@@ -1,47 +1,106 @@
 # Computational Modelling Workflow
 
-A static, visual reference for a personal computational chemistry and materials
-modelling architecture. The site follows the full research path from structure
-definition and reproducible model generation through validation, quantum or
-periodic calculation, scientific analysis, and publication-ready output.
+A stage-aligned visual reference for computational chemistry and materials
+modelling, covering finite molecular systems and periodic extended systems from
+structure preparation to validated scientific output. It is a living personal
+computational architecture, not a quantum-chemistry package or workflow engine.
 
-The workflow aligns two complementary modelling branches by scientific stage:
+## Overview
 
-- **Finite / molecular systems** cover molecules, dimers, clusters, and finite
-  fragments. They begin from chemical identity and a common reference geometry,
-  then use ORCA as the electronic-structure backend.
-- **Periodic / extended systems** cover crystals, porous frameworks, surfaces,
-  defects, and interfaces. They begin from traceable crystallographic evidence,
-  use pymatgen as a crystallographic companion, and use VASP as the periodic DFT
-  backend.
+The workflow distinguishes two modelling domains without equating them with
+organic and inorganic chemistry:
 
-ASE is the shared structure-modelling abstraction across both branches. Their
-validated calculation products converge on Python for parsing, automated quality
-checks, comparison, plotting, and reproducible report generation. A compact
-day/night control preserves the same restrained technical design language in
-both themes.
+- **Finite / molecular systems:** molecules, dimers, clusters, and finite
+  fragments.
+- **Periodic / extended systems:** crystals, COFs, MOFs, surfaces, defects, and
+  interfaces.
 
-## Open locally
+Both branches meet in a shared structure-modelling layer centred on ASE before
+proceeding to validation and their respective electronic-structure backends.
 
-The site has no build step or external dependencies. Open `index.html` directly
-in a browser, or serve the repository folder with any small static file server.
-For example:
+## Workflow architecture
+
+**Finite / molecular**
+
+`ChemDraw → Avogadro 2 → ASE → structure validation → ORCA → ORCA parsers / Multiwfn → validated finite result`
+
+**Periodic / extended**
+
+`CIF / structure source → VESTA → ASE + pymatgen → structure validation → VASP → pymatgen / VASPKIT / sumo / Bader / VESTA → validated periodic result`
+
+**Shared downstream layer**
+
+`Validated results → Python (NumPy, pandas, matplotlib) → scientific output`
+
+The HTML site is the detailed visual reference; this README provides only the
+architectural outline.
+
+## Structure-modelling philosophy
+
+ASE acts as the shared structural abstraction layer, supporting reproducible
+generation and manipulation of atomic structures before they are passed to
+different calculation backends. Finite models typically proceed to ORCA, while
+periodic models typically proceed to VASP. On the periodic side, pymatgen
+complements ASE with crystallography, symmetry, structure standardisation, and
+VASP-oriented workflows.
+
+## Method strategy
+
+The architecture is method-aware rather than fixed to one level of theory. The
+current finite-system strategy includes r²SCAN-3c for efficient screening and
+geometry exploration, ωB97X-D4 / ma-def2-TZVP with RIJCOSX acceleration for
+production DFT, and selected DLPNO-CCSD(T) benchmark single points where
+justified. These choices describe the present personal workflow and may evolve.
+
+## Repository structure
+
+```text
+.
+├── .gitignore
+├── index.html
+├── assets/
+│   ├── css/
+│   │   └── workflow.css
+│   └── js/
+│       └── workflow.js
+├── README.md
+└── LICENSE
+```
+
+## View locally
+
+The site is static and has no build step or external dependencies. Serve the
+repository directory with:
 
 ```sh
 python3 -m http.server 8000
 ```
 
-Then open `http://localhost:8000`.
+Then visit `http://localhost:8000`. Opening `index.html` directly in a browser
+also works.
 
-## Deploy with GitHub Pages
+## GitHub Pages
 
-1. Push the repository to GitHub.
-2. Open **Settings → Pages** in the repository.
-3. Under **Build and deployment**, choose **Deploy from a branch**.
-4. Select the `main` branch and the repository root (`/`), then save.
+GitHub Pages can serve the root `index.html` directly. Configure Pages to deploy
+from the `main` branch and the repository root (`/`); no site generator or build
+workflow is required.
 
-GitHub Pages can publish the root `index.html` directly; no site generator or
-build workflow is required.
+## Design principles
 
-This architecture is intentionally a living reference and should evolve as new
-methods, checks, and tools are adopted.
+- Vertical, stage-aligned workflow
+- Clear finite-versus-periodic model distinction
+- Shared structure abstraction before backend-specific calculation
+- Explicit validation before scientific interpretation
+- Calculation backends separated from post-processing and analysis
+- Reproducible downstream analysis in Python
+- Restrained day/night visual design
+
+## License
+
+This project is licensed under the MIT License. See `LICENSE` for details.
+
+## Author
+
+**Angze Li**
+
+Computational chemistry and materials modelling.
