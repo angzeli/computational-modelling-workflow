@@ -54,7 +54,7 @@
             quantum-chemical and materials modelling.
           </p>
           <p class="hero-metadata" aria-label="Workflow characteristics">
-            <span>Molecular</span>
+            <span>Finite</span>
             <span>Periodic</span>
             <span>Automated</span>
             <span>Reproducible</span>
@@ -69,7 +69,7 @@
             <h2 id="workflow-title">Two systems. Shared structure logic.</h2>
           </div>
           <p>
-            Molecular and periodic models begin from different structural evidence,
+            Finite and periodic models begin from different structural evidence,
             meet in a common modelling abstraction, and proceed through aligned
             validation, calculation, interpretation, and reporting stages.
           </p>
@@ -77,7 +77,7 @@
 
         <div class="view-selector" role="group" aria-label="Visible workflow branch">
           <button class="view-option is-active" type="button" data-view="both" aria-pressed="true">Both</button>
-          <button class="view-option" type="button" data-view="molecular" aria-pressed="false">Molecular</button>
+          <button class="view-option" type="button" data-view="molecular" aria-pressed="false">Finite</button>
           <button class="view-option" type="button" data-view="periodic" aria-pressed="false">Periodic</button>
         </div>
         <p class="sr-only" data-view-status aria-live="polite"></p>
@@ -85,14 +85,14 @@
         <div class="workflow-grid">
           <div class="column-headings" aria-label="Workflow branches">
             <section class="column-heading" data-branch="molecular">
-              <p>01 / Molecular</p>
-              <h3>Organic finite systems</h3>
-              <span>Molecules · dimers · clusters</span>
+              <p>01 / Finite</p>
+              <h3>Finite / molecular systems</h3>
+              <span>Molecules · dimers · clusters · finite fragments</span>
             </section>
             <section class="column-heading" data-branch="periodic">
               <p>02 / Periodic</p>
-              <h3>Inorganic materials</h3>
-              <span>Crystals · surfaces · defects · interfaces</span>
+              <h3>Periodic / extended systems</h3>
+              <span>Crystals · COFs · MOFs · surfaces · defects · interfaces</span>
             </section>
           </div>
 
@@ -101,93 +101,87 @@
             <span data-branch="periodic">↓</span>
           </div>
 
-          <section class="stage-row stage-row--paired" aria-label="Structure definition and preparation">
-            <article class="stage-node preparation-node" data-branch="molecular">
-              <p class="node-stage">Input + preparation / Molecular</p>
-              <h3 class="stage-title">Chemical structure definition</h3>
-
-              <div class="prep-sequence">
-                <section class="tool-block">
-                  <p class="tool-stage">2D chemical identity</p>
-                  <h4 class="tool-name">ChemDraw</h4>
-                  <p class="tool-purpose">Define molecular connectivity and chemical identity.</p>
-                  <ul class="detail-list detail-list--two">
-                    <li>Connectivity</li>
-                    <li>Bond order</li>
-                    <li>Protonation</li>
-                    <li>Chemical identity</li>
-                  </ul>
-                </section>
-
-                <div class="mini-connector" aria-hidden="true"></div>
-
-                <section class="tool-block">
-                  <p class="tool-stage">Initial 3D model</p>
-                  <h4 class="tool-name">Avogadro 2</h4>
-                  <p class="tool-purpose">Generate and inspect a chemically sensible starting geometry.</p>
-                  <ul class="detail-list detail-list--two">
-                    <li>3D structure</li>
-                    <li>Stereochemistry</li>
-                    <li>Proton placement</li>
-                    <li>Obvious strain</li>
-                    <li>Cheap pre-optimisation</li>
-                  </ul>
-                </section>
-
-                <div class="mini-connector" aria-hidden="true"></div>
-
-                <section class="reference-block">
-                  <p class="tool-stage">Canonical structural parent</p>
-                  <h4>Reference 3D structure</h4>
-                  <p>
-                    Establish one common monomer or building-block geometry from
-                    which downstream molecular motifs are generated.
-                  </p>
-                </section>
-              </div>
+          <section class="stage-row stage-row--paired preparation-row" aria-label="Structure definition inputs">
+            <article class="stage-node preparation-step" data-branch="molecular">
+              <p class="node-stage">Input + preparation / Finite</p>
+              <p class="tool-stage">2D chemical identity</p>
+              <h3 class="tool-name">ChemDraw</h3>
+              <p class="tool-purpose">Define molecular connectivity and chemical identity.</p>
+              <ul class="detail-list detail-list--two">
+                <li>Connectivity</li>
+                <li>Bond order</li>
+                <li>Protonation</li>
+                <li>Chemical identity</li>
+              </ul>
             </article>
 
-            <article class="stage-node preparation-node" data-branch="periodic">
+            <article class="stage-node preparation-step" data-branch="periodic">
               <p class="node-stage">Input + preparation / Periodic</p>
-              <h3 class="stage-title">Crystal structure definition</h3>
+              <p class="tool-stage">Experimental structural evidence</p>
+              <h3 class="tool-name">CIF / structure source</h3>
+              <p class="tool-purpose">Begin from a traceable crystallographic or measured structure.</p>
+              <ul class="detail-list">
+                <li>Literature</li>
+                <li>Crystallographic databases</li>
+                <li>Experimentally measured structures</li>
+              </ul>
+            </article>
+          </section>
 
-              <div class="prep-sequence">
-                <section class="tool-block">
-                  <p class="tool-stage">Experimental structural evidence</p>
-                  <h4 class="tool-name">CIF / structure source</h4>
-                  <p class="tool-purpose">Begin from a traceable crystallographic or measured structure.</p>
-                  <ul class="detail-list">
-                    <li>Literature</li>
-                    <li>Crystallographic databases</li>
-                    <li>Experimentally measured structures</li>
-                  </ul>
-                </section>
+          <div class="connector connector--paired connector--compact" aria-hidden="true">
+            <span data-branch="molecular">↓</span>
+            <span data-branch="periodic">↓</span>
+          </div>
 
-                <div class="mini-connector" aria-hidden="true"></div>
+          <section class="stage-row stage-row--paired preparation-row" aria-label="Initial structure inspection">
+            <article class="stage-node preparation-step" data-branch="molecular">
+              <p class="tool-stage">Initial 3D model</p>
+              <h3 class="tool-name">Avogadro 2</h3>
+              <p class="tool-purpose">Generate and inspect a chemically sensible starting geometry.</p>
+              <ul class="detail-list detail-list--two">
+                <li>3D structure</li>
+                <li>Stereochemistry</li>
+                <li>Proton placement</li>
+                <li>Obvious strain</li>
+                <li>Cheap pre-optimisation</li>
+              </ul>
+            </article>
 
-                <section class="tool-block">
-                  <p class="tool-stage">Visual crystal inspection</p>
-                  <h4 class="tool-name">VESTA</h4>
-                  <p class="tool-purpose">Inspect the cell, coordination, periodicity, and structural plausibility.</p>
-                  <ul class="detail-list detail-list--two">
-                    <li>Crystal sanity checks</li>
-                    <li>Cell inspection</li>
-                    <li>Coordination environment</li>
-                    <li>Later volumetric views</li>
-                  </ul>
-                </section>
+            <article class="stage-node preparation-step" data-branch="periodic">
+              <p class="tool-stage">Visual crystal inspection</p>
+              <h3 class="tool-name">VESTA</h3>
+              <p class="tool-purpose">Inspect the cell, coordination, periodicity, and structural plausibility.</p>
+              <ul class="detail-list detail-list--two">
+                <li>Crystal sanity checks</li>
+                <li>Cell inspection</li>
+                <li>Coordination environment</li>
+                <li>Later volumetric views</li>
+              </ul>
+            </article>
+          </section>
 
-                <div class="mini-connector" aria-hidden="true"></div>
+          <div class="connector connector--paired connector--compact" aria-hidden="true">
+            <span data-branch="molecular">↓</span>
+            <span data-branch="periodic">↓</span>
+          </div>
 
-                <section class="reference-block">
-                  <p class="tool-stage">Traceable periodic parent</p>
-                  <h4>Reference crystal model</h4>
-                  <p>
-                    Preserve source, cell choice, and structural provenance before
-                    standardisation or supercell construction.
-                  </p>
-                </section>
-              </div>
+          <section class="stage-row stage-row--paired preparation-row" aria-label="Reference structures">
+            <article class="stage-node reference-node" data-branch="molecular">
+              <p class="tool-stage">Canonical structural parent</p>
+              <h3 class="stage-title">Reference 3D structure</h3>
+              <p class="node-purpose">
+                Establish one common monomer or building-block geometry from which
+                downstream finite motifs are generated.
+              </p>
+            </article>
+
+            <article class="stage-node reference-node" data-branch="periodic">
+              <p class="tool-stage">Traceable periodic parent</p>
+              <h3 class="stage-title">Reference crystal model</h3>
+              <p class="node-purpose">
+                Preserve source, cell choice, and structural provenance before
+                standardisation or supercell construction.
+              </p>
             </article>
           </section>
 
@@ -217,31 +211,34 @@
                     <li>Slip</li>
                     <li>Distance scans</li>
                     <li>Adsorption geometries</li>
-                    <li>Structure I/O</li>
                   </ul>
                 </section>
 
                 <section class="ase-domain" data-branch="periodic">
-                  <p class="domain-label">Periodic / materials</p>
+                  <p class="domain-label">Periodic / extended</p>
                   <ul class="detail-list detail-list--two">
                     <li>Supercells</li>
                     <li>Slabs</li>
                     <li>Miller surfaces</li>
-                    <li>Vacuum + constraints</li>
+                    <li>Vacuum</li>
                     <li>Adsorption</li>
                     <li>Defects + vacancies</li>
                     <li>Dopants</li>
                     <li>Interfaces</li>
-                    <li>Structure conversion</li>
                   </ul>
-
-                  <aside class="companion-tool">
-                    <p class="tool-stage">Periodic-side companion</p>
-                    <h4 class="tool-name">pymatgen</h4>
-                    <p>Crystallography · symmetry · structure standardisation · VASP ecosystem</p>
-                  </aside>
                 </section>
               </div>
+
+              <aside class="companion-tool" data-branch="periodic">
+                <p class="tool-stage">Periodic companion</p>
+                <h4 class="tool-name">pymatgen</h4>
+                <p>Crystallography · symmetry · structure standardisation · VASP ecosystem</p>
+              </aside>
+
+              <aside class="ase-core">
+                <p class="tool-stage">ASE core</p>
+                <p>Atoms · transformations · constraints · calculators · trajectories · structure I/O</p>
+              </aside>
             </article>
           </section>
 
@@ -254,7 +251,7 @@
 
           <section class="stage-row stage-row--paired" aria-label="Structure validation">
             <article class="stage-node gate-node" data-branch="molecular">
-              <p class="node-stage">Molecular / Structure validation</p>
+              <p class="node-stage">Finite / Structure validation</p>
               <h3 class="stage-title">Structure validation</h3>
               <p class="node-purpose">Verify model identity and geometry before electronic-structure work.</p>
               <ul class="detail-list detail-list--two">
@@ -299,11 +296,12 @@
 
               <div class="capability-grid">
                 <section class="capability-group">
-                  <h4>Geometry</h4>
+                  <h4>Geometry + pathways</h4>
                   <ul>
                     <li>Optimisation</li>
                     <li>Frequencies</li>
-                    <li>Conformers</li>
+                    <li>Transition states</li>
+                    <li>IRC / reaction paths</li>
                   </ul>
                 </section>
                 <section class="capability-group">
@@ -316,19 +314,37 @@
                   </ul>
                 </section>
                 <section class="capability-group">
-                  <h4>Electronic</h4>
+                  <h4>Electronic + excited states</h4>
                   <ul>
                     <li>Orbitals</li>
                     <li>TD-DFT</li>
-                    <li>Charge</li>
-                    <li>Spin</li>
+                    <li>Charge / spin</li>
+                    <li>Excited-state properties</li>
                   </ul>
                 </section>
                 <section class="capability-group">
-                  <h4>Wavefunction</h4>
+                  <h4>Correlated methods</h4>
+                  <ul>
+                    <li>MP2</li>
+                    <li>DLPNO-CCSD(T)</li>
+                    <li>Double hybrids</li>
+                    <li>High-level single points</li>
+                  </ul>
+                </section>
+                <section class="capability-group">
+                  <h4>Environment</h4>
+                  <ul>
+                    <li>CPCM</li>
+                    <li>SMD</li>
+                    <li>Implicit solvation</li>
+                  </ul>
+                </section>
+                <section class="capability-group">
+                  <h4>Wavefunction + properties</h4>
                   <ul>
                     <li>GBW</li>
                     <li>Molden / wavefunction outputs</li>
+                    <li>Spectroscopic properties</li>
                     <li>Downstream analysis</li>
                   </ul>
                 </section>
@@ -395,63 +411,45 @@
             <span data-branch="periodic">↓</span>
           </div>
 
-          <section class="stage-row stage-row--paired" aria-label="Calculation analysis stacks">
+          <section class="stage-row stage-row--paired postprocess-row" aria-label="Calculation post-processing">
             <article class="stage-node analysis-node" data-branch="molecular">
-              <p class="node-stage">Molecular / Analysis stack</p>
-              <h3 class="stage-title">Molecular analysis stack</h3>
-              <p class="node-purpose">Extract calculation products and derive wavefunction-based evidence.</p>
+              <p class="node-stage">Finite / Post-processing</p>
+              <h3 class="stage-title">Finite / molecular post-processing</h3>
+              <p class="node-purpose">Verify ORCA products before deriving wavefunction-based evidence.</p>
 
-              <div class="analysis-tools">
-                <section>
-                  <h4 class="tool-name">Multiwfn</h4>
-                  <ul class="detail-list detail-list--two">
-                    <li>IGMH + ESP</li>
-                    <li>Orbital analysis</li>
-                    <li>Charge analysis</li>
-                    <li>Spin analysis</li>
-                    <li>Wavefunction descriptors</li>
-                  </ul>
-                </section>
-                <section>
+              <div class="postprocess-flow">
+                <section class="postprocess-phase">
+                  <p class="phase-index">01 / Parse + QA</p>
                   <h4 class="tool-name">ORCA parsers</h4>
-                  <ul class="detail-list detail-list--two">
-                    <li>Energies</li>
-                    <li>Convergence</li>
-                    <li>Termination</li>
-                    <li>Provenance</li>
-                    <li>Metadata</li>
-                  </ul>
+                  <p>Termination · SCF convergence · energies · metadata · provenance</p>
+                </section>
+                <div class="mini-connector" aria-hidden="true"></div>
+                <section class="postprocess-phase">
+                  <p class="phase-index">02 / Derive + interpret</p>
+                  <h4 class="tool-name">Multiwfn</h4>
+                  <p>IGMH · ESP · orbital · charge · spin · wavefunction descriptors</p>
                 </section>
               </div>
             </article>
 
             <article class="stage-node analysis-node" data-branch="periodic">
-              <p class="node-stage">Periodic / Analysis stack</p>
-              <h3 class="stage-title">Periodic analysis stack</h3>
-              <p class="node-purpose">Parse VASP products and interpret structural, electronic, and charge data.</p>
+              <p class="node-stage">Periodic / Post-processing</p>
+              <h3 class="stage-title">Periodic post-processing</h3>
+              <p class="node-purpose">Verify VASP products before interpreting electronic and charge data.</p>
 
-              <dl class="tool-index">
-                <div>
-                  <dt>pymatgen</dt>
-                  <dd>VASP parsing · band / DOS processing · structural analysis</dd>
-                </div>
-                <div>
-                  <dt>sumo</dt>
-                  <dd>Publication-oriented electronic-structure plotting</dd>
-                </div>
-                <div>
-                  <dt>Bader</dt>
-                  <dd>Charge partitioning</dd>
-                </div>
-                <div>
-                  <dt>VASPKIT</dt>
-                  <dd>VASP-oriented analysis utilities</dd>
-                </div>
-                <div>
-                  <dt>VESTA</dt>
-                  <dd>Structures · charge density · volumetric visualisation</dd>
-                </div>
-              </dl>
+              <div class="postprocess-flow">
+                <section class="postprocess-phase">
+                  <p class="phase-index">01 / Parse + QA</p>
+                  <h4 class="tool-name">pymatgen · VASPKIT</h4>
+                  <p>VASP parsing · numerical convergence extraction · structural data · band / DOS · metadata</p>
+                </section>
+                <div class="mini-connector" aria-hidden="true"></div>
+                <section class="postprocess-phase">
+                  <p class="phase-index">02 / Interpret + visualise</p>
+                  <h4 class="tool-name">sumo · Bader · VESTA</h4>
+                  <p>Plots · charge partitioning · charge-density / volumetric data · structural visualisation</p>
+                </section>
+              </div>
             </article>
           </section>
 
@@ -462,8 +460,8 @@
 
           <section class="stage-row stage-row--paired" aria-label="Scientifically validated results">
             <article class="stage-node result-node" data-branch="molecular">
-              <p class="node-stage">Scientific validation / Molecular</p>
-              <h3 class="stage-title">Validated molecular result</h3>
+              <p class="node-stage">Scientific validation / Finite</p>
+              <h3 class="stage-title">Validated finite result</h3>
               <p class="node-purpose">Calculation products ready for common analysis and comparison.</p>
               <ul class="detail-list detail-list--two">
                 <li>Normal termination</li>
@@ -523,48 +521,18 @@
             <article class="stage-node output-node">
               <p class="node-stage">Communicate + preserve / Research products</p>
               <h3 class="stage-title stage-title--large" id="output-title">Scientific output</h3>
-              <p class="node-purpose">Publication-ready evidence and reusable computational knowledge.</p>
-              <ul class="detail-list detail-list--output">
-                <li>Publication figures</li>
-                <li>Tables</li>
-                <li>Reports</li>
-                <li>Databases</li>
-                <li>Supporting information</li>
-                <li>Manuscript results</li>
-                <li>Reusable workflows</li>
-              </ul>
+              <div class="output-lines">
+                <p>Publication figures · tables · supporting information · manuscript results</p>
+                <p>Reports · databases · reusable computational workflows</p>
+              </div>
             </article>
           </section>
         </div>
       </section>
-
-      <section class="infrastructure" id="infrastructure" aria-labelledby="infrastructure-title">
-        <header class="infrastructure-header">
-          <p class="section-kicker">Infrastructure / Across all layers</p>
-          <h2 id="infrastructure-title">The reproducibility substrate</h2>
-          <p>
-            Shared operational practices support every structure, calculation,
-            analysis, and reported result.
-          </p>
-        </header>
-        <ul class="infrastructure-grid">
-          <li>Git</li>
-          <li>Linux</li>
-          <li>SSH</li>
-          <li>Slurm / schedulers</li>
-          <li>Environment management</li>
-          <li>Provenance</li>
-          <li>Testing</li>
-          <li>Automated validation</li>
-          <li>Data management</li>
-          <li>Reproducibility</li>
-        </ul>
-      </section>
     </main>
 
     <footer class="site-footer">
-      <p>Angze Li · Personal computational architecture · A living methods reference.</p>
-      <a href="#top">Return to top ↑</a>
+      <p>Angze Li · Computational Modelling Workflow</p>
     </footer>
   </body>
 </html>

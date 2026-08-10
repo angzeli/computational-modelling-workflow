@@ -61,6 +61,7 @@
   const viewControls = Array.from(board.querySelectorAll("[data-view]"));
   const status = board.querySelector("[data-view-status]");
   const narrowLayout = window.matchMedia("(max-width: 820px)");
+  const viewLabels = { molecular: "Finite", periodic: "Periodic" };
   let selectedView = "both";
 
   function updateView() {
@@ -81,9 +82,9 @@
     if (status) {
       status.textContent = narrowLayout.matches
         ? selectedView === "both"
-          ? "Both molecular and periodic workflow stages are visible."
-          : selectedView.charAt(0).toUpperCase() + selectedView.slice(1) + " workflow stages are visible."
-        : "Molecular and periodic workflow stages are visible in aligned columns.";
+          ? "Both finite and periodic workflow stages are visible."
+          : viewLabels[selectedView] + " workflow stages are visible."
+        : "Finite and periodic workflow stages are visible in aligned columns.";
     }
   }
 
