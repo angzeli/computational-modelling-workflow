@@ -323,13 +323,31 @@
                   </ul>
                 </section>
                 <section class="capability-group">
-                  <h4>Correlated methods</h4>
-                  <ul>
-                    <li>MP2</li>
-                    <li>DLPNO-CCSD(T)</li>
-                    <li>Double hybrids</li>
-                    <li>High-level single points</li>
-                  </ul>
+                  <h4>Method strategy</h4>
+                  <dl class="method-strategy">
+                    <div>
+                      <dt>Screen / build</dt>
+                      <dd>
+                        <strong>r²SCAN-3c</strong>
+                        <span>Motif scans · pre-optimisation · geometry screening</span>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Production DFT</dt>
+                      <dd>
+                        <strong>ωB97X-D4 / ma-def2-TZVP</strong>
+                        <span>RIJCOSX acceleration</span>
+                        <span>Refined energetics · electronic structure</span>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Selected benchmarks</dt>
+                      <dd>
+                        <strong>DLPNO-CCSD(T)</strong>
+                        <span>High-accuracy single points where justified</span>
+                      </dd>
+                    </div>
+                  </dl>
                 </section>
                 <section class="capability-group">
                   <h4>Environment</h4>
@@ -369,11 +387,11 @@
                   </ul>
                 </section>
                 <section class="capability-panel">
-                  <h4>Reference bulk</h4>
+                  <h4>Reference periodic structure</h4>
                   <ul class="detail-list">
                     <li>Structural relaxation</li>
                     <li>Lattice optimisation where appropriate</li>
-                    <li>Canonical relaxed bulk for downstream models</li>
+                    <li>Canonical relaxed periodic structure for downstream models</li>
                   </ul>
                 </section>
               </div>

@@ -754,7 +754,7 @@ button {
   display: grid;
   flex: 1;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(3, auto);
   gap: 0;
   margin-top: 29px;
   border-top: 1px solid var(--line-soft);
@@ -802,6 +802,49 @@ button {
 .capability-group li + li,
 .production-grid li + li {
   margin-top: 5px;
+}
+
+.method-strategy {
+  margin: 10px 0 0;
+}
+
+.method-strategy > div + div {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.method-strategy dt {
+  color: var(--muted-cool);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  line-height: 1.35;
+  text-transform: uppercase;
+}
+
+.method-strategy dd {
+  margin: 4px 0 0;
+}
+
+.method-strategy strong,
+.method-strategy span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.method-strategy strong {
+  color: var(--text-cool);
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.method-strategy span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.38;
 }
 
 .vasp-foundations {
