@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="A personal computational chemistry and materials modelling workflow, from structure definition to publication-ready scientific output."
+    >
+    <meta name="theme-color" content="#11181d">
+    <title>Computational Modelling Workflow</title>
+    <link rel="stylesheet" href="assets/css/workflow.css">
+    <script src="assets/js/workflow.js" defer></script>
+  </head>
+
+  <body>
+    <a class="skip-link" href="#main-content">Skip to workflow</a>
+
+    <header class="site-header" id="top">
+      <a class="site-mark" href="#top" aria-label="Computational Modelling Workflow home">
+        <span class="site-mark-symbol" aria-hidden="true">CMW</span>
+        <span>computational-modelling-workflow</span>
+      </a>
+
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="#workflows">Workflows</a>
+        <a href="#common-analysis">Analysis</a>
+        <a href="#infrastructure">Infrastructure</a>
+        <a
+          href="https://github.com/angzeli/computational-modelling-workflow"
+          target="_blank"
+          rel="noreferrer"
+        >Repository</a>
+      </nav>
+    </header>
+
+    <main class="site-main" id="main-content">
+      <section class="hero" aria-labelledby="page-title">
+        <p class="eyebrow">Personal computational architecture</p>
+        <h1 id="page-title">Computational<br>modelling workflow</h1>
+        <p class="hero-subtitle">
+          From molecular structure and crystal models to reproducible
+          quantum-chemical and materials modelling.
+        </p>
+        <p class="hero-metadata" aria-label="Workflow characteristics">
+          <span>Molecular</span>
+          <span>Periodic</span>
+          <span>Automated</span>
+          <span>Reproducible</span>
+        </p>
+        <ol class="workflow-sequence" aria-label="Overall workflow sequence">
+          <li>Define</li>
+          <li>Generate</li>
+          <li>Validate</li>
+          <li>Calculate</li>
+          <li>Analyse</li>
+          <li>Publish</li>
+        </ol>
+      </section>
+
+      <section class="workflow-board" id="workflows" data-workflow-board aria-labelledby="workflow-title">
+        <div class="section-intro">
+          <div>
+            <p class="section-kicker">01–02 / Parallel structure workflows</p>
+            <h2 id="workflow-title">Two systems. One modelling discipline.</h2>
+          </div>
+          <p>
+            Each branch moves downward from a chemically meaningful structure,
+            through reproducible model construction and explicit validation, to
+            a calculation backend and scientifically comparable results.
+          </p>
+        </div>
+
+        <div class="view-selector" role="group" aria-label="Visible workflow branch">
+          <button
+            class="view-option is-active"
+            type="button"
+            data-view="both"
+            aria-controls="molecular-lane periodic-lane"
+            aria-pressed="true"
+          >Both</button>
+          <button
+            class="view-option"
+            type="button"
+            data-view="molecular"
+            aria-controls="molecular-lane"
+            aria-pressed="false"
+          >Molecular</button>
+          <button
+            class="view-option"
+            type="button"
+            data-view="periodic"
+            aria-controls="periodic-lane"
+            aria-pressed="false"
+          >Periodic</button>
+        </div>
+        <p class="sr-only" data-view-status aria-live="polite"></p>
+
+        <div class="workflow-lanes">
+          <section
+            class="workflow-lane workflow-lane--molecular"
+            id="molecular-lane"
+            data-workflow-branch="molecular"
+            aria-labelledby="molecular-title"
+          >
+            <header class="lane-header">
+              <p class="lane-index">01 / Molecular</p>
+              <h3 id="molecular-title">Organic finite-system pipeline</h3>
+              <p>Discrete molecules · clusters · non-periodic models</p>
+            </header>
+
+            <div class="vertical-flow">
+              <article class="workflow-node">
+                <p class="node-action">Define / 2D chemical identity</p>
+                <h4>ChemDraw</h4>
+                <ul class="feature-list">
+                  <li>Molecular connectivity</li>
+                  <li>Bond order</li>
+                  <li>Protonation</li>
+                  <li>Chemical identity</li>
+                </ul>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node">
+                <p class="node-action">Generate + inspect / Initial 3D model</p>
+                <h4>Avogadro 2</h4>
+                <ul class="feature-list">
+                  <li>Initial 3D structure</li>
+                  <li>Stereochemistry</li>
+                  <li>Proton placement</li>
+                  <li>Obvious strain</li>
+                  <li>Cheap pre-optimisation</li>
+                </ul>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node workflow-node--reference">
+                <p class="node-action">Canonical parent / Structural reference</p>
+                <h4>Reference 3D structure</h4>
+                <p class="node-summary">
+                  Establish one common reference monomer or building-block geometry.
+                  Downstream motifs inherit a consistent structural parent.
+                </p>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node workflow-node--hub">
+                <p class="node-action">Central abstraction / Reproducible structures</p>
+                <h4>ASE structure hub</h4>
+                <p class="node-summary">
+                  Programmatic construction and transformation of chemically related models.
+                </p>
+                <ul class="feature-list feature-list--dense">
+                  <li>Motifs</li>
+                  <li>Stacking</li>
+                  <li>Dimers / clusters</li>
+                  <li>Hydrogen-bond arrangements</li>
+                  <li>Adsorption geometries</li>
+                  <li>Translation + rotation</li>
+                  <li>Slip</li>
+                  <li>Intermolecular separation scans</li>
+                  <li>Systematic model generation</li>
+                  <li>Structure I/O</li>
+                </ul>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node workflow-node--gate">
+                <p class="node-action">Validation gate / Stop before compute</p>
+                <h4>Structure validation gate</h4>
+                <ul class="feature-list feature-list--dense">
+                  <li>Composition</li>
+                  <li>Atom count</li>
+                  <li>Connectivity</li>
+                  <li>Minimum interatomic distance</li>
+                  <li>Expected H-bond distances</li>
+                  <li>Reference-geometry consistency</li>
+                  <li>Motif metadata</li>
+                  <li>Duplicate detection</li>
+                </ul>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node workflow-node--engine">
+                <p class="node-action">Quantum chemistry / Finite systems</p>
+                <h4>ORCA finite-system electronic-structure engine</h4>
+                <div class="capability-grid">
+                  <section class="capability-group">
+                    <h5>Geometry</h5>
+                    <ul>
+                      <li>Optimisation</li>
+                      <li>Frequencies</li>
+                      <li>Conformers</li>
+                    </ul>
+                  </section>
+                  <section class="capability-group">
+                    <h5>Energetics</h5>
+                    <ul>
+                      <li>Single points</li>
+                      <li>Interaction energies</li>
+                      <li>Redox energetics</li>
+                      <li>Thermochemistry / ΔG</li>
+                    </ul>
+                  </section>
+                  <section class="capability-group">
+                    <h5>Electronic</h5>
+                    <ul>
+                      <li>Orbitals</li>
+                      <li>TD-DFT</li>
+                      <li>Charge</li>
+                      <li>Spin</li>
+                    </ul>
+                  </section>
+                  <section class="capability-group">
+                    <h5>Wavefunction</h5>
+                    <ul>
+                      <li>GBW</li>
+                      <li>Molden / wavefunction outputs</li>
+                      <li>Downstream analysis</li>
+                    </ul>
+                  </section>
+                </div>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node">
+                <p class="node-action">Extract + interpret / Calculation products</p>
+                <h4>Multiwfn + ORCA parsers</h4>
+                <div class="tool-split">
+                  <section>
+                    <h5>Multiwfn</h5>
+                    <ul>
+                      <li>IGMH + ESP</li>
+                      <li>Orbital analysis</li>
+                      <li>Charge + spin analysis</li>
+                      <li>Wavefunction descriptors</li>
+                    </ul>
+                  </section>
+                  <section>
+                    <h5>ORCA parsers</h5>
+                    <ul>
+                      <li>Energies + convergence</li>
+                      <li>Termination</li>
+                      <li>Provenance</li>
+                      <li>Metadata</li>
+                    </ul>
+                  </section>
+                </div>
+              </article>
+
+              <div class="flow-connector flow-connector--final" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node workflow-node--gate">
+                <p class="node-action">Scientific validation / Comparable evidence</p>
+                <h4>Validated molecular result</h4>
+                <ul class="feature-list feature-list--dense">
+                  <li>Normal termination</li>
+                  <li>SCF convergence</li>
+                  <li>Imaginary-frequency checks where relevant</li>
+                  <li>Comparable reference states</li>
+                  <li>Energy consistency</li>
+                  <li>Methodological consistency</li>
+                </ul>
+              </article>
+            </div>
+          </section>
+
+          <section
+            class="workflow-lane workflow-lane--periodic"
+            id="periodic-lane"
+            data-workflow-branch="periodic"
+            aria-labelledby="periodic-title"
+          >
+            <header class="lane-header">
+              <p class="lane-index">02 / Periodic</p>
+              <h3 id="periodic-title">Inorganic periodic-materials pipeline</h3>
+              <p>Crystals · surfaces · defects · interfaces</p>
+            </header>
+
+            <div class="vertical-flow">
+              <article class="workflow-node">
+                <p class="node-action">Define / Experimental starting point</p>
+                <h4>CIF / experimental structure</h4>
+                <p class="node-summary">Source structures from:</p>
+                <ul class="feature-list">
+                  <li>Literature</li>
+                  <li>Crystallographic databases</li>
+                  <li>Measured structures</li>
+                </ul>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node">
+                <p class="node-action">Inspect + standardise / Crystal model</p>
+                <h4>VESTA + pymatgen</h4>
+                <div class="tool-split">
+                  <section>
+                    <h5>VESTA</h5>
+                    <ul>
+                      <li>Visual crystal inspection</li>
+                      <li>Structure sanity checks</li>
+                      <li>Later volumetric views</li>
+                    </ul>
+                  </section>
+                  <section>
+                    <h5>pymatgen</h5>
+                    <ul>
+                      <li>Lattice + structure</li>
+                      <li>Symmetry + space group</li>
+                      <li>Primitive / conventional cells</li>
+                      <li>Standardisation + matching</li>
+                    </ul>
+                  </section>
+                </div>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node workflow-node--hub">
+                <p class="node-action">Central abstraction / Periodic model generation</p>
+                <h4>ASE + pymatgen structure hub</h4>
+                <ul class="feature-list feature-list--dense">
+                  <li>Supercells</li>
+                  <li>Slabs + Miller surfaces</li>
+                  <li>Vacuum + constraints</li>
+                  <li>Adsorbates</li>
+                  <li>Defects + vacancies</li>
+                  <li>Dopants</li>
+                  <li>Interfaces</li>
+                  <li>Heterostructures</li>
+                  <li>Structure conversions</li>
+                </ul>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node workflow-node--gate">
+                <p class="node-action">Validation gate / Periodic model integrity</p>
+                <h4>Periodic structure validation</h4>
+                <ul class="feature-list feature-list--dense">
+                  <li>Stoichiometry + cell</li>
+                  <li>PBC + dimensionality</li>
+                  <li>Symmetry</li>
+                  <li>Minimum distances</li>
+                  <li>Surface termination</li>
+                  <li>Slab thickness</li>
+                  <li>Vacuum thickness</li>
+                  <li>Duplicate structures</li>
+                </ul>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node workflow-node--convergence">
+                <p class="node-action">Numerical validation / Before production science</p>
+                <h4>VASP convergence</h4>
+                <ul class="feature-list feature-list--dense">
+                  <li>ENCUT</li>
+                  <li>k-point mesh / density</li>
+                  <li>Smearing</li>
+                  <li>EDIFF / force convergence</li>
+                  <li>Supercell size</li>
+                  <li>Slab thickness</li>
+                  <li>Vacuum convergence</li>
+                </ul>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node workflow-node--reference">
+                <p class="node-action">Canonical parent / Relaxed periodic reference</p>
+                <h4>Bulk relaxation → reference bulk structure</h4>
+                <p class="node-summary">
+                  The relaxed reference bulk becomes the common structural parent
+                  for downstream bulk, surface, defect, and interface calculations.
+                </p>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node workflow-node--engine">
+                <p class="node-action">Periodic quantum mechanics / Production DFT</p>
+                <h4>VASP periodic DFT engine</h4>
+                <div class="capability-grid">
+                  <section class="capability-group">
+                    <h5>Bulk</h5>
+                    <ul>
+                      <li>EOS + lattice</li>
+                      <li>Structural stability</li>
+                    </ul>
+                  </section>
+                  <section class="capability-group">
+                    <h5>Electronic</h5>
+                    <ul>
+                      <li>Band structure</li>
+                      <li>DOS / PDOS + band edges</li>
+                      <li>Charge density</li>
+                    </ul>
+                  </section>
+                  <section class="capability-group">
+                    <h5>Surfaces</h5>
+                    <ul>
+                      <li>Slabs + work function</li>
+                      <li>Adsorption + intermediates</li>
+                    </ul>
+                  </section>
+                  <section class="capability-group">
+                    <h5>Defects</h5>
+                    <ul>
+                      <li>Vacancies + dopants</li>
+                      <li>Defect energetics</li>
+                      <li>Localisation</li>
+                    </ul>
+                  </section>
+                  <section class="capability-group capability-group--wide">
+                    <h5>Interfaces</h5>
+                    <ul>
+                      <li>Heterojunctions</li>
+                      <li>Lattice matching / strain</li>
+                      <li>Charge redistribution</li>
+                    </ul>
+                  </section>
+                </div>
+              </article>
+
+              <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node">
+                <p class="node-action">Extract + interpret / Periodic calculation products</p>
+                <h4>Periodic analysis stack</h4>
+                <dl class="tool-index">
+                  <div>
+                    <dt>pymatgen</dt>
+                    <dd>VASP parsing · band / DOS processing · structural analysis</dd>
+                  </div>
+                  <div>
+                    <dt>sumo</dt>
+                    <dd>Publication-oriented electronic-structure plotting</dd>
+                  </div>
+                  <div>
+                    <dt>Bader</dt>
+                    <dd>Charge partitioning</dd>
+                  </div>
+                  <div>
+                    <dt>VASPKIT</dt>
+                    <dd>VASP-oriented analysis utilities</dd>
+                  </div>
+                  <div>
+                    <dt>VESTA</dt>
+                    <dd>Structures · charge density · volumetric visualisation</dd>
+                  </div>
+                </dl>
+              </article>
+
+              <div class="flow-connector flow-connector--final" aria-hidden="true"><span>↓</span></div>
+
+              <article class="workflow-node workflow-node--gate">
+                <p class="node-action">Scientific validation / Comparable evidence</p>
+                <h4>Validated periodic result</h4>
+                <ul class="feature-list feature-list--dense">
+                  <li>Numerical convergence</li>
+                  <li>Comparable cells / reference states</li>
+                  <li>Finite-size effects</li>
+                  <li>Slab / vacuum adequacy</li>
+                  <li>k-point consistency</li>
+                  <li>Electronic-structure consistency</li>
+                  <li>Comparable defect / surface models</li>
+                </ul>
+              </article>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <div class="merge-connector" aria-hidden="true">
+        <span class="merge-line"></span>
+        <span class="merge-stem"></span>
+        <span class="merge-arrow">↓</span>
+      </div>
+
+      <section class="common-analysis" id="common-analysis" aria-labelledby="common-title">
+        <div class="section-intro section-intro--common">
+          <div>
+            <p class="section-kicker">03 / Common analysis layer</p>
+            <h2 id="common-title">Shared evidence pipeline</h2>
+          </div>
+          <p>
+            Molecular and periodic results enter one reproducible environment for
+            checking, comparison, visualisation, and reporting.
+          </p>
+        </div>
+
+        <div class="shared-flow">
+          <article class="workflow-node workflow-node--hub workflow-node--shared">
+            <p class="node-action">Common downstream environment</p>
+            <h3>Python</h3>
+            <ul class="feature-list feature-list--shared">
+              <li>NumPy</li>
+              <li>pandas</li>
+              <li>matplotlib</li>
+              <li>Parsing + aggregation</li>
+              <li>Automated QA</li>
+              <li>Statistics</li>
+              <li>Cross-calculation comparison</li>
+              <li>Plotting</li>
+              <li>Reproducible analysis</li>
+              <li>Report generation</li>
+            </ul>
+          </article>
+
+          <div class="flow-connector" aria-hidden="true"><span>↓</span></div>
+
+          <article class="workflow-node workflow-node--output workflow-node--shared">
+            <p class="node-action">Communicate + preserve / Research products</p>
+            <h3>Scientific output</h3>
+            <ul class="feature-list feature-list--shared">
+              <li>Publication figures</li>
+              <li>Tables</li>
+              <li>Reports</li>
+              <li>Databases</li>
+              <li>Supporting information</li>
+              <li>Manuscript results</li>
+              <li>Reusable computational workflows</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="infrastructure" id="infrastructure" aria-labelledby="infrastructure-title">
+        <header class="infrastructure-header">
+          <p class="section-kicker">Infrastructure / Across all layers</p>
+          <h2 id="infrastructure-title">The reproducibility substrate</h2>
+          <p>
+            Shared operational practices support every structure, calculation,
+            analysis, and reported result.
+          </p>
+        </header>
+        <ul class="infrastructure-grid">
+          <li>Git</li>
+          <li>Linux</li>
+          <li>SSH</li>
+          <li>Slurm / schedulers</li>
+          <li>Environment management</li>
+          <li>Provenance</li>
+          <li>Testing</li>
+          <li>Automated validation</li>
+          <li>Data management</li>
+          <li>Reproducibility</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <p>Personal computational architecture · A living methods reference.</p>
+      <a href="#top">Return to top ↑</a>
+    </footer>
+  </body>
+</html>
