@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "computational-modelling-workflow"
+version = "0.1.0"
+description = "A reusable computational modelling workflow architecture for molecular and periodic systems"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Angze Li" }]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/angzeli/computational-modelling-workflow"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cmw"]
