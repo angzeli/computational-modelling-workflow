@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "charge": 0,
+  "multiplicity": 1,
+  "orca_exe": "orca",
+  "resources": {
+    "nprocs": 2,
+    "maxcore_mb_per_process": 1000
+  },
+  "validation": {
+    "require_minimum": true,
+    "imaginary_tolerance_cm1": 5.0
+  },
+  "stages": {
+    "opt": {
+      "keywords": "HF STO-3G",
+      "blocks": []
+    },
+    "freq": {
+      "keywords": "HF STO-3G",
+      "blocks": []
+    },
+    "sp": {
+      "keywords": "PBE0 def2-SVP",
+      "blocks": []
+    }
+  }
+}

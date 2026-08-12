@@ -26,6 +26,7 @@ from .status import (
     read_orca_output,
     validate_stage,
 )
+from .input import parse_rendered_orca_input
 
 
 ORCA_JOB_SCHEMA_VERSION = 1
@@ -35,8 +36,6 @@ def write_target(
     path: Path,
     target: JobTarget,
     lineage: GeometryLineage,
-    *,
-    prepared_input_sha256: str | None = None,
 ) -> None:
     """Persist scientific intent independently of any execution attempt."""
 
@@ -48,7 +47,6 @@ def write_target(
             "schema_version": ORCA_JOB_SCHEMA_VERSION,
             "target": target.to_dict(),
             "lineage": asdict(lineage),
-            "prepared_input_sha256": prepared_input_sha256,
         },
     )
 
@@ -97,11 +95,21 @@ def finalize_attempt(
     """Validate and atomically record one immutable ORCA attempt."""
 
     target, target_record = load_target(target_path)
-    expected_input_hash = target_record.get("prepared_input_sha256")
     actual_input_hash = file_hash(input_path)
-    if expected_input_hash and expected_input_hash != actual_input_hash:
-        raise ValueError("generated ORCA input does not match its target record")
     stage_type = StageType(target.stage_type)
+    parsed_target, parsed_resources = parse_rendered_orca_input(input_path, stage_type)
+    expected_calculation = dict(target.calculation)
+    expected_calculation.pop("validation_policy", None)
+    if (
+        parsed_target.stage_type != target.stage_type
+        or parsed_target.geometry_sha256 != target.geometry_sha256
+        or parsed_target.charge != target.charge
+        or parsed_target.multiplicity != target.multiplicity
+        or dict(parsed_target.calculation) != expected_calculation
+    ):
+        raise ValueError("generated ORCA input does not match its scientific target")
+    if dict(resources) != parsed_resources.to_dict():
+        raise ValueError("reported attempt resources contradict the generated ORCA input")
     evidence = read_orca_output(output_path, stderr_path=stderr_path)
     execution = classify_execution(evidence, process_exit_code=process_exit_code)
     scientific = validate_stage(

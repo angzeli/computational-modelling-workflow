@@ -133,3 +133,17 @@ Keep the final report concise:
 - commit information, when requested.
 
 Do not include long command transcripts, repeated status summaries, or forensic evidence unless requested.
+
+## 11. Workflow responsibility boundary
+
+- Shell owns operational orchestration: user-facing entrypoints, environment
+  handling, executable discovery, process launch, file descriptors, signals,
+  traps, cleanup, temporary directories, and sequencing calls into Python.
+- Python owns reusable semantics: parsing, scientific validation, identities,
+  provenance, artifacts, lineage, locking decisions, reuse, plans, dependency
+  rules, and structured results.
+- Use stable exit codes and machine-readable JSON between the layers. Do not
+  duplicate ORCA validity, convergence, geometry identity, or reuse decisions
+  in shell.
+- Process health is advisory operational evidence and never scientific success
+  or an automatic termination policy.

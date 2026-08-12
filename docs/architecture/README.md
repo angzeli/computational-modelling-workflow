@@ -1,11 +1,29 @@
-# Target computational architecture
+# Computational architecture
 
-This document describes the architecture the repository is intended to
-implement progressively. It is not a claim that the corresponding Python
-modules or scientific workflows already exist.
+This document describes the architecture the repository implements
+progressively. The first reusable molecular foundation now exists; other
+branches in the diagrams remain targets rather than implementation claims.
 
-> The website describes the computational architecture; the Python package will
-> progressively implement the reusable parts of that architecture.
+> The website describes the broader computational architecture; the Python and
+> shell layers implement only the explicitly documented reusable milestones.
+
+## Implemented molecular foundation
+
+The current package implements a dependency-free OPT / optional FREQ / optional
+SP workflow for ORCA. Shell owns executable discovery, environment handling,
+process launch, descriptors, signals, temporary directories, traps, cleanup,
+and sequential calls into Python. Python owns XYZ and ORCA parsing, validation,
+scientific targets, execution attempts, provenance, artifacts, geometry
+lineage, locks, reuse decisions, plans, and structured results.
+
+Process health is operational evidence only and cannot certify scientific
+completion. ORCA execution and scientific status remain separate. Target
+identity represents scientific intent; attempt identity represents the
+resources and executable used for one realization. Reuse fails closed unless
+target identity, scientific validity, and artifact integrity all agree.
+
+See the focused boundary documents in this directory and the
+[workflow guide](../molecular/orca-opt-freq-sp.md).
 
 ## Domain branches
 
@@ -71,9 +89,10 @@ A process that exits successfully is not necessarily scientifically valid, and
 results are comparable only when their methods and provenance support the
 comparison.
 
-## Future package decomposition
+## Package decomposition
 
-The intended package may eventually resemble:
+The implemented core, structure, and ORCA directories establish the beginning
+of this decomposition; Multiwfn, periodic, and analysis remain future scope:
 
 ```text
 cmw

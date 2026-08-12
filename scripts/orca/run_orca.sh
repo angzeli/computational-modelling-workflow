@@ -61,15 +61,17 @@ metadata=$(absolute_path "$metadata")
 output=$(absolute_path "$output")
 stderr_path=$(absolute_path "$stderr_path")
 resolved_artifacts=()
-for item in "${artifacts[@]}"; do
-  role=${item%%=*}
-  path=${item#*=}
-  if [[ "$role" == "$item" || -z "$role" || -z "$path" ]]; then
-    printf 'Invalid artifact declaration: %s\n' "$item" >&2
-    exit 64
-  fi
-  resolved_artifacts+=("$role=$(absolute_path "$path")")
-done
+if ((${#artifacts[@]} > 0)); then
+  for item in "${artifacts[@]}"; do
+    role=${item%%=*}
+    path=${item#*=}
+    if [[ "$role" == "$item" || -z "$role" || -z "$path" ]]; then
+      printf 'Invalid artifact declaration: %s\n' "$item" >&2
+      exit 64
+    fi
+    resolved_artifacts+=("$role=$(absolute_path "$path")")
+  done
+fi
 
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
@@ -89,7 +91,7 @@ if ! command -v "$ORCA_EXE" >/dev/null 2>&1 && [[ ! -x "$ORCA_EXE" ]]; then
   exit 69
 fi
 
-lock_path="${metadata}.lock"
+lock_path="${target}.lock"
 lock_json=""
 lock_token=""
 child_pid=""
@@ -117,7 +119,7 @@ trap 'exit 143' TERM
 
 lock_command=(
   "$PYTHON_BIN" -m cmw.molecular.orca.cli lock acquire
-  --lock "$lock_path" --job-id "$(basename "$metadata")" --owner-pid "$$"
+  --lock "$lock_path" --job-id "$target" --owner-pid "$$"
 )
 ((replace_stale == 0)) || lock_command+=(--replace-stale)
 if ! lock_json=$("${lock_command[@]}"); then
@@ -169,9 +171,11 @@ finalize=(
   --orca-exe "$ORCA_EXE" --orca-version "$orca_version"
   --nprocs "$NPROCS" --maxcore "$MAXCORE_MB" --repository "$REPO_ROOT"
 )
-for item in "${resolved_artifacts[@]}"; do
-  finalize+=(--artifact "$item")
-done
+if ((${#resolved_artifacts[@]} > 0)); then
+  for item in "${resolved_artifacts[@]}"; do
+    finalize+=(--artifact "$item")
+  done
+fi
 [[ ${CMW_REQUIRE_MINIMUM:-0} == 1 ]] && finalize+=(--require-minimum)
 finalize+=(--imaginary-tolerance "${CMW_IMAGINARY_TOLERANCE_CM1:-0.0}")
 

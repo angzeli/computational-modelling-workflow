@@ -10,6 +10,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from cmw.core.locks import acquire_lock, release_lock
+
 
 ROOT = Path(__file__).parents[2]
 RUNNER = ROOT / "scripts" / "orca" / "run_orca.sh"
@@ -110,6 +112,17 @@ class OrcaShellTests(unittest.TestCase):
                 "--artifact",
                 f"final_geometry={attempt / 'stage.xyz'}",
             )
+            held_lock = acquire_lock(
+                attempt / "target.json.lock", job_id="held", owner_pid=os.getpid()
+            )
+            collision = subprocess.run(
+                command, cwd=ROOT, env=env, check=False, capture_output=True, text=True
+            )
+            self.assertEqual(collision.returncode, 73)
+            self.assertFalse(count.exists())
+            self.assertTrue(
+                release_lock(attempt / "target.json.lock", token=held_lock.token)
+            )
             first = subprocess.run(
                 command,
                 cwd=ROOT,
@@ -137,7 +150,7 @@ class OrcaShellTests(unittest.TestCase):
             )
             self.assertIn("[REUSED]", second.stdout)
             self.assertEqual(count.read_text(encoding="utf-8"), "1")
-            self.assertFalse((attempt / "job.json.lock").exists())
+            self.assertFalse((attempt / "target.json.lock").exists())
 
 
 if __name__ == "__main__":
