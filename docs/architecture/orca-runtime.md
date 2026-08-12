@@ -18,8 +18,9 @@ mere existence or an ORCA normal-termination marker is insufficient. A
 non-reusable directory is not overwritten: callers must select a distinct
 attempt directory.
 
-Local stage locks contain host, PID, token, and job identity. Active local
-ownership blocks mutation. Stale local ownership is diagnosed and can be
+Local locks are scoped to a scientific stage target across all of its attempts
+and contain host, PID, token, and job identity. Active local ownership blocks
+mutation. Stale local ownership is diagnosed and can be
 replaced only explicitly. Unreadable or remote ownership remains uncertain and
 blocks mutation. These local locks do not solve scheduler or shared-filesystem
 coordination.

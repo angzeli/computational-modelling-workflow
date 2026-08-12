@@ -10,14 +10,19 @@ erasing the scientific differences between molecular and periodic modelling.
 This repository currently contains:
 
 - the existing static website that visualises the computational architecture;
-- a concise description of the target architecture and its boundaries;
-- a minimal installable `cmw` Python package shell; and
-- development guidance for later extraction of reusable implementations.
+- an installable, dependency-free `cmw` Python package;
+- advisory process-tree health monitoring;
+- strict XYZ parsing and stable geometry identity;
+- factual ORCA output parsing with separate OPT/FREQ/SP validation;
+- versioned targets, attempts, artifacts, lineage, local locks, and fail-closed
+  reuse;
+- shell-owned ORCA execution; and
+- a configurable, resumable `opt`, `opt+sp`, `opt+freq`, or `opt+freq+sp`
+  molecular workflow with synthetic integration tests.
 
-It does **not yet contain** reusable ORCA runtime code, Multiwfn workflows, VASP
-workflows, pymatgen integration, or a complete shared validation and provenance
-layer. The package is deliberately small until real reusable code is ready to be
-extracted and tested.
+It does **not** contain Multiwfn, cube/IGMH workflows, interaction-energy or
+dimer-specific science, catalytic pathways, ASE, pymatgen, VASP, scheduler
+execution, cluster locking, or generic retry ladders.
 
 ## Architectural scope
 
@@ -29,9 +34,9 @@ Both branches should converge on common provenance, validation concepts,
 analysis, plotting, and reporting where that convergence is scientifically
 meaningful.
 
-Long-term development is intended to cover shared structure modelling with ASE,
-ORCA, Multiwfn, VASP, pymatgen, scientific validation, provenance, execution and
-resource management, and common analysis and reporting. See
+Long-term development may extend the implemented molecular foundation toward
+shared structure modelling, additional molecular analysis, periodic workflows,
+and common reporting where scientifically justified. See
 [`docs/architecture/README.md`](docs/architecture/README.md) for the target
 architecture. The workflow website preserves the more detailed visual reference
 and current method strategy.
@@ -45,17 +50,21 @@ and current method strategy.
 │       └── pages.yml
 ├── docs/
 │   ├── architecture/
-│   │   └── README.md
+│   ├── molecular/
 │   └── website/
-│       ├── index.html
-│       └── assets/
-│           ├── css/workflow.css
-│           └── js/workflow.js
+├── examples/molecular/orca/
+├── scripts/
+│   ├── orca/
+│   └── workflows/
 ├── src/
 │   └── cmw/
-│       └── __init__.py
+│       ├── core/
+│       ├── molecular/
+│       └── structure/
 ├── tests/
-│   └── test_package.py
+│   ├── fixtures/
+│   ├── runtime/
+│   └── workflows/
 ├── .gitignore
 ├── AGENTS.md
 ├── LICENSE
@@ -75,15 +84,26 @@ and current method strategy.
 - Prefer deterministic, offline tests and scientifically meaningful validation
   over expensive routine calculations.
 
-## Python package shell
+## Molecular workflow
 
 The distribution is `computational-modelling-workflow`; its import namespace is
-`cmw`. Version `0.1.0` marks an initial pre-alpha development API. It has no
-runtime dependencies and no command-line interface.
+`cmw`. Version `0.1.0` remains a pre-alpha API and has no runtime dependencies.
+Inspect a public synthetic example without launching ORCA:
+
+```sh
+./examples/molecular/orca/opt_freq_sp/run.sh --plan
+```
+
+The four modes, JSON configuration, override precedence, validation policy,
+geometry lineage, and resume behavior are documented in
+[`docs/molecular/orca-opt-freq-sp.md`](docs/molecular/orca-opt-freq-sp.md).
+Shell owns operational orchestration; Python owns scientific semantics and
+structured state.
+
+Development checks remain deterministic and require no ORCA installation:
 
 ```sh
 python3 -m pip install -e .
-python3 -c "import cmw"
 python3 -m unittest discover -s tests
 ```
 

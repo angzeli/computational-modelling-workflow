@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from cmw.core.job import ExecutionAttempt, GeometryLineage, JobTarget
-from cmw.core.provenance import atomic_write_json, file_hash, git_state, read_json, stable_hash
+from cmw.core.provenance import atomic_write_json, git_state, read_json, stable_hash
 from cmw.molecular.orca.input import OrcaResources, OrcaStageSpec, make_target, render_orca_input
 from cmw.molecular.orca.job import check_reuse, finalize_attempt, write_target
 from cmw.molecular.orca.status import StageType
@@ -32,6 +30,12 @@ def _valid_output(stage: StageType) -> str:
 
 
 class IdentityTests(unittest.TestCase):
+    def test_stage_spec_rejects_duplicate_control_directives(self) -> None:
+        with self.assertRaisesRegex(ValueError, "stage-control"):
+            OrcaStageSpec(StageType.OPT, "HF Opt")
+        with self.assertRaisesRegex(ValueError, "cannot be duplicated"):
+            OrcaStageSpec(StageType.SP, "HF", ("%scf\n  MaxIter 100\nend\n%pal 8 end",))
+
     def test_stable_hash_ignores_mapping_order(self) -> None:
         self.assertEqual(stable_hash({"a": 1, "b": 2}), stable_hash({"b": 2, "a": 1}))
 
@@ -39,7 +43,7 @@ class IdentityTests(unittest.TestCase):
         target = JobTarget("SP", "a" * 64, 0, 1, {"keywords": "synthetic"})
         first = ExecutionAttempt.create(
             target_id=target.target_id,
-            resources={"nprocs": 1},
+            resources={"nprocs": 1, "maxcore_mb_per_process": 1000},
             executable={"version": "1"},
             generated_input_sha256="b" * 64,
         )
@@ -90,10 +94,7 @@ class ReuseTests(unittest.TestCase):
         )
         target_path = directory / "target.json"
         write_target(
-            target_path,
-            target,
-            GeometryLineage("input_structure", geometry_hash(geometry)),
-            prepared_input_sha256=file_hash(input_path),
+            target_path, target, GeometryLineage("input_structure", geometry_hash(geometry))
         )
         output = directory / "stage.out"
         error = directory / "stage.err"
@@ -113,7 +114,7 @@ class ReuseTests(unittest.TestCase):
             stderr_path=error,
             process_exit_code=0,
             executable={"path": "synthetic-orca", "version": "test"},
-            resources={"nprocs": 1},
+            resources={"nprocs": 1, "maxcore_mb_per_process": 1000},
             artifacts=artifacts,
         )
         return target_path, metadata, output, record
@@ -166,7 +167,7 @@ class ReuseTests(unittest.TestCase):
                 stderr_path=error,
                 process_exit_code=0,
                 executable={"path": "synthetic-orca"},
-                resources={"nprocs": 1},
+                resources={"nprocs": 1, "maxcore_mb_per_process": 1000},
                 artifacts={"final_geometry": directory / "stage.xyz"},
             )
             result = check_reuse(target, metadata)
@@ -178,7 +179,7 @@ class ReuseTests(unittest.TestCase):
             directory = Path(temporary)
             target, metadata, _, _ = self._attempt(directory)
             (directory / "stage.inp").write_text("changed", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "does not match"):
+            with self.assertRaisesRegex(ValueError, "rendered-input contract"):
                 finalize_attempt(
                     target_path=target,
                     metadata_path=metadata,

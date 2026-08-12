@@ -9,7 +9,6 @@ from pathlib import Path
 
 from cmw.core.job import GeometryLineage
 from cmw.core.locks import acquire_lock, inspect_lock, release_lock
-from cmw.core.provenance import file_hash
 
 from .input import OrcaResources, OrcaStageSpec, make_target, render_orca_input
 from .job import check_reuse, finalize_attempt, write_target
@@ -47,12 +46,7 @@ def _prepare(args: argparse.Namespace) -> int:
         ),
         encoding="utf-8",
     )
-    write_target(
-        Path(args.target),
-        target,
-        lineage,
-        prepared_input_sha256=file_hash(input_path),
-    )
+    write_target(Path(args.target), target, lineage)
     _print({"target_id": target.target_id, "input": str(input_path), "target": args.target})
     return 0
 
