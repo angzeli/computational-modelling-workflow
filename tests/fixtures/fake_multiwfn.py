@@ -14,6 +14,10 @@ if "--version" in sys.argv:
     print("Multiwfn -- synthetic test double")
     print("Version 3.8")
     raise SystemExit(0)
+if "CMW_SOURCE_GEOMETRY" not in os.environ:
+    print("Multiwfn -- synthetic test double")
+    print("Version 3.8")
+    raise SystemExit(0)
 
 commands = sys.stdin.read()
 log = os.environ.get("FAKE_MULTIWFN_LOG")
@@ -67,17 +71,24 @@ def cube_text(*, shifted_origin: bool = False, shifted_geometry: bool = False) -
 
 
 operation = os.environ.get("CMW_MULTIWFN_OPERATION")
-filenames = {
-    "FMO": ("homo.cube", "lumo.cube"),
-    "ESP": ("density.cube", "esp.cube"),
-    "IGMH": ("dg_inter.cub", "sl2r.cub"),
-}.get(operation)
+if operation == "FMO":
+    selected = commands.splitlines()[2].split(",")
+    filenames = tuple(f"orb{int(value):06d}.cub" for value in selected)
+    aliases = ("homo", "lumo")
+elif operation == "ESP":
+    filenames = ("density.cub", "totesp.cub")
+    aliases = ("density", "esp")
+elif operation == "IGMH":
+    filenames = ("dg_inter.cub", "sl2r.cub")
+    aliases = ("dg_inter", "sl2r")
+else:
+    filenames = None
+    aliases = ()
 if filenames is None:
     raise SystemExit("unknown synthetic operation")
 missing = os.environ.get("FAKE_MULTIWFN_MISSING", "")
 malformed = os.environ.get("FAKE_MULTIWFN_MALFORMED", "")
-for index, filename in enumerate(filenames):
-    role = filename.split(".")[0]
+for index, (filename, role) in enumerate(zip(filenames, aliases, strict=True)):
     if missing in {role, filename}:
         continue
     content = (

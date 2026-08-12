@@ -114,6 +114,21 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("3,4", text)
         self.assertIn("0.2", text)
 
+    def test_documented_fmo_and_esp_profiles_use_batch_exports(self) -> None:
+        fmo = menu_stream(
+            Operation.FMO,
+            "3.8",
+            {"homo_index": 5, "lumo_index": 6, "grid_spacing_bohr": 0.2},
+        ).splitlines()
+        self.assertEqual(fmo, ["200", "3", "5,6", "4", "0.2", "1", "0", "q"])
+        esp = menu_stream(
+            Operation.ESP, "3.8", {"grid_spacing_bohr": 0.2}
+        ).splitlines()
+        self.assertEqual(
+            esp,
+            ["5", "1", "4", "0.2", "2", "0", "5", "12", "4", "0.2", "2", "0", "q"],
+        )
+
     def test_parallelism_warning_is_diagnostic_only(self) -> None:
         snapshot = ProcessTreeSnapshot(7, 10.0, True, True, ())
         assessment = HealthAssessment(
@@ -143,7 +158,8 @@ class RuntimeTests(unittest.TestCase):
                     "-c",
                     'set -euo pipefail; source "$1"; MULTIWFN_EXE="$2"; '
                     'MULTIWFN_NTHREADS=4; multiwfn_runtime_prepare "$3" "$4" "$5"; '
-                    'cd "$3"; printf "hello\\n" | multiwfn_runtime_launch',
+                    'cd "$3"; printf "hello\\n" | multiwfn_runtime_launch; '
+                    'printf "again\\n" | multiwfn_runtime_launch',
                     "_",
                     str(SHELL),
                     str(executable),
@@ -159,12 +175,14 @@ class RuntimeTests(unittest.TestCase):
             )
             self.assertIn("STDIN=hello,", completed.stdout)
             self.assertIn("THREADS=4", completed.stdout)
-            alias = next(
+            aliases = [
                 line.removeprefix("PATH=")
                 for line in completed.stdout.splitlines()
                 if line.startswith("PATH=")
-            )
-            self.assertFalse(Path(alias).exists())
+            ]
+            self.assertEqual(len(aliases), 2)
+            self.assertEqual(len(set(aliases)), 2)
+            self.assertTrue(all(not Path(alias).exists() for alias in aliases))
             record = json.loads(metadata.read_text())
             self.assertEqual(record["runtime"]["requested_nthreads"], 4)
 

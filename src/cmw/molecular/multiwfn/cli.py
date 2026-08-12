@@ -47,7 +47,15 @@ def _health(args: argparse.Namespace) -> int:
         "effective_cores": observation.effective_cores,
         "warning": observation.warning,
         "diagnostic_only": True,
+        "process_count": report.snapshot.process_count,
+        "aggregate_cpu_percent": report.snapshot.cpu_percent,
+        "aggregate_rss_bytes": report.snapshot.rss_bytes,
+        "cumulative_cpu_seconds": report.snapshot.cumulative_cpu_seconds,
     }
+    if args.history is not None:
+        args.history.parent.mkdir(parents=True, exist_ok=True)
+        with args.history.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(result, sort_keys=True) + "\n")
     _print(result)
     return 0
 
@@ -72,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     health.add_argument("--state", type=Path, required=True)
     health.add_argument("--activity", type=Path, action="append", default=[])
     health.add_argument("--threads", type=int, required=True)
+    health.add_argument("--history", type=Path)
     health.set_defaults(handler=_health)
     return parser
 

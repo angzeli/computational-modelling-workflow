@@ -70,11 +70,19 @@ class MultiwfnCubeHarness(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "target": target.to_dict(),
+                    "lineage": {
+                        "source": "synthetic_public_fixture",
+                        "geometry_sha256": identity,
+                        "parent_stage": None,
+                        "parent_target_id": None,
+                        "parent_artifact_sha256": None,
+                    },
                     "execution": {"status": "SUCCESS"},
                     "scientific": {"status": "VALID"},
                     "artifacts": artifacts,
                     "wavefunction_semantics": {
                         "spin_mode": spin_mode,
+                        "format": "molden",
                         "homo_index": 5,
                         "lumo_index": 6,
                         "orbital_indexing": "one_based",
@@ -129,7 +137,7 @@ class FmoWorkflowTests(MultiwfnCubeHarness):
     def test_validated_source_produces_homo_lumo_and_reuses(self) -> None:
         first = self.run_workflow(FMO)
         result = json.loads(first.stdout)
-        self.assertEqual(set(result["artifacts"]), {"homo_cube", "lumo_cube"})
+        self.assertEqual(set(result["required_artifact_roles"]), {"homo_cube", "lumo_cube"})
         self.assertEqual(result["target"]["calculation"]["homo_index"], 5)
         self.assertEqual(result["target"]["calculation"]["lumo_index"], 6)
         self.run_workflow(FMO)
@@ -185,7 +193,7 @@ class EspWorkflowTests(MultiwfnCubeHarness):
         result = json.loads(
             self.run_workflow(ESP, env={**self.env, "MULTIWFN_NTHREADS": "4"}).stdout
         )
-        self.assertEqual(set(result["artifacts"]), {"density_cube", "esp_cube"})
+        self.assertEqual(set(result["required_artifact_roles"]), {"density_cube", "esp_cube"})
         self.assertEqual(result["runtime"]["requested_nthreads"], 4)
         self.assertIn("threads=4", self.log.read_text())
 

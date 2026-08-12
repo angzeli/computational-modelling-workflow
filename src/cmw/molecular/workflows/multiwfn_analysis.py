@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
@@ -23,6 +23,7 @@ from cmw.structure.xyz import read_xyz
 from .cube import read_cube, validate_cube_compatibility, validate_cube_geometry
 from .esp_cubes import EspConfiguration
 from .fmo_cubes import FmoConfiguration, frontier_orbitals
+from .igmh import FragmentDefinition, IgmhConfiguration, load_fragments, load_igmh_configuration
 from .source import ValidatedSource, validate_source_result
 
 
@@ -32,27 +33,33 @@ ANALYSIS_SCHEMA_VERSION = 1
 class AnalysisOperation(str, Enum):
     FMO = "FMO"
     ESP = "ESP"
+    IGMH = "IGMH"
 
 
 EXPECTED_ARTIFACTS: dict[AnalysisOperation, tuple[str, ...]] = {
     AnalysisOperation.FMO: ("homo_cube", "lumo_cube"),
     AnalysisOperation.ESP: ("density_cube", "esp_cube"),
+    AnalysisOperation.IGMH: ("delta_g_inter_cube", "sign_lambda2_rho_cube"),
 }
 ARTIFACT_FILENAMES = {
     "homo_cube": "homo.cube",
     "lumo_cube": "lumo.cube",
     "density_cube": "density.cube",
     "esp_cube": "esp.cube",
+    "delta_g_inter_cube": "dg_inter.cub",
+    "sign_lambda2_rho_cube": "sl2r.cub",
 }
 
 
 def _configuration(
     operation: AnalysisOperation, grid_spacing_bohr: float
-) -> FmoConfiguration | EspConfiguration:
+) -> FmoConfiguration | EspConfiguration | IgmhConfiguration:
     return (
         FmoConfiguration(grid_spacing_bohr)
         if operation is AnalysisOperation.FMO
         else EspConfiguration(grid_spacing_bohr)
+        if operation is AnalysisOperation.ESP
+        else IgmhConfiguration(grid_spacing_bohr)
     )
 
 
@@ -61,6 +68,7 @@ def build_target(
     source: ValidatedSource,
     *,
     grid_spacing_bohr: float,
+    fragments: FragmentDefinition | None = None,
 ) -> tuple[JobTarget, dict[str, object]]:
     config = _configuration(operation, grid_spacing_bohr)
     scientific: dict[str, object] = {
@@ -80,6 +88,10 @@ def build_target(
                 "orbital_indexing": "one_based",
             }
         )
+    elif operation is AnalysisOperation.IGMH:
+        if fragments is None:
+            raise ValueError("IGMH requires an explicit fragment definition")
+        scientific.update(fragments.to_dict())
     target = JobTarget(
         stage_type=f"MULTIWFN_{operation.value}",
         geometry_sha256=source.geometry_sha256,
@@ -154,12 +166,24 @@ def plan_analysis(
     operation: AnalysisOperation,
     source_path: Path,
     output_root: Path,
-    grid_spacing_bohr: float,
+    grid_spacing_bohr: float | None,
     threads: int,
+    fragment_path: Path | None = None,
+    igmh_config_path: Path | None = None,
 ) -> dict[str, object]:
     source = validate_source_result(source_path)
+    fragments = None
+    if operation is AnalysisOperation.IGMH:
+        if fragment_path is None or igmh_config_path is None:
+            raise ValueError("IGMH requires --fragments and --config")
+        geometry = read_xyz(Path(source.geometry_path))
+        fragments = load_fragments(fragment_path, geometry.atom_count)
+        grid_spacing_bohr = load_igmh_configuration(igmh_config_path).grid_spacing_bohr
+    elif grid_spacing_bohr is None:
+        raise ValueError("--grid-spacing-bohr is required for FMO and ESP")
+    assert grid_spacing_bohr is not None
     target, configuration = build_target(
-        operation, source, grid_spacing_bohr=grid_spacing_bohr
+        operation, source, grid_spacing_bohr=grid_spacing_bohr, fragments=fragments
     )
     directory = target_directory(output_root, operation, target.target_id)
     result_path = directory / "result.json"
@@ -214,10 +238,44 @@ def write_menu(
     calculation = target_record["target"]["calculation"]
     operation = AnalysisOperation(str(calculation["operation"]))
     parameters = dict(calculation)
-    automation_operation = Operation.FMO if operation is AnalysisOperation.FMO else Operation.ESP
+    automation_operation = {
+        AnalysisOperation.FMO: Operation.FMO,
+        AnalysisOperation.ESP: Operation.ESP,
+        AnalysisOperation.IGMH: Operation.IGMH,
+    }[operation]
     text = menu_stream(automation_operation, str(runtime["version"]), parameters)
     destination.write_text(text, encoding="utf-8")
     return {"menu_path": str(destination), "operation": operation.value}
+
+
+def normalize_outputs(*, target_path: Path, attempt_directory: Path) -> dict[str, str]:
+    """Normalize documented Multiwfn 3.8 filenames to the public artifact names."""
+
+    target = read_json(target_path)["target"]
+    calculation = target["calculation"]
+    operation = AnalysisOperation(str(calculation["operation"]))
+    raw_to_public: dict[Path, Path] = {}
+    if operation is AnalysisOperation.FMO:
+        raw_to_public = {
+            attempt_directory / f"orb{int(calculation['homo_index']):06d}.cub": attempt_directory / "homo.cube",
+            attempt_directory / f"orb{int(calculation['lumo_index']):06d}.cub": attempt_directory / "lumo.cube",
+        }
+    elif operation is AnalysisOperation.ESP:
+        raw_to_public = {
+            attempt_directory / "density.cub": attempt_directory / "density.cube",
+            attempt_directory / "totesp.cub": attempt_directory / "esp.cube",
+        }
+    normalized: dict[str, str] = {}
+    for raw, public in raw_to_public.items():
+        if public.exists():
+            if raw.exists():
+                raise FileExistsError(f"both raw and normalized Multiwfn outputs exist: {raw.name}")
+            normalized[raw.name] = public.name
+            continue
+        if raw.exists():
+            raw.replace(public)
+            normalized[raw.name] = public.name
+    return normalized
 
 
 def finalize_analysis(
@@ -258,6 +316,20 @@ def finalize_analysis(
         records[role] = ArtifactRecord.from_path(
             path, role=role, relative_to=target_path.parent
         )
+    for role, filename in {
+        "automation_input": "menu.in",
+        "multiwfn_log": "multiwfn.log",
+        "multiwfn_stderr": "multiwfn.stderr",
+        "runtime_metadata": "runtime.json",
+        "health_diagnostic": "health-latest.json",
+        "health_history": "health-history.jsonl",
+        "temporary_alias_record": "multiwfn-runtime-alias.txt",
+    }.items():
+        path = attempt_directory / filename
+        if path.is_file():
+            records[role] = ArtifactRecord.from_path(
+                path, role=role, relative_to=target_path.parent
+            )
     roles = EXPECTED_ARTIFACTS[operation]
     validate_cube_compatibility(cubes[roles[0]], cubes[roles[1]])
     runtime = runtime_record["runtime"]
@@ -277,7 +349,11 @@ def finalize_analysis(
         "source": source.to_dict(),
         "attempt": attempt.to_dict(),
         "runtime": runtime,
-        "execution": {"status": "SUCCESS", "process_exit_code": process_exit_code},
+        "execution": {
+            "status": "SUCCESS",
+            "process_exit_code": process_exit_code,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        },
         "scientific": {"status": "VALID", "reason": "required compatible cubes validated"},
         "artifacts": records_to_dict(records),
         "required_artifact_roles": list(roles),

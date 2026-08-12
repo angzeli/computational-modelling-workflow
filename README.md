@@ -18,10 +18,15 @@ This repository currently contains:
   reuse;
 - shell-owned ORCA execution; and
 - a configurable, resumable `opt`, `opt+sp`, `opt+freq`, or `opt+freq+sp`
-  molecular workflow with synthetic integration tests.
+  molecular workflow with synthetic integration tests;
+- a reusable Multiwfn 3.8.x runtime with immutable run-local settings,
+  eight-thread default, executable provenance, and advisory process health; and
+- independent, source-aware HOMO/LUMO, density/ESP, and interfragment IGMH cube
+  workflows with structural validation, grid compatibility, and fail-closed
+  reuse.
 
-It does **not** contain Multiwfn, cube/IGMH workflows, interaction-energy or
-dimer-specific science, catalytic pathways, ASE, pymatgen, VASP, scheduler
+It does **not** redistribute Multiwfn or contain interaction-energy or
+dimer-selection science, catalytic pathways, ASE, pymatgen, VASP, scheduler
 execution, cluster locking, or generic retry ladders.
 
 ## Architectural scope
@@ -52,7 +57,9 @@ and current method strategy.
 │   ├── architecture/
 │   ├── molecular/
 │   └── website/
-├── examples/molecular/orca/
+├── examples/molecular/
+│   ├── orca/
+│   └── multiwfn/
 ├── scripts/
 │   ├── orca/
 │   └── workflows/
@@ -99,6 +106,12 @@ geometry lineage, and resume behavior are documented in
 [`docs/molecular/orca-opt-freq-sp.md`](docs/molecular/orca-opt-freq-sp.md).
 Shell owns operational orchestration; Python owns scientific semantics and
 structured state.
+
+Validated ORCA results can be consumed independently by the downstream FMO,
+ESP, and IGMH shell interfaces. Their source contract, explicit grid/fragment
+configuration, runtime behavior, cube validation, and plan examples are
+documented in
+[`docs/molecular/multiwfn-cubes.md`](docs/molecular/multiwfn-cubes.md).
 
 Development checks remain deterministic and require no ORCA installation:
 

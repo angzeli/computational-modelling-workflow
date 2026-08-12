@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from cmw.core.job import JobTarget
 from cmw.core.provenance import file_hash, read_json
 from cmw.structure.xyz import geometry_hash, read_xyz
 
@@ -13,6 +14,7 @@ from cmw.structure.xyz import geometry_hash, read_xyz
 @dataclass(frozen=True)
 class WavefunctionSemantics:
     spin_mode: str
+    format: str
     homo_index: int | None = None
     lumo_index: int | None = None
 
@@ -73,11 +75,43 @@ def validate_source_result(path: Path) -> ValidatedSource:
     semantics = record.get("wavefunction_semantics")
     if not isinstance(target, dict) or not isinstance(artifacts, dict):
         raise ValueError("source target or artifact manifest is invalid")
+    parsed_target = JobTarget(
+        stage_type=str(target["stage_type"]),
+        geometry_sha256=str(target["geometry_sha256"]),
+        charge=int(target["charge"]),
+        multiplicity=int(target["multiplicity"]),
+        calculation=dict(target["calculation"]),
+    )
+    if parsed_target.target_id != target.get("target_id"):
+        raise ValueError("source target identity does not match its content")
+    lineage = record.get("lineage")
+    if not isinstance(lineage, dict) or not lineage.get("source"):
+        raise ValueError("source geometry lineage is missing or ambiguous")
+    if lineage.get("geometry_sha256") != parsed_target.geometry_sha256:
+        raise ValueError("source lineage geometry differs from its target")
+    parent_values = (
+        lineage.get("parent_stage"),
+        lineage.get("parent_target_id"),
+        lineage.get("parent_artifact_sha256"),
+    )
+    if any(value is not None for value in parent_values) and not all(
+        value is not None for value in parent_values
+    ):
+        raise ValueError("source parent lineage is incomplete")
+    if parent_values[2] is not None and parent_values[2] != parsed_target.geometry_sha256:
+        raise ValueError("source parent artifact does not match the target geometry")
     if not isinstance(semantics, dict):
         raise ValueError("source lacks explicit wavefunction_semantics")
     spin_mode = str(semantics.get("spin_mode", "")).lower()
     if spin_mode not in {"restricted", "unrestricted"}:
         raise ValueError("wavefunction spin_mode must be restricted or unrestricted")
+    wavefunction_format = str(semantics.get("format", "")).lower()
+    compatible_formats = {"molden", "mwfn", "wfn", "wfx", "fch", "fchk"}
+    if wavefunction_format not in compatible_formats:
+        raise ValueError(
+            "wavefunction_semantics.format must identify a Multiwfn-compatible "
+            f"artifact ({', '.join(sorted(compatible_formats))}); GBW requires explicit conversion"
+        )
     homo = semantics.get("homo_index")
     lumo = semantics.get("lumo_index")
     if homo is not None and (not isinstance(homo, int) or homo < 1):
@@ -96,9 +130,7 @@ def validate_source_result(path: Path) -> ValidatedSource:
         raise ValueError("source geometry lineage does not match the target")
     if geometry_artifact_hash != artifacts["geometry"].get("sha256"):
         raise ValueError("source geometry artifact identity is ambiguous")
-    target_id = str(target.get("target_id", ""))
-    if not target_id:
-        raise ValueError("source target identity is missing")
+    target_id = parsed_target.target_id
     return ValidatedSource(
         result_path=str(result_path),
         target_id=target_id,
@@ -108,5 +140,5 @@ def validate_source_result(path: Path) -> ValidatedSource:
         wavefunction_sha256=wavefunction_hash,
         charge=int(target["charge"]),
         multiplicity=int(target["multiplicity"]),
-        wavefunction=WavefunctionSemantics(spin_mode, homo, lumo),
+        wavefunction=WavefunctionSemantics(spin_mode, wavefunction_format, homo, lumo),
     )

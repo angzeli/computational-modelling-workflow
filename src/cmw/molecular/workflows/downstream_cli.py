@@ -13,6 +13,7 @@ from cmw.molecular.multiwfn.runtime import resolve_threads
 from .multiwfn_analysis import (
     AnalysisOperation,
     finalize_analysis,
+    normalize_outputs,
     plan_analysis,
     prepare_analysis,
     write_menu,
@@ -30,6 +31,8 @@ def _plan(args: argparse.Namespace) -> int:
         output_root=args.output,
         grid_spacing_bohr=args.grid_spacing_bohr,
         threads=resolve_threads(cli_value=args.threads),
+        fragment_path=args.fragments,
+        igmh_config_path=args.config,
     )
     _print(plan)
     return 0
@@ -42,6 +45,8 @@ def _prepare(args: argparse.Namespace) -> int:
         output_root=args.output,
         grid_spacing_bohr=args.grid_spacing_bohr,
         threads=resolve_threads(cli_value=args.threads),
+        fragment_path=args.fragments,
+        igmh_config_path=args.config,
     )
     if plan["reuse"]["reuse"]:
         _print(plan)
@@ -74,6 +79,15 @@ def _finalize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _normalize(args: argparse.Namespace) -> int:
+    _print(
+        normalize_outputs(
+            target_path=args.target, attempt_directory=args.attempt_directory
+        )
+    )
+    return 0
+
+
 def _lock(args: argparse.Namespace) -> int:
     if args.lock_action == "acquire":
         owner = acquire_lock(args.lock, job_id=args.job_id, owner_pid=args.owner_pid)
@@ -88,7 +102,9 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--operation", choices=[item.value for item in AnalysisOperation], required=True)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--grid-spacing-bohr", type=float, required=True)
+    parser.add_argument("--grid-spacing-bohr", type=float)
+    parser.add_argument("--fragments", type=Path)
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--threads")
 
 
@@ -106,6 +122,10 @@ def build_parser() -> argparse.ArgumentParser:
     menu.add_argument("--runtime", type=Path, required=True)
     menu.add_argument("--destination", type=Path, required=True)
     menu.set_defaults(handler=_menu)
+    normalize = sub.add_parser("normalize")
+    normalize.add_argument("--target", type=Path, required=True)
+    normalize.add_argument("--attempt-directory", type=Path, required=True)
+    normalize.set_defaults(handler=_normalize)
     finalize = sub.add_parser("finalize")
     finalize.add_argument("--target", type=Path, required=True)
     finalize.add_argument("--runtime", type=Path, required=True)

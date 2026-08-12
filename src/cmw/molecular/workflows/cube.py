@@ -55,11 +55,15 @@ def read_cube(path: Path) -> CubeMetadata:
     if len(lines) < 7:
         raise ValueError(f"truncated cube header: {path}")
     atom_header = _numbers(lines[2], 4, label="atom/origin row")
+    if not atom_header[0].is_integer():
+        raise ValueError("cube atom count must be an integer")
     signed_atoms = int(atom_header[0])
     atom_count = abs(signed_atoms)
     if atom_count < 1:
         raise ValueError("cube must contain at least one atom")
     grid_rows = [_numbers(lines[index], 4, label="grid row") for index in range(3, 6)]
+    if any(not row[0].is_integer() for row in grid_rows):
+        raise ValueError("cube grid dimensions must be integers")
     signs = {1 if row[0] > 0 else -1 for row in grid_rows}
     if 0 in {row[0] for row in grid_rows} or len(signs) != 1:
         raise ValueError("cube grid dimensions must be non-zero with consistent units")
@@ -71,6 +75,8 @@ def read_cube(path: Path) -> CubeMetadata:
     atoms: list[CubeAtom] = []
     for line in lines[start : start + atom_count]:
         row = _numbers(line, 5, label="atom row")
+        if not row[0].is_integer():
+            raise ValueError("cube atomic numbers must be integers")
         number = int(row[0])
         if number < 1 or number > len(ELEMENT_ORDER):
             raise ValueError(f"invalid cube atomic number: {number}")

@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -47,6 +48,7 @@ class MultiwfnRuntime:
     settings_path: str
     settings_sha256: str
     openmp_capability: str
+    prepared_at: str
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -149,7 +151,7 @@ def detect_version(executable: Path) -> str:
     """Detect the banner without entering an operation-specific menu."""
 
     outputs: list[str] = []
-    for command in ((str(executable), "--version"), (str(executable),)):
+    for command in ((str(executable),), (str(executable), "--version")):
         completed = subprocess.run(
             command,
             input="q\n",
@@ -308,6 +310,7 @@ def prepare_runtime(
         settings_path=str(settings),
         settings_sha256=file_hash(settings),
         openmp_capability=detect_openmp(resolved_executable).value,
+        prepared_at=datetime.now(timezone.utc).isoformat(),
     )
 
 
