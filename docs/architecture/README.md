@@ -7,7 +7,7 @@ branches in the diagrams remain targets rather than implementation claims.
 > The website describes the broader computational architecture; the Python and
 > shell layers implement only the explicitly documented reusable milestones.
 
-## Implemented molecular foundation
+## Implemented molecular stack
 
 The current package implements a dependency-free OPT / optional FREQ / optional
 SP workflow for ORCA. Shell owns executable discovery, environment handling,
@@ -15,6 +15,31 @@ process launch, descriptors, signals, temporary directories, traps, cleanup,
 and sequential calls into Python. Python owns XYZ and ORCA parsing, validation,
 scientific targets, execution attempts, provenance, artifacts, geometry
 lineage, locks, reuse decisions, plans, and structured results.
+
+The validated ORCA result is also an explicit downstream source contract. A
+shell-owned Multiwfn runtime launches three independent analyses while Python
+owns source identity, operation semantics, cube parsing, paired-grid checks,
+fragment validation, target/attempt provenance, and reuse:
+
+```text
+validated ORCA result
+        │
+        ▼
+compatible recorded wavefunction
+        │
+        ├──────────────┬─────────────────┐
+        ▼              ▼                 ▼
+  HOMO/LUMO          density + ESP      IGMH
+     cubes             cubes            cubes
+        └──────────────┴─────────────────┘
+                       │
+                       ▼
+          validated provenance-rich artifacts
+```
+
+IGMH additionally requires an explicit two-fragment complete partition and an
+explicit grid configuration. These analyses are downstream siblings, not new
+`opt+freq+sp` mode combinations.
 
 Process health is operational evidence only and cannot certify scientific
 completion. ORCA execution and scientific status remain separate. Target
@@ -43,7 +68,7 @@ finite / molecular systems
                      ▼
                    ORCA
                      │
-           Multiwfn / ORCA parsing
+       validated ORCA result + Multiwfn
                      │
                      ▼
          validated molecular result ──┐
@@ -91,8 +116,9 @@ comparison.
 
 ## Package decomposition
 
-The implemented core, structure, and ORCA directories establish the beginning
-of this decomposition; Multiwfn, periodic, and analysis remain future scope:
+The implemented core, structure, ORCA, Multiwfn runtime, and downstream
+workflow directories establish the molecular decomposition. Periodic and
+general analysis layers remain future scope:
 
 ```text
 cmw

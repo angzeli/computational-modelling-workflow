@@ -15,7 +15,8 @@ source "$CMW_ROOT/scripts/multiwfn/multiwfn_runtime.sh"
 multiwfn_cube_usage() {
   printf '%s\n' \
     "Usage: $0 --source RESULT.json --output DIRECTORY" \
-    "          --grid-spacing-bohr VALUE [--multiwfn-exe FILE]" \
+    "          (--grid-spacing-bohr VALUE | --fragments FILE --config FILE)" \
+    "          [--multiwfn-exe FILE]" \
     "          [--settings-source FILE] [--threads N] [--plan]" >&2
 }
 
@@ -23,12 +24,15 @@ multiwfn_cube_main() {
   local operation=$1
   shift
   local source_result="" output_root="" grid_spacing="" settings_source=""
+  local fragment_path="" igmh_config=""
   local cli_threads="" plan_only=0 plan_json prepare_json
   while (($#)); do
     case "$1" in
       --source) source_result=${2:?}; shift 2 ;;
       --output) output_root=${2:?}; shift 2 ;;
       --grid-spacing-bohr) grid_spacing=${2:?}; shift 2 ;;
+      --fragments) fragment_path=${2:?}; shift 2 ;;
+      --config) igmh_config=${2:?}; shift 2 ;;
       --multiwfn-exe) MULTIWFN_EXE=${2:?}; shift 2 ;;
       --settings-source) settings_source=${2:?}; shift 2 ;;
       --threads) cli_threads=${2:?}; shift 2 ;;
@@ -38,7 +42,16 @@ multiwfn_cube_main() {
       *) printf 'Unknown argument: %s\n' "$1" >&2; multiwfn_cube_usage; return 64 ;;
     esac
   done
-  if [[ -z "$source_result" || -z "$output_root" || -z "$grid_spacing" ]]; then
+  if [[ -z "$source_result" || -z "$output_root" ]]; then
+    multiwfn_cube_usage
+    return 64
+  fi
+  if [[ "$operation" == IGMH ]]; then
+    if [[ -z "$fragment_path" || -z "$igmh_config" ]]; then
+      multiwfn_cube_usage
+      return 64
+    fi
+  elif [[ -z "$grid_spacing" ]]; then
     multiwfn_cube_usage
     return 64
   fi
@@ -46,8 +59,12 @@ multiwfn_cube_main() {
   local plan_command=(
     "$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli plan
     --operation "$operation" --source "$source_result" --output "$output_root"
-    --grid-spacing-bohr "$grid_spacing"
   )
+  if [[ "$operation" == IGMH ]]; then
+    plan_command+=(--fragments "$fragment_path" --config "$igmh_config")
+  else
+    plan_command+=(--grid-spacing-bohr "$grid_spacing")
+  fi
   [[ -z "$cli_threads" ]] || plan_command+=(--threads "$cli_threads")
   if ! plan_json=$("${plan_command[@]}"); then
     printf '%s\n' "$plan_json"
@@ -58,7 +75,7 @@ multiwfn_cube_main() {
     return 0
   fi
 
-  local target_path result_path lock_path lock_json lock_token="" child_pid=""
+  local target_path result_path lock_path lock_json lock_token="" child_pid="" monitor_pid=""
   target_path=$(printf '%s' "$plan_json" | "$PYTHON_BIN" -c \
     'import json,sys; print(json.load(sys.stdin)["target_path"])')
   result_path=$(printf '%s' "$plan_json" | "$PYTHON_BIN" -c \
@@ -79,6 +96,10 @@ multiwfn_cube_main() {
       kill -TERM "$child_pid" 2>/dev/null || true
       wait "$child_pid" 2>/dev/null || true
     fi
+    if [[ -n "${monitor_pid:-}" ]] && kill -0 "$monitor_pid" 2>/dev/null; then
+      kill -TERM "$monitor_pid" 2>/dev/null || true
+      wait "$monitor_pid" 2>/dev/null || true
+    fi
     if [[ -n "${lock_token:-}" ]]; then
       "$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli lock release \
         --lock "$lock_path" --token "$lock_token" >/dev/null 2>&1 || true
@@ -97,8 +118,12 @@ multiwfn_cube_main() {
   local prepare_command=(
     "$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli prepare
     --operation "$operation" --source "$source_result" --output "$output_root"
-    --grid-spacing-bohr "$grid_spacing"
   )
+  if [[ "$operation" == IGMH ]]; then
+    prepare_command+=(--fragments "$fragment_path" --config "$igmh_config")
+  else
+    prepare_command+=(--grid-spacing-bohr "$grid_spacing")
+  fi
   [[ -z "$cli_threads" ]] || prepare_command+=(--threads "$cli_threads")
   if ! prepare_json=$("${prepare_command[@]}"); then
     printf '%s\n' "$prepare_json"
@@ -121,25 +146,47 @@ multiwfn_cube_main() {
     --target "$target_path" --runtime "$runtime_path" --destination "$menu_path" >/dev/null
 
   export CMW_MULTIWFN_OPERATION=$operation CMW_SOURCE_GEOMETRY=$source_geometry
+  multiwfn_health_monitor() {
+    local owned_pid=$1 attempt=$2 interval=${CMW_HEALTH_INTERVAL:-30}
+    local sleep_pid=""
+    trap '
+      if [[ -n "${sleep_pid:-}" ]]; then kill "$sleep_pid" 2>/dev/null || true; fi
+      exit 0
+    ' INT TERM
+    while kill -0 "$owned_pid" 2>/dev/null; do
+      "$PYTHON_BIN" -m cmw.molecular.multiwfn.cli health \
+        --pid "$owned_pid" --state "$attempt/health-state.json" \
+        --activity "$attempt/multiwfn.log" --threads "$MULTIWFN_NTHREADS" \
+        --history "$attempt/health-history.jsonl" \
+        >"$attempt/health-latest.json" 2>/dev/null || true
+      sleep "$interval" &
+      sleep_pid=$!
+      wait "$sleep_pid" || return 0
+      sleep_pid=""
+    done
+  }
   set +e
   (
     cd "$attempt_directory"
     multiwfn_runtime_launch "$source_wavefunction" <menu.in >multiwfn.log 2>multiwfn.stderr
   ) &
   child_pid=$!
-  "$PYTHON_BIN" -m cmw.molecular.multiwfn.cli health \
-    --pid "$child_pid" --state "$attempt_directory/health-state.json" \
-    --activity "$attempt_directory/multiwfn.log" \
-    --threads "$MULTIWFN_NTHREADS" >"$attempt_directory/health-sample.json" 2>/dev/null || true
+  multiwfn_health_monitor "$child_pid" "$attempt_directory" &
+  monitor_pid=$!
   wait "$child_pid"
   local process_status=$?
   child_pid=""
+  kill -TERM "$monitor_pid" 2>/dev/null || true
+  wait "$monitor_pid" 2>/dev/null || true
+  monitor_pid=""
   set -e
   if ((process_status != 0)); then
     printf 'Multiwfn %s attempt failed with status %d; diagnostics retained in %s\n' \
       "$operation" "$process_status" "$attempt_directory" >&2
     return "$process_status"
   fi
+  "$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli normalize \
+    --target "$target_path" --attempt-directory "$attempt_directory" >/dev/null
   local final_json
   final_json=$("$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli finalize \
     --target "$target_path" --runtime "$runtime_path" --menu "$menu_path" \

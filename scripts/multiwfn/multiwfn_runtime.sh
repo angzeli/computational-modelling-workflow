@@ -29,7 +29,10 @@ multiwfn_runtime_prepare() {
   [[ -z "$MULTIWFN_EXE" ]] || command+=(--multiwfn-exe "$MULTIWFN_EXE")
   [[ -z "$settings_source" ]] || command+=(--settings-source "$settings_source")
   [[ -z "${MULTIWFN_NTHREADS+x}" ]] || command+=(--threads "$MULTIWFN_NTHREADS")
-  prepared=$(multiwfn_runtime_python "${command[@]}") || return
+  if ! prepared=$(multiwfn_runtime_python "${command[@]}"); then
+    printf '%s\n' "$prepared"
+    return 64
+  fi
   MULTIWFN_EXE=$(printf '%s' "$prepared" | multiwfn_runtime_json_value executable)
   MULTIWFN_VERSION=$(printf '%s' "$prepared" | multiwfn_runtime_json_value version)
   MULTIWFN_NTHREADS=$(printf '%s' "$prepared" | multiwfn_runtime_json_value requested_nthreads)
@@ -57,6 +60,7 @@ multiwfn_runtime_launch() {
     }
     trap cleanup_multiwfn_alias EXIT
     ln -s "$MULTIWFN_RUN_SETTINGS_DIRECTORY" "$alias_path"
+    printf '%s\n' "$alias_path" > multiwfn-runtime-alias.txt
     Multiwfnpath="$alias_path" OMP_NUM_THREADS="$MULTIWFN_NTHREADS" \
       "$MULTIWFN_EXE" "$@"
   )

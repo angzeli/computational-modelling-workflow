@@ -30,12 +30,13 @@ def menu_stream(
         homo = int(parameters["homo_index"])
         lumo = int(parameters["lumo_index"])
         spacing = float(parameters["grid_spacing_bohr"])
-        return f"5\n4\n{spacing:g}\n7\n{homo}\nhomo.cube\n7\n{lumo}\nlumo.cube\n0\nq\n"
+        # Main function 200, subfunction 3: batch orbital cube export.
+        # Scheme 1 writes orbNNNNNN.cub files, normalized by the workflow.
+        return f"200\n3\n{homo},{lumo}\n4\n{spacing:g}\n1\n0\nq\n"
     if operation is Operation.ESP:
         spacing = float(parameters["grid_spacing_bohr"])
-        return (
-            f"5\n4\n{spacing:g}\n1\ndensity.cube\n12\nesp.cube\n0\nq\n"
-        )
+        # Main function 5 exports density.cub and totesp.cub by default.
+        return f"5\n1\n4\n{spacing:g}\n2\n0\n5\n12\n4\n{spacing:g}\n2\n0\nq\n"
     if operation is Operation.IGMH:
         fragment_a = ",".join(str(value) for value in parameters["fragment_a"])
         fragment_b = ",".join(str(value) for value in parameters["fragment_b"])
