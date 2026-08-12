@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from cmw.core.process_health import (
+    HealthAssessment,
+    HealthReport,
+    HealthState,
+    ProcessTreeSnapshot,
+)
+from cmw.molecular.multiwfn.automation import Operation, menu_stream
+from cmw.molecular.multiwfn.runtime import (
+    DEFAULT_MULTIWFN_NTHREADS,
+    parallelism_warning,
+    parse_threads,
+    prepare_runtime,
+    resolve_executable,
+    resolve_threads,
+)
+
+
+ROOT = Path(__file__).resolve().parents[3]
+SHELL = ROOT / "scripts" / "multiwfn" / "multiwfn_runtime.sh"
+
+
+def _fake(root: Path, name: str = "Multiwfn") -> Path:
+    path = root / name
+    path.write_text(
+        """#!/usr/bin/env python3
+import os, sys
+if '--version' in sys.argv:
+    print('Multiwfn -- synthetic\\nVersion 3.8')
+    raise SystemExit(0)
+data = sys.stdin.read()
+print('STDIN=' + data.replace('\\n', ','))
+print('THREADS=' + os.environ.get('OMP_NUM_THREADS', ''))
+print('PATH=' + os.environ.get('Multiwfnpath', ''))
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+class RuntimeTests(unittest.TestCase):
+    def test_thread_default_override_and_conflict(self) -> None:
+        self.assertEqual(DEFAULT_MULTIWFN_NTHREADS, 8)
+        self.assertEqual(resolve_threads(environment={}), 8)
+        self.assertEqual(resolve_threads(environment={"MULTIWFN_NTHREADS": "4"}), 4)
+        self.assertEqual(resolve_threads(cli_value=4, environment={}, config_value=4), 4)
+        with self.assertRaisesRegex(ValueError, "contradictory"):
+            resolve_threads(cli_value=4, environment={"MULTIWFN_NTHREADS": "8"})
+        for value in ("", "0", "-1", "four"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_threads(value)
+
+    def test_executable_resolution_missing_and_path_with_spaces(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cmw exe space ") as temporary:
+            executable = _fake(Path(temporary), "Multiwfn test")
+            self.assertEqual(resolve_executable(explicit=str(executable)), executable.resolve())
+            with self.assertRaises(FileNotFoundError):
+                resolve_executable(explicit=str(Path(temporary) / "missing"))
+
+    def test_settings_are_immutable_and_attempts_are_isolated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = _fake(root)
+            source = root / "settings.ini"
+            original = b"alpha=1\nnthreads= 2 // keep\nomega=3\n"
+            source.write_bytes(original)
+            first = root / "attempt one"
+            second = root / "attempt two"
+            first.mkdir()
+            second.mkdir()
+            one = prepare_runtime(
+                attempt_directory=first,
+                executable=str(executable),
+                settings_source=source,
+                cli_threads=1,
+                environment={},
+            )
+            four = prepare_runtime(
+                attempt_directory=second,
+                executable=str(executable),
+                settings_source=source,
+                cli_threads=4,
+                environment={},
+            )
+            self.assertEqual(source.read_bytes(), original)
+            self.assertIn("nthreads= 1", Path(one.settings_path).read_text())
+            self.assertIn("nthreads= 4", Path(four.settings_path).read_text())
+            self.assertNotEqual(Path(one.settings_path), Path(four.settings_path))
+            self.assertEqual(Path(one.settings_path).stat().st_mode & 0o222, 0)
+            self.assertEqual(one.version, "3.8")
+            self.assertEqual(one.executable_sha256, four.executable_sha256)
+
+    def test_unsupported_version_fails_before_launch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "supported series is 3.8"):
+            menu_stream(Operation.ESP, "3.9", {"grid_spacing_bohr": 0.2})
+
+    def test_operation_stream_forwards_semantic_values(self) -> None:
+        text = menu_stream(
+            Operation.IGMH,
+            "3.8",
+            {"fragment_a": [1, 2], "fragment_b": [3, 4], "grid_spacing_bohr": 0.2},
+        )
+        self.assertIn("1,2", text)
+        self.assertIn("3,4", text)
+        self.assertIn("0.2", text)
+
+    def test_parallelism_warning_is_diagnostic_only(self) -> None:
+        snapshot = ProcessTreeSnapshot(7, 10.0, True, True, ())
+        assessment = HealthAssessment(
+            HealthState.ACTIVE, "cpu", 0, 10.0, 10.0, False, 0
+        )
+        observed = parallelism_warning(8, HealthReport(snapshot, (), assessment))
+        self.assertIn("diagnostic only", observed.warning or "")
+        unavailable = HealthAssessment(
+            HealthState.UNKNOWN, "unavailable", 0, None, None, False, 0
+        )
+        self.assertIsNone(
+            parallelism_warning(8, HealthReport(snapshot, (), unavailable)).warning
+        )
+
+    def test_shell_short_alias_stdin_threads_and_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cmw shell space ") as temporary:
+            root = Path(temporary)
+            executable = _fake(root, "fake Multiwfn")
+            settings = root / "settings.ini"
+            settings.write_text("nthreads= 2\n", encoding="utf-8")
+            attempt = root / "attempt directory"
+            attempt.mkdir()
+            metadata = attempt / "runtime.json"
+            completed = subprocess.run(
+                (
+                    "bash",
+                    "-c",
+                    'set -euo pipefail; source "$1"; MULTIWFN_EXE="$2"; '
+                    'MULTIWFN_NTHREADS=4; multiwfn_runtime_prepare "$3" "$4" "$5"; '
+                    'cd "$3"; printf "hello\\n" | multiwfn_runtime_launch',
+                    "_",
+                    str(SHELL),
+                    str(executable),
+                    str(attempt),
+                    str(metadata),
+                    str(settings),
+                ),
+                cwd=ROOT,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertIn("STDIN=hello,", completed.stdout)
+            self.assertIn("THREADS=4", completed.stdout)
+            alias = next(
+                line.removeprefix("PATH=")
+                for line in completed.stdout.splitlines()
+                if line.startswith("PATH=")
+            )
+            self.assertFalse(Path(alias).exists())
+            record = json.loads(metadata.read_text())
+            self.assertEqual(record["runtime"]["requested_nthreads"], 4)
+
+
+if __name__ == "__main__":
+    unittest.main()
