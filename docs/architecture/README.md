@@ -1,0 +1,105 @@
+# Target computational architecture
+
+This document describes the architecture the repository is intended to
+implement progressively. It is not a claim that the corresponding Python
+modules or scientific workflows already exist.
+
+> The website describes the computational architecture; the Python package will
+> progressively implement the reusable parts of that architecture.
+
+## Domain branches
+
+Finite and molecular systems follow this target path:
+
+```text
+finite / molecular systems
+        │
+        ├── structural definition
+        └── shared structure modelling
+                     │
+                     ▼
+                    ASE
+                     │
+              structure validation
+                     │
+                     ▼
+                   ORCA
+                     │
+           Multiwfn / ORCA parsing
+                     │
+                     ▼
+         validated molecular result ──┐
+                                      │
+                                      ▼
+                            common Python analysis
+                                      │
+                                      ▼
+                             scientific outputs
+```
+
+Periodic and materials systems follow a distinct target path:
+
+```text
+periodic / materials systems
+        │
+        ├── crystallographic evidence
+        └── shared structure modelling
+                     │
+                ASE + pymatgen
+                     │
+              structure validation
+                     │
+                     ▼
+                   VASP
+                     │
+          periodic analysis stack
+                     │
+                     ▼
+          validated periodic result ──┘
+                                      │
+                                      ▼
+                            common Python analysis
+                                      │
+                                      ▼
+                             scientific outputs
+```
+
+The branches should share configuration, environment handling, execution,
+provenance, status, monitoring, validation, resource management, testing,
+automated QA, data management, and reproducibility concepts where appropriate.
+A process that exits successfully is not necessarily scientifically valid, and
+results are comparable only when their methods and provenance support the
+comparison.
+
+## Future package decomposition
+
+The intended package may eventually resemble:
+
+```text
+cmw
+├── core
+├── structure
+├── molecular
+│   ├── orca
+│   └── multiwfn
+├── periodic
+│   ├── vasp
+│   └── pymatgen
+└── analysis
+```
+
+These are conceptual boundaries, not directories to create pre-emptively. A
+module should be introduced only when a demonstrated workflow supplies a real,
+reusable implementation and a meaningful behavioral contract.
+
+Molecular and periodic workflows should converge on shared validation,
+provenance, status, and analysis concepts where scientifically justified. They
+should not be forced into artificial symmetry: ORCA and VASP have different
+inputs, execution models, outputs, and domain-specific validation requirements.
+
+Reusable code belongs under `src/cmw/`; the website belongs under
+`docs/website/`; and architecture documentation belongs under
+`docs/architecture/`. Molecule- or material-specific assumptions, private
+research data, machine-specific paths, licensed software, and unpublished
+results remain outside this public package unless they are demonstrably generic
+and legally distributable.

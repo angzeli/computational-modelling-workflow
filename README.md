@@ -1,99 +1,103 @@
 # Computational Modelling Workflow
 
-A stage-aligned visual reference for computational chemistry and materials
-modelling, covering finite molecular systems and periodic extended systems from
-structure preparation to validated scientific output. It is a living personal
-computational architecture, not a quantum-chemistry package or workflow engine.
+A public, reusable, stage-aligned computational modelling architecture spanning
+finite molecular systems and periodic materials systems. The project is intended
+to turn proven research workflows into inspectable Python infrastructure without
+erasing the scientific differences between molecular and periodic modelling.
 
-## Overview
+## Current status
 
-The workflow distinguishes two modelling domains without equating them with
-organic and inorganic chemistry:
+This repository currently contains:
 
-- **Finite / molecular systems:** molecules, dimers, clusters, and finite
-  fragments.
-- **Periodic / extended systems:** crystals, COFs, MOFs, surfaces, defects, and
-  interfaces.
+- the existing static website that visualises the computational architecture;
+- a concise description of the target architecture and its boundaries;
+- a minimal installable `cmw` Python package shell; and
+- development guidance for later extraction of reusable implementations.
 
-Both branches meet in a shared structure-modelling layer centred on ASE before
-proceeding to validation and their respective electronic-structure backends.
+It does **not yet contain** reusable ORCA runtime code, Multiwfn workflows, VASP
+workflows, pymatgen integration, or a complete shared validation and provenance
+layer. The package is deliberately small until real reusable code is ready to be
+extracted and tested.
 
-## Workflow architecture
+## Architectural scope
 
-**Finite / molecular**
+The molecular branch proceeds from chemical identity and finite structures
+through shared structure modelling, validation, ORCA, and ORCA/Multiwfn
+post-processing. The periodic branch proceeds from crystallographic evidence
+through shared structure modelling, validation, VASP, and periodic analysis.
+Both branches should converge on common provenance, validation concepts,
+analysis, plotting, and reporting where that convergence is scientifically
+meaningful.
 
-`ChemDraw → Avogadro 2 → ASE → structure validation → ORCA → ORCA parsers / Multiwfn → validated finite result`
+Long-term development is intended to cover shared structure modelling with ASE,
+ORCA, Multiwfn, VASP, pymatgen, scientific validation, provenance, execution and
+resource management, and common analysis and reporting. See
+[`docs/architecture/README.md`](docs/architecture/README.md) for the target
+architecture. The workflow website preserves the more detailed visual reference
+and current method strategy.
 
-**Periodic / extended**
-
-`CIF / structure source → VESTA → ASE + pymatgen → structure validation → VASP → pymatgen / VASPKIT / sumo / Bader / VESTA → validated periodic result`
-
-**Shared downstream layer**
-
-`Validated results → Python (NumPy, pandas, matplotlib) → scientific output`
-
-The HTML site is the detailed visual reference; this README provides only the
-architectural outline.
-
-## Structure-modelling philosophy
-
-ASE acts as the shared structural abstraction layer, supporting reproducible
-generation and manipulation of atomic structures before they are passed to
-different calculation backends. Finite models typically proceed to ORCA, while
-periodic models typically proceed to VASP. On the periodic side, pymatgen
-complements ASE with crystallography, symmetry, structure standardisation, and
-VASP-oriented workflows.
-
-## Method strategy
-
-The architecture is method-aware rather than fixed to one level of theory. The
-current finite-system strategy includes r²SCAN-3c for efficient screening and
-geometry exploration, ωB97X-D4 / ma-def2-TZVP with RIJCOSX acceleration for
-production DFT, and selected DLPNO-CCSD(T) benchmark single points where
-justified. These choices describe the present personal workflow and may evolve.
-
-## Repository structure
+## Repository layout
 
 ```text
 .
+├── .github/
+│   └── workflows/
+│       └── pages.yml
+├── docs/
+│   ├── architecture/
+│   │   └── README.md
+│   └── website/
+│       ├── index.html
+│       └── assets/
+│           ├── css/workflow.css
+│           └── js/workflow.js
+├── src/
+│   └── cmw/
+│       └── __init__.py
+├── tests/
+│   └── test_package.py
 ├── .gitignore
-├── index.html
-├── assets/
-│   ├── css/
-│   │   └── workflow.css
-│   └── js/
-│       └── workflow.js
+├── AGENTS.md
+├── LICENSE
 ├── README.md
-└── LICENSE
+└── pyproject.toml
 ```
 
-## View locally
+## Development philosophy
 
-The site is static and has no build step or external dependencies. Serve the
-repository directory with:
+- Extract abstractions from demonstrated workflows instead of designing an
+  empty framework in advance.
+- Keep execution success separate from scientific validity.
+- Treat provenance, methodological comparability, and reproducibility as
+  first-class requirements.
+- Align molecular and periodic stages where concepts are genuinely shared;
+  preserve backend-specific behavior where they differ.
+- Prefer deterministic, offline tests and scientifically meaningful validation
+  over expensive routine calculations.
+
+## Python package shell
+
+The distribution is `computational-modelling-workflow`; its import namespace is
+`cmw`. Version `0.1.0` marks an initial pre-alpha development API. It has no
+runtime dependencies and no command-line interface.
 
 ```sh
-python3 -m http.server 8000
+python3 -m pip install -e .
+python3 -c "import cmw"
+python3 -m unittest discover -s tests
 ```
 
-Then visit `http://localhost:8000`. Opening `index.html` directly in a browser
-also works.
+## Website
 
-## GitHub Pages
+The static HTML/CSS/JavaScript source lives in `docs/website/` and has no build
+step or external dependency. Preview it locally with:
 
-GitHub Pages can serve the root `index.html` directly. Configure Pages to deploy
-from the `main` branch and the repository root (`/`); no site generator or build
-workflow is required.
+```sh
+python3 -m http.server --directory docs/website 8000
+```
 
-## Design principles
-
-- Vertical, stage-aligned workflow
-- Clear finite-versus-periodic model distinction
-- Shared structure abstraction before backend-specific calculation
-- Explicit validation before scientific interpretation
-- Calculation backends separated from post-processing and analysis
-- Reproducible downstream analysis in Python
-- Restrained day/night visual design
+Then visit `http://localhost:8000`. GitHub Pages deployment is defined by
+`.github/workflows/pages.yml`, which publishes `docs/website/` directly.
 
 ## License
 
