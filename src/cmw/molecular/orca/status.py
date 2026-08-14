@@ -27,6 +27,21 @@ FREQUENCY_RE = re.compile(rf"^\s*\d+:\s+({NUMBER})\s+cm\*\*-1", re.M)
 CHARGE_RE = re.compile(r"^\s*(?:Total Charge|Charge).*?\.\.+\s*(-?\d+)\s*$", re.I | re.M)
 MULTIPLICITY_RE = re.compile(r"^\s*Multiplicity.*?\.\.+\s*(\d+)\s*$", re.I | re.M)
 MEMORY_RE = re.compile(rf"Memory available(?:\s+for [^:\n]+)?:\s*({NUMBER})\s*MB", re.I)
+INPUT_KEYWORD_RE = re.compile(r"^\s*!\s+(.+?)\s*$", re.M)
+METHOD_REPORT_RE = re.compile(
+    r"^\s*(?:METHOD|METHOD NAME|AB INITIO METHOD)\s*(?:\.{2,}|:|=)\s*(.+?)\s*$",
+    re.I | re.M,
+)
+BASIS_REPORT_RE = re.compile(
+    r"^\s*(?:BASIS|BASIS SET|ORBITAL BASIS)\s*(?:\.{2,}|:|=)\s*(.+?)\s*$",
+    re.I | re.M,
+)
+PNO_REPORT_RE = re.compile(r"\b(?:LoosePNO|NormalPNO|TightPNO)\b", re.I)
+FRAGMENT_COUNT_RE = re.compile(
+    r"(?:NUMBER\s+OF\s+FRAGMENTS|NFRAGMENTS?)\s*(?:\.{2,}|:|=)\s*(\d+)",
+    re.I,
+)
+LED_RE = re.compile(r"LOCAL\s+ENERGY\s+DECOMPOSITION|\bLED\s+(?:ANALYSIS|DECOMPOSITION)\b", re.I)
 FATAL_PATTERNS = tuple(
     re.compile(pattern, re.I)
     for pattern in (
@@ -81,6 +96,12 @@ class OrcaEvidence:
     memory_available_mb: float | None
     warnings: tuple[str, ...]
     fatal_evidence: tuple[str, ...]
+    input_keyword_tokens: tuple[str, ...] = ()
+    reported_methods: tuple[str, ...] = ()
+    reported_basis_sets: tuple[str, ...] = ()
+    reported_pno_settings: tuple[str, ...] = ()
+    led_present: bool = False
+    fragment_count: int | None = None
 
     @property
     def final_energy_hartree(self) -> float | None:
@@ -165,6 +186,23 @@ def parse_orca_output(text: str, *, stderr_text: str = "") -> OrcaEvidence:
     charge = CHARGE_RE.findall(text)
     multiplicity = MULTIPLICITY_RE.findall(text)
     memory = MEMORY_RE.findall(combined)
+    keyword_lines = INPUT_KEYWORD_RE.findall(text)
+    keyword_tokens = tuple(
+        dict.fromkeys(token for line in keyword_lines for token in line.split())
+    )
+    methods = tuple(dict.fromkeys(value.strip() for value in METHOD_REPORT_RE.findall(text)))
+    bases = tuple(dict.fromkeys(value.strip() for value in BASIS_REPORT_RE.findall(text)))
+    pno = tuple(
+        dict.fromkeys(
+            {
+                "loosepno": "LoosePNO",
+                "normalpno": "NormalPNO",
+                "tightpno": "TightPNO",
+            }[value.casefold()]
+            for value in PNO_REPORT_RE.findall(text)
+        )
+    )
+    fragments = FRAGMENT_COUNT_RE.findall(text)
     return OrcaEvidence(
         normal_termination="ORCA TERMINATED NORMALLY" in text,
         final_energies_hartree=energies,
@@ -184,6 +222,12 @@ def parse_orca_output(text: str, *, stderr_text: str = "") -> OrcaEvidence:
         memory_available_mb=_number(memory[-1]) if memory else None,
         warnings=warning_lines,
         fatal_evidence=fatal,
+        input_keyword_tokens=keyword_tokens,
+        reported_methods=methods,
+        reported_basis_sets=bases,
+        reported_pno_settings=pno,
+        led_present=bool(LED_RE.search(text)),
+        fragment_count=int(fragments[-1]) if fragments else None,
     )
 
 

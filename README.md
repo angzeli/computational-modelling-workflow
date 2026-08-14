@@ -16,6 +16,10 @@ This repository currently contains:
 - factual ORCA output parsing with separate OPT/FREQ/SP validation;
 - versioned targets, attempts, artifacts, lineage, local locks, and fail-closed
   reuse;
+- a system-agnostic calculation/aggregation/derived-result workflow graph with
+  typed scientific artifact contracts;
+- optional method-aware ORCA protocol validation for method, basis, PNO, LED,
+  fragment, SCF, optimization, and frequency evidence;
 - shell-owned ORCA execution; and
 - a configurable, resumable `opt`, `opt+sp`, `opt+freq`, or `opt+freq+sp`
   molecular workflow with synthetic integration tests;
@@ -45,6 +49,10 @@ and common reporting where scientifically justified. See
 [`docs/architecture/README.md`](docs/architecture/README.md) for the target
 architecture. The workflow website preserves the more detailed visual reference
 and current method strategy.
+
+The composite graph, typed artifact, compatibility, and protocol-validation
+contracts are documented in
+[`docs/architecture/composite-workflow-engine.md`](docs/architecture/composite-workflow-engine.md).
 
 ## Repository layout
 
