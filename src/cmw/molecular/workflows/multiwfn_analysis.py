@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
+from cmw.core.artifacts import artifact_from_dict, artifact_from_result
 from cmw.core.job import ExecutionAttempt, JobTarget
 from cmw.core.provenance import (
     ArtifactRecord,
@@ -128,6 +129,21 @@ def check_reuse(
         return {"reuse": False, "code": "SOURCE_MISMATCH", "reason": "source wavefunction differs"}
     if not record.get("reusable"):
         return {"reuse": False, "code": "NOT_REUSABLE", "reason": "prior result is not reusable"}
+    typed_artifact = record.get("scientific_artifact")
+    if typed_artifact is not None:
+        try:
+            parsed_artifact = artifact_from_dict(typed_artifact)
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"reuse": False, "code": "TYPED_ARTIFACT_INVALID", "reason": str(exc)}
+        if (
+            parsed_artifact.producing_calculation != target.target_id
+            or not parsed_artifact.validation.passed
+        ):
+            return {
+                "reuse": False,
+                "code": "TYPED_ARTIFACT_INVALID",
+                "reason": "typed artifact contradicts the reusable analysis result",
+            }
     artifacts = record.get("artifacts")
     if not isinstance(artifacts, dict):
         return {"reuse": False, "code": "ARTIFACT_MANIFEST_INVALID", "reason": "artifact manifest missing"}
@@ -360,6 +376,7 @@ def finalize_analysis(
         "provenance": {"git": git_state(repository)},
         "reusable": True,
     }
+    attempt_record["scientific_artifact"] = artifact_from_result(attempt_record).to_dict()
     atomic_write_json(attempt_directory / "attempt.json", attempt_record)
     result_path = target_path.parent / "result.json"
     atomic_write_json(result_path, attempt_record)

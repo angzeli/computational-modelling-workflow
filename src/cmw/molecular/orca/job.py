@@ -6,6 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
 
+from cmw.core.artifacts import artifact_from_dict, artifact_from_result
 from cmw.core.job import ExecutionAttempt, GeometryLineage, JobTarget
 from cmw.core.provenance import (
     ArtifactRecord,
@@ -27,6 +28,7 @@ from .status import (
     validate_stage,
 )
 from .input import parse_rendered_orca_input
+from .protocol import ProtocolIntent, validate_protocol
 
 
 ORCA_JOB_SCHEMA_VERSION = 1
@@ -100,6 +102,7 @@ def finalize_attempt(
     parsed_target, parsed_resources = parse_rendered_orca_input(input_path, stage_type)
     expected_calculation = dict(target.calculation)
     expected_calculation.pop("validation_policy", None)
+    expected_calculation.pop("protocol", None)
     if (
         parsed_target.stage_type != target.stage_type
         or parsed_target.geometry_sha256 != target.geometry_sha256
@@ -118,6 +121,20 @@ def finalize_attempt(
         execution=execution,
         frequency_policy=frequency_policy,
     )
+    protocol_intent = ProtocolIntent.from_mapping(
+        target.calculation.get("protocol")
+        if isinstance(target.calculation.get("protocol"), Mapping)
+        else None
+    )
+    protocol_validation = validate_protocol(evidence, protocol_intent, stage_type)
+    if target.calculation.get("protocol") and not protocol_validation.valid:
+        scientific = type(scientific)(
+            ScientificStatus.INVALID,
+            stage_type,
+            protocol_validation.reason,
+            scientific.imaginary_frequencies_cm1,
+            scientific.significant_imaginary_frequencies_cm1,
+        )
     attempt = ExecutionAttempt.create(
         target_id=target.target_id,
         resources=resources,
@@ -171,6 +188,7 @@ def finalize_attempt(
         "attempt": attempt.to_dict(),
         "execution": {**asdict(execution), "status": execution.status.value},
         "scientific": {**asdict(scientific), "status": scientific.status.value, "stage_type": stage_type.value},
+        "validation": protocol_validation.to_dict(),
         "evidence": evidence.to_dict(),
         "artifacts": records_to_dict(selected_artifacts),
         "required_artifact_roles": required_roles,
@@ -179,6 +197,7 @@ def finalize_attempt(
         and scientific.status is ScientificStatus.VALID
         and not missing_roles,
     }
+    record["scientific_artifact"] = artifact_from_result(record).to_dict()
     atomic_write_json(metadata_path, record)
     return record
 
@@ -204,6 +223,21 @@ def check_reuse(target_path: Path, metadata_path: Path) -> dict[str, Any]:
         return {"reuse": False, "code": "EXECUTION_INVALID", "reason": "prior execution was not successful"}
     if record.get("scientific", {}).get("status") != ScientificStatus.VALID.value:
         return {"reuse": False, "code": "SCIENTIFICALLY_INVALID", "reason": "prior scientific status is not valid"}
+    typed_artifact = record.get("scientific_artifact")
+    if typed_artifact is not None:
+        try:
+            parsed_artifact = artifact_from_dict(typed_artifact)
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"reuse": False, "code": "TYPED_ARTIFACT_INVALID", "reason": str(exc)}
+        if (
+            parsed_artifact.producing_calculation != target.target_id
+            or not parsed_artifact.validation.passed
+        ):
+            return {
+                "reuse": False,
+                "code": "TYPED_ARTIFACT_INVALID",
+                "reason": "typed artifact contradicts the reusable calculation result",
+            }
 
     artifacts = record.get("artifacts")
     if not isinstance(artifacts, dict):

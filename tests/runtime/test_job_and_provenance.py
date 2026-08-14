@@ -75,9 +75,17 @@ class IdentityTests(unittest.TestCase):
 
 
 class ReuseTests(unittest.TestCase):
-    def _attempt(self, directory: Path, stage: StageType = StageType.OPT):
+    def _attempt(
+        self,
+        directory: Path,
+        stage: StageType = StageType.OPT,
+        *,
+        keywords: str = "HF STO-3G",
+        protocol: dict[str, object] | None = None,
+        output_text: str | None = None,
+    ):
         geometry = read_xyz(FIXTURE)
-        spec = OrcaStageSpec(stage, "HF STO-3G")
+        spec = OrcaStageSpec(stage, keywords, protocol=protocol or {})
         target = make_target(geometry, charge=0, multiplicity=1, spec=spec)
         input_path = directory / "stage.inp"
         input_geometry = directory / "input.xyz"
@@ -98,7 +106,7 @@ class ReuseTests(unittest.TestCase):
         )
         output = directory / "stage.out"
         error = directory / "stage.err"
-        output.write_text(_valid_output(stage), encoding="utf-8")
+        output.write_text(output_text or _valid_output(stage), encoding="utf-8")
         error.write_text("", encoding="utf-8")
         artifacts = {}
         if stage is StageType.OPT:
@@ -125,6 +133,43 @@ class ReuseTests(unittest.TestCase):
             result = check_reuse(target, metadata)
         self.assertTrue(record["reusable"])
         self.assertTrue(result["reuse"])
+        self.assertEqual(
+            record["scientific_artifact"]["artifact_type"], "OptimizationArtifact"
+        )
+        self.assertEqual(
+            record["scientific_artifact"]["validation"]["status"], "PASSED"
+        )
+
+    def test_declared_protocol_mismatch_is_not_reusable(self) -> None:
+        wrong = (Path(__file__).parents[1] / "fixtures" / "orca" / "protocol_wrong_method.out").read_text(
+            encoding="utf-8"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            target, metadata, _, record = self._attempt(
+                Path(temporary),
+                StageType.SP,
+                keywords="DLPNO-CCSD(T) def2-TZVPP TightPNO",
+                protocol={
+                    "method": "DLPNO-CCSD(T)",
+                    "basis": "def2-TZVPP",
+                    "pno": "TightPNO",
+                    "led": True,
+                },
+                output_text=wrong,
+            )
+            result = check_reuse(target, metadata)
+        self.assertFalse(record["reusable"])
+        self.assertEqual(record["validation"]["status"], "FAILED_PROTOCOL_MISMATCH")
+        self.assertEqual(record["scientific"]["status"], "INVALID")
+        self.assertIn("FAILED_PROTOCOL_MISMATCH", record["scientific"]["reason"])
+        typed = record["scientific_artifact"]
+        self.assertEqual(typed["validation"]["status"], "FAILED")
+        self.assertFalse(typed["validation"]["checks"]["method_match"])
+        self.assertEqual(
+            typed["provenance"]["validation"]["status"],
+            "FAILED_PROTOCOL_MISMATCH",
+        )
+        self.assertEqual(result["code"], "SCIENTIFICALLY_INVALID")
 
     def test_target_mismatch_prevents_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

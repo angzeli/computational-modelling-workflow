@@ -138,6 +138,12 @@ class FmoWorkflowTests(MultiwfnCubeHarness):
         first = self.run_workflow(FMO)
         result = json.loads(first.stdout)
         self.assertEqual(set(result["required_artifact_roles"]), {"homo_cube", "lumo_cube"})
+        self.assertEqual(
+            result["scientific_artifact"]["artifact_type"], "AnalysisArtifact"
+        )
+        self.assertEqual(
+            result["scientific_artifact"]["validation"]["status"], "PASSED"
+        )
         self.assertEqual(result["target"]["calculation"]["homo_index"], 5)
         self.assertEqual(result["target"]["calculation"]["lumo_index"], 6)
         self.run_workflow(FMO)

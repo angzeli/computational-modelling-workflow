@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import re
 from typing import Mapping
@@ -27,6 +27,7 @@ class OrcaStageSpec:
     stage_type: StageType
     keywords: str
     blocks: tuple[str, ...] = ()
+    protocol: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.keywords.strip():
@@ -41,6 +42,7 @@ class OrcaStageSpec:
         block_lines = [line for block in self.blocks for line in block.splitlines()]
         if any(line.lstrip().lower().startswith(reserved) for line in block_lines):
             raise ValueError("resources and geometry directives cannot be duplicated in stage blocks")
+        object.__setattr__(self, "protocol", dict(self.protocol))
 
     def scientific_identity(self) -> dict[str, object]:
         normalized_blocks = [
@@ -49,12 +51,15 @@ class OrcaStageSpec:
             for line in block.strip().splitlines()
             if line.strip()
         ]
-        return {
+        identity: dict[str, object] = {
             "adapter": "orca",
             "stage_type": self.stage_type.value,
             "keywords": " ".join(self.keywords.split()),
             "blocks": normalized_blocks,
         }
+        if self.protocol:
+            identity["protocol"] = dict(self.protocol)
+        return identity
 
 
 @dataclass(frozen=True)

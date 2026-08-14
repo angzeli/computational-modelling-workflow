@@ -1,0 +1,190 @@
+"""Method-aware ORCA protocol intent and fail-closed validation."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from enum import Enum
+from typing import Any, Mapping
+
+from .status import OrcaEvidence, StageType
+
+
+class ProtocolValidationStatus(str, Enum):
+    PASSED = "PASSED"
+    FAILED_PROTOCOL_MISMATCH = "FAILED_PROTOCOL_MISMATCH"
+
+
+def _boolean(value: object, *, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{name} must be a boolean")
+
+
+@dataclass(frozen=True)
+class ProtocolIntent:
+    """Scientific method features that must be evidenced by ORCA output."""
+
+    method: str | None = None
+    basis: str | None = None
+    pno: str | None = None
+    led: bool = False
+    fragments_required: bool = False
+    expected_fragments: int | None = None
+    optimization_required: bool | None = None
+    frequency_required: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.expected_fragments is not None and self.expected_fragments < 1:
+            raise ValueError("expected_fragments must be positive")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any] | None) -> "ProtocolIntent":
+        raw = dict(value or {})
+        pno = raw.get("pno", raw.get("pno_setting"))
+        fragments_value = raw.get("fragments_required", raw.get("fragments", False))
+        if isinstance(fragments_value, int) and not isinstance(fragments_value, bool):
+            expected_fragments = fragments_value
+            fragments_required = True
+        else:
+            fragments_required = _boolean(fragments_value, name="fragments_required")
+            expected = raw.get("expected_fragments", raw.get("fragment_count"))
+            expected_fragments = int(expected) if expected is not None else None
+        return cls(
+            method=str(raw["method"]) if raw.get("method") is not None else None,
+            basis=str(raw["basis"]) if raw.get("basis") is not None else None,
+            pno=str(pno) if pno is not None else None,
+            led=_boolean(raw.get("led", False), name="led"),
+            fragments_required=fragments_required,
+            expected_fragments=expected_fragments,
+            optimization_required=(
+                _boolean(raw["optimization_required"], name="optimization_required")
+                if raw.get("optimization_required") is not None
+                else None
+            ),
+            frequency_required=(
+                _boolean(raw["frequency_required"], name="frequency_required")
+                if raw.get("frequency_required") is not None
+                else None
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ProtocolValidation:
+    status: ProtocolValidationStatus
+    checks: Mapping[str, bool]
+    expected: Mapping[str, object]
+    detected: Mapping[str, object]
+    failures: tuple[str, ...] = ()
+
+    @property
+    def valid(self) -> bool:
+        return self.status is ProtocolValidationStatus.PASSED
+
+    @property
+    def reason(self) -> str:
+        return (
+            "method-aware ORCA protocol validation passed"
+            if self.valid
+            else f"FAILED_PROTOCOL_MISMATCH: {', '.join(self.failures)}"
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status.value,
+            "checks": dict(self.checks),
+            "expected": dict(self.expected),
+            "detected": dict(self.detected),
+            "failures": list(self.failures),
+            "reason": self.reason,
+        }
+
+
+def _normal(value: str) -> str:
+    return "".join(value.casefold().split())
+
+
+def _reported(expected: str, values: tuple[str, ...], keywords: tuple[str, ...]) -> bool:
+    wanted = _normal(expected)
+    candidates = {_normal(value) for value in (*values, *keywords)}
+    return wanted in candidates
+
+
+def validate_protocol(
+    evidence: OrcaEvidence,
+    intent: ProtocolIntent,
+    stage_type: StageType,
+) -> ProtocolValidation:
+    """Compare declared scientific intent with factual ORCA output evidence."""
+
+    checks: dict[str, bool] = {"scf_converged": evidence.scf_converged and not evidence.scf_failure_evidence}
+    failures: list[str] = []
+
+    if intent.method is not None:
+        checks["method_match"] = _reported(
+            intent.method, evidence.reported_methods, evidence.input_keyword_tokens
+        )
+    if intent.basis is not None:
+        checks["basis_match"] = _reported(
+            intent.basis, evidence.reported_basis_sets, evidence.input_keyword_tokens
+        )
+    if intent.pno is not None:
+        checks["pno_match"] = _reported(
+            intent.pno, evidence.reported_pno_settings, evidence.input_keyword_tokens
+        )
+
+    require_optimization = (
+        stage_type is StageType.OPT
+        if intent.optimization_required is None
+        else intent.optimization_required
+    )
+    require_frequency = (
+        stage_type is StageType.FREQ
+        if intent.frequency_required is None
+        else intent.frequency_required
+    )
+    if require_optimization:
+        checks["optimization_converged"] = evidence.optimization_converged
+    if require_frequency:
+        checks["frequency_completed"] = evidence.frequency_analysis_completed
+    if intent.led:
+        checks["led_present"] = evidence.led_present
+    if intent.fragments_required or intent.expected_fragments is not None:
+        checks["fragments_present"] = evidence.fragment_count is not None
+        if intent.expected_fragments is not None:
+            checks["fragment_count_match"] = evidence.fragment_count == intent.expected_fragments
+
+    failures.extend(name for name, passed in checks.items() if not passed)
+    status = (
+        ProtocolValidationStatus.PASSED
+        if not failures
+        else ProtocolValidationStatus.FAILED_PROTOCOL_MISMATCH
+    )
+    return ProtocolValidation(
+        status,
+        checks,
+        intent.to_dict(),
+        {
+            "methods": list(evidence.reported_methods),
+            "basis_sets": list(evidence.reported_basis_sets),
+            "pno_settings": list(evidence.reported_pno_settings),
+            "input_keyword_tokens": list(evidence.input_keyword_tokens),
+            "led_present": evidence.led_present,
+            "fragment_count": evidence.fragment_count,
+            "scf_converged": evidence.scf_converged,
+            "optimization_converged": evidence.optimization_converged,
+            "frequency_analysis_completed": evidence.frequency_analysis_completed,
+        },
+        tuple(failures),
+    )
+
+
+__all__ = [
+    "ProtocolIntent",
+    "ProtocolValidation",
+    "ProtocolValidationStatus",
+    "validate_protocol",
+]

@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from cmw.core.job import GeometryLineage
 from cmw.core.provenance import atomic_write_json, read_json, stable_hash
+from cmw.core.workflow_graph import NodeKind, WorkflowGraph, WorkflowNode
 from cmw.molecular.orca.input import (
     OrcaResources,
     OrcaStageSpec,
@@ -18,6 +19,7 @@ from cmw.molecular.orca.input import (
     render_orca_input,
 )
 from cmw.molecular.orca.job import check_reuse, write_target
+from cmw.molecular.orca.protocol import ProtocolIntent
 from cmw.molecular.orca.status import FrequencyPolicy, StageType
 from cmw.structure.xyz import XYZGeometry, geometry_hash, read_xyz, write_xyz
 
@@ -35,6 +37,19 @@ MODE_ALIASES = {
     "opt-freq-sp": "opt+freq+sp",
 }
 ALL_STAGES = (StageType.OPT, StageType.FREQ, StageType.SP)
+PROTOCOL_KEYS = {
+    "method",
+    "basis",
+    "pno",
+    "pno_setting",
+    "led",
+    "fragments",
+    "fragments_required",
+    "fragment_count",
+    "expected_fragments",
+    "optimization_required",
+    "frequency_required",
+}
 
 
 @dataclass(frozen=True)
@@ -138,7 +153,19 @@ def load_workflow_config(
             isinstance(block, str) for block in blocks
         ):
             raise ValueError(f"invalid settings for stages.{stage.value.lower()}")
-        stage_specs[stage] = OrcaStageSpec(stage, keywords, tuple(blocks))
+        configured_protocol = raw.get("protocol", {})
+        if not isinstance(configured_protocol, dict):
+            raise ValueError(f"stages.{stage.value.lower()}.protocol must be an object")
+        protocol = dict(configured_protocol)
+        for key in PROTOCOL_KEYS:
+            if key in raw:
+                if key in protocol and protocol[key] != raw[key]:
+                    raise ValueError(
+                        f"conflicting protocol setting for stages.{stage.value.lower()}.{key}"
+                    )
+                protocol[key] = raw[key]
+        ProtocolIntent.from_mapping(protocol)
+        stage_specs[stage] = OrcaStageSpec(stage, keywords, tuple(blocks), protocol)
 
     charge = int(data.get("charge", 0))
     multiplicity = int(data.get("multiplicity", 1))
@@ -199,6 +226,36 @@ def _resolved_output(config: WorkflowConfig, output_override: Path | None) -> Pa
     return selected.expanduser().resolve()
 
 
+def legacy_workflow_graph(mode: str) -> WorkflowGraph:
+    """Represent the original OPT/FREQ/SP contract using the generic DAG model."""
+
+    selected = CANONICAL_MODES[canonical_mode(mode)]
+    nodes: list[WorkflowNode] = []
+    artifact_types = {
+        StageType.OPT: "OptimizationArtifact",
+        StageType.FREQ: "FrequencyArtifact",
+        StageType.SP: "SinglePointArtifact",
+    }
+    for stage in selected:
+        dependencies: list[str] = []
+        if stage is StageType.FREQ:
+            dependencies.append(StageType.OPT.value)
+        elif stage is StageType.SP:
+            dependencies.append(StageType.OPT.value)
+            if StageType.FREQ in selected:
+                dependencies.append(StageType.FREQ.value)
+        nodes.append(
+            WorkflowNode(
+                stage.value,
+                NodeKind.CALCULATION,
+                tuple(dependencies),
+                operation=stage.value,
+                produces=(artifact_types[stage],),
+            )
+        )
+    return WorkflowGraph("opt_freq_sp", tuple(nodes))
+
+
 def build_state(
     *,
     mode: str,
@@ -224,15 +281,17 @@ def build_state(
         imaginary_tolerance_cm1=imaginary_tolerance_cm1,
     )
     output = _resolved_output(config, output_override)
-    selected = CANONICAL_MODES[selected_mode]
+    graph = legacy_workflow_graph(selected_mode)
+    selected = tuple(StageType(name) for name in graph.topological_order())
+    graph_nodes = graph.node_map
     workflow_target_id = _workflow_target_id(selected_mode, structure, config)
     stage_records: dict[str, dict[str, Any]] = {}
     for stage in ALL_STAGES:
         chosen = stage in selected
-        depends_on: list[str] = []
-        if stage is StageType.FREQ:
+        depends_on = list(graph_nodes[stage.value].dependencies) if chosen else []
+        if not chosen and stage is StageType.FREQ:
             depends_on = [StageType.OPT.value]
-        elif stage is StageType.SP:
+        elif not chosen and stage is StageType.SP:
             depends_on = [StageType.OPT.value]
             if StageType.FREQ in selected:
                 depends_on.append(StageType.FREQ.value)
@@ -324,6 +383,7 @@ def _config_from_state(state: Mapping[str, Any]) -> WorkflowConfig:
             StageType(name),
             str(record["settings"]["keywords"]),
             tuple(record["settings"].get("blocks", ())),
+            dict(record["settings"].get("protocol", {})),
         )
         for name, record in state["stages"].items()
     }
@@ -381,6 +441,7 @@ def _record_valid_stage(
             "lineage": metadata["lineage"],
             "execution": metadata["execution"],
             "scientific": metadata["scientific"],
+            "scientific_artifact": metadata.get("scientific_artifact"),
             "reason": "",
         }
     )
