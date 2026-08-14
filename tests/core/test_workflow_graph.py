@@ -7,7 +7,12 @@ from cmw.core.artifacts import (
     SinglePointArtifact,
     ValidationStatus,
 )
-from cmw.core.workflow_graph import WorkflowGraph
+from cmw.core.workflow_graph import (
+    AggregationNode,
+    CalculationNode,
+    DerivedResultNode,
+    WorkflowGraph,
+)
 from cmw.molecular.workflows.opt_freq_sp import legacy_workflow_graph
 
 
@@ -69,6 +74,8 @@ class WorkflowGraphTests(unittest.TestCase):
         self.assertEqual(
             graph.topological_order(), ("parent", "child_left", "child_right", "combine")
         )
+        self.assertIsInstance(graph.node_map["parent"], CalculationNode)
+        self.assertIsInstance(graph.node_map["combine"], AggregationNode)
         self.assertEqual(set(graph.ready_nodes({"parent"})), {"child_left", "child_right"})
         parents = graph.validate_artifacts(
             "combine", {"child_left": _energy("left"), "child_right": _energy("right")}
@@ -87,6 +94,23 @@ class WorkflowGraphTests(unittest.TestCase):
             }
         )
         self.assertEqual(graph.node_map["aggregation"].dependencies, ("a", "b"))
+
+    def test_explicit_node_classes_preserve_kind_and_mapping_contracts(self) -> None:
+        calculation = CalculationNode("calculate")
+        aggregation = AggregationNode("combine", dependencies=("calculate",))
+        derived = DerivedResultNode("derive", dependencies=("combine",))
+        graph = WorkflowGraph("explicit", (calculation, aggregation, derived))
+
+        self.assertEqual(graph.topological_order(), ("calculate", "combine", "derive"))
+        self.assertEqual(aggregation.to_dict()["kind"], "aggregation")
+        self.assertIsInstance(
+            DerivedResultNode.from_mapping(
+                {"id": "mapped", "depends_on": ["combine"]}
+            ),
+            DerivedResultNode,
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be created"):
+            AggregationNode.from_mapping({"id": "bad", "kind": "calculation"})
 
     def test_missing_and_circular_dependencies_fail_validation(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing dependencies"):
