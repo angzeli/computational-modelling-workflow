@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, ClassVar, Iterable, Mapping, Sequence
 
 from .artifacts import ARTIFACT_TYPES, Artifact, artifact_matches_type
 
@@ -110,7 +110,13 @@ class WorkflowNode:
         node_id = value.get("id", value.get("node_id"))
         if not isinstance(node_id, str):
             raise ValueError("workflow node requires a string id")
-        kind = NodeKind(str(value.get("kind", value.get("node_type", "calculation"))).lower())
+        declared_kind = value.get("kind", value.get("node_type"))
+        default_kind = getattr(cls, "KIND", NodeKind.CALCULATION)
+        kind = NodeKind(str(declared_kind or default_kind.value).lower())
+        if cls is not WorkflowNode and kind is not default_kind:
+            raise ValueError(
+                f"{cls.__name__} cannot be created with node kind {kind.value!r}"
+            )
         dependencies = _string_tuple(
             value.get("depends_on", value.get("dependencies", value.get("parents"))),
             name=f"dependencies for {node_id}",
@@ -148,15 +154,19 @@ class WorkflowNode:
         }
         configuration = {key: item for key, item in value.items() if key not in reserved}
         operation = value.get("operation", value.get("type", value.get("method")))
-        return cls(
-            node_id,
-            kind,
-            dependencies,
-            str(operation) if operation is not None else None,
-            str(value["role"]) if value.get("role") is not None else None,
-            requires,
-            produces,
-            configuration,
+        node_class = {
+            NodeKind.CALCULATION: CalculationNode,
+            NodeKind.AGGREGATION: AggregationNode,
+            NodeKind.DERIVED: DerivedResultNode,
+        }[kind]
+        return node_class(
+            node_id=node_id,
+            dependencies=dependencies,
+            operation=str(operation) if operation is not None else None,
+            role=str(value["role"]) if value.get("role") is not None else None,
+            requires=requires,
+            produces=produces,
+            configuration=configuration,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -170,6 +180,30 @@ class WorkflowNode:
             "produces": list(self.produces),
             "configuration": dict(self.configuration),
         }
+
+
+@dataclass(frozen=True)
+class CalculationNode(WorkflowNode):
+    """A node that delegates one scientific calculation to an adapter."""
+
+    KIND: ClassVar[NodeKind] = NodeKind.CALCULATION
+    kind: NodeKind = field(default=NodeKind.CALCULATION, init=False)
+
+
+@dataclass(frozen=True)
+class AggregationNode(WorkflowNode):
+    """A fan-in node that combines dependency artifacts through an operation."""
+
+    KIND: ClassVar[NodeKind] = NodeKind.AGGREGATION
+    kind: NodeKind = field(default=NodeKind.AGGREGATION, init=False)
+
+
+@dataclass(frozen=True)
+class DerivedResultNode(WorkflowNode):
+    """A node that derives a scientific result from dependency artifacts."""
+
+    KIND: ClassVar[NodeKind] = NodeKind.DERIVED
+    kind: NodeKind = field(default=NodeKind.DERIVED, init=False)
 
 
 @dataclass(frozen=True)
@@ -258,7 +292,7 @@ class WorkflowGraph:
         previous: str | None = None
         for node_id in node_ids:
             nodes.append(
-                WorkflowNode(
+                CalculationNode(
                     str(node_id),
                     dependencies=(previous,) if previous is not None else (),
                     produces=tuple((produces or {}).get(str(node_id), ())),
@@ -396,7 +430,10 @@ class WorkflowGraph:
 
 __all__ = [
     "WORKFLOW_GRAPH_SCHEMA_VERSION",
+    "AggregationNode",
     "ArtifactRequirement",
+    "CalculationNode",
+    "DerivedResultNode",
     "NodeKind",
     "WorkflowGraph",
     "WorkflowNode",

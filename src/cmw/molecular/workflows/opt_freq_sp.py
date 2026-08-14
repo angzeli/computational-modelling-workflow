@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from cmw.core.job import GeometryLineage
 from cmw.core.provenance import atomic_write_json, read_json, stable_hash
-from cmw.core.workflow_graph import NodeKind, WorkflowGraph, WorkflowNode
+from cmw.core.workflow_graph import CalculationNode, WorkflowGraph, WorkflowNode
 from cmw.molecular.orca.input import (
     OrcaResources,
     OrcaStageSpec,
@@ -245,10 +245,9 @@ def legacy_workflow_graph(mode: str) -> WorkflowGraph:
             if StageType.FREQ in selected:
                 dependencies.append(StageType.FREQ.value)
         nodes.append(
-            WorkflowNode(
+            CalculationNode(
                 stage.value,
-                NodeKind.CALCULATION,
-                tuple(dependencies),
+                dependencies=tuple(dependencies),
                 operation=stage.value,
                 produces=(artifact_types[stage],),
             )

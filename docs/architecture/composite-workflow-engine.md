@@ -14,9 +14,11 @@ node and artifact contracts.
 
 ## Workflow graph
 
-`cmw.core.workflow_graph.WorkflowGraph` supports calculation, aggregation, and
-derived-result nodes. Each node can declare dependencies, required artifact
-types, and produced artifact types.
+`cmw.core.workflow_graph.WorkflowGraph` supports explicit `CalculationNode`,
+`AggregationNode`, and `DerivedResultNode` types. Each node can declare
+dependencies, required artifact types, and produced artifact types. The legacy
+`WorkflowNode` constructor remains available as a compatibility surface, while
+schema-loaded nodes use the explicit types.
 
 ```yaml
 workflow:
