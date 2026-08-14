@@ -9,8 +9,8 @@ branches in the diagrams remain targets rather than implementation claims.
 
 ## Implemented molecular stack
 
-The current package implements a dependency-free OPT / optional FREQ / optional
-SP workflow for ORCA and a reusable directed-acyclic workflow graph for
+The current package implements an OPT / optional FREQ / optional SP workflow
+for ORCA and a reusable directed-acyclic workflow graph for
 calculation, aggregation, and derived-result nodes. Shell owns executable discovery, environment handling,
 process launch, descriptors, signals, temporary directories, traps, cleanup,
 and sequential calls into Python. Python owns XYZ and ORCA parsing, validation,
@@ -52,6 +52,9 @@ See the focused boundary documents in this directory and the
 [workflow guide](../molecular/orca-opt-freq-sp.md). Composite graphs, typed
 artifacts, and method-aware validation are described in the
 [composite workflow engine guide](composite-workflow-engine.md).
+Domain-specific translation remains outside the core graph. The first adapter,
+documented in the [HOF adapter guide](../adapters/hof.md), validates the HOF
+system schema and maps it onto those generic graph and artifact contracts.
 
 ## Domain branches
 

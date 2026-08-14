@@ -1,0 +1,14 @@
+schema_version: 1
+
+high_level:
+  program: orca
+  method: DLPNO-CCSD(T)
+  basis: def2-TZVPP
+  pno_setting: TightPNO
+  tight_scf: true
+
+interaction_energy:
+  method_ref: high_level
+  counterpoise: true
+  led: true
+  frozen_fragments: true
