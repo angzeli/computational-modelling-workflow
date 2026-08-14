@@ -1,0 +1,31 @@
+schema_version: 1
+
+systems:
+  synthetic_hof:
+    label: Synthetic HOF dimer
+    structure:
+      input: structure/input_structure/dimer.xyz
+    atom_index_base: 0
+    charge: 0
+    multiplicity: 1
+    fragments:
+      left:
+        atom_indices: [0, 1, 2]
+        charge: 0
+        multiplicity: 1
+      right:
+        atom_indices: [3, 4, 5]
+        charge: 0
+        multiplicity: 1
+    hydrogen_bonds:
+      expected_count: 2
+      symmetry_equivalent: true
+      bonds:
+        - id: hb_left_to_right
+          donor_atom: 0
+          hydrogen_atom: 1
+          acceptor_atom: 3
+        - id: hb_right_to_left
+          donor_atom: 3
+          hydrogen_atom: 4
+          acceptor_atom: 0

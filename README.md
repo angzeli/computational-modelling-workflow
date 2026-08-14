@@ -10,7 +10,7 @@ erasing the scientific differences between molecular and periodic modelling.
 This repository currently contains:
 
 - the existing static website that visualises the computational architecture;
-- an installable, dependency-free `cmw` Python package;
+- an installable `cmw` Python package with safe YAML loading for domain adapters;
 - advisory process-tree health monitoring;
 - strict XYZ parsing and stable geometry identity;
 - factual ORCA output parsing with separate OPT/FREQ/SP validation;
@@ -20,6 +20,8 @@ This repository currently contains:
   typed scientific artifact contracts;
 - optional method-aware ORCA protocol validation for method, basis, PNO, LED,
   fragment, SCF, optimization, and frequency evidence;
+- a HOF domain adapter that validates two-fragment hydrogen-bonded systems and
+  translates their YAML configuration into generic CP/LED workflow contracts;
 - shell-owned ORCA execution; and
 - a configurable, resumable `opt`, `opt+sp`, `opt+freq`, or `opt+freq+sp`
   molecular workflow with synthetic integration tests;
@@ -29,9 +31,9 @@ This repository currently contains:
   workflows with structural validation, grid compatibility, and fail-closed
   reuse.
 
-It does **not** redistribute Multiwfn or contain interaction-energy or
-dimer-selection science, catalytic pathways, ASE, pymatgen, VASP, scheduler
-execution, cluster locking, or generic retry ladders.
+It does **not** redistribute Multiwfn or contain dimer-selection science,
+catalytic pathways, ASE, pymatgen, VASP, scheduler execution, cluster locking,
+or generic retry ladders.
 
 ## Architectural scope
 
@@ -53,6 +55,8 @@ and current method strategy.
 The composite graph, typed artifact, compatibility, and protocol-validation
 contracts are documented in
 [`docs/architecture/composite-workflow-engine.md`](docs/architecture/composite-workflow-engine.md).
+The HOF YAML mapping, validators, CP/LED graph, and non-executing ORCA input
+plans are documented in [`docs/adapters/hof.md`](docs/adapters/hof.md).
 
 ## Repository layout
 
@@ -73,6 +77,7 @@ contracts are documented in
 │   └── workflows/
 ├── src/
 │   └── cmw/
+│       ├── adapters/
 │       ├── core/
 │       ├── molecular/
 │       └── structure/
@@ -102,7 +107,8 @@ contracts are documented in
 ## Molecular workflow
 
 The distribution is `computational-modelling-workflow`; its import namespace is
-`cmw`. Version `0.1.0` remains a pre-alpha API and has no runtime dependencies.
+`cmw`. Version `0.1.0` remains a pre-alpha API. PyYAML is the only runtime
+dependency and is used with `safe_load` for explicit adapter configuration.
 Inspect a public synthetic example without launching ORCA:
 
 ```sh

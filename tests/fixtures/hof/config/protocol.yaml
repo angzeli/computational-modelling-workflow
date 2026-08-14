@@ -1,0 +1,13 @@
+schema_version: 1
+
+workflow:
+  interaction_energy:
+    enabled: true
+    method_ref: interaction_energy
+    geometry_source: optimized_dimer
+    frozen_fragments: true
+    calculate_deformation_energy: true
+    outputs:
+      - interaction_energy
+      - deformation_energy
+      - led
