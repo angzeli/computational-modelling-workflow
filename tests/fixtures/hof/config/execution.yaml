@@ -1,0 +1,12 @@
+schema_version: 1
+
+active_profile: local_mac
+
+profiles:
+  local_mac:
+    orca:
+      nprocs: 8
+      total_memory_gb: 18
+    multiwfn:
+      nthreads: 8
+      total_memory_gb: 18

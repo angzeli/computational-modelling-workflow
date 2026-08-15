@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 import re
 from typing import Mapping
 
+from cmw.core.execution_profiles import ExecutionProfile
 from cmw.core.job import JobTarget
 from cmw.structure.xyz import XYZGeometry, geometry_hash, read_xyz
 
@@ -18,6 +20,9 @@ STAGE_KEYWORDS = {
     StageType.FREQ: "Freq",
     StageType.SP: "SP",
 }
+
+ORCA_MEMORY_MB_PER_GB = 1024
+ORCA_MEMORY_SAFETY_FRACTION = 0.80
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,67 @@ class OrcaResources:
             "nprocs": self.nprocs,
             "maxcore_mb_per_process": self.maxcore_mb_per_process,
         }
+
+
+@dataclass(frozen=True)
+class ResolvedOrcaResources:
+    """Program resources and provenance derived from one execution profile."""
+
+    profile_name: str
+    execution_profile_hash: str
+    total_memory_gb: float
+    safety_fraction: float
+    resources: OrcaResources
+
+    @property
+    def derived_total_memory_mb(self) -> int:
+        return self.resources.nprocs * self.resources.maxcore_mb_per_process
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "execution_profile": self.profile_name,
+            "execution_profile_hash": self.execution_profile_hash,
+            "nprocs": self.resources.nprocs,
+            "total_memory_gb": self.total_memory_gb,
+            "memory_safety_fraction": self.safety_fraction,
+            "derived_maxcore_mb_per_process": (
+                self.resources.maxcore_mb_per_process
+            ),
+            "derived_total_memory_mb": self.derived_total_memory_mb,
+        }
+
+
+def resolve_orca_resources(
+    profile: ExecutionProfile,
+    *,
+    safety_fraction: float = ORCA_MEMORY_SAFETY_FRACTION,
+) -> ResolvedOrcaResources:
+    """Derive conservative per-process MaxCore from a total profile budget."""
+
+    if (
+        not isinstance(safety_fraction, (int, float))
+        or isinstance(safety_fraction, bool)
+        or not math.isfinite(float(safety_fraction))
+        or not 0 < float(safety_fraction) <= 1
+    ):
+        raise ValueError("ORCA memory safety fraction must be in (0, 1]")
+    total_memory_mb = math.floor(
+        profile.orca.total_memory_gb * ORCA_MEMORY_MB_PER_GB
+    )
+    usable_memory_mb = math.floor(total_memory_mb * float(safety_fraction))
+    maxcore_mb_per_process = usable_memory_mb // profile.orca.nprocs
+    if maxcore_mb_per_process < 1:
+        raise ValueError("ORCA execution profile provides insufficient memory per process")
+    resources = OrcaResources(profile.orca.nprocs, maxcore_mb_per_process)
+    if resources.nprocs * resources.maxcore_mb_per_process > total_memory_mb:
+        raise ValueError("derived ORCA memory exceeds the execution-profile budget")
+    return ResolvedOrcaResources(
+        profile.name,
+        profile.execution_profile_hash,
+        profile.orca.total_memory_gb,
+        float(safety_fraction),
+        resources,
+    )
 
 
 def make_target(

@@ -27,7 +27,7 @@ from cmw.core.workflow_graph import (
     CalculationNode,
     WorkflowGraph,
 )
-from cmw.molecular.orca.input import OrcaStageSpec
+from cmw.molecular.orca.input import OrcaStageSpec, resolve_orca_resources
 from cmw.molecular.orca.status import StageType
 from cmw.molecular.workflows.igmh import default_igmh_outputs
 from cmw.molecular.workflows.multiwfn_analysis import (
@@ -114,12 +114,15 @@ def _require_complete_configuration(configuration: HofAdapterConfiguration) -> N
 
 
 def _provenance(configuration: HofAdapterConfiguration) -> dict[str, object]:
-    return {
+    provenance: dict[str, object] = {
         "adapter": "cmw.adapters.hof",
         "system_identity": configuration.system.system_identity,
         "source_files": dict(configuration.source_files),
         "execution": "planned_only",
     }
+    if configuration.execution_profile is not None:
+        provenance["execution_profile"] = configuration.execution_profile.to_dict()
+    return provenance
 
 
 def _calculation_id(
@@ -159,6 +162,11 @@ def _orca_plan(
     calculation_id = _calculation_id(
         configuration, node_id=node_id, role=role, protocol=protocol
     )
+    resolved_resources = (
+        resolve_orca_resources(configuration.execution_profile)
+        if configuration.execution_profile is not None
+        else None
+    )
     return HofOrcaCalculation(
         calculation_id=calculation_id,
         node_id=node_id,
@@ -170,6 +178,12 @@ def _orca_plan(
         ),
         spec=OrcaStageSpec(stage_type, keywords, protocol=protocol),
         active_atom_indices=active,
+        resources=(
+            resolved_resources.resources if resolved_resources is not None else None
+        ),
+        execution=(
+            resolved_resources.to_dict() if resolved_resources is not None else {}
+        ),
     )
 
 
@@ -588,6 +602,16 @@ def _density_igmh_branch(
         "visualization": dict(igmh.visualization),
         "execute": False,
     }
+    multiwfn_plan = dict(analysis_configuration)
+    if configuration.execution_profile is not None:
+        profile = configuration.execution_profile
+        multiwfn_plan["runtime"] = {
+            "execution_profile": profile.name,
+            "execution_profile_hash": profile.execution_profile_hash,
+            "nthreads": profile.multiwfn.nthreads,
+            "total_memory_gb": profile.multiwfn.total_memory_gb,
+            "execution_config": configuration.source_files.get("execution"),
+        }
     generic_graph = analysis_workflow_graph(
         AnalysisOperation.IGMH, analysis_configuration
     )
@@ -641,7 +665,7 @@ def _density_igmh_branch(
         analysis_graph,
         {"igmh_density": (density,), "multiwfn_igmh": (igmh_artifact,)},
         {"igmh_density": calculation},
-        {"multiwfn_igmh": analysis_configuration},
+        {"multiwfn_igmh": multiwfn_plan},
     )
 
 
@@ -770,17 +794,20 @@ def build_hof_workflow_plan(configuration: HofAdapterConfiguration) -> HofWorkfl
         **deformation_plans,
         **density_plans,
     }
+    metadata: dict[str, object] = {
+        "execution": "planned_only",
+        "branches": ["geometry", "interaction", "deformation", "density", "igmh"],
+        "synthetic_results": False,
+    }
+    if configuration.execution_profile is not None:
+        metadata["execution_profile"] = configuration.execution_profile.to_dict()
     return HofWorkflowPlan(
         configuration=configuration,
         graph=graph,
         artifact_templates=artifacts,
         orca_calculations=orca_plans,
         multiwfn_plans=multiwfn_plans,
-        metadata={
-            "execution": "planned_only",
-            "branches": ["geometry", "interaction", "deformation", "density", "igmh"],
-            "synthetic_results": False,
-        },
+        metadata=metadata,
     )
 
 

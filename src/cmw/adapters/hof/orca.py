@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 from cmw.core.provenance import stable_hash
-from cmw.molecular.orca.input import OrcaResources, OrcaStageSpec
+from cmw.molecular.orca.input import (
+    OrcaResources,
+    OrcaStageSpec,
+    resolve_orca_resources,
+)
 from cmw.molecular.orca.status import StageType
 
 from .models import HofAdapterConfiguration, HofSystem
@@ -25,6 +29,8 @@ class HofOrcaCalculation:
     active_atom_indices: tuple[int, ...]
     ghost_atom_indices: tuple[int, ...] = ()
     fragment_id: str | None = None
+    resources: OrcaResources | None = None
+    execution: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not all((self.calculation_id, self.node_id, self.role)):
@@ -37,9 +43,10 @@ class HofOrcaCalculation:
             raise ValueError("active and ghost atom sets must not overlap")
         object.__setattr__(self, "active_atom_indices", tuple(self.active_atom_indices))
         object.__setattr__(self, "ghost_atom_indices", tuple(self.ghost_atom_indices))
+        object.__setattr__(self, "execution", dict(self.execution))
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "calculation_id": self.calculation_id,
             "node_id": self.node_id,
             "role": self.role,
@@ -50,6 +57,10 @@ class HofOrcaCalculation:
             "ghost_atom_indices": list(self.ghost_atom_indices),
             "scientific_identity": self.spec.scientific_identity(),
         }
+        if self.resources is not None:
+            value["resources"] = self.resources.to_dict()
+            value["execution"] = dict(self.execution)
+        return value
 
 
 def _keywords(configuration: HofAdapterConfiguration, *, led: bool) -> str:
@@ -100,6 +111,13 @@ def build_hof_orca_calculations(
     if set(node_ids) != set(system.fragment_map):
         raise ValueError("fragment node ids must cover every configured fragment")
     all_atoms = tuple(range(system.geometry.atom_count))
+    resolved_resources = (
+        resolve_orca_resources(configuration.execution_profile)
+        if configuration.execution_profile is not None
+        else None
+    )
+    resources = resolved_resources.resources if resolved_resources is not None else None
+    execution = resolved_resources.to_dict() if resolved_resources is not None else {}
     calculations: dict[str, HofOrcaCalculation] = {}
     dimer_protocol = {
         **configuration.interaction.led_metadata,
@@ -120,6 +138,8 @@ def build_hof_orca_calculations(
             protocol=dimer_protocol,
         ),
         active_atom_indices=all_atoms,
+        resources=resources,
+        execution=execution,
     )
     for fragment in system.fragments:
         node_id = node_ids[fragment.fragment_id]
@@ -155,6 +175,8 @@ def build_hof_orca_calculations(
             ),
             active_atom_indices=active,
             ghost_atom_indices=ghosts,
+            resources=resources,
+            execution=execution,
         )
     return calculations
 
@@ -163,7 +185,7 @@ def render_hof_orca_input(
     *,
     system: HofSystem,
     calculation: HofOrcaCalculation,
-    resources: OrcaResources,
+    resources: OrcaResources | None = None,
 ) -> str:
     """Render inline fragment labels for LED or ghost atoms for CP fragments."""
 
@@ -176,12 +198,15 @@ def render_hof_orca_input(
         raise ValueError("dimer ORCA calculation cannot contain ghost atoms")
     if calculation.role == "cp_fragment" and not ghosts:
         raise ValueError("counterpoise fragment calculation requires ghost atoms")
+    selected_resources = resources or calculation.resources
+    if selected_resources is None:
+        raise ValueError("HOF ORCA rendering requires explicit execution resources")
 
     keyword_tokens = " ".join(calculation.spec.keywords.split())
     lines = [
         f"! {keyword_tokens} SP",
-        f"%pal nprocs {resources.nprocs} end",
-        f"%maxcore {resources.maxcore_mb_per_process}",
+        f"%pal nprocs {selected_resources.nprocs} end",
+        f"%maxcore {selected_resources.maxcore_mb_per_process}",
     ]
     lines.extend(
         str(block) for block in calculation.spec.scientific_identity()["blocks"]

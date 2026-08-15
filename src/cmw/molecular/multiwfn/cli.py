@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from cmw.core.execution_profiles import load_execution_profiles
 from cmw.core.process_health import format_status_line
 from cmw.core.provenance import atomic_write_json
 
@@ -18,11 +19,17 @@ def _print(value: object) -> None:
 
 
 def _prepare(args: argparse.Namespace) -> int:
+    execution_profile = (
+        load_execution_profiles(args.execution_config).selected
+        if args.execution_config is not None
+        else None
+    )
     runtime = prepare_runtime(
         attempt_directory=args.attempt_directory,
         executable=args.multiwfn_exe,
         settings_source=args.settings_source,
         cli_threads=args.threads,
+        execution_profile=execution_profile,
     )
     atomic_write_json(args.metadata, {"schema_version": 1, "runtime": runtime.to_dict()})
     _print(runtime.to_dict())
@@ -69,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--multiwfn-exe")
     prepare.add_argument("--settings-source", type=Path)
     prepare.add_argument("--threads")
+    prepare.add_argument("--execution-config", type=Path)
     prepare.set_defaults(handler=_prepare)
     stream = sub.add_parser("stream")
     stream.add_argument("--operation", choices=[item.value for item in Operation], required=True)

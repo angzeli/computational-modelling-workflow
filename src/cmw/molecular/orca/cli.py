@@ -7,10 +7,17 @@ import json
 import os
 from pathlib import Path
 
+from cmw.core.execution_profiles import load_execution_profiles
 from cmw.core.job import GeometryLineage
 from cmw.core.locks import acquire_lock, inspect_lock, release_lock
 
-from .input import OrcaResources, OrcaStageSpec, make_target, render_orca_input
+from .input import (
+    OrcaResources,
+    OrcaStageSpec,
+    make_target,
+    render_orca_input,
+    resolve_orca_resources,
+)
 from .job import check_reuse, finalize_attempt, write_target
 from .status import FrequencyPolicy, StageType, classify_execution, read_orca_output, validate_stage
 
@@ -24,7 +31,25 @@ def _prepare(args: argparse.Namespace) -> int:
 
     source = read_xyz(Path(args.structure))
     spec = OrcaStageSpec(StageType(args.stage), args.keywords, tuple(args.block))
-    resources = OrcaResources(args.nprocs, args.maxcore)
+    execution: dict[str, object] | None = None
+    if args.execution_config is not None:
+        resolved = resolve_orca_resources(
+            load_execution_profiles(Path(args.execution_config)).selected
+        )
+        if args.nprocs is not None and args.nprocs != resolved.resources.nprocs:
+            raise ValueError("explicit nprocs contradicts the execution profile")
+        if (
+            args.maxcore is not None
+            and args.maxcore != resolved.resources.maxcore_mb_per_process
+        ):
+            raise ValueError("explicit maxcore contradicts the execution profile")
+        resources = resolved.resources
+        execution = resolved.to_dict()
+    else:
+        resources = OrcaResources(
+            args.nprocs if args.nprocs is not None else 1,
+            args.maxcore if args.maxcore is not None else 1000,
+        )
     target = make_target(source, charge=args.charge, multiplicity=args.multiplicity, spec=spec)
     lineage = GeometryLineage(
         source=args.lineage_source,
@@ -47,7 +72,15 @@ def _prepare(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     write_target(Path(args.target), target, lineage)
-    _print({"target_id": target.target_id, "input": str(input_path), "target": args.target})
+    result: dict[str, object] = {
+        "target_id": target.target_id,
+        "input": str(input_path),
+        "target": args.target,
+        "resources": resources.to_dict(),
+    }
+    if execution is not None:
+        result["execution"] = execution
+    _print(result)
     return 0
 
 
@@ -136,8 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--multiplicity", type=int, required=True)
     prepare.add_argument("--keywords", required=True)
     prepare.add_argument("--block", action="append", default=[])
-    prepare.add_argument("--nprocs", type=int, default=1)
-    prepare.add_argument("--maxcore", type=int, default=1000)
+    prepare.add_argument("--nprocs", type=int)
+    prepare.add_argument("--maxcore", type=int)
+    prepare.add_argument("--execution-config")
     prepare.add_argument("--input", required=True)
     prepare.add_argument("--target", required=True)
     prepare.add_argument("--lineage-source", default="input_structure")
