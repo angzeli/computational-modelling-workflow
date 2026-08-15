@@ -62,12 +62,37 @@ The original OPT/FREQ/SP modes are represented internally by
 `legacy_workflow_graph()`. Their public CLI, stage order, dependencies, and
 result values remain unchanged.
 
+### Graph composition
+
+`WorkflowGraph.compose()` and `compose_workflow_graphs()` merge independently
+built graphs without renaming their nodes. An `ArtifactBinding` connects a
+producing node to a downstream typed requirement; the composition operation
+adds only that dependency and then validates the complete DAG.
+
+```python
+composed = WorkflowGraph.compose(
+    "geometry_plus_analysis",
+    (geometry_graph, analysis_graph),
+    bindings=(
+        ArtifactBinding("optimization", "density", "StructureArtifact"),
+    ),
+)
+```
+
+Node identity is a contract: identical duplicate nodes are deduplicated, while
+different definitions with the same identifier are rejected. Bindings fail if
+the source does not declare the bound artifact type or the target has no
+compatible requirement. Existing dependency order, external inputs, and each
+source graph's provenance are retained in the composed graph manifest; an
+external input is removed only when composed producers fully satisfy it.
+
 ## Typed artifacts
 
 `cmw.core.artifacts` provides a small hierarchy:
 
 ```text
 Artifact
+├── StructureArtifact
 ├── CalculationArtifact
 │   ├── EnergyArtifact
 │   │   ├── SinglePointArtifact
@@ -99,6 +124,30 @@ The rules can be extended without teaching the graph engine about a particular
 scientific operation. Existing ORCA and Multiwfn results retain their original
 artifact manifests and additionally expose `scientific_artifact`. Result readers
 continue to accept older records that predate this field.
+
+### Structure artifacts
+
+`StructureArtifact` gives input, optimized, intermediate, and generated
+geometries first-class identity. Its structure-specific manifest fields are the
+source, format, atom count, elemental composition, charge, multiplicity, and a
+geometry hash; file locations, general provenance, validation, and lineage use
+the same fields as every other artifact. The geometry hash participates in the
+stable artifact identity, while its storage path and later validation verdict
+do not.
+
+`structure_artifact_from_file()` constructs a validated artifact using the
+registered reader for the declared format or file suffix. The initial registry
+contains the existing strict XYZ reader, but `StructureFormatHandler` provides
+the extension point for future structure formats. Generic validation fails
+closed for missing files, unknown formats, unreadable geometry, missing
+metadata, and metadata that no longer matches the file. It does not evaluate
+bonding, fragments, or any project-specific chemistry.
+
+Any validated `StructureArtifact` can be declared as a parent of an
+`OptimizationArtifact`, `FrequencyArtifact`, `SinglePointArtifact`, or
+`DensityArtifact`. An optimization node may also emit a new
+`StructureArtifact`, allowing downstream branches to bind explicitly to the
+optimized geometry rather than to an untyped file path.
 
 ## Method-aware ORCA validation
 

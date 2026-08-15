@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, ClassVar, Iterable, Mapping, Sequence
 
@@ -63,6 +63,30 @@ class ArtifactRequirement:
             "count": self.count,
             "from_nodes": list(self.from_nodes),
         }
+
+
+@dataclass(frozen=True)
+class ArtifactBinding:
+    """Connect one producer to a compatible artifact requirement in another graph."""
+
+    source_node: str
+    target_node: str
+    artifact_type: str
+
+    def __post_init__(self) -> None:
+        if not self.source_node or not self.target_node or not self.artifact_type:
+            raise ValueError("artifact binding fields must be non-empty")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "source_node": self.source_node,
+            "target_node": self.target_node,
+            "artifact_type": self.artifact_type,
+        }
+
+
+class WorkflowCompositionError(ValueError):
+    """Raised when workflow graphs cannot be composed without ambiguity."""
 
 
 def _string_tuple(value: object, *, name: str) -> tuple[str, ...]:
@@ -213,6 +237,7 @@ class WorkflowGraph:
     graph_id: str
     nodes: tuple[WorkflowNode, ...]
     external_inputs: tuple[str, ...] = ()
+    provenance: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.graph_id:
@@ -221,6 +246,7 @@ class WorkflowGraph:
             raise ValueError("workflow graph requires at least one node")
         object.__setattr__(self, "nodes", tuple(self.nodes))
         object.__setattr__(self, "external_inputs", tuple(self.external_inputs))
+        object.__setattr__(self, "provenance", dict(self.provenance))
         self.validate()
 
     @property
@@ -277,8 +303,14 @@ class WorkflowGraph:
             NodeKind.DERIVED,
             "derived_result",
         )
-        external = _string_tuple(selected.get("inputs"), name="workflow inputs")
-        return cls(graph_id, tuple(nodes), external)
+        external = _string_tuple(
+            selected.get("inputs", selected.get("external_inputs")),
+            name="workflow inputs",
+        )
+        raw_provenance = selected.get("provenance", value.get("provenance", {}))
+        if not isinstance(raw_provenance, Mapping):
+            raise ValueError("workflow provenance must be an object")
+        return cls(graph_id, tuple(nodes), external, dict(raw_provenance))
 
     @classmethod
     def linear(
@@ -300,6 +332,19 @@ class WorkflowGraph:
             )
             previous = str(node_id)
         return cls(graph_id, tuple(nodes))
+
+    @classmethod
+    def compose(
+        cls,
+        graph_id: str,
+        graphs: Sequence["WorkflowGraph"],
+        *,
+        bindings: Sequence[ArtifactBinding] = (),
+        provenance: Mapping[str, object] | None = None,
+    ) -> "WorkflowGraph":
+        return compose_workflow_graphs(
+            graph_id, graphs, bindings=bindings, provenance=provenance
+        )
 
     def validate(self) -> None:
         identifiers = [node.node_id for node in self.nodes]
@@ -423,18 +468,155 @@ class WorkflowGraph:
             "schema_version": WORKFLOW_GRAPH_SCHEMA_VERSION,
             "graph_id": self.graph_id,
             "external_inputs": list(self.external_inputs),
+            "provenance": dict(self.provenance),
             "topological_order": list(self.topological_order()),
             "nodes": [node.to_dict() for node in self.nodes],
         }
 
 
+def _remaining_external_inputs(
+    external_inputs: Sequence[str], nodes: Sequence[WorkflowNode]
+) -> tuple[str, ...]:
+    node_map = {node.node_id: node for node in nodes}
+    remaining: list[str] = []
+    for external_type in dict.fromkeys(external_inputs):
+        referenced = False
+        insufficient = False
+        for node in nodes:
+            for requirement in node.requires:
+                if not _declared_artifact_matches(
+                    external_type, requirement.artifact_type
+                ):
+                    continue
+                referenced = True
+                sources = requirement.from_nodes or node.dependencies
+                declared = sum(
+                    _declared_artifact_matches(
+                        candidate, requirement.artifact_type
+                    )
+                    for source in sources
+                    for candidate in node_map[source].produces
+                )
+                if declared < requirement.count:
+                    insufficient = True
+        if not referenced or insufficient:
+            remaining.append(external_type)
+    return tuple(remaining)
+
+
+def compose_workflow_graphs(
+    graph_id: str,
+    graphs: Sequence[WorkflowGraph],
+    *,
+    bindings: Sequence[ArtifactBinding] = (),
+    provenance: Mapping[str, object] | None = None,
+) -> WorkflowGraph:
+    """Merge validated graphs and connect branches through typed artifact bindings."""
+
+    if not graphs:
+        raise WorkflowCompositionError("workflow composition requires at least one graph")
+    merged: dict[str, WorkflowNode] = {}
+    order: list[str] = []
+    external_inputs: list[str] = []
+    for graph in graphs:
+        if not isinstance(graph, WorkflowGraph):
+            raise TypeError("workflow composition accepts WorkflowGraph instances")
+        external_inputs.extend(graph.external_inputs)
+        for node in graph.nodes:
+            existing = merged.get(node.node_id)
+            if existing is None:
+                merged[node.node_id] = node
+                order.append(node.node_id)
+            elif existing != node:
+                raise WorkflowCompositionError(
+                    f"workflow node identity conflict for {node.node_id!r}"
+                )
+
+    unique_bindings = tuple(dict.fromkeys(bindings))
+    for binding in unique_bindings:
+        source = merged.get(binding.source_node)
+        target = merged.get(binding.target_node)
+        if source is None or target is None:
+            missing = binding.source_node if source is None else binding.target_node
+            raise WorkflowCompositionError(
+                f"artifact binding references unknown node {missing!r}"
+            )
+        if not any(
+            _declared_artifact_matches(candidate, binding.artifact_type)
+            for candidate in source.produces
+        ):
+            raise WorkflowCompositionError(
+                f"node {source.node_id!r} does not produce {binding.artifact_type}"
+            )
+        compatible = tuple(
+            requirement
+            for requirement in target.requires
+            if _declared_artifact_matches(
+                binding.artifact_type, requirement.artifact_type
+            )
+        )
+        if not compatible:
+            raise WorkflowCompositionError(
+                f"node {target.node_id!r} does not require a compatible "
+                f"{binding.artifact_type} artifact"
+            )
+
+        dependencies = tuple(
+            dict.fromkeys((*target.dependencies, source.node_id))
+        )
+        requirements = tuple(
+            replace(
+                requirement,
+                from_nodes=tuple(
+                    dict.fromkeys((*requirement.from_nodes, source.node_id))
+                ),
+            )
+            if requirement in compatible and requirement.from_nodes
+            else requirement
+            for requirement in target.requires
+        )
+        target = replace(
+            target, dependencies=dependencies, requires=requirements
+        )
+        merged[target.node_id] = target
+
+    nodes = tuple(merged[node_id] for node_id in order)
+    remaining_inputs = _remaining_external_inputs(external_inputs, nodes)
+    composed_provenance = dict(provenance or {})
+    if "composition" in composed_provenance:
+        raise WorkflowCompositionError(
+            "composition provenance is reserved for the graph composition API"
+        )
+    composed_provenance["composition"] = {
+        "source_graphs": [
+            {"graph_id": graph.graph_id, "provenance": dict(graph.provenance)}
+            for graph in graphs
+        ],
+        "bindings": [binding.to_dict() for binding in unique_bindings],
+    }
+    try:
+        return WorkflowGraph(
+            graph_id,
+            nodes,
+            external_inputs=remaining_inputs,
+            provenance=composed_provenance,
+        )
+    except ValueError as exc:
+        raise WorkflowCompositionError(
+            f"composed workflow graph is inconsistent: {exc}"
+        ) from exc
+
+
 __all__ = [
     "WORKFLOW_GRAPH_SCHEMA_VERSION",
     "AggregationNode",
+    "ArtifactBinding",
     "ArtifactRequirement",
     "CalculationNode",
     "DerivedResultNode",
     "NodeKind",
     "WorkflowGraph",
+    "WorkflowCompositionError",
     "WorkflowNode",
+    "compose_workflow_graphs",
 ]

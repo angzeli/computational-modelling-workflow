@@ -9,9 +9,13 @@ from cmw.core.artifacts import (
 )
 from cmw.core.workflow_graph import (
     AggregationNode,
+    ArtifactBinding,
+    ArtifactRequirement,
     CalculationNode,
     DerivedResultNode,
+    WorkflowCompositionError,
     WorkflowGraph,
+    compose_workflow_graphs,
 )
 from cmw.molecular.workflows.opt_freq_sp import legacy_workflow_graph
 
@@ -165,6 +169,147 @@ class WorkflowGraphTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "received invalid artifact"):
             graph.validate_artifacts("derived", {"source": invalid})
+
+
+class WorkflowCompositionTests(unittest.TestCase):
+    def test_two_graphs_compose_through_a_typed_artifact_binding(self) -> None:
+        geometry = WorkflowGraph(
+            "geometry",
+            (
+                CalculationNode("structure", produces=("StructureArtifact",)),
+                CalculationNode(
+                    "optimization",
+                    dependencies=("structure",),
+                    requires=(
+                        ArtifactRequirement(
+                            "StructureArtifact", from_nodes=("structure",)
+                        ),
+                    ),
+                    produces=("OptimizationArtifact", "StructureArtifact"),
+                ),
+            ),
+            provenance={"builder": "geometry"},
+        )
+        analysis = WorkflowGraph(
+            "analysis",
+            (
+                CalculationNode(
+                    "density",
+                    requires=(ArtifactRequirement("StructureArtifact"),),
+                    produces=("DensityArtifact",),
+                ),
+            ),
+            external_inputs=("StructureArtifact",),
+            provenance={"builder": "analysis"},
+        )
+
+        composed = WorkflowGraph.compose(
+            "composed",
+            (geometry, analysis),
+            bindings=(
+                ArtifactBinding(
+                    "optimization", "density", "StructureArtifact"
+                ),
+            ),
+            provenance={"request": "synthetic-test"},
+        )
+
+        self.assertEqual(
+            composed.topological_order(),
+            ("structure", "optimization", "density"),
+        )
+        self.assertEqual(composed.node_map["density"].dependencies, ("optimization",))
+        self.assertEqual(composed.external_inputs, ())
+        self.assertEqual(composed.provenance["request"], "synthetic-test")
+        self.assertEqual(
+            [
+                item["graph_id"]
+                for item in composed.provenance["composition"]["source_graphs"]
+            ],
+            ["geometry", "analysis"],
+        )
+
+    def test_composition_preserves_existing_dependencies(self) -> None:
+        upstream = WorkflowGraph(
+            "upstream",
+            (CalculationNode("source", produces=("StructureArtifact",)),),
+        )
+        downstream = WorkflowGraph(
+            "downstream",
+            (
+                CalculationNode("prepare"),
+                CalculationNode(
+                    "consume",
+                    dependencies=("prepare",),
+                    requires=(ArtifactRequirement("StructureArtifact"),),
+                ),
+            ),
+            external_inputs=("StructureArtifact",),
+        )
+
+        composed = compose_workflow_graphs(
+            "composed",
+            (upstream, downstream),
+            bindings=(ArtifactBinding("source", "consume", "StructureArtifact"),),
+        )
+
+        self.assertEqual(
+            composed.node_map["consume"].dependencies, ("prepare", "source")
+        )
+        self.assertLess(
+            composed.topological_order().index("prepare"),
+            composed.topological_order().index("consume"),
+        )
+
+    def test_identical_duplicate_nodes_are_deduplicated(self) -> None:
+        shared = CalculationNode("shared", produces=("StructureArtifact",))
+        left = WorkflowGraph("left", (shared,))
+        right = WorkflowGraph(
+            "right",
+            (
+                shared,
+                CalculationNode("right", dependencies=("shared",)),
+            ),
+        )
+
+        composed = compose_workflow_graphs("composed", (left, right))
+
+        self.assertEqual(tuple(composed.node_map), ("shared", "right"))
+
+    def test_node_identity_and_artifact_contract_conflicts_are_rejected(self) -> None:
+        left = WorkflowGraph(
+            "left", (CalculationNode("shared", operation="first"),)
+        )
+        conflicting = WorkflowGraph(
+            "conflicting", (CalculationNode("shared", operation="second"),)
+        )
+        with self.assertRaisesRegex(WorkflowCompositionError, "identity conflict"):
+            compose_workflow_graphs("bad", (left, conflicting))
+
+        producer = WorkflowGraph(
+            "producer",
+            (CalculationNode("energy", produces=("SinglePointArtifact",)),),
+        )
+        consumer = WorkflowGraph(
+            "consumer",
+            (
+                CalculationNode(
+                    "structure_consumer",
+                    requires=(ArtifactRequirement("StructureArtifact"),),
+                ),
+            ),
+            external_inputs=("StructureArtifact",),
+        )
+        with self.assertRaisesRegex(WorkflowCompositionError, "does not produce"):
+            compose_workflow_graphs(
+                "bad-contract",
+                (producer, consumer),
+                bindings=(
+                    ArtifactBinding(
+                        "energy", "structure_consumer", "StructureArtifact"
+                    ),
+                ),
+            )
 
 
 if __name__ == "__main__":
