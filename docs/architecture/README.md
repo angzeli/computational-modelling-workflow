@@ -55,6 +55,10 @@ artifacts, and method-aware validation are described in the
 Domain-specific translation remains outside the core graph. The first adapter,
 documented in the [HOF adapter guide](../adapters/hof.md), validates the HOF
 system schema and maps it onto those generic graph and artifact contracts.
+Program-specific analysis adapters remain molecule agnostic. The
+[Multiwfn analysis layer](../molecular/multiwfn-cubes.md) maps validated
+wavefunction or density inputs through deterministic command and output
+contracts to typed analysis artifacts, including density-to-IGMH lineage.
 
 ## Domain branches
 
