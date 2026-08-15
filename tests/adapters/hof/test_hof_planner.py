@@ -139,6 +139,16 @@ class HofWorkflowPlannerTests(unittest.TestCase):
             plan.orca_calculations["relaxed_fragment_left_energy"].spec.stage_type,
             StageType.SP,
         )
+        parents = {
+            parent.artifact_id: parent
+            for node_artifacts in plan.artifact_templates.values()
+            for parent in node_artifacts
+            if parent.artifact_id in artifact.parent_artifacts
+        }
+        self.assertEqual(
+            {parent.metadata["geometry_state"] for parent in parents.values()},
+            {"distorted", "relaxed"},
+        )
 
     def test_density_and_generic_igmh_branches_are_composed(self) -> None:
         plan = self.plan()
@@ -163,6 +173,9 @@ class HofWorkflowPlannerTests(unittest.TestCase):
             {"delta_g_inter_cube", "sign_lambda2_rho_cube"},
         )
         self.assertIsNone(igmh.provenance["multiwfn_version"])
+        self.assertEqual(igmh.metadata["density_source"], density.artifact_id)
+        self.assertIsNone(igmh.metadata["grid_spacing_bohr"])
+        self.assertEqual(igmh.metadata["multiwfn_protocol"], multiwfn_plan)
 
     def test_artifact_lineage_is_complete_and_has_only_declared_terminals(self) -> None:
         plan = self.plan()

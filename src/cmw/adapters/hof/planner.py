@@ -394,7 +394,13 @@ def _deformation_branch(
             parent_artifacts=(optimized_structure.artifact_id,),
             validation=PLANNED,
             provenance=provenance,
-            metadata={"fragment_id": fragment.fragment_id, "energy_role": "distorted"},
+            metadata={
+                "fragment_id": fragment.fragment_id,
+                "energy_role": "distorted",
+                "geometry_state": "distorted",
+                "charge": fragment.charge,
+                "multiplicity": fragment.multiplicity,
+            },
         )
         relaxation_artifact = OptimizationArtifact(
             producing_calculation=relaxation_plan.calculation_id,
@@ -435,7 +441,13 @@ def _deformation_branch(
             parent_artifacts=(relaxed_structure.artifact_id,),
             validation=PLANNED,
             provenance=provenance,
-            metadata={"fragment_id": fragment.fragment_id, "energy_role": "relaxed"},
+            metadata={
+                "fragment_id": fragment.fragment_id,
+                "energy_role": "relaxed",
+                "geometry_state": "relaxed",
+                "charge": fragment.charge,
+                "multiplicity": fragment.multiplicity,
+            },
         )
         artifacts[distorted_id] = (distorted_artifact,)
         artifacts[relax_id] = (relaxation_artifact, relaxed_structure)
@@ -615,7 +627,14 @@ def _density_igmh_branch(
             "generating_program": "Multiwfn",
             "multiwfn_version": None,
         },
-        metadata={"system_id": system.system_id, "analysis": "IGMH"},
+        metadata={
+            "system_id": system.system_id,
+            "analysis": "IGMH",
+            "density_source": density.artifact_id,
+            "grid_spacing_bohr": igmh.grid_spacing_bohr,
+            "multiwfn_protocol": analysis_configuration,
+            "visualization": dict(igmh.visualization),
+        },
     )
     return (
         density_graph,

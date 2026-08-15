@@ -7,13 +7,26 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from cmw.core.provenance import read_json
+from cmw.core.artifacts import (
+    Artifact,
+    ArtifactCompatibilityError,
+    DensityArtifact,
+    IGMHArtifact,
+    validate_artifact_compatibility,
+)
+from cmw.core.provenance import read_json, stable_hash
 from cmw.molecular.multiwfn.adapter import MultiwfnOutputSpec, validate_output_specs
 
 
 REQUIRED_INTERFRAGMENT_ROLES = frozenset(
     {"delta_g_inter_cube", "sign_lambda2_rho_cube"}
 )
+
+
+class IgmhExecutionContractError(ValueError):
+    """Raised when a production IGMH plan is scientifically incomplete."""
+
+    code = "FAILED_PROTOCOL_MISMATCH"
 
 
 def default_igmh_outputs() -> tuple[MultiwfnOutputSpec, ...]:
@@ -97,6 +110,73 @@ class IgmhConfiguration:
             "cube_generation": self.cube_generation,
             "outputs": [item.to_dict() for item in self.outputs],
         }
+
+
+def validate_igmh_execution_contract(
+    execution_plan: Mapping[str, object],
+    artifact: IGMHArtifact,
+    parents: Sequence[Artifact],
+) -> None:
+    """Validate the explicit density and grid contract before IGMH execution."""
+
+    try:
+        validate_artifact_compatibility(artifact, parents)
+    except ArtifactCompatibilityError as exc:
+        raise IgmhExecutionContractError(
+            "production IGMH execution requires a validated DensityArtifact "
+            f"parent: {exc}"
+        ) from exc
+
+    grid_spacing = execution_plan.get("grid_spacing_bohr")
+    if (
+        not isinstance(grid_spacing, (int, float))
+        or isinstance(grid_spacing, bool)
+        or not math.isfinite(float(grid_spacing))
+        or float(grid_spacing) <= 0
+    ):
+        raise IgmhExecutionContractError(
+            "production IGMH execution requires a finite positive grid_spacing_bohr"
+        )
+
+    density_source = artifact.metadata.get("density_source")
+    parent_by_id = {parent.artifact_id: parent for parent in parents}
+    density = parent_by_id.get(str(density_source))
+    if not isinstance(density, DensityArtifact):
+        raise IgmhExecutionContractError(
+            "IGMHArtifact metadata must identify its DensityArtifact source"
+        )
+    if density.artifact_id not in artifact.parent_artifacts:
+        raise IgmhExecutionContractError(
+            "IGMH density source is not a declared parent artifact"
+        )
+    if artifact.method != density.method or artifact.basis != density.basis:
+        raise IgmhExecutionContractError(
+            "IGMHArtifact method and basis metadata are incompatible with "
+            "its density source"
+        )
+
+    recorded_spacing = artifact.metadata.get("grid_spacing_bohr")
+    if (
+        not isinstance(recorded_spacing, (int, float))
+        or isinstance(recorded_spacing, bool)
+        or not math.isclose(float(recorded_spacing), float(grid_spacing))
+    ):
+        raise IgmhExecutionContractError(
+            "IGMHArtifact grid spacing does not match the execution plan"
+        )
+    recorded_protocol = artifact.metadata.get("multiwfn_protocol")
+    if not isinstance(recorded_protocol, Mapping) or stable_hash(
+        recorded_protocol
+    ) != stable_hash(execution_plan):
+        raise IgmhExecutionContractError(
+            "IGMHArtifact does not preserve the Multiwfn execution protocol"
+        )
+    if "visualization" in execution_plan and artifact.metadata.get(
+        "visualization"
+    ) != execution_plan.get("visualization"):
+        raise IgmhExecutionContractError(
+            "IGMHArtifact visualization metadata does not match the execution plan"
+        )
 
 
 def _outputs(value: object) -> tuple[MultiwfnOutputSpec, ...]:
@@ -193,8 +273,10 @@ def load_igmh_configuration(path: Path) -> IgmhConfiguration:
 __all__ = [
     "FragmentDefinition",
     "IgmhConfiguration",
+    "IgmhExecutionContractError",
     "REQUIRED_INTERFRAGMENT_ROLES",
     "default_igmh_outputs",
     "load_fragments",
     "load_igmh_configuration",
+    "validate_igmh_execution_contract",
 ]

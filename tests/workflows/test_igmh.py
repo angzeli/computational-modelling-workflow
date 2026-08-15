@@ -123,6 +123,14 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
             {"delta_g_inter_cube", "sign_lambda2_rho_cube", "metadata"},
         )
         self.assertEqual(provenance["visualization"]["recommended_isovalue"], 0.01)
+        metadata = result["scientific_artifact"]["metadata"]
+        self.assertEqual(metadata["grid_spacing_bohr"], 0.2)
+        self.assertEqual(
+            metadata["density_source"],
+            result["source_density_artifact"]["artifact_id"],
+        )
+        self.assertEqual(metadata["multiwfn_protocol"]["profile"], "interfragment")
+        self.assertEqual(metadata["visualization"]["recommended_isovalue"], 0.01)
         self.assertEqual(
             result["scientific_artifact"]["validation"]["status"], "PASSED"
         )

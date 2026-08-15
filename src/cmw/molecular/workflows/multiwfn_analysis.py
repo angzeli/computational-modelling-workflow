@@ -14,7 +14,6 @@ from cmw.core.artifacts import (
     IGMHArtifact,
     artifact_from_dict,
     artifact_from_result,
-    validate_artifact_compatibility,
 )
 from cmw.core.job import ExecutionAttempt, JobTarget
 from cmw.core.provenance import (
@@ -51,6 +50,7 @@ from .igmh import (
     IgmhConfiguration,
     load_fragments,
     load_igmh_configuration,
+    validate_igmh_execution_contract,
 )
 from .source import (
     ValidatedSource,
@@ -269,7 +269,9 @@ def check_reuse(
                 density = artifact_from_dict(density_record)
                 if not isinstance(density, DensityArtifact):
                     raise ValueError("source artifact is not a DensityArtifact")
-                validate_artifact_compatibility(parsed_artifact, (density,))
+                validate_igmh_execution_contract(
+                    target.calculation, parsed_artifact, (density,)
+                )
             except (TypeError, ValueError) as exc:
                 return {
                     "reuse": False,
@@ -557,9 +559,13 @@ def _scientific_artifact(
         metadata={
             **dict(artifact.metadata),
             "analysis_protocol": calculation,
+            "density_source": density.artifact_id,
+            "grid_spacing_bohr": calculation.get("grid_spacing_bohr"),
+            "multiwfn_protocol": calculation,
+            "visualization": dict(record.get("visualization", {})),
         },
     )
-    validate_artifact_compatibility(igmh, (density,))
+    validate_igmh_execution_contract(calculation, igmh, (density,))
     return igmh
 
 

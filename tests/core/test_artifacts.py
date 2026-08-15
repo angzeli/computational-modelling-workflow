@@ -6,6 +6,7 @@ from cmw.core.artifacts import (
     ArtifactCompatibilityError,
     ArtifactValidation,
     CPInteractionArtifact,
+    DeformationEnergyArtifact,
     DensityArtifact,
     DimerEnergyArtifact,
     FragmentEnergyArtifact,
@@ -34,6 +35,27 @@ def _energy(cls, calculation: str, role: str, *, basis: str = "def2-TZVPP"):
         protocol={"pno": "TightPNO"},
         validation=PASSED,
         metadata={"energy_role": role},
+    )
+
+
+def _deformation_energy(
+    fragment_id: str,
+    geometry_state: str,
+    *,
+    method: str = "DLPNO-CCSD(T)",
+):
+    return FragmentEnergyArtifact(
+        producing_calculation=f"{fragment_id}-{geometry_state}-{method}",
+        method=method,
+        basis="def2-TZVPP",
+        protocol={"pno": "TightPNO", "geometry_role": geometry_state},
+        validation=PASSED,
+        metadata={
+            "fragment_id": fragment_id,
+            "geometry_state": geometry_state,
+            "charge": 0,
+            "multiplicity": 1,
+        },
     )
 
 
@@ -105,6 +127,62 @@ class ArtifactIdentityTests(unittest.TestCase):
 
 
 class ArtifactCompatibilityTests(unittest.TestCase):
+    def test_deformation_energy_requires_compatible_distorted_and_relaxed_pairs(
+        self,
+    ) -> None:
+        distorted = _deformation_energy("fragment-a", "distorted")
+        relaxed = _deformation_energy("fragment-a", "relaxed")
+        artifact = DeformationEnergyArtifact(
+            producing_calculation="deformation-a",
+            method="DLPNO-CCSD(T)",
+            basis="def2-TZVPP",
+            parent_artifacts=(distorted.artifact_id, relaxed.artifact_id),
+            validation=PASSED,
+        )
+
+        validate_artifact_compatibility(artifact, (distorted, relaxed))
+
+    def test_deformation_energy_rejects_missing_relaxed_reference(self) -> None:
+        distorted = _deformation_energy("fragment-a", "distorted")
+        artifact = DeformationEnergyArtifact(
+            producing_calculation="deformation-missing-relaxed",
+            parent_artifacts=(distorted.artifact_id,),
+            validation=PASSED,
+        )
+
+        with self.assertRaisesRegex(
+            ArtifactCompatibilityError, "requires distorted and relaxed"
+        ):
+            validate_artifact_compatibility(artifact, (distorted,))
+
+    def test_deformation_energy_rejects_mismatched_fragment_identity(self) -> None:
+        distorted = _deformation_energy("fragment-a", "distorted")
+        relaxed = _deformation_energy("fragment-b", "relaxed")
+        artifact = DeformationEnergyArtifact(
+            producing_calculation="deformation-mismatched-fragment",
+            parent_artifacts=(distorted.artifact_id, relaxed.artifact_id),
+            validation=PASSED,
+        )
+
+        with self.assertRaisesRegex(
+            ArtifactCompatibilityError, "same fragment identity"
+        ):
+            validate_artifact_compatibility(artifact, (distorted, relaxed))
+
+    def test_deformation_energy_rejects_mismatched_method(self) -> None:
+        distorted = _deformation_energy("fragment-a", "distorted")
+        relaxed = _deformation_energy("fragment-a", "relaxed", method="PBE0")
+        artifact = DeformationEnergyArtifact(
+            producing_calculation="deformation-mismatched-method",
+            parent_artifacts=(distorted.artifact_id, relaxed.artifact_id),
+            validation=PASSED,
+        )
+
+        with self.assertRaisesRegex(
+            ArtifactCompatibilityError, "incompatible methods"
+        ):
+            validate_artifact_compatibility(artifact, (distorted, relaxed))
+
     def test_cp_interaction_requires_comparable_dimer_and_fragment_energies(self) -> None:
         dimer = _energy(DimerEnergyArtifact, "dimer", "dimer")
         fragment_a = _energy(FragmentEnergyArtifact, "fragment-a", "fragment")

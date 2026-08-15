@@ -273,6 +273,8 @@ ARTIFACT_TYPES: dict[str, type[Artifact]] = {
 class ArtifactCompatibilityError(ValueError):
     """Raised when parent artifacts cannot support a derived scientific result."""
 
+    code = "FAILED_ARTIFACT_COMPATIBILITY"
+
 
 def artifact_from_dict(value: Mapping[str, Any]) -> Artifact:
     if value.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
@@ -349,6 +351,89 @@ def _protocol_signature(artifact: Artifact) -> tuple[str, str, str]:
     return _normal(artifact.method), _normal(artifact.basis), stable_hash(protocol)
 
 
+def _deformation_protocol_signature(artifact: Artifact) -> tuple[str, str, str]:
+    protocol = {
+        key: value
+        for key, value in artifact.protocol.items()
+        if key
+        not in {
+            "fragment",
+            "fragment_id",
+            "geometry_role",
+            "geometry_state",
+            "role",
+        }
+    }
+    return _normal(artifact.method), _normal(artifact.basis), stable_hash(protocol)
+
+
+def _validate_deformation_parents(parents: Sequence[Artifact]) -> None:
+    if not parents or any(
+        not isinstance(parent, FragmentEnergyArtifact) for parent in parents
+    ):
+        raise ArtifactCompatibilityError(
+            "DeformationEnergyArtifact requires FragmentEnergyArtifact parents"
+        )
+
+    by_fragment: dict[str, dict[str, FragmentEnergyArtifact]] = {}
+    identities: dict[str, tuple[int, int]] = {}
+    for parent in parents:
+        fragment_id = parent.metadata.get("fragment_id")
+        geometry_state = parent.metadata.get("geometry_state")
+        charge = parent.metadata.get("charge")
+        multiplicity = parent.metadata.get("multiplicity")
+        if not isinstance(fragment_id, str) or not fragment_id.strip():
+            raise ArtifactCompatibilityError(
+                "deformation parent energies require a fragment_id"
+            )
+        if geometry_state not in {"distorted", "relaxed"}:
+            raise ArtifactCompatibilityError(
+                "deformation parent energies require geometry_state "
+                "distorted or relaxed"
+            )
+        if not isinstance(charge, int) or isinstance(charge, bool):
+            raise ArtifactCompatibilityError(
+                "deformation parent energies require an integer charge"
+            )
+        if (
+            not isinstance(multiplicity, int)
+            or isinstance(multiplicity, bool)
+            or multiplicity < 1
+        ):
+            raise ArtifactCompatibilityError(
+                "deformation parent energies require a positive multiplicity"
+            )
+        states = by_fragment.setdefault(fragment_id, {})
+        if geometry_state in states:
+            raise ArtifactCompatibilityError(
+                f"fragment {fragment_id!r} has duplicate {geometry_state} energies"
+            )
+        states[geometry_state] = parent
+        identity = (charge, multiplicity)
+        if fragment_id in identities and identities[fragment_id] != identity:
+            raise ArtifactCompatibilityError(
+                f"fragment {fragment_id!r} has incompatible charge or multiplicity"
+            )
+        identities[fragment_id] = identity
+
+    incomplete = sorted(
+        fragment_id
+        for fragment_id, states in by_fragment.items()
+        if set(states) != {"distorted", "relaxed"}
+    )
+    if incomplete:
+        raise ArtifactCompatibilityError(
+            "deformation energy requires distorted and relaxed energies for the same "
+            f"fragment identity: {', '.join(incomplete)}"
+        )
+
+    signatures = {_deformation_protocol_signature(parent) for parent in parents}
+    if len(signatures) != 1:
+        raise ArtifactCompatibilityError(
+            "deformation parent energies use incompatible methods, bases, or protocols"
+        )
+
+
 def validate_artifact_compatibility(
     artifact: Artifact, parents: Sequence[Artifact]
 ) -> None:
@@ -393,6 +478,9 @@ def validate_artifact_compatibility(
             raise ArtifactCompatibilityError(
                 "counterpoise parent energies use different methods, bases, or protocols"
             )
+
+    if isinstance(artifact, DeformationEnergyArtifact):
+        _validate_deformation_parents(selected)
 
     if isinstance(artifact, LEDArtifact):
         compatible = [

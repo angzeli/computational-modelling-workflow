@@ -98,8 +98,9 @@ Artifact
 │   │   ├── SinglePointArtifact
 │   │   ├── DimerEnergyArtifact
 │   │   ├── FragmentEnergyArtifact
-│   │   └── InteractionEnergyArtifact
-│   │       └── CPInteractionArtifact
+│   │   ├── InteractionEnergyArtifact
+│   │   │   └── CPInteractionArtifact
+│   │   └── DeformationEnergyArtifact
 │   ├── OptimizationArtifact
 │   ├── FrequencyArtifact
 │   └── WavefunctionArtifact
@@ -117,6 +118,7 @@ not mutable file locations or a later validation verdict.
 Compatibility is checked separately from graph traversal. Current rules cover:
 
 - comparable dimer/supersystem and fragment energies for a CP artifact;
+- paired distorted and relaxed energies for each deformation fragment;
 - a valid DLPNO calculation with LED enabled for an LED artifact; and
 - a valid density parent for an IGMH artifact.
 
@@ -124,6 +126,55 @@ The rules can be extended without teaching the graph engine about a particular
 scientific operation. Existing ORCA and Multiwfn results retain their original
 artifact manifests and additionally expose `scientific_artifact`. Result readers
 continue to accept older records that predate this field.
+
+### Deformation-energy contract
+
+`DeformationEnergyArtifact` is a generic derived-energy contract rather than a
+domain-adapter rule. Its parents must be validated `FragmentEnergyArtifact`
+objects. Each parent records a non-empty `fragment_id`, integer `charge`,
+positive `multiplicity`, and a `geometry_state` of either `distorted` or
+`relaxed`. For every fragment identity, exactly one energy from each geometry
+state must be available.
+
+The paired energies must agree on fragment identity, charge, multiplicity,
+method, basis, and protocol. Geometry-state fields are intentionally excluded
+from the protocol comparison because the state distinction is the quantity
+being compared. Missing references, mixed fragment identities, and incompatible
+calculation protocols raise `FAILED_ARTIFACT_COMPATIBILITY`; no deformation
+value is inferred or synthesized.
+
+### Production IGMH execution contract
+
+The reusable IGMH planning layer may describe a non-executing workflow before a
+project selects a grid. Before any production Multiwfn IGMH execution,
+`validate_igmh_execution_contract()` requires an explicit finite, positive
+`grid_spacing_bohr`; there is no implicit project or engine default. It also
+requires a validated, declared `DensityArtifact` whose identity, method, and
+basis agree with the `IGMHArtifact`.
+
+An `IGMHArtifact` records the selected grid spacing, density artifact identity,
+complete Multiwfn protocol, and any supplied visualization settings in its
+metadata. Missing or contradictory production intent raises
+`FAILED_PROTOCOL_MISMATCH`. Existing planning-only manifests and older result
+readers remain valid; the stricter contract is applied at the production
+execution boundary.
+
+### Batch artifact finalization
+
+`finalize_artifact_bundle()` promotes a set of planned artifacts using explicit
+`ArtifactFinalizationEvidence` supplied by execution or analysis finalizers. It
+resolves declared parents in dependency order, merges only supplied file and
+provenance evidence, requires every artifact validation to have passed, and
+runs the normal typed compatibility rules before adding a derived artifact to
+the bundle.
+
+Scientific identity fields and parent declarations are preserved, so batch
+finalization cannot change methods, protocols, or derived values. Missing
+parents, absent evidence, failed validations, duplicate identities, and
+incompatible artifacts produce an `ArtifactBundleFinalizationError` with
+machine-readable per-artifact failures. The helper performs no external
+execution and returns a `FinalizedArtifactBundle` only when the complete set is
+valid.
 
 ### Structure artifacts
 
