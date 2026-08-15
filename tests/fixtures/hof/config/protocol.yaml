@@ -1,6 +1,17 @@
 schema_version: 1
 
 workflow:
+  starting_geometry:
+    enabled: true
+    source: model_constructed
+
+  geometry:
+    enabled: true
+    method_ref: geometry
+    outputs:
+      - optimized_geometry
+      - hydrogen_bond_geometry
+
   interaction_energy:
     enabled: true
     method_ref: interaction_energy
@@ -11,3 +22,10 @@ workflow:
       - interaction_energy
       - deformation_energy
       - led
+
+  igmh:
+    enabled: true
+    density_method_ref: igmh_density
+    geometry_source: optimized_dimer
+    outputs:
+      - igmh

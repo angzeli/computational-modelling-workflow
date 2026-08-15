@@ -1,5 +1,10 @@
 schema_version: 1
 
+geometry:
+  program: orca
+  method: r2SCAN-3c
+  task: opt_freq
+
 high_level:
   program: orca
   method: DLPNO-CCSD(T)
@@ -12,3 +17,10 @@ interaction_energy:
   counterpoise: true
   led: true
   frozen_fragments: true
+
+igmh_density:
+  program: orca
+  method: wB97X-D4
+  basis: def2-TZVPP
+  tight_scf: true
+  task: sp

@@ -11,8 +11,11 @@ from .models import (
     HOF_ADAPTER_SCHEMA_VERSION,
     HofAdapterConfiguration,
     HofFragment,
+    HofGeometryProtocol,
     HofHydrogenBond,
+    HofIgmhProtocol,
     HofInteractionProtocol,
+    HofStartingGeometryProtocol,
     HofSystem,
 )
 from .validation import validate_hof_system
@@ -326,6 +329,129 @@ def _parse_interaction_protocol(
     )
 
 
+def _workflow_section(
+    protocol_document: Mapping[str, Any], name: str
+) -> dict[str, Any] | None:
+    workflow = _mapping(protocol_document.get("workflow"), name="workflow")
+    raw = workflow.get(name)
+    return None if raw is None else _mapping(raw, name=f"workflow.{name}")
+
+
+def _parse_starting_geometry_protocol(
+    protocol_document: Mapping[str, Any],
+) -> HofStartingGeometryProtocol | None:
+    section = _workflow_section(protocol_document, "starting_geometry")
+    if section is None:
+        return None
+    if not _boolean(
+        section.get("enabled"), name="workflow.starting_geometry.enabled"
+    ):
+        raise ValueError("HOF starting_geometry workflow must be enabled")
+    return HofStartingGeometryProtocol(
+        _required_string(
+            section.get("source"), name="workflow.starting_geometry.source"
+        )
+    )
+
+
+def _parse_geometry_protocol(
+    methods_document: Mapping[str, Any], protocol_document: Mapping[str, Any]
+) -> HofGeometryProtocol | None:
+    section = _workflow_section(protocol_document, "geometry")
+    if section is None:
+        return None
+    if not _boolean(section.get("enabled"), name="workflow.geometry.enabled"):
+        raise ValueError("HOF geometry workflow must be enabled")
+    method_ref = _required_string(
+        section.get("method_ref"), name="workflow.geometry.method_ref"
+    )
+    resolved = _resolve_method(methods_document, method_ref)
+    program = _required_string(
+        resolved.get("program"), name=f"methods.{method_ref}.program"
+    )
+    if program.casefold() != "orca":
+        raise ValueError("HOF geometry protocol currently requires program: orca")
+    task = _required_string(resolved.get("task"), name=f"methods.{method_ref}.task")
+    if task.casefold() not in {"opt", "opt_freq"}:
+        raise ValueError("HOF geometry task must be opt or opt_freq")
+    outputs = _strings(section.get("outputs"), name="workflow.geometry.outputs")
+    if "optimized_geometry" not in outputs:
+        raise ValueError("workflow.geometry.outputs requires optimized_geometry")
+    consumed = {"program", "method", "task"}
+    return HofGeometryProtocol(
+        method_ref=method_ref,
+        program=program,
+        method=_required_string(
+            resolved.get("method"), name=f"methods.{method_ref}.method"
+        ),
+        task=task,
+        outputs=outputs,
+        metadata={key: item for key, item in resolved.items() if key not in consumed},
+    )
+
+
+def _parse_igmh_protocol(
+    methods_document: Mapping[str, Any], protocol_document: Mapping[str, Any]
+) -> HofIgmhProtocol | None:
+    section = _workflow_section(protocol_document, "igmh")
+    if section is None:
+        return None
+    if not _boolean(section.get("enabled"), name="workflow.igmh.enabled"):
+        raise ValueError("HOF IGMH workflow must be enabled")
+    method_ref = _required_string(
+        section.get("density_method_ref"), name="workflow.igmh.density_method_ref"
+    )
+    resolved = _resolve_method(methods_document, method_ref)
+    program = _required_string(
+        resolved.get("program"), name=f"methods.{method_ref}.program"
+    )
+    if program.casefold() != "orca":
+        raise ValueError("HOF IGMH density protocol currently requires program: orca")
+    task = _required_string(resolved.get("task"), name=f"methods.{method_ref}.task")
+    if task.casefold() != "sp":
+        raise ValueError("HOF IGMH density protocol requires task: sp")
+    outputs = _strings(section.get("outputs"), name="workflow.igmh.outputs")
+    if "igmh" not in outputs:
+        raise ValueError("workflow.igmh.outputs requires igmh")
+    raw_spacing = section.get("grid_spacing_bohr")
+    if raw_spacing is not None and (
+        isinstance(raw_spacing, bool) or not isinstance(raw_spacing, (int, float))
+    ):
+        raise ValueError("workflow.igmh.grid_spacing_bohr must be numeric")
+    visualization = section.get("visualization", {})
+    consumed = {"program", "method", "basis", "tight_scf", "task"}
+    return HofIgmhProtocol(
+        density_method_ref=method_ref,
+        program=program,
+        method=_required_string(
+            resolved.get("method"), name=f"methods.{method_ref}.method"
+        ),
+        basis=_required_string(
+            resolved.get("basis"), name=f"methods.{method_ref}.basis"
+        ),
+        tight_scf=_boolean(
+            resolved.get("tight_scf"), name=f"methods.{method_ref}.tight_scf"
+        ),
+        task=task,
+        geometry_source=_required_string(
+            section.get("geometry_source"), name="workflow.igmh.geometry_source"
+        ),
+        outputs=outputs,
+        profile=_required_string(
+            section.get("profile", "interfragment"), name="workflow.igmh.profile"
+        ),
+        cube_generation=_boolean(
+            section.get("cube_generation", True),
+            name="workflow.igmh.cube_generation",
+        ),
+        grid_spacing_bohr=float(raw_spacing) if raw_spacing is not None else None,
+        visualization=_mapping(
+            visualization, name="workflow.igmh.visualization"
+        ),
+        metadata={key: item for key, item in resolved.items() if key not in consumed},
+    )
+
+
 def configuration_from_documents(
     *,
     systems: Mapping[str, Any],
@@ -348,6 +474,9 @@ def configuration_from_documents(
             geometry=geometry,
         ),
         interaction=_parse_interaction_protocol(methods, protocol),
+        starting_geometry=_parse_starting_geometry_protocol(protocol),
+        geometry=_parse_geometry_protocol(methods, protocol),
+        igmh=_parse_igmh_protocol(methods, protocol),
         source_files=dict(source_files or {}),
     )
 

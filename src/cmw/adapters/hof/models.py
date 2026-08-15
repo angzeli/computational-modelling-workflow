@@ -215,11 +215,114 @@ class HofInteractionProtocol:
 
 
 @dataclass(frozen=True)
+class HofStartingGeometryProtocol:
+    """Declared provenance for the source structure selected by the HOF project."""
+
+    source: str
+
+    def __post_init__(self) -> None:
+        if not self.source:
+            raise ValueError("starting geometry source is required")
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class HofGeometryProtocol:
+    """Resolved HOF geometry-optimization intent."""
+
+    method_ref: str
+    program: str
+    method: str
+    task: str
+    outputs: tuple[str, ...]
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not all((self.method_ref, self.program, self.method, self.task)):
+            raise ValueError("geometry protocol requires method, program, and task")
+        if len(set(self.outputs)) != len(self.outputs):
+            raise ValueError("geometry protocol outputs must be unique")
+        object.__setattr__(self, "outputs", tuple(self.outputs))
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
+    @property
+    def method_metadata(self) -> dict[str, object]:
+        return {
+            "method": self.method,
+            "task": self.task,
+            **dict(self.metadata),
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class HofIgmhProtocol:
+    """Resolved density-calculation and generic Multiwfn IGMH intent."""
+
+    density_method_ref: str
+    program: str
+    method: str
+    basis: str
+    tight_scf: bool
+    task: str
+    geometry_source: str
+    outputs: tuple[str, ...]
+    profile: str = "interfragment"
+    cube_generation: bool = True
+    grid_spacing_bohr: float | None = None
+    visualization: Mapping[str, object] = field(default_factory=dict)
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.density_method_ref,
+                self.program,
+                self.method,
+                self.basis,
+                self.task,
+                self.geometry_source,
+            )
+        ):
+            raise ValueError("IGMH protocol requires a complete density method")
+        if self.profile != "interfragment":
+            raise ValueError("HOF IGMH currently requires the interfragment profile")
+        if not self.cube_generation:
+            raise ValueError("HOF IGMH requires cube generation")
+        if self.grid_spacing_bohr is not None and self.grid_spacing_bohr <= 0:
+            raise ValueError("IGMH grid spacing must be positive when provided")
+        if len(set(self.outputs)) != len(self.outputs):
+            raise ValueError("IGMH protocol outputs must be unique")
+        object.__setattr__(self, "outputs", tuple(self.outputs))
+        object.__setattr__(self, "visualization", dict(self.visualization))
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
+    @property
+    def density_metadata(self) -> dict[str, object]:
+        return {
+            "method": self.method,
+            "basis": self.basis,
+            "tight_scf": self.tight_scf,
+            "task": self.task,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class HofAdapterConfiguration:
-    """Validated system and interaction protocol ready for workflow translation."""
+    """Validated HOF protocols ready for adapter-level workflow translation."""
 
     system: HofSystem
     interaction: HofInteractionProtocol
+    starting_geometry: HofStartingGeometryProtocol | None = None
+    geometry: HofGeometryProtocol | None = None
+    igmh: HofIgmhProtocol | None = None
     source_files: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -231,6 +334,13 @@ class HofAdapterConfiguration:
             "adapter": "hof",
             "system": self.system.to_dict(),
             "interaction": self.interaction.to_dict(),
+            "starting_geometry": (
+                self.starting_geometry.to_dict()
+                if self.starting_geometry is not None
+                else None
+            ),
+            "geometry": self.geometry.to_dict() if self.geometry is not None else None,
+            "igmh": self.igmh.to_dict() if self.igmh is not None else None,
             "source_files": dict(self.source_files),
         }
 
@@ -239,7 +349,10 @@ __all__ = [
     "HOF_ADAPTER_SCHEMA_VERSION",
     "HofAdapterConfiguration",
     "HofFragment",
+    "HofGeometryProtocol",
     "HofHydrogenBond",
+    "HofIgmhProtocol",
     "HofInteractionProtocol",
+    "HofStartingGeometryProtocol",
     "HofSystem",
 ]
