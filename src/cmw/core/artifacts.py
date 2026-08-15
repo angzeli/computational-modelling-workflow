@@ -228,6 +228,12 @@ class CPInteractionArtifact(InteractionEnergyArtifact):
     TYPE = "CPInteractionArtifact"
 
 
+class DeformationEnergyArtifact(EnergyArtifact):
+    """Derived energy cost between distorted and relaxed structures."""
+
+    TYPE = "DeformationEnergyArtifact"
+
+
 class LEDArtifact(AnalysisArtifact):
     TYPE = "LEDArtifact"
 
@@ -256,6 +262,7 @@ ARTIFACT_TYPES: dict[str, type[Artifact]] = {
         FragmentEnergyArtifact,
         InteractionEnergyArtifact,
         CPInteractionArtifact,
+        DeformationEnergyArtifact,
         LEDArtifact,
         DensityArtifact,
         IGMHArtifact,
@@ -536,6 +543,7 @@ __all__ = [
     "ArtifactValidation",
     "CPInteractionArtifact",
     "CalculationArtifact",
+    "DeformationEnergyArtifact",
     "DensityArtifact",
     "DimerEnergyArtifact",
     "EnergyArtifact",

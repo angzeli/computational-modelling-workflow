@@ -12,6 +12,7 @@ from cmw.core.artifacts import (
     DimerEnergyArtifact,
     FragmentEnergyArtifact,
     LEDArtifact,
+    StructureArtifact,
     WavefunctionArtifact,
 )
 from cmw.core.provenance import stable_hash
@@ -73,6 +74,8 @@ class HofInteractionPlan:
 
 def build_hof_interaction_workflow(
     configuration: HofAdapterConfiguration,
+    *,
+    structure_artifact: StructureArtifact | None = None,
 ) -> HofInteractionPlan:
     """Build dimer -> fragments -> CP interaction -> LED with generic CMW types."""
 
@@ -97,6 +100,7 @@ def build_hof_interaction_workflow(
             dimer_id,
             operation="orca_single_point",
             role="supersystem",
+            requires=(ArtifactRequirement("StructureArtifact"),),
             produces=("DimerEnergyArtifact", "WavefunctionArtifact"),
             configuration={
                 "calculation_id": dimer_calculation.calculation_id,
@@ -165,6 +169,7 @@ def build_hof_interaction_workflow(
     graph = WorkflowGraph(
         f"hof_interaction_{_node_token(system.system_id)}_{system.system_identity[:12]}",
         tuple(nodes),
+        external_inputs=("StructureArtifact",),
     )
 
     provenance = {
@@ -175,11 +180,15 @@ def build_hof_interaction_workflow(
     method = configuration.interaction.method
     basis = configuration.interaction.basis
     energy_protocol = configuration.interaction.energy_metadata
+    structure_parents = (
+        (structure_artifact.artifact_id,) if structure_artifact is not None else ()
+    )
     dimer_energy = DimerEnergyArtifact(
         producing_calculation=dimer_calculation.calculation_id,
         method=method,
         basis=basis,
         protocol=energy_protocol,
+        parent_artifacts=structure_parents,
         provenance=provenance,
         metadata={"energy_role": "supersystem", "system_id": system.system_id},
     )
@@ -188,6 +197,7 @@ def build_hof_interaction_workflow(
         method=method,
         basis=basis,
         protocol=configuration.interaction.led_metadata,
+        parent_artifacts=structure_parents,
         provenance=provenance,
         metadata={"analysis_role": "led_source", "system_id": system.system_id},
     )
