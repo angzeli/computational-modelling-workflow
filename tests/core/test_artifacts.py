@@ -53,6 +53,32 @@ class ArtifactIdentityTests(unittest.TestCase):
         self.assertTrue(artifact_matches_type(restored, "EnergyArtifact"))
         self.assertTrue(restored.validation.passed)
 
+    def test_existing_schema_one_manifest_remains_readable(self) -> None:
+        restored = artifact_from_dict(
+            {
+                "schema_version": 1,
+                "artifact_id": (
+                    "d0247ba3658fe2791077cbafcf3e88cede3570ba57554eb7bb666c3ef85f6f36"
+                ),
+                "artifact_type": "SinglePointArtifact",
+                "producing_calculation": "legacy-sp",
+                "method": "PBE0",
+                "basis": "def2-SVP",
+                "protocol": {},
+                "parent_artifacts": [],
+                "files": {},
+                "validation": {},
+                "provenance": {},
+                "metadata": {},
+            }
+        )
+
+        self.assertIsInstance(restored, SinglePointArtifact)
+        self.assertEqual(
+            restored.artifact_id,
+            "d0247ba3658fe2791077cbafcf3e88cede3570ba57554eb7bb666c3ef85f6f36",
+        )
+
     def test_legacy_orca_result_maps_without_replacing_existing_fields(self) -> None:
         target = JobTarget(
             "SP",

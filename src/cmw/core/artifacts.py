@@ -87,18 +87,19 @@ class Artifact:
     def artifact_id(self) -> str:
         """Stable semantic identity; file locations and verdicts are evidence, not intent."""
 
-        return stable_hash(
-            {
-                "schema_version": ARTIFACT_SCHEMA_VERSION,
-                "artifact_type": self.artifact_type,
-                "producing_calculation": self.producing_calculation,
-                "method": self.method,
-                "basis": self.basis,
-                "protocol": dict(self.protocol),
-                "parent_artifacts": list(self.parent_artifacts),
-                "metadata": dict(self.metadata),
-            }
-        )
+        return stable_hash(self._identity_payload())
+
+    def _identity_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": ARTIFACT_SCHEMA_VERSION,
+            "artifact_type": self.artifact_type,
+            "producing_calculation": self.producing_calculation,
+            "method": self.method,
+            "basis": self.basis,
+            "protocol": dict(self.protocol),
+            "parent_artifacts": list(self.parent_artifacts),
+            "metadata": dict(self.metadata),
+        }
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -131,6 +132,72 @@ class WavefunctionArtifact(CalculationArtifact):
 
 class AnalysisArtifact(Artifact):
     TYPE = "AnalysisArtifact"
+
+
+@dataclass(frozen=True)
+class StructureArtifact(Artifact):
+    """First-class identity for an input, generated, or calculated structure."""
+
+    TYPE: ClassVar[str] = "StructureArtifact"
+
+    source: str = ""
+    format: str = ""
+    atom_count: int | None = None
+    elemental_composition: Mapping[str, int] = field(default_factory=dict)
+    charge: int | None = None
+    multiplicity: int | None = None
+    geometry_hash: str = ""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.atom_count is not None and self.atom_count < 1:
+            raise ValueError("structure atom_count must be positive when provided")
+        composition = {
+            str(element): int(count)
+            for element, count in self.elemental_composition.items()
+        }
+        if any(not element or count < 1 for element, count in composition.items()):
+            raise ValueError("elemental composition requires positive counts")
+        if self.charge is not None and not isinstance(self.charge, int):
+            raise ValueError("structure charge must be an integer when provided")
+        if self.multiplicity is not None and (
+            not isinstance(self.multiplicity, int) or self.multiplicity < 1
+        ):
+            raise ValueError("structure multiplicity must be a positive integer")
+        object.__setattr__(self, "source", str(self.source))
+        object.__setattr__(self, "format", str(self.format).casefold().lstrip("."))
+        object.__setattr__(self, "elemental_composition", composition)
+        object.__setattr__(self, "geometry_hash", str(self.geometry_hash))
+
+    def _identity_payload(self) -> dict[str, object]:
+        payload = super()._identity_payload()
+        payload["structure"] = {
+            "source": self.source,
+            "format": self.format,
+            "atom_count": self.atom_count,
+            "elemental_composition": dict(sorted(self.elemental_composition.items())),
+            "charge": self.charge,
+            "multiplicity": self.multiplicity,
+            "geometry_hash": self.geometry_hash,
+        }
+        return payload
+
+    def to_dict(self) -> dict[str, object]:
+        value = super().to_dict()
+        value.update(
+            {
+                "source": self.source,
+                "format": self.format,
+                "atom_count": self.atom_count,
+                "elemental_composition": dict(
+                    sorted(self.elemental_composition.items())
+                ),
+                "charge": self.charge,
+                "multiplicity": self.multiplicity,
+                "geometry_hash": self.geometry_hash,
+            }
+        )
+        return value
 
 
 class OptimizationArtifact(CalculationArtifact):
@@ -181,6 +248,7 @@ ARTIFACT_TYPES: dict[str, type[Artifact]] = {
         EnergyArtifact,
         WavefunctionArtifact,
         AnalysisArtifact,
+        StructureArtifact,
         OptimizationArtifact,
         FrequencyArtifact,
         SinglePointArtifact,
@@ -206,16 +274,48 @@ def artifact_from_dict(value: Mapping[str, Any]) -> Artifact:
     cls = ARTIFACT_TYPES.get(artifact_type)
     if cls is None:
         raise ValueError(f"unsupported scientific artifact type: {artifact_type!r}")
+    arguments: dict[str, object] = {
+        "producing_calculation": str(value["producing_calculation"]),
+        "method": str(value["method"]) if value.get("method") is not None else None,
+        "basis": str(value["basis"]) if value.get("basis") is not None else None,
+        "protocol": dict(value.get("protocol", {})),
+        "parent_artifacts": tuple(str(item) for item in value.get("parent_artifacts", ())),
+        "files": {str(k): str(v) for k, v in dict(value.get("files", {})).items()},
+        "validation": ArtifactValidation.from_dict(dict(value.get("validation", {}))),
+        "provenance": dict(value.get("provenance", {})),
+        "metadata": dict(value.get("metadata", {})),
+    }
+    if issubclass(cls, StructureArtifact):
+        arguments.update(
+            {
+                "source": str(value.get("source", "")),
+                "format": str(value.get("format", "")),
+                "atom_count": (
+                    int(value["atom_count"])
+                    if value.get("atom_count") is not None
+                    else None
+                ),
+                "elemental_composition": {
+                    str(k): int(v)
+                    for k, v in dict(
+                        value.get("elemental_composition", {})
+                    ).items()
+                },
+                "charge": (
+                    int(value["charge"])
+                    if value.get("charge") is not None
+                    else None
+                ),
+                "multiplicity": (
+                    int(value["multiplicity"])
+                    if value.get("multiplicity") is not None
+                    else None
+                ),
+                "geometry_hash": str(value.get("geometry_hash", "")),
+            }
+        )
     artifact = cls(
-        producing_calculation=str(value["producing_calculation"]),
-        method=str(value["method"]) if value.get("method") is not None else None,
-        basis=str(value["basis"]) if value.get("basis") is not None else None,
-        protocol=dict(value.get("protocol", {})),
-        parent_artifacts=tuple(str(item) for item in value.get("parent_artifacts", ())),
-        files={str(k): str(v) for k, v in dict(value.get("files", {})).items()},
-        validation=ArtifactValidation.from_dict(dict(value.get("validation", {}))),
-        provenance=dict(value.get("provenance", {})),
-        metadata=dict(value.get("metadata", {})),
+        **arguments,
     )
     if value.get("artifact_id") not in (None, artifact.artifact_id):
         raise ValueError("stored artifact identity does not match artifact content")
@@ -446,6 +546,7 @@ __all__ = [
     "LEDArtifact",
     "OptimizationArtifact",
     "SinglePointArtifact",
+    "StructureArtifact",
     "ValidationStatus",
     "WavefunctionArtifact",
     "artifact_from_dict",
