@@ -181,8 +181,14 @@ multiwfn_cube_main() {
   monitor_pid=""
   set -e
   if ((process_status != 0)); then
+    local failure_json
+    failure_json=$("$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli finalize \
+      --target "$target_path" --runtime "$runtime_path" --menu "$menu_path" \
+      --attempt-directory "$attempt_directory" --process-exit-code "$process_status" \
+      --repository "$CMW_ROOT" 2>/dev/null || true)
     printf 'Multiwfn %s attempt failed with status %d; diagnostics retained in %s\n' \
       "$operation" "$process_status" "$attempt_directory" >&2
+    [[ -z "$failure_json" ]] || printf '%s\n' "$failure_json" >&2
     return "$process_status"
   fi
   "$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli normalize \

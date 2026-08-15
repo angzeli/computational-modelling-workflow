@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 
@@ -43,17 +42,23 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
             encoding="utf-8",
         )
 
-    def write_config(self, spacing: float) -> None:
+    def write_config(
+        self, spacing: float, *, outputs: list[dict[str, object]] | None = None
+    ) -> None:
+        record: dict[str, object] = {
+            "schema_version": 1,
+            "profile": "interfragment",
+            "grid_spacing_bohr": spacing,
+            "cube_generation": True,
+            "visualization": {
+                "format": "cube",
+                "recommended_isovalue": 0.01,
+            },
+        }
+        if outputs is not None:
+            record["outputs"] = outputs
         self.config.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "profile": "interfragment",
-                    "grid_spacing_bohr": spacing,
-                },
-                indent=2,
-            )
-            + "\n",
+            json.dumps(record, indent=2) + "\n",
             encoding="utf-8",
         )
 
@@ -101,6 +106,69 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
         self.assertEqual(calculation["indexing"], "one_based")
         self.assertEqual(calculation["grid_spacing_bohr"], 0.2)
         self.assertEqual(result["runtime"]["requested_nthreads"], 8)
+        self.assertEqual(result["scientific_artifact"]["artifact_type"], "IGMHArtifact")
+        self.assertEqual(
+            result["source_density_artifact"]["artifact_type"], "DensityArtifact"
+        )
+        self.assertEqual(
+            result["scientific_artifact"]["parent_artifacts"],
+            [result["source_density_artifact"]["artifact_id"]],
+        )
+        provenance = result["scientific_artifact"]["provenance"]
+        self.assertEqual(provenance["generating_program"], "Multiwfn")
+        self.assertEqual(provenance["multiwfn_version"], "3.8")
+        self.assertIn("source_wavefunction", provenance["input_files"])
+        self.assertEqual(
+            set(provenance["output_files"]),
+            {"delta_g_inter_cube", "sign_lambda2_rho_cube", "metadata"},
+        )
+        self.assertEqual(provenance["visualization"]["recommended_isovalue"], 0.01)
+        self.assertEqual(
+            result["scientific_artifact"]["validation"]["status"], "PASSED"
+        )
+        self.assertEqual(
+            result["workflow_graph"]["nodes"][1]["produces"], ["IGMHArtifact"]
+        )
+
+    def test_configured_output_paths_are_discovered_without_public_name_assumptions(
+        self,
+    ) -> None:
+        self.write_config(
+            0.2,
+            outputs=[
+                {
+                    "role": "delta_g_inter_cube",
+                    "raw_path": "dg_inter.cub",
+                    "output_path": "cubes/interaction-field.cube",
+                },
+                {
+                    "role": "sign_lambda2_rho_cube",
+                    "raw_path": "sl2r.cub",
+                    "output_path": "cubes/signed-density.cube",
+                },
+                {
+                    "role": "delta_g_intra_cube",
+                    "raw_path": "dg_intra.cub",
+                    "output_path": "cubes/intrafragment-field.cube",
+                    "required": False,
+                },
+            ],
+        )
+
+        result = json.loads(self.run_igmh().stdout)
+        attempt = next((self.output / "igmh").glob("*/attempts/*"))
+        self.assertTrue((attempt / "cubes/interaction-field.cube").is_file())
+        self.assertTrue((attempt / "cubes/signed-density.cube").is_file())
+        self.assertFalse((attempt / "cubes/intrafragment-field.cube").exists())
+        self.assertEqual(
+            set(result["required_artifact_roles"]),
+            {"delta_g_inter_cube", "sign_lambda2_rho_cube"},
+        )
+        command_outputs = {item["role"]: item for item in result["command"]["outputs"]}
+        self.assertEqual(
+            command_outputs["delta_g_inter_cube"]["output_path"],
+            "cubes/interaction-field.cube",
+        )
 
     def test_invalid_index_overlap_and_incomplete_partition_fail(self) -> None:
         cases = (
@@ -139,13 +207,15 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
         for label, extra_env in cases:
             with self.subTest(label=label):
                 self.output = self.root / f"{label} output"
-                completed = self.run_igmh(
-                    env={**self.env, **extra_env}, check=False
-                )
+                completed = self.run_igmh(env={**self.env, **extra_env}, check=False)
                 self.assertNotEqual(completed.returncode, 0)
+                if label == "missing":
+                    self.assertIn("MISSING_REQUIRED_OUTPUT", completed.stdout)
                 self.assertEqual(self.results("igmh"), [])
 
-    def test_changed_source_wavefunction_fails_closed_until_manifest_updates(self) -> None:
+    def test_changed_source_wavefunction_fails_closed_until_manifest_updates(
+        self,
+    ) -> None:
         self.wavefunction.write_text("changed without provenance\n", encoding="utf-8")
         completed = self.run_igmh(extra=("--plan",), check=False)
         self.assertNotEqual(completed.returncode, 0)
@@ -172,7 +242,9 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
             self.assertTrue(any(sample["process_count"] >= 1 for sample in history))
         else:
             self.assertTrue(all(sample["state"] == "UNKNOWN" for sample in history))
-        self.assertIn(health["state"], {"ACTIVE", "WAITING", "UNKNOWN", "POSSIBLY_STALLED"})
+        self.assertIn(
+            health["state"], {"ACTIVE", "WAITING", "UNKNOWN", "POSSIBLY_STALLED"}
+        )
         self.assertEqual(result["scientific"]["status"], "VALID")
 
     def test_plan_shows_fragments_indexing_outputs_and_no_menu_numbers(self) -> None:
@@ -186,7 +258,9 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
     def test_unsupported_version_fails_before_operation(self) -> None:
         unsupported = self.root / "unsupported Multiwfn"
         unsupported.write_text(
-            FAKE.read_text(encoding="utf-8").replace('print("Version 3.8")', 'print("Version 3.9")'),
+            FAKE.read_text(encoding="utf-8").replace(
+                'print("Version 3.8")', 'print("Version 3.9")'
+            ),
             encoding="utf-8",
         )
         unsupported.chmod(0o755)

@@ -4,6 +4,22 @@ CMW provides shell-first downstream workflows for validated molecular results.
 These analyses are siblings of one another: FMO does not precede ESP, and
 neither is added to the ORCA `opt+freq+sp` mode string.
 
+The reusable layer has three explicit contracts:
+
+- `MultiwfnCommandSpec` records the executable/source argument vector, stdin
+  file, working directory, environment contract, declared outputs, and runtime
+  provenance;
+- `MultiwfnOutputSpec` maps semantic output roles to known raw Multiwfn paths
+  and caller-selected public paths; and
+- the analysis workflow maps a validated wavefunction or density source to a
+  typed CMW artifact. IGMH requires a validated `DensityArtifact` and produces
+  an `IGMHArtifact`.
+
+The shell remains responsible for the child process, descriptors, signals,
+temporary runtime alias, and cleanup. Python owns command validation, menu
+generation, output discovery, scientific cube validation, artifact identity,
+and provenance.
+
 ## Validated source contract
 
 `--source` identifies a version-1 CMW ORCA result manifest. The manifest must:
@@ -134,21 +150,53 @@ two fragments must form a complete partition of the ordered source atoms:
 }
 ```
 
-The IGMH configuration separately records its scientific profile and mandatory
-grid spacing. No project-derived spacing is used as a default:
+The IGMH configuration separately records its scientific profile, mandatory
+grid spacing, cube-generation intent, visualization metadata, and optional
+output mapping. No project-derived spacing is used as a default:
 
 ```json
 {
   "schema_version": 1,
   "profile": "interfragment",
-  "grid_spacing_bohr": 0.20
+  "grid_spacing_bohr": 0.20,
+  "cube_generation": true,
+  "outputs": [
+    {
+      "role": "delta_g_inter_cube",
+      "raw_path": "dg_inter.cub",
+      "output_path": "cubes/interaction-field.cube"
+    },
+    {
+      "role": "sign_lambda2_rho_cube",
+      "raw_path": "sl2r.cub",
+      "output_path": "cubes/signed-density.cube"
+    },
+    {
+      "role": "delta_g_intra_cube",
+      "raw_path": "dg_intra.cub",
+      "output_path": "cubes/intrafragment-field.cube",
+      "required": false
+    }
+  ],
+  "visualization": {
+    "format": "cube",
+    "recommended_isovalue": 0.01
+  }
 }
 ```
 
-The proven output contract is `dg_inter.cub` (interfragment delta-g) plus
-`sl2r.cub` (sign(lambda2)rho). Both must be structurally complete, match the
-source geometry, and share a compatible grid. Source wavefunction, source
-geometry, fragments, grid, and operation profile enter target identity.
+The backward-compatible output contract uses `dg_inter.cub` (interfragment
+delta-g) plus `sl2r.cub` (sign(lambda2)rho), but these are defaults rather than
+public-path assumptions. Each role declares the raw file expected from the
+supported Multiwfn profile and a safe relative public path. Additional outputs
+such as an intrafragment field may be declared as required or optional. Every
+discovered cube must be structurally complete, match the source geometry, and
+share a compatible grid. Missing required roles are reported together as
+`MISSING_REQUIRED_OUTPUT` rather than being inferred from directory contents.
+
+Source wavefunction, source geometry, fragments, grid, requested output roles,
+and operation profile enter target identity. Visualization metadata is retained
+in artifact provenance and does not alter scientific artifact identity.
 Executable/version/hash, threads, run-local settings, timestamps, menu-input
 hash, and health evidence describe the attempt.
 
@@ -156,3 +204,9 @@ During a long run, CMW repeatedly samples the owned process tree and the
 Multiwfn log. Advisory states, including `POSSIBLY_STALLED`, never terminate the
 job and never substitute for post-run cube validation. Reuse requires the exact
 source/fragment/grid target and both intact validated cubes.
+
+Successful IGMH results contain the parent `DensityArtifact`, generating
+program and Multiwfn version, complete analysis protocol, source/menu/command
+input locations, discovered output locations, immutable attempt metadata,
+validation checks, and visualization metadata. No PDI, HOF, ORR, or other
+molecule-specific selection logic is present in this layer.

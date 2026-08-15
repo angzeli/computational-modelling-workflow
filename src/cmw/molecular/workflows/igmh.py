@@ -3,10 +3,36 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Mapping, Sequence
 
 from cmw.core.provenance import read_json
+from cmw.molecular.multiwfn.adapter import MultiwfnOutputSpec, validate_output_specs
+
+
+REQUIRED_INTERFRAGMENT_ROLES = frozenset(
+    {"delta_g_inter_cube", "sign_lambda2_rho_cube"}
+)
+
+
+def default_igmh_outputs() -> tuple[MultiwfnOutputSpec, ...]:
+    """Backward-compatible public names for the supported 3.8 profile."""
+
+    return (
+        MultiwfnOutputSpec(
+            "delta_g_inter_cube",
+            "dg_inter.cub",
+            "dg_inter.cub",
+            visualization={"field": "delta_g_inter"},
+        ),
+        MultiwfnOutputSpec(
+            "sign_lambda2_rho_cube",
+            "sl2r.cub",
+            "sl2r.cub",
+            visualization={"field": "sign_lambda2_rho"},
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -25,12 +51,76 @@ class FragmentDefinition:
 class IgmhConfiguration:
     grid_spacing_bohr: float
     profile: str = "interfragment"
+    cube_generation: bool = True
+    outputs: tuple[MultiwfnOutputSpec, ...] = field(
+        default_factory=default_igmh_outputs
+    )
+    visualization: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.grid_spacing_bohr) or self.grid_spacing_bohr <= 0:
             raise ValueError("IGMH grid spacing must be finite and positive")
         if self.profile != "interfragment":
             raise ValueError("only the interfragment IGMH profile is supported")
+        if not isinstance(self.cube_generation, bool):
+            raise ValueError("IGMH cube_generation must be a boolean")
+        if not self.cube_generation:
+            raise ValueError(
+                "the reusable IGMH artifact workflow requires cube generation"
+            )
+        outputs = validate_output_specs(self.outputs)
+        roles = {item.role for item in outputs if item.required}
+        missing = sorted(REQUIRED_INTERFRAGMENT_ROLES - roles)
+        if missing:
+            raise ValueError(
+                "interfragment IGMH outputs are missing required roles: "
+                + ", ".join(missing)
+            )
+        incompatible = sorted(
+            item.role
+            for item in outputs
+            if item.role in REQUIRED_INTERFRAGMENT_ROLES
+            and item.media_type != "application/x-gaussian-cube"
+        )
+        if incompatible:
+            raise ValueError(
+                "interfragment IGMH fields must use cube media types: "
+                + ", ".join(incompatible)
+            )
+        object.__setattr__(self, "outputs", outputs)
+        object.__setattr__(self, "visualization", dict(self.visualization))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "profile": self.profile,
+            "grid_spacing_bohr": self.grid_spacing_bohr,
+            "cube_generation": self.cube_generation,
+            "outputs": [item.to_dict() for item in self.outputs],
+        }
+
+
+def _outputs(value: object) -> tuple[MultiwfnOutputSpec, ...]:
+    if value is None:
+        return default_igmh_outputs()
+    items: list[MultiwfnOutputSpec] = []
+    if isinstance(value, Mapping):
+        for role, raw in value.items():
+            if isinstance(raw, str):
+                items.append(MultiwfnOutputSpec(str(role), raw, raw))
+            elif isinstance(raw, Mapping):
+                items.append(
+                    MultiwfnOutputSpec.from_mapping({"role": str(role), **dict(raw)})
+                )
+            else:
+                raise ValueError("IGMH output mappings require strings or objects")
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for item in value:
+            if not isinstance(item, Mapping):
+                raise ValueError("IGMH outputs must contain objects")
+            items.append(MultiwfnOutputSpec.from_mapping(item))
+    else:
+        raise ValueError("IGMH outputs must be a mapping or list")
+    return tuple(items)
 
 
 def load_fragments(path: Path, atom_count: int) -> FragmentDefinition:
@@ -52,7 +142,10 @@ def load_fragments(path: Path, atom_count: int) -> FragmentDefinition:
         if (
             not isinstance(values, list)
             or not values
-            or any(not isinstance(value, int) or isinstance(value, bool) for value in values)
+            or any(
+                not isinstance(value, int) or isinstance(value, bool)
+                for value in values
+            )
         ):
             raise ValueError(f"fragment {name} must contain one-based integer indices")
         if len(set(values)) != len(values):
@@ -68,7 +161,9 @@ def load_fragments(path: Path, atom_count: int) -> FragmentDefinition:
     supplied = set(parsed["A"]) | set(parsed["B"])
     if supplied != expected:
         missing = sorted(expected - supplied)
-        raise ValueError(f"fragment definitions are an incomplete partition; missing {missing}")
+        raise ValueError(
+            f"fragment definitions are an incomplete partition; missing {missing}"
+        )
     return FragmentDefinition(parsed["A"], parsed["B"])
 
 
@@ -77,7 +172,29 @@ def load_igmh_configuration(path: Path) -> IgmhConfiguration:
     if record.get("schema_version") != 1:
         raise ValueError("unsupported IGMH configuration schema")
     if "grid_spacing_bohr" not in record:
-        raise ValueError("IGMH grid_spacing_bohr is required; no project default is assumed")
+        raise ValueError(
+            "IGMH grid_spacing_bohr is required; no project default is assumed"
+        )
+    cube_generation = record.get("cube_generation", True)
+    if not isinstance(cube_generation, bool):
+        raise ValueError("IGMH cube_generation must be a boolean")
+    visualization = record.get("visualization", {})
+    if not isinstance(visualization, Mapping):
+        raise ValueError("IGMH visualization metadata must be a mapping")
     return IgmhConfiguration(
-        float(record["grid_spacing_bohr"]), str(record.get("profile", "interfragment"))
+        float(record["grid_spacing_bohr"]),
+        str(record.get("profile", record.get("mode", "interfragment"))),
+        cube_generation,
+        _outputs(record.get("outputs")),
+        dict(visualization),
     )
+
+
+__all__ = [
+    "FragmentDefinition",
+    "IgmhConfiguration",
+    "REQUIRED_INTERFRAGMENT_ROLES",
+    "default_igmh_outputs",
+    "load_fragments",
+    "load_igmh_configuration",
+]

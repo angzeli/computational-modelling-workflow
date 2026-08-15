@@ -395,6 +395,8 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
         cls = SinglePointArtifact
     elif stage_type == "MULTIWFN_ESP":
         cls = DensityArtifact
+    elif stage_type == "MULTIWFN_IGMH":
+        cls = IGMHArtifact
     elif stage_type.startswith("MULTIWFN_"):
         cls = AnalysisArtifact
     else:

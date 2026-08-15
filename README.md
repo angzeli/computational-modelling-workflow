@@ -29,7 +29,8 @@ This repository currently contains:
   eight-thread default, executable provenance, and advisory process health; and
 - independent, source-aware HOMO/LUMO, density/ESP, and interfragment IGMH cube
   workflows with structural validation, grid compatibility, and fail-closed
-  reuse.
+  reuse, plus deterministic command/output contracts and typed
+  density-to-IGMH artifact lineage.
 
 It does **not** redistribute Multiwfn or contain dimer-selection science,
 catalytic pathways, ASE, pymatgen, VASP, scheduler execution, cluster locking,

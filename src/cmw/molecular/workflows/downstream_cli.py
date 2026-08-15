@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from cmw.core.locks import acquire_lock, release_lock
+from cmw.molecular.multiwfn.adapter import MultiwfnAdapterError
 from cmw.molecular.multiwfn.runtime import resolve_threads
 
 from .multiwfn_analysis import (
@@ -99,7 +100,9 @@ def _lock(args: argparse.Namespace) -> int:
 
 
 def _common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--operation", choices=[item.value for item in AnalysisOperation], required=True)
+    parser.add_argument(
+        "--operation", choices=[item.value for item in AnalysisOperation], required=True
+    )
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--grid-spacing-bohr", type=float)
@@ -152,7 +155,17 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         return int(args.handler(args))
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+    except MultiwfnAdapterError as exc:
+        _print(exc.to_dict())
+        return 64
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        KeyError,
+        TypeError,
+        RuntimeError,
+    ) as exc:
         _print({"error": type(exc).__name__, "reason": str(exc)})
         return 64
 
