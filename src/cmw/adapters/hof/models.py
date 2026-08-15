@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Mapping
 
+from cmw.core.execution_profiles import ExecutionProfile
 from cmw.core.provenance import stable_hash
 from cmw.structure.xyz import XYZGeometry, geometry_hash
 
@@ -323,13 +324,14 @@ class HofAdapterConfiguration:
     starting_geometry: HofStartingGeometryProtocol | None = None
     geometry: HofGeometryProtocol | None = None
     igmh: HofIgmhProtocol | None = None
+    execution_profile: ExecutionProfile | None = None
     source_files: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_files", dict(self.source_files))
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "schema_version": HOF_ADAPTER_SCHEMA_VERSION,
             "adapter": "hof",
             "system": self.system.to_dict(),
@@ -343,6 +345,9 @@ class HofAdapterConfiguration:
             "igmh": self.igmh.to_dict() if self.igmh is not None else None,
             "source_files": dict(self.source_files),
         }
+        if self.execution_profile is not None:
+            value["execution_profile"] = self.execution_profile.to_dict()
+        return value
 
 
 __all__ = [

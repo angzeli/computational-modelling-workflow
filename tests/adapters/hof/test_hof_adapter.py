@@ -120,6 +120,57 @@ class HofAdapterTests(unittest.TestCase):
             plan.orca_calculations["fragment_left"].spec.protocol["counterpoise"]
         )
 
+    def test_optional_execution_config_is_loaded_without_changing_science(self) -> None:
+        base = load_hof_configuration(
+            systems_path=CONFIG / "systems.yaml",
+            methods_path=CONFIG / "methods.yaml",
+            protocol_path=CONFIG / "protocol.yaml",
+            system_id="synthetic_hof",
+        )
+        configured = load_hof_configuration(
+            systems_path=CONFIG / "systems.yaml",
+            methods_path=CONFIG / "methods.yaml",
+            protocol_path=CONFIG / "protocol.yaml",
+            execution_path=CONFIG / "execution.yaml",
+            system_id="synthetic_hof",
+        )
+        base_plan = build_hof_interaction_workflow(base)
+        configured_plan = build_hof_interaction_workflow(configured)
+
+        self.assertNotIn("execution_profile", base.to_dict())
+        self.assertNotIn("resources", base_plan.orca_calculations["dimer"].to_dict())
+        self.assertEqual(configured.execution_profile.name, "local_mac")
+        self.assertEqual(configured.execution_profile.orca.total_memory_gb, 18.0)
+        self.assertEqual(
+            {key: value.calculation_id for key, value in base_plan.orca_calculations.items()},
+            {
+                key: value.calculation_id
+                for key, value in configured_plan.orca_calculations.items()
+            },
+        )
+        self.assertEqual(
+            {
+                artifact.artifact_id
+                for values in base_plan.artifact_templates.values()
+                for artifact in values
+            },
+            {
+                artifact.artifact_id
+                for values in configured_plan.artifact_templates.values()
+                for artifact in values
+            },
+        )
+        dimer = configured_plan.orca_calculations["dimer"]
+        self.assertEqual(dimer.resources, OrcaResources(8, 1843))
+        self.assertEqual(dimer.execution["derived_total_memory_mb"], 14_744)
+
+        rendered = render_hof_orca_input(
+            system=configured.system,
+            calculation=dimer,
+        )
+        self.assertIn("%pal nprocs 8 end", rendered)
+        self.assertIn("%maxcore 1843", rendered)
+
     def test_invalid_fragment_partition_is_rejected(self) -> None:
         systems, methods, protocol = self.documents()
         overlapping = deepcopy(systems)

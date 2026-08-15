@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from cmw.core.execution_profiles import execution_profiles_from_mapping
 from cmw.core.process_health import (
     HealthAssessment,
     HealthReport,
@@ -27,6 +28,21 @@ from cmw.molecular.multiwfn.runtime import (
 
 ROOT = Path(__file__).resolve().parents[3]
 SHELL = ROOT / "scripts" / "multiwfn" / "multiwfn_runtime.sh"
+
+
+def _execution_profile():
+    return execution_profiles_from_mapping(
+        {
+            "schema_version": 1,
+            "active_profile": "local_mac",
+            "profiles": {
+                "local_mac": {
+                    "orca": {"nprocs": 8, "total_memory_gb": 18},
+                    "multiwfn": {"nthreads": 8, "total_memory_gb": 18},
+                }
+            },
+        }
+    ).selected
 
 
 def _fake(root: Path, name: str = "Multiwfn") -> Path:
@@ -99,6 +115,44 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(Path(one.settings_path).stat().st_mode & 0o222, 0)
             self.assertEqual(one.version, "3.8")
             self.assertEqual(one.executable_sha256, four.executable_sha256)
+
+    def test_execution_profile_threads_use_existing_runtime_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = _fake(root)
+            settings = root / "settings.ini"
+            settings.write_text("nthreads= 2\n", encoding="utf-8")
+            attempt = root / "attempt"
+            attempt.mkdir()
+            profile = _execution_profile()
+
+            runtime = prepare_runtime(
+                attempt_directory=attempt,
+                executable=str(executable),
+                settings_source=settings,
+                execution_profile=profile,
+                environment={},
+            )
+            record = runtime.to_dict()
+
+            self.assertEqual(runtime.requested_nthreads, 8)
+            self.assertIn("nthreads= 8", Path(runtime.settings_path).read_text())
+            self.assertEqual(record["execution_profile"], "local_mac")
+            self.assertEqual(record["execution_profile_hash"], profile.execution_profile_hash)
+            self.assertEqual(record["total_memory_gb"], 18.0)
+            self.assertNotIn("maxcore", record)
+
+            conflicting = root / "conflicting"
+            conflicting.mkdir()
+            with self.assertRaisesRegex(ValueError, "contradictory"):
+                prepare_runtime(
+                    attempt_directory=conflicting,
+                    executable=str(executable),
+                    settings_source=settings,
+                    cli_threads=4,
+                    execution_profile=profile,
+                    environment={},
+                )
 
     def test_unsupported_version_fails_before_launch(self) -> None:
         with self.assertRaisesRegex(ValueError, "supported series is 3.8"):

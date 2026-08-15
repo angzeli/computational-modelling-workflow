@@ -3,6 +3,8 @@
 `cmw.adapters.hof` is a domain adapter. It translates the HOF project's
 `systems.yaml`, `methods.yaml`, and `protocol.yaml` documents into generic CMW
 workflow nodes, typed artifact templates, and non-executing ORCA input plans.
+An optional `execution.yaml` selects a generic CMW resource profile; it does not
+change the HOF scientific schema or chemistry.
 No HOF rule is implemented in `cmw.core`.
 
 ## Schema mapping
@@ -14,6 +16,7 @@ No HOF rule is implemented in `cmw.core`.
 | `hydrogen_bonds` | `HofHydrogenBond` | validated domain metadata |
 | `interaction_energy.method_ref` | `HofInteractionProtocol` | resolved ORCA method and protocol metadata |
 | workflow outputs | `HofInteractionPlan` | DAG plus typed artifact templates |
+| optional `execution.yaml` | `ExecutionProfile` | ORCA and Multiwfn plan resources and execution provenance |
 
 External atom indices may be zero- or one-based, as declared by
 `atom_index_base`. The adapter normalizes them to zero-based indices for stable
@@ -105,6 +108,7 @@ configuration = load_hof_configuration(
     systems_path=root / "config/systems.yaml",
     methods_path=root / "config/methods.yaml",
     protocol_path=root / "config/protocol.yaml",
+    execution_path=root / "config/execution.yaml",  # optional
     system_id="hof_h4tbapy",
 )
 plan = build_hof_interaction_workflow(configuration)
@@ -113,3 +117,10 @@ print(plan.graph.topological_order())
 
 All adapter tests use synthetic geometries and fixtures. They do not invoke
 ORCA.
+
+The optional execution document is validated generically. An unknown
+`active_profile`, including a name that differs from all keys under `profiles`,
+fails closed. Selected ORCA resources use CMW's conservative per-process
+`%maxcore` derivation, while Multiwfn receives only its thread count through the
+existing runtime layer. Resource and profile hashes remain outside calculation
+and artifact identity.

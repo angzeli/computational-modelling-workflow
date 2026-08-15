@@ -6,7 +6,8 @@
 MULTIWFN_RUNTIME_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 MULTIWFN_RUNTIME_ROOT=$(cd "$MULTIWFN_RUNTIME_DIR/../.." && pwd -P)
 MULTIWFN_RUNTIME_PYTHON=${PYTHON_BIN:-python3}
-MULTIWFN_NTHREADS=${MULTIWFN_NTHREADS-8}
+MULTIWFN_NTHREADS=${MULTIWFN_NTHREADS-}
+MULTIWFN_EXECUTION_CONFIG=${MULTIWFN_EXECUTION_CONFIG:-}
 MULTIWFN_EXE=${MULTIWFN_EXE:-}
 MULTIWFN_VERSION=""
 MULTIWFN_RUN_SETTINGS_PATH=""
@@ -25,10 +26,12 @@ multiwfn_runtime_json_value() {
 
 multiwfn_runtime_prepare() {
   local attempt_directory=$1 metadata=$2 settings_source=${3:-} prepared
+  local execution_config=${4:-$MULTIWFN_EXECUTION_CONFIG}
   local command=(prepare --attempt-directory "$attempt_directory" --metadata "$metadata")
   [[ -z "$MULTIWFN_EXE" ]] || command+=(--multiwfn-exe "$MULTIWFN_EXE")
   [[ -z "$settings_source" ]] || command+=(--settings-source "$settings_source")
-  [[ -z "${MULTIWFN_NTHREADS+x}" ]] || command+=(--threads "$MULTIWFN_NTHREADS")
+  [[ -z "$MULTIWFN_NTHREADS" ]] || command+=(--threads "$MULTIWFN_NTHREADS")
+  [[ -z "$execution_config" ]] || command+=(--execution-config "$execution_config")
   if ! prepared=$(multiwfn_runtime_python "${command[@]}"); then
     printf '%s\n' "$prepared"
     return 64

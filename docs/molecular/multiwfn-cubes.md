@@ -72,6 +72,11 @@ recent Multiwfn builds may truncate long configuration paths. Executable hash,
 version, settings, requested threads, and process-health samples are execution
 provenance, not scientific target identity.
 
+An optional generic execution profile may supply `nthreads` through the same
+runtime path. Its declared total memory is recorded in runtime provenance, but
+CMW does not translate it into a fictitious Multiwfn memory keyword. An
+explicit thread override that contradicts the selected profile fails closed.
+
 Health sampling follows the owned process tree and selected output files.
 `POSSIBLY_STALLED` and low observed core use are advisory diagnostics; neither
 changes cube validity nor terminates a process.

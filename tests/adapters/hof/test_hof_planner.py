@@ -47,11 +47,12 @@ class HofWorkflowPlannerTests(unittest.TestCase):
             geometry=read_xyz(FIXTURES / "structure/input_structure/dimer.xyz"),
         )
 
-    def plan(self):
+    def plan(self, *, execution: bool = False):
         configuration = load_hof_configuration(
             systems_path=CONFIG / "systems.yaml",
             methods_path=CONFIG / "methods.yaml",
             protocol_path=CONFIG / "protocol.yaml",
+            execution_path=(CONFIG / "execution.yaml") if execution else None,
             system_id="synthetic_hof",
         )
         return build_hof_workflow_plan(configuration)
@@ -200,6 +201,44 @@ class HofWorkflowPlannerTests(unittest.TestCase):
         self.assertEqual(
             terminals,
             {"LEDArtifact", "DeformationEnergyArtifact", "IGMHArtifact"},
+        )
+
+    def test_execution_profile_populates_plans_not_scientific_identities(self) -> None:
+        base = self.plan()
+        configured = self.plan(execution=True)
+
+        self.assertEqual(
+            {
+                node_id: plan.calculation_id
+                for node_id, plan in base.orca_calculations.items()
+            },
+            {
+                node_id: plan.calculation_id
+                for node_id, plan in configured.orca_calculations.items()
+            },
+        )
+        self.assertEqual(
+            {
+                artifact.artifact_id
+                for artifacts in base.artifact_templates.values()
+                for artifact in artifacts
+            },
+            {
+                artifact.artifact_id
+                for artifacts in configured.artifact_templates.values()
+                for artifact in artifacts
+            },
+        )
+        for calculation in configured.orca_calculations.values():
+            self.assertEqual(calculation.resources.nprocs, 8)
+            self.assertEqual(calculation.resources.maxcore_mb_per_process, 1843)
+            self.assertEqual(calculation.execution["total_memory_gb"], 18.0)
+        runtime = configured.multiwfn_plans["multiwfn_igmh"]["runtime"]
+        self.assertEqual(runtime["nthreads"], 8)
+        self.assertEqual(runtime["total_memory_gb"], 18.0)
+        self.assertNotIn("maxcore", runtime)
+        self.assertEqual(
+            configured.metadata["execution_profile"]["name"], "local_mac"
         )
 
     def test_missing_branch_methods_fail_during_configuration_resolution(self) -> None:

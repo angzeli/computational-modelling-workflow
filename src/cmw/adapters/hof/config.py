@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from cmw.core.execution_profiles import execution_profiles_from_mapping
 from cmw.structure.xyz import XYZGeometry, read_xyz
 
 from .models import (
@@ -457,6 +458,7 @@ def configuration_from_documents(
     systems: Mapping[str, Any],
     methods: Mapping[str, Any],
     protocol: Mapping[str, Any],
+    execution: Mapping[str, Any] | None = None,
     system_id: str,
     project_root: Path,
     structure_override: Path | None = None,
@@ -477,6 +479,11 @@ def configuration_from_documents(
         starting_geometry=_parse_starting_geometry_protocol(protocol),
         geometry=_parse_geometry_protocol(methods, protocol),
         igmh=_parse_igmh_protocol(methods, protocol),
+        execution_profile=(
+            execution_profiles_from_mapping(execution).selected
+            if execution is not None
+            else None
+        ),
         source_files=dict(source_files or {}),
     )
 
@@ -486,15 +493,19 @@ def load_hof_configuration(
     systems_path: Path,
     methods_path: Path,
     protocol_path: Path,
+    execution_path: Path | None = None,
     system_id: str,
     project_root: Path | None = None,
     structure_override: Path | None = None,
 ) -> HofAdapterConfiguration:
-    """Load the three public HOF YAML files without changing their schema."""
+    """Load HOF science YAML plus an optional generic execution profile."""
 
     systems_path = systems_path.expanduser().resolve()
     methods_path = methods_path.expanduser().resolve()
     protocol_path = protocol_path.expanduser().resolve()
+    resolved_execution_path = (
+        execution_path.expanduser().resolve() if execution_path is not None else None
+    )
     selected_root = (
         project_root.expanduser().resolve()
         if project_root is not None
@@ -504,6 +515,11 @@ def load_hof_configuration(
         systems=load_yaml_document(systems_path),
         methods=load_yaml_document(methods_path),
         protocol=load_yaml_document(protocol_path),
+        execution=(
+            load_yaml_document(resolved_execution_path)
+            if resolved_execution_path is not None
+            else None
+        ),
         system_id=system_id,
         project_root=selected_root,
         structure_override=structure_override,
@@ -511,6 +527,11 @@ def load_hof_configuration(
             "systems": str(systems_path),
             "methods": str(methods_path),
             "protocol": str(protocol_path),
+            **(
+                {"execution": str(resolved_execution_path)}
+                if resolved_execution_path is not None
+                else {}
+            ),
         },
     )
 

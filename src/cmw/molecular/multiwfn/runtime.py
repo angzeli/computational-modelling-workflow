@@ -19,6 +19,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from cmw.core.execution_profiles import ExecutionProfile
 from cmw.core.process_health import HealthReport, monitor_once
 from cmw.core.provenance import file_hash
 
@@ -49,9 +50,17 @@ class MultiwfnRuntime:
     settings_sha256: str
     openmp_capability: str
     prepared_at: str
+    execution_profile: str | None = None
+    execution_profile_hash: str | None = None
+    total_memory_gb: float | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        value = asdict(self)
+        if self.execution_profile is None:
+            value.pop("execution_profile")
+            value.pop("execution_profile_hash")
+            value.pop("total_memory_gb")
+        return value
 
 
 @dataclass(frozen=True)
@@ -286,14 +295,28 @@ def prepare_runtime(
     settings_source: Path | None = None,
     cli_threads: str | int | None = None,
     config_threads: str | int | None = None,
+    execution_profile: ExecutionProfile | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> MultiwfnRuntime:
     env = os.environ if environment is None else environment
     resolved_executable = resolve_executable(
         explicit=executable, config=config_executable, environment=env
     )
+    profile_threads = (
+        execution_profile.multiwfn.nthreads
+        if execution_profile is not None
+        else None
+    )
+    if (
+        profile_threads is not None
+        and config_threads is not None
+        and parse_threads(config_threads) != profile_threads
+    ):
+        raise ValueError("configured Multiwfn threads contradict the execution profile")
     threads = resolve_threads(
-        cli_value=cli_threads, environment=env, config_value=config_threads
+        cli_value=cli_threads,
+        environment=env,
+        config_value=(profile_threads if profile_threads is not None else config_threads),
     )
     source = resolve_settings_source(
         resolved_executable, explicit=settings_source, environment=env
@@ -311,6 +334,19 @@ def prepare_runtime(
         settings_sha256=file_hash(settings),
         openmp_capability=detect_openmp(resolved_executable).value,
         prepared_at=datetime.now(timezone.utc).isoformat(),
+        execution_profile=(
+            execution_profile.name if execution_profile is not None else None
+        ),
+        execution_profile_hash=(
+            execution_profile.execution_profile_hash
+            if execution_profile is not None
+            else None
+        ),
+        total_memory_gb=(
+            execution_profile.multiwfn.total_memory_gb
+            if execution_profile is not None
+            else None
+        ),
     )
 
 
