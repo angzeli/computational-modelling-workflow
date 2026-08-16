@@ -87,8 +87,11 @@ def build_hof_interaction_workflow(
     if len(set(fragment_node_ids.values())) != len(fragment_node_ids):
         raise ValueError("fragment ids produce duplicate workflow node ids")
     calculations = build_hof_orca_calculations(
-        configuration, fragment_node_ids=fragment_node_ids
+        configuration,
+        structure_artifact=structure_artifact,
+        fragment_node_ids=fragment_node_ids,
     )
+    effective_structure_artifact = calculations["dimer"].geometry_artifact
     dimer_id = "dimer"
     cp_id = "cp_interaction"
     led_id = "led"
@@ -182,9 +185,7 @@ def build_hof_interaction_workflow(
     method = configuration.interaction.method
     basis = configuration.interaction.basis
     energy_protocol = configuration.interaction.energy_metadata
-    structure_parents = (
-        (structure_artifact.artifact_id,) if structure_artifact is not None else ()
-    )
+    structure_parents = (effective_structure_artifact.artifact_id,)
     dimer_energy = DimerEnergyArtifact(
         producing_calculation=dimer_calculation.calculation_id,
         method=method,

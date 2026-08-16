@@ -120,9 +120,11 @@ def _resolve_format(path: Path, declared: str) -> StructureFormatHandler | None:
     )
 
 
-def _structure_path(
-    artifact: StructureArtifact, *, base_dir: str | Path | None
+def structure_artifact_path(
+    artifact: StructureArtifact, *, base_dir: str | Path | None = None
 ) -> Path | None:
+    """Resolve the declared structure file without validating its contents."""
+
     raw = artifact.files.get("structure")
     if raw is None and len(artifact.files) == 1:
         raw = next(iter(artifact.files.values()))
@@ -139,7 +141,7 @@ def validate_structure_artifact(
 ) -> ArtifactValidation:
     """Validate file evidence and metadata without applying chemistry-specific rules."""
 
-    path = _structure_path(artifact, base_dir=base_dir)
+    path = structure_artifact_path(artifact, base_dir=base_dir)
     checks: dict[str, bool | None] = {
         "source_available": bool(artifact.source),
         "structure_file_declared": path is not None,
@@ -288,5 +290,6 @@ __all__ = [
     "register_structure_format",
     "registered_structure_formats",
     "structure_artifact_from_file",
+    "structure_artifact_path",
     "validate_structure_artifact",
 ]

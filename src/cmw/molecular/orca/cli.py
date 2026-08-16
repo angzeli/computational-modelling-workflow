@@ -11,11 +11,14 @@ from cmw.core.execution_layout import ExecutionLayout
 from cmw.core.execution_profiles import load_execution_profiles
 from cmw.core.job import GeometryLineage
 from cmw.core.locks import acquire_lock, inspect_lock, release_lock
+from cmw.core.provenance import atomic_write_json
+from cmw.core.structure_artifacts import structure_artifact_from_file
 
+from .geometry import OrcaGeometryInput, prepare_orca_geometry_input
 from .input import (
     OrcaResources,
     OrcaStageSpec,
-    make_target,
+    make_target_from_geometry_input,
     render_orca_input,
     resolve_orca_resources,
 )
@@ -28,9 +31,6 @@ def _print(value: object) -> None:
 
 
 def _prepare(args: argparse.Namespace) -> int:
-    from cmw.structure.xyz import read_xyz, write_xyz
-
-    source = read_xyz(Path(args.structure))
     spec = OrcaStageSpec(StageType(args.stage), args.keywords, tuple(args.block))
     execution: dict[str, object] | None = None
     if args.execution_config is not None:
@@ -51,7 +51,21 @@ def _prepare(args: argparse.Namespace) -> int:
             args.nprocs if args.nprocs is not None else 1,
             args.maxcore if args.maxcore is not None else 1000,
         )
-    target = make_target(source, charge=args.charge, multiplicity=args.multiplicity, spec=spec)
+    input_path = Path(args.input)
+    source_artifact = structure_artifact_from_file(
+        Path(args.structure).resolve(),
+        source=args.lineage_source,
+        charge=args.charge,
+        multiplicity=args.multiplicity,
+        provenance={"adapter": "cmw.molecular.orca.cli"},
+    )
+    geometry_path = (input_path.parent / "input.xyz").resolve()
+    geometry_input = prepare_orca_geometry_input(
+        source_artifact,
+        geometry_path,
+        provenance={"preparation": "orca_cli"},
+    )
+    target = make_target_from_geometry_input(geometry_input, spec=spec)
     lineage = GeometryLineage(
         source=args.lineage_source,
         geometry_sha256=target.geometry_sha256,
@@ -59,12 +73,11 @@ def _prepare(args: argparse.Namespace) -> int:
         parent_target_id=args.parent_target_id or None,
         parent_artifact_sha256=args.parent_artifact_sha256 or None,
     )
-    input_path = Path(args.input)
-    geometry_path = input_path.parent / "input.xyz"
-    write_xyz(geometry_path, source, comment="CMW attempt input geometry")
+    geometry_contract_path = input_path.parent / "geometry-input.json"
+    atomic_write_json(geometry_contract_path, geometry_input.to_dict())
     input_path.write_text(
         render_orca_input(
-            geometry_path=Path(geometry_path.name),
+            geometry_input=geometry_input,
             charge=args.charge,
             multiplicity=args.multiplicity,
             spec=spec,
@@ -79,6 +92,8 @@ def _prepare(args: argparse.Namespace) -> int:
         "target": args.target,
         "resources": resources.to_dict(),
         "execution_intent": spec.execution_intent.to_dict(),
+        "geometry_contract": str(geometry_contract_path),
+        "geometry_input": geometry_input.to_dict(),
     }
     if execution is not None:
         result["execution"] = execution
@@ -134,6 +149,16 @@ def _finalize(args: argparse.Namespace) -> int:
             )
             if args.layout
             else None
+        ),
+        geometry_input=(
+            OrcaGeometryInput.from_mapping(
+                json.loads(Path(args.geometry_contract).read_text(encoding="utf-8"))
+            )
+            if args.geometry_contract
+            else None
+        ),
+        geometry_contract_path=(
+            Path(args.geometry_contract) if args.geometry_contract else None
         ),
     )
     _print(record)
@@ -216,6 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
     finalize.add_argument("--imaginary-tolerance", type=float, default=0.0)
     finalize.add_argument("--parent-attempt-id", default="")
     finalize.add_argument("--layout", default="")
+    finalize.add_argument("--geometry-contract", default="")
     finalize.set_defaults(handler=_finalize)
 
     reuse = sub.add_parser("reuse")

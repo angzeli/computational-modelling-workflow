@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from cmw.core.artifacts import artifact_from_dict, artifact_from_result
 from cmw.core.execution_layout import ExecutionLayout, ExecutionLayoutError
 from cmw.core.job import ExecutionAttempt, GeometryLineage, JobTarget
+from cmw.core.structure_artifacts import structure_artifact_path
 from cmw.core.provenance import (
     ArtifactRecord,
     atomic_write_json,
@@ -29,6 +30,12 @@ from .status import (
     validate_stage,
 )
 from .input import orca_execution_intent, parse_rendered_orca_input
+from .geometry import (
+    OrcaGeometryInput,
+    OrcaGeometryMode,
+    legacy_geometry_provenance,
+    validate_orca_geometry_input,
+)
 from .protocol import ProtocolIntent, validate_protocol
 
 
@@ -95,16 +102,30 @@ def finalize_attempt(
     frequency_policy: FrequencyPolicy = FrequencyPolicy(),
     parent_attempt_id: str | None = None,
     execution_layout: ExecutionLayout | None = None,
+    geometry_input: OrcaGeometryInput | None = None,
+    geometry_contract_path: Path | None = None,
 ) -> dict[str, Any]:
     """Validate and atomically record one immutable ORCA attempt."""
 
     target, target_record = load_target(target_path)
     supplied_artifacts = dict(artifacts or {})
+    if geometry_input is not None:
+        validate_orca_geometry_input(geometry_input)
+        if geometry_contract_path is None or not geometry_contract_path.is_file():
+            raise ValueError("artifact-backed ORCA execution requires geometry contract metadata")
+    elif geometry_contract_path is not None:
+        raise ValueError("geometry contract metadata requires an artifact-backed input")
     if execution_layout is not None:
         execution_layout.validate_paths(
-            input_paths=(input_path,),
+            input_paths=(
+                input_path,
+                *((geometry_input.input_path,) if geometry_input is not None else ()),
+            ),
             output_paths=(output_path, *supplied_artifacts.values()),
-            metadata_paths=(metadata_path,),
+            metadata_paths=(
+                metadata_path,
+                *((geometry_contract_path,) if geometry_contract_path is not None else ()),
+            ),
             log_paths=(stderr_path,),
         )
         if target.target_id != execution_layout.target_identifier:
@@ -118,6 +139,8 @@ def finalize_attempt(
             "output": execution_layout.output_path("stage.out"),
             "stderr": execution_layout.log_path("stage.err"),
             "metadata": execution_layout.metadata_path("job.json"),
+            "geometry_contract": execution_layout.metadata_path("geometry-input.json"),
+            "input_geometry": execution_layout.input_path("input.xyz"),
         }
         actual_paths = {
             "target": target_path,
@@ -125,11 +148,15 @@ def finalize_attempt(
             "output": output_path,
             "stderr": stderr_path,
             "metadata": metadata_path,
+            "geometry_contract": geometry_contract_path,
+            "input_geometry": (
+                geometry_input.input_path if geometry_input is not None else None
+            ),
         }
         conflicts = [
             name
             for name, expected in expected_paths.items()
-            if actual_paths[name].resolve() != expected
+            if actual_paths[name] is not None and actual_paths[name].resolve() != expected
         ]
         if conflicts:
             raise ExecutionLayoutError(
@@ -138,7 +165,11 @@ def finalize_attempt(
             )
     actual_input_hash = file_hash(input_path)
     stage_type = StageType(target.stage_type)
-    parsed_target, parsed_resources = parse_rendered_orca_input(input_path, stage_type)
+    parsed_target, parsed_resources = parse_rendered_orca_input(
+        input_path,
+        stage_type,
+        geometry_input=geometry_input,
+    )
     expected_calculation = dict(target.calculation)
     expected_calculation.pop("validation_policy", None)
     expected_calculation.pop("protocol", None)
@@ -188,10 +219,21 @@ def finalize_attempt(
     )
 
     selected_artifacts: dict[str, ArtifactRecord] = {}
+    geometry_artifacts: dict[str, Path] = {}
+    if geometry_input is not None:
+        source_structure = structure_artifact_path(geometry_input.source_artifact)
+        if source_structure is None:
+            raise ValueError("StructureArtifact geometry file is missing")
+        geometry_artifacts = {
+            "input_geometry": geometry_input.input_path,
+            "source_structure": source_structure,
+            "geometry_contract": geometry_contract_path,
+        }
     for role, path in {
         "input": input_path,
         "output": output_path,
         "stderr": stderr_path,
+        **geometry_artifacts,
         **supplied_artifacts,
     }.items():
         if path.is_file():
@@ -205,6 +247,10 @@ def finalize_attempt(
                 ),
             )
     required_roles = ["input", "output"]
+    if geometry_input is not None:
+        required_roles.extend(
+            ("input_geometry", "source_structure", "geometry_contract")
+        )
     if stage_type is StageType.OPT:
         required_roles.append("final_geometry")
     missing_roles = [role for role in required_roles if role not in selected_artifacts]
@@ -230,6 +276,16 @@ def finalize_attempt(
             scientific.significant_imaginary_frequencies_cm1,
         )
 
+    if geometry_input is not None:
+        geometry_record = geometry_input.to_dict()
+        parent_artifacts = [geometry_input.source_artifact.artifact_id]
+    else:
+        geometry_reference = Path(input_path.read_text(encoding="utf-8").splitlines()[-1].split()[-1])
+        geometry_record = legacy_geometry_provenance(
+            input_path.parent / geometry_reference,
+            mode=OrcaGeometryMode.LEGACY_XYZFILE,
+        )
+        parent_artifacts = []
     record = {
         "schema_version": ORCA_JOB_SCHEMA_VERSION,
         "target": target.to_dict(),
@@ -237,6 +293,13 @@ def finalize_attempt(
         "execution_layout": (
             execution_layout.to_dict() if execution_layout is not None else None
         ),
+        "geometry_input": geometry_record,
+        "geometry_contract_path": (
+            str(geometry_contract_path.resolve())
+            if geometry_contract_path is not None
+            else None
+        ),
+        "parent_artifacts": parent_artifacts,
         "lineage": target_record["lineage"],
         "attempt": attempt.to_dict(),
         "execution": {**asdict(execution), "status": execution.status.value},
@@ -270,6 +333,19 @@ def check_reuse(target_path: Path, metadata_path: Path) -> dict[str, Any]:
         return {"reuse": False, "code": "SCHEMA_MISMATCH", "reason": "unsupported metadata schema"}
     if record.get("target", {}).get("target_id") != target.target_id:
         return {"reuse": False, "code": "TARGET_MISMATCH", "reason": "scientific target identity differs"}
+    geometry_record = record.get("geometry_input")
+    if isinstance(geometry_record, Mapping) and geometry_record.get("mode") == OrcaGeometryMode.XYZFILE.value:
+        try:
+            geometry_input = OrcaGeometryInput.from_mapping(geometry_record)
+            validate_orca_geometry_input(geometry_input)
+            if geometry_input.geometry_hash != target.geometry_sha256:
+                raise ValueError("geometry contract hash differs from target geometry")
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            return {
+                "reuse": False,
+                "code": "GEOMETRY_INPUT_INVALID",
+                "reason": str(exc),
+            }
     layout = None
     layout_record = record.get("execution_layout")
     if layout_record is not None:

@@ -17,6 +17,11 @@ from cmw.core.execution_profiles import ExecutionProfile
 from cmw.core.job import JobTarget
 from cmw.structure.xyz import XYZGeometry, geometry_hash, read_xyz
 
+from .geometry import (
+    OrcaGeometryInput,
+    read_orca_xyzfile_geometry,
+    validate_orca_geometry_input,
+)
 from .status import StageType
 
 
@@ -238,17 +243,53 @@ def make_target(
     )
 
 
+def make_target_from_geometry_input(
+    geometry_input: OrcaGeometryInput,
+    *,
+    spec: OrcaStageSpec,
+    validation_policy: Mapping[str, object] | None = None,
+) -> JobTarget:
+    """Create scientific intent from the same validated geometry ORCA will read."""
+
+    validate_orca_geometry_input(geometry_input)
+    return make_target(
+        read_orca_xyzfile_geometry(geometry_input.input_path),
+        charge=geometry_input.charge,
+        multiplicity=geometry_input.multiplicity,
+        spec=spec,
+        validation_policy=validation_policy,
+    )
+
+
 def render_orca_input(
     *,
-    geometry_path: Path,
+    geometry_input: OrcaGeometryInput | None = None,
+    geometry_path: Path | None = None,
     charge: int,
     multiplicity: int,
     spec: OrcaStageSpec,
     resources: OrcaResources,
 ) -> str:
-    """Render a compact ORCA input referencing one adjacent XYZ file."""
+    """Render an ORCA xyzfile input, preferring a StructureArtifact contract."""
 
-    if geometry_path.name != str(geometry_path):
+    if (geometry_input is None) == (geometry_path is None):
+        raise ValueError(
+            "provide exactly one artifact-backed geometry_input or legacy geometry_path"
+        )
+    if geometry_input is not None:
+        validate_orca_geometry_input(geometry_input)
+        if (charge, multiplicity) != (
+            geometry_input.charge,
+            geometry_input.multiplicity,
+        ):
+            raise ValueError(
+                "ORCA charge or multiplicity conflicts with its geometry contract"
+            )
+        selected_path = geometry_input.input_path
+    else:
+        assert geometry_path is not None
+        selected_path = geometry_path
+    if geometry_input is None and selected_path.name != str(selected_path):
         raise ValueError("ORCA geometry reference must be a basename in the attempt directory")
     keyword_tokens = " ".join(spec.keywords.split())
     intent = spec.execution_intent
@@ -260,12 +301,17 @@ def render_orca_input(
         f"%maxcore {resources.maxcore_mb_per_process}",
     ]
     lines.extend(str(line) for line in spec.scientific_identity()["blocks"])
-    lines.append(f"* xyzfile {charge} {multiplicity} {geometry_path.name}")
+    lines.append(f"* xyzfile {charge} {multiplicity} {selected_path.name}")
     validate_orca_execution_contract(intent, rendered_behavior=lines[0].split()[-1])
     return "\n".join(lines) + "\n"
 
 
-def parse_rendered_orca_input(path: Path, stage_type: StageType) -> tuple[JobTarget, OrcaResources]:
+def parse_rendered_orca_input(
+    path: Path,
+    stage_type: StageType,
+    *,
+    geometry_input: OrcaGeometryInput | None = None,
+) -> tuple[JobTarget, OrcaResources]:
     """Verify the deterministic adapter contract before recording an attempt."""
 
     lines = path.read_text(encoding="utf-8", errors="strict").splitlines()
@@ -290,7 +336,18 @@ def parse_rendered_orca_input(path: Path, stage_type: StageType) -> tuple[JobTar
     geometry_reference = Path(geometry_match.group(3))
     if geometry_reference.name != str(geometry_reference):
         raise ValueError("ORCA geometry reference must be an adjacent basename")
-    geometry = read_xyz(path.parent / geometry_reference)
+    geometry_path = (path.parent / geometry_reference).resolve()
+    if geometry_input is not None:
+        validate_orca_geometry_input(geometry_input)
+        if geometry_path != geometry_input.input_path:
+            raise ValueError(
+                "rendered ORCA geometry reference conflicts with its StructureArtifact contract"
+            )
+    geometry = (
+        read_orca_xyzfile_geometry(geometry_path)
+        if geometry_input is not None
+        else read_xyz(geometry_path)
+    )
     spec = OrcaStageSpec(stage_type, keywords, tuple(lines[3:-1]))
     target = make_target(
         geometry,

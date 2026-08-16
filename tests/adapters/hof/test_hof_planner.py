@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+import tempfile
 import unittest
 
 from cmw.adapters.hof import (
@@ -96,11 +97,16 @@ class HofWorkflowPlannerTests(unittest.TestCase):
                 "frequency_requested"
             ]
         )
-        rendered = render_hof_orca_input(
-            system=plan.configuration.system,
-            calculation=plan.orca_calculations["geometry_optimization"],
-            resources=OrcaResources(),
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            geometry_path = Path(temporary) / "input.xyz"
+            rendered = render_hof_orca_input(
+                system=plan.configuration.system,
+                calculation=plan.orca_calculations["geometry_optimization"],
+                resources=OrcaResources(),
+                geometry_path=geometry_path,
+            )
+            self.assertTrue(geometry_path.is_file())
+        self.assertIn("* xyzfile 0 1 input.xyz", rendered)
         self.assertEqual(rendered.splitlines()[0].split()[-1], "Opt")
         self.assertEqual(
             geometry.configuration["execution_intent"],
@@ -109,6 +115,20 @@ class HofWorkflowPlannerTests(unittest.TestCase):
                 "task": "optimization",
                 "required_behavior": "Opt",
             },
+        )
+        geometry_plan = plan.orca_calculations["geometry_optimization"].to_dict()[
+            "geometry_input"
+        ]
+        self.assertEqual(geometry_plan["mode"], "xyzfile")
+        self.assertEqual(geometry_plan["input_geometry_file"], "input.xyz")
+        self.assertEqual(geometry_plan["geometry_contract_file"], "geometry-input.json")
+        self.assertEqual(
+            geometry_plan["geometry_hash"],
+            geometry_plan["source_structure_artifact"]["geometry_hash"],
+        )
+        self.assertEqual(
+            geometry_plan["source_structure_artifact"]["artifact_type"],
+            "StructureArtifact",
         )
 
     def test_interaction_branch_uses_composed_optimized_structure(self) -> None:

@@ -662,6 +662,10 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
             "producing_execution_node": layout.workflow_node_identifier,
             "resolved_output_path": str(layout.output_directory),
         }
+    geometry_provenance: dict[str, object] = {}
+    geometry_input = record.get("geometry_input")
+    if isinstance(geometry_input, Mapping):
+        geometry_provenance = {"geometry_input": dict(geometry_input)}
     return cls(
         producing_calculation=target_id,
         method=method,
@@ -675,6 +679,7 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
             "provenance": dict(record.get("provenance", {})),
             "validation": dict(record.get("validation", {})),
             **execution_provenance,
+            **geometry_provenance,
         },
         metadata=metadata,
     )

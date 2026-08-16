@@ -151,6 +151,7 @@ def _orca_plan(
     stage_type: StageType,
     keywords: str,
     protocol: Mapping[str, object],
+    geometry_artifact: StructureArtifact,
     fragment: HofFragment | None = None,
 ) -> HofOrcaCalculation:
     system = configuration.system
@@ -177,6 +178,7 @@ def _orca_plan(
             fragment.multiplicity if fragment is not None else system.multiplicity
         ),
         spec=OrcaStageSpec(stage_type, keywords, protocol=protocol),
+        geometry_artifact=geometry_artifact,
         active_atom_indices=active,
         resources=(
             resolved_resources.resources if resolved_resources is not None else None
@@ -230,6 +232,7 @@ def _geometry_branch(
         stage_type=StageType.OPT,
         keywords=keywords,
         protocol=protocol,
+        geometry_artifact=input_structure,
     )
     optimization = OptimizationArtifact(
         producing_calculation=calculation.calculation_id,
@@ -339,6 +342,7 @@ def _deformation_branch(
             stage_type=StageType.SP,
             keywords=energy_keywords,
             protocol={**energy_protocol, "geometry_role": "distorted"},
+            geometry_artifact=optimized_structure,
             fragment=fragment,
         )
         relaxation_protocol = {
@@ -355,7 +359,40 @@ def _deformation_branch(
             stage_type=StageType.OPT,
             keywords=geometry_protocol.method,
             protocol=relaxation_protocol,
+            geometry_artifact=optimized_structure,
             fragment=fragment,
+        )
+        relaxation_artifact = OptimizationArtifact(
+            producing_calculation=relaxation_plan.calculation_id,
+            method=geometry_protocol.method,
+            protocol=relaxation_protocol,
+            parent_artifacts=(optimized_structure.artifact_id,),
+            files={"optimized_structure": f"deformation/{token}_relaxed.xyz"},
+            validation=PLANNED,
+            provenance=provenance,
+            metadata={"fragment_id": fragment.fragment_id},
+        )
+        relaxed_structure = StructureArtifact(
+            producing_calculation=relaxation_plan.calculation_id,
+            method=geometry_protocol.method,
+            protocol=relaxation_protocol,
+            parent_artifacts=(relaxation_artifact.artifact_id,),
+            files={"structure": f"deformation/{token}_relaxed.xyz"},
+            validation=PLANNED,
+            provenance=provenance,
+            metadata={"fragment_id": fragment.fragment_id, "structure_role": "relaxed"},
+            source="isolated_fragment_optimization",
+            format=optimized_structure.format,
+            atom_count=len(fragment.atom_indices),
+            elemental_composition=dict(
+                Counter(
+                    system.geometry.atoms[index].element
+                    for index in fragment.atom_indices
+                )
+            ),
+            charge=fragment.charge,
+            multiplicity=fragment.multiplicity,
+            geometry_hash="",
         )
         relaxed_plan = _orca_plan(
             configuration,
@@ -364,6 +401,7 @@ def _deformation_branch(
             stage_type=StageType.SP,
             keywords=energy_keywords,
             protocol={**energy_protocol, "geometry_role": "relaxed"},
+            geometry_artifact=relaxed_structure,
             fragment=fragment,
         )
         calculations.update(
@@ -428,37 +466,6 @@ def _deformation_branch(
                 "charge": fragment.charge,
                 "multiplicity": fragment.multiplicity,
             },
-        )
-        relaxation_artifact = OptimizationArtifact(
-            producing_calculation=relaxation_plan.calculation_id,
-            method=geometry_protocol.method,
-            protocol=relaxation_protocol,
-            parent_artifacts=(optimized_structure.artifact_id,),
-            files={"optimized_structure": f"deformation/{token}_relaxed.xyz"},
-            validation=PLANNED,
-            provenance=provenance,
-            metadata={"fragment_id": fragment.fragment_id},
-        )
-        relaxed_structure = StructureArtifact(
-            producing_calculation=relaxation_plan.calculation_id,
-            method=geometry_protocol.method,
-            protocol=relaxation_protocol,
-            parent_artifacts=(relaxation_artifact.artifact_id,),
-            files={"structure": f"deformation/{token}_relaxed.xyz"},
-            validation=PLANNED,
-            provenance=provenance,
-            metadata={"fragment_id": fragment.fragment_id, "structure_role": "relaxed"},
-            source="isolated_fragment_optimization",
-            format=optimized_structure.format,
-            atom_count=len(fragment.atom_indices),
-            elemental_composition=dict(
-                Counter(
-                    system.geometry.atoms[index].element for index in fragment.atom_indices
-                )
-            ),
-            charge=fragment.charge,
-            multiplicity=fragment.multiplicity,
-            geometry_hash="",
         )
         relaxed_artifact = FragmentEnergyArtifact(
             producing_calculation=relaxed_plan.calculation_id,
@@ -566,6 +573,7 @@ def _density_igmh_branch(
         stage_type=StageType.SP,
         keywords=density_keywords,
         protocol=density_protocol,
+        geometry_artifact=optimized_structure,
     )
     density = DensityArtifact(
         producing_calculation=calculation.calculation_id,
@@ -745,6 +753,19 @@ def _validate_complete_plan(plan: HofWorkflowPlan) -> None:
         if node.operation and node.operation.startswith("orca_"):
             if node.node_id not in plan.orca_calculations:
                 raise ValueError(f"ORCA workflow node lacks a plan: {node.node_id}")
+            geometry_artifact = plan.orca_calculations[
+                node.node_id
+            ].geometry_artifact
+            geometry_node = artifact_nodes.get(geometry_artifact.artifact_id)
+            if geometry_node is None:
+                raise ValueError(
+                    f"ORCA workflow node lacks a source StructureArtifact: {node.node_id}"
+                )
+            if geometry_node != node.node_id and geometry_node not in ancestors[node.node_id]:
+                raise ValueError(
+                    f"ORCA geometry source from {geometry_node} is not upstream of "
+                    f"{node.node_id}"
+                )
         if node.operation == "multiwfn_analysis" and node.node_id not in plan.multiwfn_plans:
             raise ValueError(f"Multiwfn workflow node lacks a plan: {node.node_id}")
 

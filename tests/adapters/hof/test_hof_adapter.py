@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+import tempfile
 import unittest
 
 from cmw.adapters.hof import (
@@ -10,6 +11,7 @@ from cmw.adapters.hof import (
     configuration_from_documents,
     load_hof_configuration,
     load_yaml_document,
+    prepare_hof_orca_geometry_input,
     render_hof_orca_input,
 )
 from cmw.core.artifacts import (
@@ -25,7 +27,9 @@ from cmw.core.workflow_graph import (
     CalculationNode,
     DerivedResultNode,
 )
-from cmw.molecular.orca.input import OrcaResources
+from cmw.molecular.orca.input import OrcaResources, parse_rendered_orca_input
+from cmw.molecular.orca.geometry import OrcaGeometryMode
+from cmw.molecular.orca.status import StageType
 from cmw.structure.xyz import read_xyz
 
 
@@ -99,26 +103,59 @@ class HofAdapterTests(unittest.TestCase):
         configuration = self.configuration()
         plan = build_hof_interaction_workflow(configuration)
         resources = OrcaResources(4, 2000)
-        dimer = render_hof_orca_input(
-            system=configuration.system,
-            calculation=plan.orca_calculations["dimer"],
-            resources=resources,
-        )
-        fragment = render_hof_orca_input(
-            system=configuration.system,
-            calculation=plan.orca_calculations["fragment_left"],
-            resources=resources,
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            dimer_geometry = directory / "dimer.xyz"
+            fragment_geometry = directory / "fragment.xyz"
+            dimer = render_hof_orca_input(
+                system=configuration.system,
+                calculation=plan.orca_calculations["dimer"],
+                resources=resources,
+                geometry_path=dimer_geometry,
+            )
+            fragment = render_hof_orca_input(
+                system=configuration.system,
+                calculation=plan.orca_calculations["fragment_left"],
+                resources=resources,
+                geometry_path=fragment_geometry,
+            )
+            dimer_contract = prepare_hof_orca_geometry_input(
+                system=configuration.system,
+                calculation=plan.orca_calculations["dimer"],
+                geometry_path=dimer_geometry,
+            )
+            dimer_input = directory / "dimer.inp"
+            dimer_input.write_text(dimer, encoding="utf-8")
+            parsed_target, _ = parse_rendered_orca_input(
+                dimer_input,
+                StageType.SP,
+                geometry_input=dimer_contract,
+            )
+            dimer_xyz = dimer_geometry.read_text(encoding="utf-8")
+            fragment_xyz = fragment_geometry.read_text(encoding="utf-8")
 
         self.assertIn("TightPNO TightSCF LED SP", dimer.splitlines()[0])
-        self.assertIn("O(1)", dimer)
-        self.assertIn("O(2)", dimer)
+        self.assertIn("* xyzfile 0 1 dimer.xyz", dimer)
+        self.assertNotIn("O(1)", dimer)
+        self.assertIn("O(1)", dimer_xyz)
+        self.assertIn("O(2)", dimer_xyz)
+        self.assertEqual(parsed_target.geometry_sha256, dimer_contract.geometry_hash)
         self.assertNotIn(" LED ", fragment.splitlines()[0])
-        self.assertEqual(sum(":" in line for line in fragment.splitlines()[4:-1]), 3)
-        self.assertIn("O:", fragment)
+        self.assertIn("* xyzfile 0 1 fragment.xyz", fragment)
+        self.assertEqual(sum(":" in line for line in fragment_xyz.splitlines()[2:]), 3)
+        self.assertIn("O:", fragment_xyz)
         self.assertTrue(
             plan.orca_calculations["fragment_left"].spec.protocol["counterpoise"]
         )
+
+        legacy = render_hof_orca_input(
+            system=configuration.system,
+            calculation=plan.orca_calculations["dimer"],
+            resources=resources,
+            geometry_mode=OrcaGeometryMode.LEGACY_INLINE,
+        )
+        self.assertIn("* xyz 0 1", legacy)
+        self.assertNotIn("xyzfile", legacy)
 
     def test_optional_execution_config_is_loaded_without_changing_science(self) -> None:
         base = load_hof_configuration(
@@ -164,10 +201,12 @@ class HofAdapterTests(unittest.TestCase):
         self.assertEqual(dimer.resources, OrcaResources(8, 1843))
         self.assertEqual(dimer.execution["derived_total_memory_mb"], 14_744)
 
-        rendered = render_hof_orca_input(
-            system=configured.system,
-            calculation=dimer,
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            rendered = render_hof_orca_input(
+                system=configured.system,
+                calculation=dimer,
+                geometry_path=Path(temporary) / "input.xyz",
+            )
         self.assertIn("%pal nprocs 8 end", rendered)
         self.assertIn("%maxcore 1843", rendered)
 

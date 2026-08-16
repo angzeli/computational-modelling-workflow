@@ -15,6 +15,7 @@ from cmw.core.execution_layout import (
 )
 from cmw.core.job import GeometryLineage
 from cmw.core.provenance import atomic_write_json, read_json, stable_hash
+from cmw.core.structure_artifacts import structure_artifact_from_file
 from cmw.core.workflow_graph import CalculationNode, WorkflowGraph, WorkflowNode
 from cmw.molecular.orca.input import (
     OrcaResources,
@@ -24,9 +25,10 @@ from cmw.molecular.orca.input import (
     render_orca_input,
 )
 from cmw.molecular.orca.job import check_reuse, write_target
+from cmw.molecular.orca.geometry import prepare_orca_geometry_input
 from cmw.molecular.orca.protocol import ProtocolIntent
 from cmw.molecular.orca.status import FrequencyPolicy, StageType
-from cmw.structure.xyz import XYZGeometry, geometry_hash, read_xyz, write_xyz
+from cmw.structure.xyz import XYZGeometry, geometry_hash, read_xyz
 
 
 WORKFLOW_SCHEMA_VERSION = 1
@@ -594,10 +596,27 @@ def next_action(state_path: Path) -> tuple[str, dict[str, Any]]:
         final_geometry = (
             layout.output_path("stage.xyz") if stage is StageType.OPT else None
         )
-        write_xyz(input_geometry, geometry, comment=f"CMW {stage.value} attempt input")
+        structure_artifact = structure_artifact_from_file(
+            geometry_path.resolve(),
+            source=lineage.source,
+            producing_calculation=lineage.parent_target_id or "structure_import",
+            charge=config.charge,
+            multiplicity=config.multiplicity,
+            provenance={"geometry_lineage": asdict(lineage)},
+            metadata={"structure_role": "orca_input"},
+        )
+        geometry_input = prepare_orca_geometry_input(
+            structure_artifact,
+            input_geometry,
+            provenance={"workflow_stage": stage.value},
+        )
+        if geometry_input.geometry_hash != target.geometry_sha256:
+            raise ValueError("StructureArtifact geometry differs from the ORCA target")
+        geometry_contract = layout.metadata_path("geometry-input.json")
+        atomic_write_json(geometry_contract, geometry_input.to_dict())
         input_path.write_text(
             render_orca_input(
-                geometry_path=Path(input_geometry.name),
+                geometry_input=geometry_input,
                 charge=config.charge,
                 multiplicity=config.multiplicity,
                 spec=config.stages[stage],
@@ -612,6 +631,8 @@ def next_action(state_path: Path) -> tuple[str, dict[str, Any]]:
             "attempt_id": attempt_id,
             "layout": str(layout.layout_path),
             "execution_layout": layout.to_dict(),
+            "geometry_contract": str(geometry_contract),
+            "geometry_input": geometry_input.to_dict(),
             "working_directory": str(layout.working_directory),
             "output_directory": str(layout.output_directory),
             "input": str(input_path.resolve()),
