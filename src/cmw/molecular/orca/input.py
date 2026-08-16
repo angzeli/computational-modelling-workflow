@@ -8,6 +8,11 @@ from pathlib import Path
 import re
 from typing import Mapping
 
+from cmw.core.execution_contract import (
+    ComputationalTask,
+    ExecutionContractError,
+    ExecutionIntent,
+)
 from cmw.core.execution_profiles import ExecutionProfile
 from cmw.core.job import JobTarget
 from cmw.structure.xyz import XYZGeometry, geometry_hash, read_xyz
@@ -15,10 +20,16 @@ from cmw.structure.xyz import XYZGeometry, geometry_hash, read_xyz
 from .status import StageType
 
 
-STAGE_KEYWORDS = {
-    StageType.OPT: "Opt",
-    StageType.FREQ: "Freq",
-    StageType.SP: "SP",
+STAGE_TASKS = {
+    StageType.OPT: ComputationalTask.OPTIMIZATION,
+    StageType.FREQ: ComputationalTask.FREQUENCY,
+    StageType.SP: ComputationalTask.SINGLE_POINT,
+}
+
+ORCA_TASK_BEHAVIORS = {
+    ComputationalTask.OPTIMIZATION: "Opt",
+    ComputationalTask.FREQUENCY: "Freq",
+    ComputationalTask.SINGLE_POINT: "SP",
 }
 
 ORCA_MEMORY_MB_PER_GB = 1024
@@ -33,6 +44,7 @@ class OrcaStageSpec:
     keywords: str
     blocks: tuple[str, ...] = ()
     protocol: Mapping[str, object] = field(default_factory=dict)
+    task: ComputationalTask | str | None = None
 
     def __post_init__(self) -> None:
         if not self.keywords.strip():
@@ -48,6 +60,17 @@ class OrcaStageSpec:
         if any(line.lstrip().lower().startswith(reserved) for line in block_lines):
             raise ValueError("resources and geometry directives cannot be duplicated in stage blocks")
         object.__setattr__(self, "protocol", dict(self.protocol))
+        selected_task = self.task or STAGE_TASKS[self.stage_type]
+        object.__setattr__(self, "task", ComputationalTask(selected_task))
+
+    @property
+    def execution_intent(self) -> ExecutionIntent:
+        task = ComputationalTask(self.task)
+        return ExecutionIntent(
+            stage_type=self.stage_type.value,
+            task=task,
+            required_behavior=ORCA_TASK_BEHAVIORS[task],
+        )
 
     def scientific_identity(self) -> dict[str, object]:
         normalized_blocks = [
@@ -65,6 +88,53 @@ class OrcaStageSpec:
         if self.protocol:
             identity["protocol"] = dict(self.protocol)
         return identity
+
+
+def validate_orca_execution_contract(
+    intent: ExecutionIntent,
+    *,
+    rendered_behavior: str | None = None,
+) -> None:
+    """Fail closed unless stage, task, and ORCA operation are mutually consistent."""
+
+    try:
+        stage_type = StageType(intent.stage_type)
+        expected_task = STAGE_TASKS[stage_type]
+        expected_behavior = ORCA_TASK_BEHAVIORS[expected_task]
+    except (KeyError, ValueError) as exc:
+        raise ExecutionContractError(
+            f"{ExecutionContractError.code}: unsupported ORCA execution intent"
+        ) from exc
+    mismatches: list[str] = []
+    if intent.task is not expected_task:
+        mismatches.append(
+            f"stage {stage_type.value} requires task {expected_task.value}, "
+            f"not {intent.task.value}"
+        )
+    if intent.required_behavior.casefold() != expected_behavior.casefold():
+        mismatches.append(
+            f"task {expected_task.value} requires ORCA {expected_behavior}, "
+            f"not {intent.required_behavior}"
+        )
+    if (
+        rendered_behavior is not None
+        and rendered_behavior.casefold() != expected_behavior.casefold()
+    ):
+        mismatches.append(
+            f"stage {stage_type.value} rendered ORCA {rendered_behavior}, "
+            f"not {expected_behavior}"
+        )
+    if mismatches:
+        raise ExecutionContractError(
+            f"{ExecutionContractError.code}: " + "; ".join(mismatches)
+        )
+
+
+def orca_execution_intent(stage_type: StageType) -> ExecutionIntent:
+    """Return the canonical task and ORCA behavior for a scientific stage."""
+
+    task = STAGE_TASKS[stage_type]
+    return ExecutionIntent(stage_type.value, task, ORCA_TASK_BEHAVIORS[task])
 
 
 @dataclass(frozen=True)
@@ -181,7 +251,9 @@ def render_orca_input(
     if geometry_path.name != str(geometry_path):
         raise ValueError("ORCA geometry reference must be a basename in the attempt directory")
     keyword_tokens = " ".join(spec.keywords.split())
-    stage_keyword = STAGE_KEYWORDS[spec.stage_type]
+    intent = spec.execution_intent
+    validate_orca_execution_contract(intent)
+    stage_keyword = intent.required_behavior
     lines = [
         f"! {keyword_tokens} {stage_keyword}",
         f"%pal nprocs {resources.nprocs} end",
@@ -189,6 +261,7 @@ def render_orca_input(
     ]
     lines.extend(str(line) for line in spec.scientific_identity()["blocks"])
     lines.append(f"* xyzfile {charge} {multiplicity} {geometry_path.name}")
+    validate_orca_execution_contract(intent, rendered_behavior=lines[0].split()[-1])
     return "\n".join(lines) + "\n"
 
 
@@ -199,9 +272,13 @@ def parse_rendered_orca_input(path: Path, stage_type: StageType) -> tuple[JobTar
     if len(lines) < 4 or not lines[0].startswith("! "):
         raise ValueError("ORCA input does not match the CMW rendered-input contract")
     tokens = lines[0][2:].split()
-    expected_stage = STAGE_KEYWORDS[stage_type]
-    if not tokens or tokens[-1].lower() != expected_stage.lower():
-        raise ValueError("ORCA stage keyword does not match the target stage")
+    if not tokens:
+        raise ExecutionContractError(
+            f"{ExecutionContractError.code}: ORCA operation is missing"
+        )
+    validate_orca_execution_contract(
+        orca_execution_intent(stage_type), rendered_behavior=tokens[-1]
+    )
     keywords = " ".join(tokens[:-1])
     pal_match = re.fullmatch(r"%pal\s+nprocs\s+(\d+)\s+end", lines[1], re.I)
     maxcore_match = re.fullmatch(r"%maxcore\s+(\d+)", lines[2], re.I)

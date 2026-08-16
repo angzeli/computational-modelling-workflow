@@ -10,6 +10,7 @@ from cmw.adapters.hof import (
     configuration_from_documents,
     load_hof_configuration,
     load_yaml_document,
+    render_hof_orca_input,
 )
 from cmw.core.artifacts import (
     DeformationEnergyArtifact,
@@ -20,6 +21,7 @@ from cmw.core.artifacts import (
     artifact_from_dict,
 )
 from cmw.core.workflow_graph import AggregationNode
+from cmw.molecular.orca.input import OrcaResources
 from cmw.molecular.orca.status import StageType
 from cmw.structure.xyz import read_xyz
 
@@ -93,6 +95,20 @@ class HofWorkflowPlannerTests(unittest.TestCase):
             plan.orca_calculations["geometry_optimization"].spec.protocol[
                 "frequency_requested"
             ]
+        )
+        rendered = render_hof_orca_input(
+            system=plan.configuration.system,
+            calculation=plan.orca_calculations["geometry_optimization"],
+            resources=OrcaResources(),
+        )
+        self.assertEqual(rendered.splitlines()[0].split()[-1], "Opt")
+        self.assertEqual(
+            geometry.configuration["execution_intent"],
+            {
+                "stage_type": "OPT",
+                "task": "optimization",
+                "required_behavior": "Opt",
+            },
         )
 
     def test_interaction_branch_uses_composed_optimized_structure(self) -> None:

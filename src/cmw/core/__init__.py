@@ -22,6 +22,11 @@ from .execution_profiles import (
     execution_profiles_from_mapping,
     load_execution_profiles,
 )
+from .execution_contract import (
+    ComputationalTask,
+    ExecutionContractError,
+    ExecutionIntent,
+)
 from .structure_artifacts import (
     StructureFormatHandler,
     StructureSummary,
@@ -54,10 +59,13 @@ __all__ = [
     "ArtifactRequirement",
     "ArtifactValidation",
     "CalculationNode",
+    "ComputationalTask",
     "DerivedResultNode",
     "EXECUTION_PROFILE_SCHEMA_VERSION",
     "ExecutionProfile",
     "ExecutionProfiles",
+    "ExecutionContractError",
+    "ExecutionIntent",
     "FinalizedArtifactBundle",
     "NodeKind",
     "MultiwfnResourcePolicy",

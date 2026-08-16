@@ -137,6 +137,14 @@ class ReuseTests(unittest.TestCase):
             record["scientific_artifact"]["artifact_type"], "OptimizationArtifact"
         )
         self.assertEqual(
+            record["execution_intent"],
+            {
+                "stage_type": "OPT",
+                "task": "optimization",
+                "required_behavior": "Opt",
+            },
+        )
+        self.assertEqual(
             record["scientific_artifact"]["validation"]["status"], "PASSED"
         )
 

@@ -16,6 +16,7 @@ from cmw.molecular.orca.input import (
     OrcaResources,
     OrcaStageSpec,
     make_target,
+    orca_execution_intent,
     render_orca_input,
 )
 from cmw.molecular.orca.job import check_reuse, write_target
@@ -250,6 +251,9 @@ def legacy_workflow_graph(mode: str) -> WorkflowGraph:
                 dependencies=tuple(dependencies),
                 operation=stage.value,
                 produces=(artifact_types[stage],),
+                configuration={
+                    "execution_intent": orca_execution_intent(stage).to_dict()
+                },
             )
         )
     return WorkflowGraph("opt_freq_sp", tuple(nodes))
@@ -300,6 +304,7 @@ def build_state(
             "depends_on": depends_on,
             "geometry_source": "input_structure" if stage is StageType.OPT else "validated_OPT_geometry",
             "settings": _stage_settings(config, stage),
+            "execution_intent": config.stages[stage].execution_intent.to_dict(),
             "target_id": None,
             "attempt_id": None,
             "disposition": "pending" if chosen else "skipped",
@@ -383,6 +388,11 @@ def _config_from_state(state: Mapping[str, Any]) -> WorkflowConfig:
             str(record["settings"]["keywords"]),
             tuple(record["settings"].get("blocks", ())),
             dict(record["settings"].get("protocol", {})),
+            task=(
+                record.get("execution_intent", {}).get("task")
+                if isinstance(record.get("execution_intent"), Mapping)
+                else None
+            ),
         )
         for name, record in state["stages"].items()
     }
