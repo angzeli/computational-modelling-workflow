@@ -106,6 +106,7 @@ while true; do
   stage_stderr=$(json_field "$action_json" stderr)
   final_geometry=$(json_field "$action_json" final_geometry)
   layout=$(json_field "$action_json" layout)
+  geometry_contract=$(json_field "$action_json" geometry_contract)
   stage_orca_exe=$(json_field "$action_json" orca_exe)
   stage_nprocs=$(json_field "$action_json" nprocs)
   stage_maxcore=$(json_field "$action_json" maxcore_mb_per_process)
@@ -117,6 +118,7 @@ while true; do
     --output "$stage_output" --stderr "$stage_stderr"
   )
   [[ -z "$layout" ]] || runner+=(--layout "$layout")
+  [[ -z "$geometry_contract" ]] || runner+=(--geometry-contract "$geometry_contract")
   [[ -z "$final_geometry" ]] || runner+=(--artifact "final_geometry=$final_geometry")
 
   set +e

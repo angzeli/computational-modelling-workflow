@@ -176,6 +176,16 @@ class FailureAndLineageTests(WorkflowHarness):
             self.assertEqual(record["lineage"]["parent_artifact_sha256"], opt_hash)
             input_geometry = Path(record["artifacts"]["input"]["path"]).parent / "input.xyz"
             self.assertEqual(geometry_hash(read_xyz(input_geometry)), opt_hash)
+            self.assertEqual(
+                record["scientific_artifact"]["provenance"]["geometry_input"][
+                    "mode"
+                ],
+                "xyzfile",
+            )
+            self.assertEqual(
+                Path(record["scientific_artifact"]["files"]["input_geometry"]),
+                input_geometry,
+            )
 
 
 class ResumeTests(WorkflowHarness):

@@ -19,6 +19,7 @@ from .models import (
 from .orca import (
     HofOrcaCalculation,
     build_hof_orca_calculations,
+    prepare_hof_orca_geometry_input,
     render_hof_orca_input,
 )
 from .validation import HofValidationError, validate_hof_system
@@ -45,6 +46,7 @@ __all__ = [
     "configuration_from_documents",
     "load_hof_configuration",
     "load_yaml_document",
+    "prepare_hof_orca_geometry_input",
     "render_hof_orca_input",
     "validate_hof_system",
 ]

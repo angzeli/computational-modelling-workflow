@@ -18,6 +18,7 @@ metadata=""
 output=""
 stderr_path=""
 layout=""
+geometry_contract=""
 replace_stale=0
 artifacts=()
 
@@ -26,6 +27,7 @@ usage() {
     "Usage: run_orca.sh --input FILE --target FILE --metadata FILE" \
     "                   --output FILE --stderr FILE [--artifact ROLE=FILE]" \
     "                   [--layout FILE]" \
+    "                   [--geometry-contract FILE]" \
     "                   [--replace-stale-lock]" >&2
 }
 
@@ -37,6 +39,7 @@ while (($#)); do
     --output) output=${2:?}; shift 2 ;;
     --stderr) stderr_path=${2:?}; shift 2 ;;
     --layout) layout=${2:?}; shift 2 ;;
+    --geometry-contract) geometry_contract=${2:?}; shift 2 ;;
     --artifact) artifacts+=("${2:?}"); shift 2 ;;
     --replace-stale-lock) replace_stale=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -65,6 +68,9 @@ output=$(absolute_path "$output")
 stderr_path=$(absolute_path "$stderr_path")
 if [[ -n "$layout" ]]; then
   layout=$(absolute_path "$layout")
+fi
+if [[ -n "$geometry_contract" ]]; then
+  geometry_contract=$(absolute_path "$geometry_contract")
 fi
 resolved_artifacts=()
 if ((${#artifacts[@]} > 0)); then
@@ -178,6 +184,7 @@ finalize=(
   --nprocs "$NPROCS" --maxcore "$MAXCORE_MB" --repository "$REPO_ROOT"
 )
 [[ -z "$layout" ]] || finalize+=(--layout "$layout")
+[[ -z "$geometry_contract" ]] || finalize+=(--geometry-contract "$geometry_contract")
 if ((${#resolved_artifacts[@]} > 0)); then
   for item in "${resolved_artifacts[@]}"; do
     finalize+=(--artifact "$item")

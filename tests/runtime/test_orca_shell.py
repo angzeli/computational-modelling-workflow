@@ -96,7 +96,8 @@ class OrcaShellTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertIn("target_id", json.loads(prepare.stdout))
+            prepare_record = json.loads(prepare.stdout)
+            self.assertIn("target_id", prepare_record)
             command = (
                 str(RUNNER),
                 "--input",
@@ -109,6 +110,8 @@ class OrcaShellTests(unittest.TestCase):
                 str(attempt / "stage.out"),
                 "--stderr",
                 str(attempt / "stage.err"),
+                "--geometry-contract",
+                str(prepare_record["geometry_contract"]),
                 "--artifact",
                 f"final_geometry={attempt / 'stage.xyz'}",
             )
@@ -143,6 +146,7 @@ class OrcaShellTests(unittest.TestCase):
             self.assertFalse(Path(scratch).exists())
             record = json.loads((attempt / "job.json").read_text(encoding="utf-8"))
             self.assertEqual(record["attempt"]["resources"]["nprocs"], 4)
+            self.assertEqual(record["geometry_input"]["mode"], "xyzfile")
             self.assertTrue(record["reusable"])
 
             second = subprocess.run(

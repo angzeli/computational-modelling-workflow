@@ -7,6 +7,8 @@ from pathlib import Path
 from cmw.core.execution_layout import ExecutionLayout
 from cmw.core.job import ExecutionAttempt, GeometryLineage, JobTarget
 from cmw.core.provenance import atomic_write_json, git_state, read_json, stable_hash
+from cmw.core.structure_artifacts import structure_artifact_from_file
+from cmw.molecular.orca.geometry import prepare_orca_geometry_input
 from cmw.molecular.orca.input import OrcaResources, OrcaStageSpec, make_target, render_orca_input
 from cmw.molecular.orca.job import check_reuse, finalize_attempt, write_target
 from cmw.molecular.orca.status import StageType
@@ -148,6 +150,7 @@ class ReuseTests(unittest.TestCase):
         self.assertEqual(
             record["scientific_artifact"]["validation"]["status"], "PASSED"
         )
+        self.assertEqual(record["geometry_input"]["mode"], "legacy_xyzfile")
 
     def test_layout_identity_and_resolved_paths_reach_artifact_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -170,11 +173,23 @@ class ReuseTests(unittest.TestCase):
                 GeometryLineage("input_structure", geometry_hash(geometry)),
             )
             input_geometry = layout.input_path("input.xyz")
-            write_xyz(input_geometry, geometry)
+            structure_artifact = structure_artifact_from_file(
+                FIXTURE.resolve(),
+                source="synthetic fixture",
+                charge=0,
+                multiplicity=1,
+            )
+            geometry_input = prepare_orca_geometry_input(
+                structure_artifact,
+                input_geometry,
+                provenance={"workflow_node": "optimization"},
+            )
+            geometry_contract = layout.metadata_path("geometry-input.json")
+            atomic_write_json(geometry_contract, geometry_input.to_dict())
             input_path = layout.input_path("stage.inp")
             input_path.write_text(
                 render_orca_input(
-                    geometry_path=Path("input.xyz"),
+                    geometry_input=geometry_input,
                     charge=0,
                     multiplicity=1,
                     spec=spec,
@@ -201,6 +216,8 @@ class ReuseTests(unittest.TestCase):
                 resources=OrcaResources().to_dict(),
                 artifacts={"final_geometry": final_geometry},
                 execution_layout=layout,
+                geometry_input=geometry_input,
+                geometry_contract_path=geometry_contract,
             )
             reuse = check_reuse(target_path, metadata_path)
 
@@ -208,6 +225,21 @@ class ReuseTests(unittest.TestCase):
         self.assertEqual(record["attempt"]["attempt_id"], "attempt_001")
         self.assertEqual(artifact["files"]["output"], str(output_path))
         self.assertEqual(artifact["provenance"]["attempt_id"], "attempt_001")
+        self.assertEqual(
+            artifact["provenance"]["geometry_input"][
+                "source_structure_artifact_id"
+            ],
+            structure_artifact.artifact_id,
+        )
+        self.assertEqual(
+            artifact["parent_artifacts"], [structure_artifact.artifact_id]
+        )
+        self.assertEqual(
+            artifact["files"]["input_geometry"], str(input_geometry)
+        )
+        self.assertEqual(
+            artifact["files"]["geometry_contract"], str(geometry_contract)
+        )
         self.assertEqual(
             artifact["provenance"]["producing_execution_node"], "optimization"
         )

@@ -41,6 +41,7 @@ from .structure_artifacts import (
     register_structure_format,
     registered_structure_formats,
     structure_artifact_from_file,
+    structure_artifact_path,
     validate_structure_artifact,
 )
 from .workflow_graph import (
@@ -97,5 +98,6 @@ __all__ = [
     "register_structure_format",
     "registered_structure_formats",
     "structure_artifact_from_file",
+    "structure_artifact_path",
     "validate_structure_artifact",
 ]
