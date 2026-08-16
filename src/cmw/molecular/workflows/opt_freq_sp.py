@@ -7,8 +7,12 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
-from uuid import uuid4
 
+from cmw.core.execution_layout import (
+    ExecutionLayout,
+    execution_target_directory,
+    next_attempt_identifier,
+)
 from cmw.core.job import GeometryLineage
 from cmw.core.provenance import atomic_write_json, read_json, stable_hash
 from cmw.core.workflow_graph import CalculationNode, WorkflowGraph, WorkflowNode
@@ -227,6 +231,21 @@ def _resolved_output(config: WorkflowConfig, output_override: Path | None) -> Pa
     return selected.expanduser().resolve()
 
 
+def _state_system_identifier(state: Mapping[str, Any]) -> str:
+    """Read the additive identity or derive it for schema-one legacy state."""
+
+    existing = state.get("system_identifier")
+    if existing:
+        return str(existing)
+    return stable_hash(
+        {
+            "geometry_sha256": state["input_structure"]["geometry_sha256"],
+            "charge": state["electronic_state"]["charge"],
+            "multiplicity": state["electronic_state"]["multiplicity"],
+        }
+    )
+
+
 def legacy_workflow_graph(mode: str) -> WorkflowGraph:
     """Represent the original OPT/FREQ/SP contract using the generic DAG model."""
 
@@ -288,6 +307,13 @@ def build_state(
     selected = tuple(StageType(name) for name in graph.topological_order())
     graph_nodes = graph.node_map
     workflow_target_id = _workflow_target_id(selected_mode, structure, config)
+    system_identifier = stable_hash(
+        {
+            "geometry_sha256": geometry_hash(structure),
+            "charge": config.charge,
+            "multiplicity": config.multiplicity,
+        }
+    )
     stage_records: dict[str, dict[str, Any]] = {}
     for stage in ALL_STAGES:
         chosen = stage in selected
@@ -317,6 +343,7 @@ def build_state(
         "workflow": "opt_freq_sp",
         "mode": selected_mode,
         "workflow_target_id": workflow_target_id,
+        "system_identifier": system_identifier,
         "input_structure": {
             "path": str(structure_path.resolve()),
             "geometry_sha256": geometry_hash(structure),
@@ -513,11 +540,26 @@ def next_action(state_path: Path) -> tuple[str, dict[str, Any]]:
             _write_state(state_path, state)
             return "FAILED", {"failure_point": stage.value, "reason": stage_record["reason"]}
         target = _make_stage_target(config, stage, geometry)
-        target_dir = Path(state["output_root"]) / "stages" / stage.value.lower() / target.target_id
+        target_dir = execution_target_directory(
+            Path(state["output_root"]),
+            system_identifier=_state_system_identifier(state),
+            workflow_node_identifier=stage.value.lower(),
+            target_identifier=target.target_id,
+        )
         target_path = target_dir / "target.json"
         if not target_path.exists():
             write_target(target_path, target, lineage)
         reusable = _find_reusable(target_path)
+        if reusable is None:
+            legacy_target_path = (
+                Path(state["output_root"])
+                / "stages"
+                / stage.value.lower()
+                / target.target_id
+                / "target.json"
+            )
+            if legacy_target_path.is_file():
+                reusable = _find_reusable(legacy_target_path)
         if reusable is not None:
             metadata_path, metadata = reusable
             _record_valid_stage(
@@ -533,15 +575,25 @@ def next_action(state_path: Path) -> tuple[str, dict[str, Any]]:
 
         if stage_record["status"] == "READY":
             return "RUN", dict(stage_record["runner"])
-        attempt_id = uuid4().hex
-        attempt_dir = target_dir / "attempts" / attempt_id
-        attempt_dir.mkdir(parents=True, exist_ok=False)
-        input_geometry = attempt_dir / "input.xyz"
-        input_path = attempt_dir / "stage.inp"
-        output_path = attempt_dir / "stage.out"
-        stderr_path = attempt_dir / "stage.err"
-        metadata_path = attempt_dir / "job.json"
-        final_geometry = attempt_dir / "stage.xyz" if stage is StageType.OPT else None
+        attempt_id = next_attempt_identifier(target_dir)
+        layout = ExecutionLayout(
+            project_root=Path(state["output_root"]),
+            system_identifier=_state_system_identifier(state),
+            workflow_node_identifier=stage.value.lower(),
+            target_identifier=target.target_id,
+            attempt_identifier=attempt_id,
+        )
+        layout.create_working_directory()
+        attempt_dir = layout.working_directory
+        atomic_write_json(layout.layout_path, layout.to_dict())
+        input_geometry = layout.input_path("input.xyz")
+        input_path = layout.input_path("stage.inp")
+        output_path = layout.output_path("stage.out")
+        stderr_path = layout.log_path("stage.err")
+        metadata_path = layout.metadata_path("job.json")
+        final_geometry = (
+            layout.output_path("stage.xyz") if stage is StageType.OPT else None
+        )
         write_xyz(input_geometry, geometry, comment=f"CMW {stage.value} attempt input")
         input_path.write_text(
             render_orca_input(
@@ -558,6 +610,10 @@ def next_action(state_path: Path) -> tuple[str, dict[str, Any]]:
             "stage": stage.value,
             "target_id": target.target_id,
             "attempt_id": attempt_id,
+            "layout": str(layout.layout_path),
+            "execution_layout": layout.to_dict(),
+            "working_directory": str(layout.working_directory),
+            "output_directory": str(layout.output_directory),
             "input": str(input_path.resolve()),
             "target": str(target_path.resolve()),
             "metadata": str(metadata_path.resolve()),
@@ -651,7 +707,13 @@ def plan_summary(state: dict[str, Any]) -> dict[str, Any]:
             prerequisite_ready = False
             continue
         target = _make_stage_target(config, stage, geometry)
-        target_path = (
+        target_path = execution_target_directory(
+            Path(planned["output_root"]),
+            system_identifier=_state_system_identifier(planned),
+            workflow_node_identifier=stage.value.lower(),
+            target_identifier=target.target_id,
+        ) / "target.json"
+        legacy_target_path = (
             Path(planned["output_root"])
             / "stages"
             / stage.value.lower()
@@ -660,6 +722,8 @@ def plan_summary(state: dict[str, Any]) -> dict[str, Any]:
         )
         record["target_id"] = target.target_id
         reusable = _find_reusable(target_path) if target_path.exists() else None
+        if reusable is None and legacy_target_path.is_file():
+            reusable = _find_reusable(legacy_target_path)
         if not prerequisite_ready:
             record.update(disposition="pending", reason="required prior stage is not yet valid")
         elif reusable:

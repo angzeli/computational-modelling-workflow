@@ -105,6 +105,7 @@ while true; do
   stage_output=$(json_field "$action_json" output)
   stage_stderr=$(json_field "$action_json" stderr)
   final_geometry=$(json_field "$action_json" final_geometry)
+  layout=$(json_field "$action_json" layout)
   stage_orca_exe=$(json_field "$action_json" orca_exe)
   stage_nprocs=$(json_field "$action_json" nprocs)
   stage_maxcore=$(json_field "$action_json" maxcore_mb_per_process)
@@ -115,6 +116,7 @@ while true; do
     "$ORCA_RUNNER" --input "$input" --target "$target" --metadata "$metadata"
     --output "$stage_output" --stderr "$stage_stderr"
   )
+  [[ -z "$layout" ]] || runner+=(--layout "$layout")
   [[ -z "$final_geometry" ]] || runner+=(--artifact "final_geometry=$final_geometry")
 
   set +e

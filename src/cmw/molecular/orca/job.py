@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from cmw.core.artifacts import artifact_from_dict, artifact_from_result
+from cmw.core.execution_layout import ExecutionLayout, ExecutionLayoutError
 from cmw.core.job import ExecutionAttempt, GeometryLineage, JobTarget
 from cmw.core.provenance import (
     ArtifactRecord,
@@ -93,10 +94,48 @@ def finalize_attempt(
     repository: Path | None = None,
     frequency_policy: FrequencyPolicy = FrequencyPolicy(),
     parent_attempt_id: str | None = None,
+    execution_layout: ExecutionLayout | None = None,
 ) -> dict[str, Any]:
     """Validate and atomically record one immutable ORCA attempt."""
 
     target, target_record = load_target(target_path)
+    supplied_artifacts = dict(artifacts or {})
+    if execution_layout is not None:
+        execution_layout.validate_paths(
+            input_paths=(input_path,),
+            output_paths=(output_path, *supplied_artifacts.values()),
+            metadata_paths=(metadata_path,),
+            log_paths=(stderr_path,),
+        )
+        if target.target_id != execution_layout.target_identifier:
+            raise ExecutionLayoutError(
+                f"{ExecutionLayoutError.code}: layout target identity conflicts "
+                "with the scientific target"
+            )
+        expected_paths = {
+            "target": execution_layout.target_directory / "target.json",
+            "input": execution_layout.input_path("stage.inp"),
+            "output": execution_layout.output_path("stage.out"),
+            "stderr": execution_layout.log_path("stage.err"),
+            "metadata": execution_layout.metadata_path("job.json"),
+        }
+        actual_paths = {
+            "target": target_path,
+            "input": input_path,
+            "output": output_path,
+            "stderr": stderr_path,
+            "metadata": metadata_path,
+        }
+        conflicts = [
+            name
+            for name, expected in expected_paths.items()
+            if actual_paths[name].resolve() != expected
+        ]
+        if conflicts:
+            raise ExecutionLayoutError(
+                f"{ExecutionLayoutError.code}: non-deterministic ORCA paths: "
+                + ", ".join(conflicts)
+            )
     actual_input_hash = file_hash(input_path)
     stage_type = StageType(target.stage_type)
     parsed_target, parsed_resources = parse_rendered_orca_input(input_path, stage_type)
@@ -141,9 +180,13 @@ def finalize_attempt(
         executable=executable,
         generated_input_sha256=actual_input_hash,
         parent_attempt_id=parent_attempt_id,
+        attempt_id=(
+            execution_layout.attempt_identifier
+            if execution_layout is not None
+            else None
+        ),
     )
 
-    supplied_artifacts = dict(artifacts or {})
     selected_artifacts: dict[str, ArtifactRecord] = {}
     for role, path in {
         "input": input_path,
@@ -153,7 +196,13 @@ def finalize_attempt(
     }.items():
         if path.is_file():
             selected_artifacts[role] = ArtifactRecord.from_path(
-                path, role=role, relative_to=metadata_path.parent
+                path,
+                role=role,
+                relative_to=(
+                    execution_layout.working_directory
+                    if execution_layout is not None
+                    else metadata_path.parent
+                ),
             )
     required_roles = ["input", "output"]
     if stage_type is StageType.OPT:
@@ -185,6 +234,9 @@ def finalize_attempt(
         "schema_version": ORCA_JOB_SCHEMA_VERSION,
         "target": target.to_dict(),
         "execution_intent": orca_execution_intent(stage_type).to_dict(),
+        "execution_layout": (
+            execution_layout.to_dict() if execution_layout is not None else None
+        ),
         "lineage": target_record["lineage"],
         "attempt": attempt.to_dict(),
         "execution": {**asdict(execution), "status": execution.status.value},
@@ -218,6 +270,25 @@ def check_reuse(target_path: Path, metadata_path: Path) -> dict[str, Any]:
         return {"reuse": False, "code": "SCHEMA_MISMATCH", "reason": "unsupported metadata schema"}
     if record.get("target", {}).get("target_id") != target.target_id:
         return {"reuse": False, "code": "TARGET_MISMATCH", "reason": "scientific target identity differs"}
+    layout = None
+    layout_record = record.get("execution_layout")
+    if layout_record is not None:
+        try:
+            if not isinstance(layout_record, Mapping):
+                raise ExecutionLayoutError("execution layout must be a mapping")
+            layout = ExecutionLayout.from_mapping(layout_record)
+            layout.validate(require_existing=True)
+            layout.validate_attempt_identity(
+                str(record.get("attempt", {}).get("attempt_id", ""))
+            )
+            if layout.target_identifier != target.target_id:
+                raise ExecutionLayoutError("layout target identity differs")
+        except (KeyError, TypeError, ValueError) as exc:
+            return {
+                "reuse": False,
+                "code": "LAYOUT_INVALID",
+                "reason": str(exc),
+            }
     if not record.get("reusable"):
         return {"reuse": False, "code": "SCIENTIFICALLY_INVALID", "reason": "prior attempt is not scientifically valid"}
     if record.get("execution", {}).get("status") != ExecutionStatus.SUCCESS.value:
@@ -247,7 +318,14 @@ def check_reuse(target_path: Path, metadata_path: Path) -> dict[str, Any]:
         artifact = artifacts.get(role)
         if not isinstance(artifact, dict):
             return {"reuse": False, "code": "ARTIFACT_MISSING", "reason": f"required artifact is absent: {role}"}
-        path = _artifact_path(metadata_path, str(artifact.get("path", "")))
+        stored_path = Path(str(artifact.get("path", "")))
+        path = (
+            stored_path
+            if stored_path.is_absolute()
+            else (layout.working_directory / stored_path)
+            if layout is not None
+            else _artifact_path(metadata_path, str(stored_path))
+        )
         if not path.is_file():
             return {"reuse": False, "code": "ARTIFACT_MISSING", "reason": f"required artifact is absent: {role}"}
         if path.stat().st_size != artifact.get("size_bytes") or file_hash(path) != artifact.get("sha256"):

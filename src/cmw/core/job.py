@@ -72,9 +72,10 @@ class ExecutionAttempt:
         executable: Mapping[str, object],
         generated_input_sha256: str,
         parent_attempt_id: str | None = None,
+        attempt_id: str | None = None,
     ) -> "ExecutionAttempt":
         return cls(
-            attempt_id=uuid4().hex,
+            attempt_id=attempt_id or uuid4().hex,
             target_id=target_id,
             created_at=datetime.now(timezone.utc).isoformat(),
             resources=dict(resources),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, ClassVar, Mapping, Sequence
 
 from .execution_contract import (
@@ -11,6 +12,7 @@ from .execution_contract import (
     ExecutionContractError,
     ExecutionIntent,
 )
+from .execution_layout import ExecutionLayout, ExecutionLayoutError
 from .provenance import stable_hash
 
 
@@ -575,12 +577,30 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
         reason,
     )
 
+    layout = None
+    layout_record = record.get("execution_layout")
+    if layout_record is not None:
+        if not isinstance(layout_record, Mapping):
+            raise ExecutionLayoutError(
+                f"{ExecutionLayoutError.code}: result execution layout is invalid"
+            )
+        layout = ExecutionLayout.from_mapping(layout_record)
+        attempt_record = record.get("attempt")
+        if not isinstance(attempt_record, Mapping):
+            raise ExecutionLayoutError(
+                f"{ExecutionLayoutError.code}: result attempt identity is missing"
+            )
+        layout.validate_attempt_identity(str(attempt_record.get("attempt_id", "")))
     artifacts = record.get("artifacts", {})
-    files = {
-        str(role): str(item.get("path", ""))
-        for role, item in artifacts.items()
-        if isinstance(item, Mapping)
-    } if isinstance(artifacts, Mapping) else {}
+    files: dict[str, str] = {}
+    if isinstance(artifacts, Mapping):
+        for role, item in artifacts.items():
+            if not isinstance(item, Mapping):
+                continue
+            path = Path(str(item.get("path", "")))
+            if layout is not None and not path.is_absolute():
+                path = layout.working_directory / path
+            files[str(role)] = str(path.resolve()) if layout is not None else str(path)
     parents = [str(item) for item in record.get("parent_artifacts", ())]
     source = record.get("source")
     if isinstance(source, Mapping) and source.get("scientific_artifact_id"):
@@ -634,6 +654,14 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
     evidence = record.get("evidence")
     if isinstance(evidence, Mapping) and evidence.get("final_energy_hartree") is not None:
         metadata["final_energy_hartree"] = evidence["final_energy_hartree"]
+    execution_provenance: dict[str, object] = {}
+    if layout is not None:
+        execution_provenance = {
+            "execution_layout": layout.to_dict(),
+            "attempt_id": layout.attempt_identifier,
+            "producing_execution_node": layout.workflow_node_identifier,
+            "resolved_output_path": str(layout.output_directory),
+        }
     return cls(
         producing_calculation=target_id,
         method=method,
@@ -646,6 +674,7 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
             "attempt": dict(record.get("attempt", {})),
             "provenance": dict(record.get("provenance", {})),
             "validation": dict(record.get("validation", {})),
+            **execution_provenance,
         },
         metadata=metadata,
     )
