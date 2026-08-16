@@ -77,6 +77,7 @@ def _prepare(args: argparse.Namespace) -> int:
         "input": str(input_path),
         "target": args.target,
         "resources": resources.to_dict(),
+        "execution_intent": spec.execution_intent.to_dict(),
     }
     if execution is not None:
         result["execution"] = execution

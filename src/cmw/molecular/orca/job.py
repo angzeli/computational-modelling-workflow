@@ -27,7 +27,7 @@ from .status import (
     read_orca_output,
     validate_stage,
 )
-from .input import parse_rendered_orca_input
+from .input import orca_execution_intent, parse_rendered_orca_input
 from .protocol import ProtocolIntent, validate_protocol
 
 
@@ -184,6 +184,7 @@ def finalize_attempt(
     record = {
         "schema_version": ORCA_JOB_SCHEMA_VERSION,
         "target": target.to_dict(),
+        "execution_intent": orca_execution_intent(stage_type).to_dict(),
         "lineage": target_record["lineage"],
         "attempt": attempt.to_dict(),
         "execution": {**asdict(execution), "status": execution.status.value},

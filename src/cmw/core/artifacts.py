@@ -6,6 +6,11 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, ClassVar, Mapping, Sequence
 
+from .execution_contract import (
+    ComputationalTask,
+    ExecutionContractError,
+    ExecutionIntent,
+)
 from .provenance import stable_hash
 
 
@@ -582,12 +587,36 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
         parents.append(str(source["scientific_artifact_id"]))
 
     cls: type[Artifact]
-    if stage_type == "OPT":
-        cls = OptimizationArtifact
-    elif stage_type == "FREQ":
-        cls = FrequencyArtifact
-    elif stage_type == "SP":
-        cls = SinglePointArtifact
+    stage_tasks = {
+        "OPT": ComputationalTask.OPTIMIZATION,
+        "FREQ": ComputationalTask.FREQUENCY,
+        "SP": ComputationalTask.SINGLE_POINT,
+    }
+    task_artifacts: dict[ComputationalTask, type[Artifact]] = {
+        ComputationalTask.OPTIMIZATION: OptimizationArtifact,
+        ComputationalTask.FREQUENCY: FrequencyArtifact,
+        ComputationalTask.SINGLE_POINT: SinglePointArtifact,
+    }
+    if stage_type in stage_tasks:
+        task = stage_tasks[stage_type]
+        execution_intent = record.get("execution_intent")
+        if execution_intent is not None:
+            if not isinstance(execution_intent, Mapping):
+                raise ExecutionContractError(
+                    f"{ExecutionContractError.code}: result execution intent is invalid"
+                )
+            try:
+                parsed_intent = ExecutionIntent.from_mapping(execution_intent)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ExecutionContractError(
+                    f"{ExecutionContractError.code}: result execution intent is invalid"
+                ) from exc
+            if parsed_intent.stage_type != stage_type or parsed_intent.task is not task:
+                raise ExecutionContractError(
+                    f"{ExecutionContractError.code}: result execution intent "
+                    f"does not match stage {stage_type}"
+                )
+        cls = task_artifacts[task]
     elif stage_type == "MULTIWFN_ESP":
         cls = DensityArtifact
     elif stage_type == "MULTIWFN_IGMH":

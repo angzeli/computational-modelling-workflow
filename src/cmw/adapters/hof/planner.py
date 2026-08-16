@@ -276,7 +276,11 @@ def _geometry_branch(
                     ArtifactRequirement("StructureArtifact", 1, ("input_structure",)),
                 ),
                 produces=("OptimizationArtifact", "StructureArtifact"),
-                configuration={"calculation_id": calculation.calculation_id, **protocol},
+                configuration={
+                    "calculation_id": calculation.calculation_id,
+                    "execution_intent": calculation.spec.execution_intent.to_dict(),
+                    **protocol,
+                },
             ),
         ),
         provenance={"adapter_branch": "geometry"},
@@ -377,7 +381,10 @@ def _deformation_branch(
                     role="distorted_fragment_energy",
                     requires=(ArtifactRequirement("StructureArtifact"),),
                     produces=("FragmentEnergyArtifact",),
-                    configuration={"calculation_id": distorted_plan.calculation_id},
+                    configuration={
+                        "calculation_id": distorted_plan.calculation_id,
+                        "execution_intent": distorted_plan.spec.execution_intent.to_dict(),
+                    },
                 ),
                 CalculationNode(
                     relax_id,
@@ -385,7 +392,10 @@ def _deformation_branch(
                     role="isolated_fragment_optimization",
                     requires=(ArtifactRequirement("StructureArtifact"),),
                     produces=("OptimizationArtifact", "StructureArtifact"),
-                    configuration={"calculation_id": relaxation_plan.calculation_id},
+                    configuration={
+                        "calculation_id": relaxation_plan.calculation_id,
+                        "execution_intent": relaxation_plan.spec.execution_intent.to_dict(),
+                    },
                 ),
                 CalculationNode(
                     relaxed_id,
@@ -396,7 +406,10 @@ def _deformation_branch(
                         ArtifactRequirement("StructureArtifact", 1, (relax_id,)),
                     ),
                     produces=("FragmentEnergyArtifact",),
-                    configuration={"calculation_id": relaxed_plan.calculation_id},
+                    configuration={
+                        "calculation_id": relaxed_plan.calculation_id,
+                        "execution_intent": relaxed_plan.spec.execution_intent.to_dict(),
+                    },
                 ),
             )
         )
@@ -574,7 +587,11 @@ def _density_igmh_branch(
                 role="density_generation",
                 requires=(ArtifactRequirement("StructureArtifact"),),
                 produces=("DensityArtifact",),
-                configuration={"calculation_id": calculation.calculation_id, **density_protocol},
+                configuration={
+                    "calculation_id": calculation.calculation_id,
+                    "execution_intent": calculation.spec.execution_intent.to_dict(),
+                    **density_protocol,
+                },
             ),
         ),
         external_inputs=("StructureArtifact",),

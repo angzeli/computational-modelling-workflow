@@ -108,6 +108,7 @@ def build_hof_interaction_workflow(
                 "method": configuration.interaction.method,
                 "basis": configuration.interaction.basis,
                 "protocol": dict(dimer_calculation.spec.protocol),
+                "execution_intent": dimer_calculation.spec.execution_intent.to_dict(),
             },
         )
     ]
@@ -129,6 +130,7 @@ def build_hof_interaction_workflow(
                     "active_atom_indices": list(fragment.atom_indices),
                     "ghost_atom_indices": list(calculation.ghost_atom_indices),
                     "protocol": dict(calculation.spec.protocol),
+                    "execution_intent": calculation.spec.execution_intent.to_dict(),
                 },
             )
         )

@@ -10,6 +10,7 @@ from cmw.molecular.orca.input import (
     OrcaResources,
     OrcaStageSpec,
     resolve_orca_resources,
+    validate_orca_execution_contract,
 )
 from cmw.molecular.orca.status import StageType
 
@@ -56,6 +57,7 @@ class HofOrcaCalculation:
             "active_atom_indices": list(self.active_atom_indices),
             "ghost_atom_indices": list(self.ghost_atom_indices),
             "scientific_identity": self.spec.scientific_identity(),
+            "execution_intent": self.spec.execution_intent.to_dict(),
         }
         if self.resources is not None:
             value["resources"] = self.resources.to_dict()
@@ -203,8 +205,10 @@ def render_hof_orca_input(
         raise ValueError("HOF ORCA rendering requires explicit execution resources")
 
     keyword_tokens = " ".join(calculation.spec.keywords.split())
+    intent = calculation.spec.execution_intent
+    validate_orca_execution_contract(intent)
     lines = [
-        f"! {keyword_tokens} SP",
+        f"! {keyword_tokens} {intent.required_behavior}",
         f"%pal nprocs {selected_resources.nprocs} end",
         f"%maxcore {selected_resources.maxcore_mb_per_process}",
     ]
@@ -224,6 +228,7 @@ def render_hof_orca_input(
             symbol = f"{atom.element}:" if index in ghosts else atom.element
         lines.append(f"{symbol:<8s} {atom.x: .12f} {atom.y: .12f} {atom.z: .12f}")
     lines.append("*")
+    validate_orca_execution_contract(intent, rendered_behavior=lines[0].split()[-1])
     return "\n".join(lines) + "\n"
 
 
