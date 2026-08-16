@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
-from uuid import uuid4
 
 from cmw.core.artifacts import (
     Artifact,
@@ -16,6 +15,12 @@ from cmw.core.artifacts import (
     artifact_from_result,
 )
 from cmw.core.job import ExecutionAttempt, JobTarget
+from cmw.core.execution_layout import (
+    ExecutionLayout,
+    ExecutionLayoutError,
+    execution_target_directory,
+    next_attempt_identifier,
+)
 from cmw.core.provenance import (
     ArtifactRecord,
     atomic_write_json,
@@ -192,9 +197,20 @@ def analysis_workflow_graph(
 
 
 def target_directory(
-    output_root: Path, operation: AnalysisOperation, target_id: str
+    output_root: Path,
+    operation: AnalysisOperation,
+    target_id: str,
+    *,
+    system_identifier: str | None = None,
 ) -> Path:
-    return output_root.resolve() / operation.value.lower() / target_id
+    if system_identifier is None:
+        return output_root.resolve() / operation.value.lower() / target_id
+    return execution_target_directory(
+        output_root,
+        system_identifier=system_identifier,
+        workflow_node_identifier=operation.value.lower(),
+        target_identifier=target_id,
+    )
 
 
 def _artifact_path(metadata_path: Path, stored: str) -> Path:
@@ -278,6 +294,21 @@ def check_reuse(
                     "code": "DENSITY_LINEAGE_INVALID",
                     "reason": str(exc),
                 }
+    layout = None
+    layout_record = record.get("execution_layout")
+    if layout_record is not None:
+        try:
+            if not isinstance(layout_record, Mapping):
+                raise ExecutionLayoutError("execution layout must be a mapping")
+            layout = ExecutionLayout.from_mapping(layout_record)
+            layout.validate(require_existing=True)
+            layout.validate_attempt_identity(
+                str(record.get("attempt", {}).get("attempt_id", ""))
+            )
+            if layout.target_identifier != target.target_id:
+                raise ExecutionLayoutError("layout target identity differs")
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"reuse": False, "code": "LAYOUT_INVALID", "reason": str(exc)}
     artifacts = record.get("artifacts")
     if not isinstance(artifacts, dict):
         return {
@@ -294,7 +325,14 @@ def check_reuse(
                 "code": "ARTIFACT_MISSING",
                 "reason": f"missing {role}",
             }
-        path = _artifact_path(result_path, str(artifact.get("path", "")))
+        stored_path = Path(str(artifact.get("path", "")))
+        path = (
+            stored_path
+            if stored_path.is_absolute()
+            else (layout.working_directory / stored_path)
+            if layout is not None
+            else _artifact_path(result_path, str(stored_path))
+        )
         if not path.is_file() or path.stat().st_size != artifact.get("size_bytes"):
             return {
                 "reuse": False,
@@ -374,14 +412,30 @@ def plan_analysis(
         if operation is AnalysisOperation.IGMH
         else None
     )
-    directory = target_directory(output_root, operation, target.target_id)
+    system_identifier = source.geometry_sha256
+    directory = target_directory(
+        output_root,
+        operation,
+        target.target_id,
+        system_identifier=system_identifier,
+    )
     result_path = directory / "result.json"
     reuse = check_reuse(target, result_path, source)
+    if not reuse["reuse"]:
+        legacy_directory = target_directory(output_root, operation, target.target_id)
+        legacy_result = legacy_directory / "result.json"
+        if legacy_result.is_file():
+            legacy_reuse = check_reuse(target, legacy_result, source)
+            if legacy_reuse["reuse"]:
+                directory = legacy_directory
+                result_path = legacy_result
+                reuse = legacy_reuse
     return {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
         "operation": operation.value,
         "source": source.to_dict(),
         "output_root": str(output_root.resolve()),
+        "system_identifier": system_identifier,
         "target_id": target.target_id,
         "target_path": str(directory / "target.json"),
         "result_path": str(result_path),
@@ -425,14 +479,28 @@ def prepare_analysis(plan: Mapping[str, Any]) -> dict[str, object]:
             )
     else:
         atomic_write_json(target_path, target_record)
-    attempt_id = uuid4().hex
-    attempt_directory = target_path.parent / "attempts" / attempt_id
-    attempt_directory.mkdir(parents=True)
+    attempt_id = next_attempt_identifier(target_path.parent)
+    layout = ExecutionLayout(
+        project_root=Path(str(plan["output_root"])),
+        system_identifier=str(plan["system_identifier"]),
+        workflow_node_identifier=str(plan["operation"]).lower(),
+        target_identifier=str(plan["target_id"]),
+        attempt_identifier=attempt_id,
+    )
+    if layout.target_directory != target_path.parent.resolve():
+        raise ExecutionLayoutError(
+            f"{ExecutionLayoutError.code}: planned target path conflicts with layout"
+        )
+    layout.create_working_directory()
+    attempt_directory = layout.working_directory
+    atomic_write_json(layout.layout_path, layout.to_dict())
     atomic_write_json(attempt_directory / "analysis-plan.json", dict(plan))
     return {
         **dict(plan),
         "attempt_id": attempt_id,
         "attempt_directory": str(attempt_directory),
+        "execution_layout": layout.to_dict(),
+        "layout_path": str(layout.layout_path),
     }
 
 
@@ -503,7 +571,6 @@ def _scientific_artifact(
     density: DensityArtifact | None,
     *,
     metadata_path: Path,
-    artifact_root: Path,
 ) -> Artifact:
     artifact = artifact_from_result(record)
     if not isinstance(artifact, IGMHArtifact):
@@ -520,8 +587,8 @@ def _scientific_artifact(
         for item in command_outputs
         if isinstance(item, Mapping) and item.get("role")
     }
-    relative_metadata = metadata_path.relative_to(artifact_root)
-    artifact_files = {**dict(artifact.files), "metadata": str(relative_metadata)}
+    resolved_metadata = str(metadata_path.resolve())
+    artifact_files = {**dict(artifact.files), "metadata": resolved_metadata}
     input_roles = {
         "source_wavefunction",
         "source_geometry",
@@ -553,7 +620,7 @@ def _scientific_artifact(
                 for role, item in manifest.items()
                 if role in declared_output_roles and isinstance(item, Mapping)
             }
-            | {"metadata": str(relative_metadata)},
+            | {"metadata": resolved_metadata},
             "visualization": dict(record.get("visualization", {})),
         },
         metadata={
@@ -578,6 +645,21 @@ def finalize_analysis(
     process_exit_code: int,
     repository: Path | None = None,
 ) -> dict[str, object]:
+    layout_record = read_json(attempt_directory / "execution-layout.json")
+    layout = ExecutionLayout.from_mapping(layout_record)
+    if attempt_directory.resolve() != layout.working_directory:
+        raise ExecutionLayoutError(
+            f"{ExecutionLayoutError.code}: supplied working directory conflicts "
+            "with execution layout"
+        )
+    layout.validate_paths(
+        input_paths=(runtime_path, menu_path),
+        metadata_paths=(attempt_directory / "attempt.json",),
+        log_paths=(
+            attempt_directory / "multiwfn.log",
+            attempt_directory / "multiwfn.stderr",
+        ),
+    )
     target_record = read_json(target_path)
     runtime_record = read_json(runtime_path)
     source = validate_source_result(Path(target_record["source"]["result_path"]))
@@ -591,6 +673,15 @@ def finalize_analysis(
     )
     if target.target_id != target_data.get("target_id"):
         raise ValueError("stored downstream target identity is invalid")
+    if target.target_id != layout.target_identifier:
+        raise ExecutionLayoutError(
+            f"{ExecutionLayoutError.code}: layout target identity conflicts "
+            "with the scientific target"
+        )
+    if target_path.resolve() != layout.target_directory / "target.json":
+        raise ExecutionLayoutError(
+            f"{ExecutionLayoutError.code}: target path conflicts with execution layout"
+        )
     operation = AnalysisOperation(str(target.calculation["operation"]))
     if process_exit_code != 0:
         raise MultiwfnAdapterError(
@@ -619,7 +710,7 @@ def finalize_analysis(
             validate_cube_geometry(cube, geometry)
             cubes[role] = cube
         records[role] = ArtifactRecord.from_path(
-            path, role=role, relative_to=target_path.parent
+            path, role=role, relative_to=layout.working_directory
         )
     for role, filename in {
         "automation_input": "menu.in",
@@ -635,19 +726,20 @@ def finalize_analysis(
         path = attempt_directory / filename
         if path.is_file():
             records[role] = ArtifactRecord.from_path(
-                path, role=role, relative_to=target_path.parent
+                path, role=role, relative_to=layout.working_directory
             )
     for role, path in {
         "source_wavefunction": Path(source.wavefunction_path),
         "source_geometry": Path(source.geometry_path),
     }.items():
         records[role] = ArtifactRecord.from_path(
-            path, role=role, relative_to=target_path.parent
+            path, role=role, relative_to=layout.working_directory
         )
     cube_roles = tuple(cubes)
     for role in cube_roles[1:]:
         validate_cube_compatibility(cubes[cube_roles[0]], cubes[role])
     roles = tuple(item.role for item in outputs if item.required)
+    layout.validate_paths(output_paths=tuple(discovered.values()))
     attempt = ExecutionAttempt.create(
         target_id=target.target_id,
         resources={"multiwfn_nthreads": runtime["requested_nthreads"]},
@@ -657,6 +749,7 @@ def finalize_analysis(
             "version": runtime["version"],
         },
         generated_input_sha256=file_hash(menu_path),
+        attempt_id=layout.attempt_identifier,
     )
     plan_record = read_json(attempt_directory / "analysis-plan.json")
     density = None
@@ -673,6 +766,7 @@ def finalize_analysis(
         "target": target.to_dict(),
         "source": source.to_dict(),
         "attempt": attempt.to_dict(),
+        "execution_layout": layout.to_dict(),
         "runtime": runtime,
         "command": command.to_dict(),
         "execution": {
@@ -697,7 +791,6 @@ def finalize_analysis(
         attempt_record,
         density,
         metadata_path=attempt_directory / "attempt.json",
-        artifact_root=target_path.parent,
     ).to_dict()
     atomic_write_json(attempt_directory / "attempt.json", attempt_record)
     result_path = target_path.parent / "result.json"

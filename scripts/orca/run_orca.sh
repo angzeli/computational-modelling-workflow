@@ -17,6 +17,7 @@ target=""
 metadata=""
 output=""
 stderr_path=""
+layout=""
 replace_stale=0
 artifacts=()
 
@@ -24,6 +25,7 @@ usage() {
   printf '%s\n' \
     "Usage: run_orca.sh --input FILE --target FILE --metadata FILE" \
     "                   --output FILE --stderr FILE [--artifact ROLE=FILE]" \
+    "                   [--layout FILE]" \
     "                   [--replace-stale-lock]" >&2
 }
 
@@ -34,6 +36,7 @@ while (($#)); do
     --metadata) metadata=${2:?}; shift 2 ;;
     --output) output=${2:?}; shift 2 ;;
     --stderr) stderr_path=${2:?}; shift 2 ;;
+    --layout) layout=${2:?}; shift 2 ;;
     --artifact) artifacts+=("${2:?}"); shift 2 ;;
     --replace-stale-lock) replace_stale=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -60,6 +63,9 @@ target=$(absolute_path "$target")
 metadata=$(absolute_path "$metadata")
 output=$(absolute_path "$output")
 stderr_path=$(absolute_path "$stderr_path")
+if [[ -n "$layout" ]]; then
+  layout=$(absolute_path "$layout")
+fi
 resolved_artifacts=()
 if ((${#artifacts[@]} > 0)); then
   for item in "${artifacts[@]}"; do
@@ -171,6 +177,7 @@ finalize=(
   --orca-exe "$ORCA_EXE" --orca-version "$orca_version"
   --nprocs "$NPROCS" --maxcore "$MAXCORE_MB" --repository "$REPO_ROOT"
 )
+[[ -z "$layout" ]] || finalize+=(--layout "$layout")
 if ((${#resolved_artifacts[@]} > 0)); then
   for item in "${resolved_artifacts[@]}"; do
     finalize+=(--artifact "$item")

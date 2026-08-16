@@ -27,6 +27,13 @@ from .execution_contract import (
     ExecutionContractError,
     ExecutionIntent,
 )
+from .execution_layout import (
+    EXECUTION_LAYOUT_SCHEMA_VERSION,
+    ExecutionLayout,
+    ExecutionLayoutError,
+    execution_target_directory,
+    next_attempt_identifier,
+)
 from .structure_artifacts import (
     StructureFormatHandler,
     StructureSummary,
@@ -66,6 +73,9 @@ __all__ = [
     "ExecutionProfiles",
     "ExecutionContractError",
     "ExecutionIntent",
+    "ExecutionLayout",
+    "ExecutionLayoutError",
+    "EXECUTION_LAYOUT_SCHEMA_VERSION",
     "FinalizedArtifactBundle",
     "NodeKind",
     "MultiwfnResourcePolicy",
@@ -80,8 +90,10 @@ __all__ = [
     "WorkflowNode",
     "compose_workflow_graphs",
     "execution_profiles_from_mapping",
+    "execution_target_directory",
     "finalize_artifact_bundle",
     "load_execution_profiles",
+    "next_attempt_identifier",
     "register_structure_format",
     "registered_structure_formats",
     "structure_artifact_from_file",

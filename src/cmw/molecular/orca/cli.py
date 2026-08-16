@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 
+from cmw.core.execution_layout import ExecutionLayout
 from cmw.core.execution_profiles import load_execution_profiles
 from cmw.core.job import GeometryLineage
 from cmw.core.locks import acquire_lock, inspect_lock, release_lock
@@ -127,6 +128,13 @@ def _finalize(args: argparse.Namespace) -> int:
         repository=Path(args.repository) if args.repository else None,
         frequency_policy=FrequencyPolicy(args.require_minimum, args.imaginary_tolerance),
         parent_attempt_id=args.parent_attempt_id or None,
+        execution_layout=(
+            ExecutionLayout.from_mapping(
+                json.loads(Path(args.layout).read_text(encoding="utf-8"))
+            )
+            if args.layout
+            else None
+        ),
     )
     _print(record)
     return 0 if record["reusable"] else 70
@@ -207,6 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     finalize.add_argument("--require-minimum", action="store_true")
     finalize.add_argument("--imaginary-tolerance", type=float, default=0.0)
     finalize.add_argument("--parent-attempt-id", default="")
+    finalize.add_argument("--layout", default="")
     finalize.set_defaults(handler=_finalize)
 
     reuse = sub.add_parser("reuse")

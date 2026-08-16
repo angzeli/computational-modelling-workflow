@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from cmw.core.execution_layout import ExecutionLayout
 from cmw.core.job import ExecutionAttempt, GeometryLineage, JobTarget
 from cmw.core.provenance import atomic_write_json, git_state, read_json, stable_hash
 from cmw.molecular.orca.input import OrcaResources, OrcaStageSpec, make_target, render_orca_input
@@ -147,6 +148,74 @@ class ReuseTests(unittest.TestCase):
         self.assertEqual(
             record["scientific_artifact"]["validation"]["status"], "PASSED"
         )
+
+    def test_layout_identity_and_resolved_paths_reach_artifact_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            geometry = read_xyz(FIXTURE)
+            spec = OrcaStageSpec(StageType.OPT, "HF STO-3G")
+            target = make_target(geometry, charge=0, multiplicity=1, spec=spec)
+            layout = ExecutionLayout(
+                root,
+                "system-a",
+                "optimization",
+                target.target_id,
+                "attempt_001",
+            )
+            layout.create_working_directory()
+            target_path = layout.target_directory / "target.json"
+            write_target(
+                target_path,
+                target,
+                GeometryLineage("input_structure", geometry_hash(geometry)),
+            )
+            input_geometry = layout.input_path("input.xyz")
+            write_xyz(input_geometry, geometry)
+            input_path = layout.input_path("stage.inp")
+            input_path.write_text(
+                render_orca_input(
+                    geometry_path=Path("input.xyz"),
+                    charge=0,
+                    multiplicity=1,
+                    spec=spec,
+                    resources=OrcaResources(),
+                ),
+                encoding="utf-8",
+            )
+            output_path = layout.output_path("stage.out")
+            output_path.write_text(_valid_output(StageType.OPT), encoding="utf-8")
+            stderr_path = layout.log_path("stage.err")
+            stderr_path.write_text("", encoding="utf-8")
+            final_geometry = layout.output_path("stage.xyz")
+            write_xyz(final_geometry, geometry)
+            metadata_path = layout.metadata_path("job.json")
+
+            record = finalize_attempt(
+                target_path=target_path,
+                metadata_path=metadata_path,
+                input_path=input_path,
+                output_path=output_path,
+                stderr_path=stderr_path,
+                process_exit_code=0,
+                executable={"path": "synthetic-orca", "version": "test"},
+                resources=OrcaResources().to_dict(),
+                artifacts={"final_geometry": final_geometry},
+                execution_layout=layout,
+            )
+            reuse = check_reuse(target_path, metadata_path)
+
+        artifact = record["scientific_artifact"]
+        self.assertEqual(record["attempt"]["attempt_id"], "attempt_001")
+        self.assertEqual(artifact["files"]["output"], str(output_path))
+        self.assertEqual(artifact["provenance"]["attempt_id"], "attempt_001")
+        self.assertEqual(
+            artifact["provenance"]["producing_execution_node"], "optimization"
+        )
+        self.assertEqual(
+            artifact["provenance"]["resolved_output_path"],
+            str(layout.output_directory),
+        )
+        self.assertTrue(reuse["reuse"])
 
     def test_declared_protocol_mismatch_is_not_reusable(self) -> None:
         wrong = (Path(__file__).parents[1] / "fixtures" / "orca" / "protocol_wrong_method.out").read_text(

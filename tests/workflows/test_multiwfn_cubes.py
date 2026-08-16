@@ -129,7 +129,9 @@ class MultiwfnCubeHarness(unittest.TestCase):
     def results(self, operation: str) -> list[dict[str, object]]:
         return [
             json.loads(path.read_text())
-            for path in sorted((self.output / operation).glob("*/result.json"))
+            for path in sorted(
+                (self.output / "calculation").glob(f"*/{operation}/*/result.json")
+            )
         ]
 
 
@@ -185,9 +187,11 @@ class FmoWorkflowTests(MultiwfnCubeHarness):
 
     def test_changed_cube_hash_prevents_reuse(self) -> None:
         self.run_workflow(FMO)
-        result_path = next((self.output / "fmo").glob("*/result.json"))
+        result_path = next(
+            (self.output / "calculation").glob("*/fmo/*/result.json")
+        )
         record = json.loads(result_path.read_text())
-        cube = result_path.parent / record["artifacts"]["homo_cube"]["path"]
+        cube = Path(record["scientific_artifact"]["files"]["homo_cube"])
         cube.write_text(cube.read_text() + " 0.8\n", encoding="utf-8")
         self.run_workflow(FMO)
         self.assertEqual(self.log.read_text().splitlines().count("FMO"), 2)
