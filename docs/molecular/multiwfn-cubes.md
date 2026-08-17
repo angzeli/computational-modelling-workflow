@@ -66,11 +66,14 @@ MULTIWFN_NTHREADS=4 \
 ```
 
 CMW derives a read-only attempt-local `settings.ini`, records the source and
-effective hashes, and never edits installation settings. A unique short alias
-under `TMPDIR` is exposed as `Multiwfnpath` only for the child lifetime because
-recent Multiwfn builds may truncate long configuration paths. Executable hash,
-version, settings, requested threads, and process-health samples are execution
-provenance, not scientific target identity.
+effective hashes, and never edits installation settings. Unique short aliases
+under `TMPDIR` expose both `Multiwfnpath` and the validated wavefunction source
+only for the child lifetime because recent Multiwfn builds may truncate long
+configuration or input paths. The original absolute source remains the
+provenance identity; the temporary alias is only an execution detail and is
+removed when the child exits. Executable hash, version, settings, requested
+threads, and process-health samples are execution provenance, not scientific
+target identity.
 
 An optional generic execution profile may supply `nthreads` through the same
 runtime path. Its declared total memory is recorded in runtime provenance, but
