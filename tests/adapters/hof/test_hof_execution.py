@@ -99,6 +99,29 @@ class HofExecutionMaterializationTests(unittest.TestCase):
             self.assertEqual(repeated["attempt_id"], "attempt_001")
             self.assertEqual(repeated["command_path"], result["command_path"])
 
+            runtime.write_text('{"runtime_id":"updated"}\n', encoding="utf-8")
+            refreshed = materialize_hof_orca_node(
+                systems_path=project / "config/systems.yaml",
+                methods_path=project / "config/methods.yaml",
+                protocol_path=project / "config/protocol.yaml",
+                execution_path=project / "config/execution.yaml",
+                system_id="synthetic_hof",
+                project_root=project,
+                node_id="geometry_optimization",
+                runtime_contract_source=runtime,
+                cmw_root=ROOT,
+                python_bin=Path("/usr/bin/python3"),
+                orca_executable=Path("/usr/bin/true"),
+            )
+            self.assertEqual(refreshed["attempt_id"], "attempt_002")
+            self.assertEqual(
+                json.loads(
+                    (Path(str(refreshed["attempt_directory"])) / "orca-runtime.json")
+                    .read_text(encoding="utf-8")
+                )["runtime_id"],
+                "updated",
+            )
+
     def test_non_initial_node_requires_validated_parent_results(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary) / "hof"
