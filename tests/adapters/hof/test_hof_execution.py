@@ -6,7 +6,10 @@ import shutil
 import tempfile
 import unittest
 
-from cmw.adapters.hof.execution import materialize_hof_orca_node
+from cmw.adapters.hof.execution import (
+    _reused_attempt_state,
+    materialize_hof_orca_node,
+)
 
 
 ROOT = Path(__file__).parents[3]
@@ -14,6 +17,36 @@ FIXTURE = ROOT / "tests/fixtures/hof"
 
 
 class HofExecutionMaterializationTests(unittest.TestCase):
+    def test_reused_attempt_preserves_operational_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            attempt = Path(temporary) / "target" / "attempts" / "attempt_004"
+            attempt.mkdir(parents=True)
+            metadata = attempt / "job.json"
+            metadata.write_text("{}\n", encoding="utf-8")
+            command = attempt / "exact_terminal_command.sh"
+            command.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+            (attempt / "execution-layout.json").write_text(
+                json.dumps(
+                    {
+                        "attempt_identifier": "attempt_004",
+                        "target_identifier": "target-id",
+                        "workflow_node_identifier": "geometry_optimization",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = _reused_attempt_state(
+                metadata,
+                node_id="geometry_optimization",
+                target_id="target-id",
+            )
+
+            self.assertEqual(result["status"], "REUSED")
+            self.assertEqual(result["attempt_id"], "attempt_004")
+            self.assertEqual(result["command_path"], str(command.resolve()))
+            self.assertEqual(result["result_path"], str(metadata.resolve()))
+
     def test_initial_optimization_is_materialized_with_storage_protection(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary) / "hof"

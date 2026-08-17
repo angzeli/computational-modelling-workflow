@@ -200,6 +200,38 @@ def _find_reusable_result(target_directory: Path) -> Path | None:
     return None
 
 
+def _reused_attempt_state(
+    metadata: Path, *, node_id: str, target_id: str
+) -> dict[str, object]:
+    """Return the same operational identity fields as a prepared attempt."""
+
+    attempt = metadata.resolve().parent
+    command = attempt / "exact_terminal_command.sh"
+    if not command.is_file():
+        raise ValueError("reusable HOF attempt lacks its launch provenance command")
+    result: dict[str, object] = {
+        "status": "REUSED",
+        "node_id": node_id,
+        "target_id": target_id,
+        "attempt_id": attempt.name,
+        "target_directory": str(attempt.parent.parent),
+        "attempt_directory": str(attempt),
+        "result_path": str(metadata.resolve()),
+        "command_path": str(command),
+    }
+    layout_path = attempt / "execution-layout.json"
+    if layout_path.is_file():
+        layout = read_json(layout_path)
+        expected = {
+            "attempt_identifier": attempt.name,
+            "target_identifier": target_id,
+            "workflow_node_identifier": node_id,
+        }
+        if any(layout.get(name) != value for name, value in expected.items()):
+            raise ValueError("reusable HOF attempt has conflicting execution identity")
+    return result
+
+
 def _find_pristine_prepared_attempt(target_directory: Path) -> dict[str, object] | None:
     attempts = target_directory / "attempts"
     if not attempts.is_dir():
@@ -324,12 +356,9 @@ def _materialize_calculation(
     )
     reusable = _find_reusable_result(target_directory)
     if reusable is not None:
-        return {
-            "status": "REUSED",
-            "node_id": calculation.node_id,
-            "target_id": target.target_id,
-            "result_path": str(reusable),
-        }
+        return _reused_attempt_state(
+            reusable, node_id=calculation.node_id, target_id=target.target_id
+        )
     prepared = _find_pristine_prepared_attempt(target_directory)
     if prepared is not None:
         return prepared
@@ -570,12 +599,9 @@ def materialize_relaxed_fragment_energy(
     )
     reusable = _find_reusable_result(target_directory)
     if reusable is not None:
-        return {
-            "status": "REUSED",
-            "node_id": node_id,
-            "target_id": target.target_id,
-            "result_path": str(reusable),
-        }
+        return _reused_attempt_state(
+            reusable, node_id=node_id, target_id=target.target_id
+        )
     attempt_id = next_attempt_identifier(target_directory)
     layout = ExecutionLayout(
         project_root=project_root,
