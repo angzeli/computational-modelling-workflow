@@ -4,6 +4,11 @@ import json
 import subprocess
 from pathlib import Path
 
+from cmw.molecular.workflows.multiwfn_analysis import (
+    AnalysisOperation,
+    plan_analysis,
+    prepare_analysis,
+)
 from tests.workflows.test_multiwfn_cubes import FAKE, MultiwfnCubeHarness, ROOT
 
 
@@ -207,6 +212,27 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
         self.run_igmh()
         self.run_igmh()
         self.assertEqual(self.log.read_text().splitlines().count("IGMH"), 1)
+
+    def test_existing_attempt_can_retry_equivalent_json_target(self) -> None:
+        arguments = {
+            "operation": AnalysisOperation.IGMH,
+            "source_path": self.source,
+            "output_root": self.output,
+            "grid_spacing_bohr": None,
+            "threads": 8,
+            "fragment_path": self.fragments,
+            "igmh_config_path": self.config,
+        }
+        first = prepare_analysis(plan_analysis(**arguments))
+        retry = prepare_analysis(plan_analysis(**arguments))
+
+        self.assertEqual(first["target_id"], retry["target_id"])
+        self.assertEqual(first["attempt_id"], "attempt_001")
+        self.assertEqual(retry["attempt_id"], "attempt_002")
+        attempts = sorted(
+            (self.output / "calculation").glob("*/igmh/*/attempts/attempt_*")
+        )
+        self.assertEqual([path.name for path in attempts], ["attempt_001", "attempt_002"])
 
     def test_missing_malformed_and_incompatible_cubes_fail(self) -> None:
         cases = (
