@@ -9,17 +9,24 @@ from unittest.mock import patch
 from cmw.core.execution_profiles import execution_profiles_from_mapping
 from cmw.core.provenance import file_hash
 from cmw.molecular.orca.runtime import (
+    ORCA_REQUIRED_MPI_DATATYPES,
     OrcaRuntimeError,
     _inspect_macos_dependencies,
     _parse_ldd_dependencies,
     _parse_otool_dependencies,
     _parse_otool_rpaths,
+    _parse_openmpi_fortran_datatypes,
     _probe_macos_loader,
     _resolve_macho_dependency,
     materialize_orca_runtime_contract,
     prepare_orca_runtime,
     runtime_environment,
     validate_orca_runtime_contract,
+)
+
+
+VALID_OMPI_INFO = "\n".join(
+    f"compiler:fortran:have:{name}:yes" for name in ORCA_REQUIRED_MPI_DATATYPES
 )
 
 
@@ -46,6 +53,16 @@ def _profile(root: Path):
 
 
 class OrcaRuntimeTests(unittest.TestCase):
+    def test_openmpi_fortran_datatype_capabilities_are_parsed(self) -> None:
+        self.assertEqual(
+            _parse_openmpi_fortran_datatypes(
+                "compiler:fortran:have:integer4:yes\n"
+                "compiler:fortran:have:complex16:no\n"
+                "unrelated:value\n"
+            ),
+            {"integer4": True, "complex16": False},
+        )
+
     def test_linker_output_parsers_preserve_dependency_identity(self) -> None:
         self.assertEqual(
             _parse_otool_dependencies(
@@ -224,14 +241,43 @@ class OrcaRuntimeTests(unittest.TestCase):
                 ):
                     _probe_macos_loader(record, working_directory=root)
 
+    def test_parallel_runtime_rejects_openmpi_without_required_datatypes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            orca = root / "orca" / "orca"
+            startup = root / "orca" / "orca_startup_mpi"
+            mpirun = root / "mpi" / "bin" / "mpirun"
+            ompi_info = root / "mpi" / "bin" / "ompi_info"
+            library = root / "mpi" / "lib" / "libmpi.40.dylib"
+            for path in (orca, startup, mpirun, ompi_info, library):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(path.name, encoding="utf-8")
+                path.chmod(0o755)
+            with (
+                patch("cmw.molecular.orca.runtime.platform.system", return_value="Darwin"),
+                patch(
+                    "cmw.molecular.orca.runtime._run",
+                    side_effect=(
+                        "mpirun (Open MPI) 4.1.6",
+                        "compiler:fortran:have:real8:yes",
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    OrcaRuntimeError,
+                    "lacks ORCA-required Fortran datatype support.*integer4",
+                ):
+                    prepare_orca_runtime(_profile(root), orca_executable=orca)
+
     def test_runtime_contract_is_revalidated_and_detects_binary_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             orca = root / "orca" / "orca"
             startup = root / "orca" / "orca_startup_mpi"
             mpirun = root / "mpi" / "bin" / "mpirun"
+            ompi_info = root / "mpi" / "bin" / "ompi_info"
             library = root / "mpi" / "lib" / "libmpi.40.dylib"
-            for path in (orca, startup, mpirun, library):
+            for path in (orca, startup, mpirun, ompi_info, library):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(path.name, encoding="utf-8")
                 path.chmod(0o755)
@@ -257,7 +303,11 @@ class OrcaRuntimeTests(unittest.TestCase):
                 patch("cmw.molecular.orca.runtime.platform.machine", return_value="arm64"),
                 patch(
                     "cmw.molecular.orca.runtime._run",
-                    return_value="mpirun (Open MPI) 4.1.6",
+                    side_effect=lambda command, **_: (
+                        VALID_OMPI_INFO
+                        if Path(command[0]).name == "ompi_info"
+                        else "mpirun (Open MPI) 4.1.6"
+                    ),
                 ),
                 patch(
                     "cmw.molecular.orca.runtime._inspect_macos_dependencies",

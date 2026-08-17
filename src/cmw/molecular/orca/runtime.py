@@ -13,8 +13,16 @@ from cmw.core.execution_profiles import ExecutionProfile, MpiRuntimePolicy
 from cmw.core.provenance import file_hash, stable_hash
 
 
-ORCA_RUNTIME_SCHEMA_VERSION = 2
+ORCA_RUNTIME_SCHEMA_VERSION = 3
 SYSTEM_LIBRARY_PREFIXES = (Path("/usr/lib"), Path("/System/Library"))
+ORCA_REQUIRED_MPI_DATATYPES = (
+    "integer4",
+    "integer8",
+    "real4",
+    "real8",
+    "complex8",
+    "complex16",
+)
 
 
 class OrcaRuntimeError(ValueError):
@@ -307,6 +315,54 @@ def _runtime_environment(
     }
 
 
+def _parse_openmpi_fortran_datatypes(value: str) -> dict[str, bool]:
+    """Extract size-specific MPI datatype support from parsable ompi_info."""
+
+    prefix = "compiler:fortran:have:"
+    capabilities: dict[str, bool] = {}
+    for line in value.splitlines():
+        if not line.startswith(prefix):
+            continue
+        name, separator, availability = line.removeprefix(prefix).rpartition(":")
+        if not separator or not name:
+            continue
+        normalized = availability.strip().casefold()
+        if normalized in {"yes", "no"}:
+            capabilities[name.casefold()] = normalized == "yes"
+    return capabilities
+
+
+def _inspect_openmpi_capabilities(
+    mpi: MpiRuntimePolicy, *, environment: Mapping[str, str]
+) -> dict[str, object]:
+    """Require the size-specific MPI datatypes used by ORCA parallel helpers."""
+
+    ompi_info = mpi.bin_directory / "ompi_info"
+    if not ompi_info.is_file() or not os.access(ompi_info, os.X_OK):
+        raise _failure(f"OpenMPI capability inspector is missing: {ompi_info}")
+    output = _run(
+        (str(ompi_info), "--parsable", "--all"), environment=environment
+    )
+    available = _parse_openmpi_fortran_datatypes(output)
+    missing = [
+        name for name in ORCA_REQUIRED_MPI_DATATYPES if not available.get(name, False)
+    ]
+    if missing:
+        raise _failure(
+            "OpenMPI lacks ORCA-required Fortran datatype support: "
+            + ", ".join(missing)
+        )
+    return {
+        "inspector": str(ompi_info.resolve()),
+        "inspector_sha256": file_hash(ompi_info.resolve()),
+        "required_fortran_datatypes": list(ORCA_REQUIRED_MPI_DATATYPES),
+        "available_fortran_datatypes": {
+            name: available[name] for name in ORCA_REQUIRED_MPI_DATATYPES
+        },
+        "status": "PASSED",
+    }
+
+
 def _prepare_runtime(
     *,
     profile_name: str,
@@ -340,6 +396,9 @@ def _prepare_runtime(
         f":{environment[library_variable]}" if environment.get(library_variable) else ""
     )
     mpi_version = _run((str(mpirun), "--version"), environment=environment).splitlines()[0]
+    mpi_capabilities = _inspect_openmpi_capabilities(
+        mpi, environment=environment
+    )
 
     helpers = tuple(
         sorted(
@@ -379,6 +438,7 @@ def _prepare_runtime(
             "launcher": str(mpirun.resolve()),
             "launcher_sha256": file_hash(mpirun.resolve()),
             "version": mpi_version,
+            "capabilities": mpi_capabilities,
         },
         "environment": environment_contract,
         "launch_overlay": launch_overlay,
@@ -398,6 +458,7 @@ def _prepare_runtime(
                 "orca_executable": True,
                 "mpi_launcher": True,
                 "mpi_version": True,
+                "mpi_fortran_datatypes": True,
                 "dynamic_libraries_resolved": True,
                 "parallel_helpers_inspected": bool(helpers),
             },

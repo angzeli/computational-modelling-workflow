@@ -65,7 +65,11 @@ operating-system overhead.
 Before a parallel production launch, `cmw.molecular.orca.cli runtime-prepare`
 resolves the configured `mpirun`, records its version and hash, inspects ORCA's
 parallel helper binaries, and resolves their dynamic-library dependencies
-transitively. On macOS this includes bare dependencies such as
+transitively. It also interrogates `ompi_info` and requires the size-specific
+integer, real, and complex MPI datatypes used by ORCA's parallel helpers. An
+OpenMPI build with its Fortran datatype table disabled is rejected even when
+its version, launcher, and shared-library names otherwise match. On macOS this
+includes bare dependencies such as
 `libmpi.40.dylib`; on Linux it uses the corresponding ELF linkage report.
 Missing launchers, directories, helper binaries, or libraries fail with
 `FAILED_RUNTIME_CONTRACT` before ORCA is started.
