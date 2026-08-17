@@ -53,6 +53,7 @@ class OrcaShellTests(unittest.TestCase):
                                 "path_prepend": [{str(runtime_bin)!r}],
                                 "library_path_variable": "LD_LIBRARY_PATH",
                                 "library_path_prepend": [{str(runtime_lib)!r}],
+                                "variables": {{"PMIX_MCA_gds": "hash"}},
                             }},
                             "validation": {{"status": "PASSED"}},
                         }}))
@@ -99,6 +100,7 @@ class OrcaShellTests(unittest.TestCase):
                         "working_directory": str(pathlib.Path.cwd()),
                         "path": os.environ.get("PATH", ""),
                         "library_path": os.environ.get("LD_LIBRARY_PATH", ""),
+                        "pmix_gds": os.environ.get("PMIX_MCA_gds", ""),
                     }}))
                     count = pathlib.Path({str(count)!r})
                     value = int(count.read_text() if count.exists() else "0") + 1
@@ -248,6 +250,7 @@ class OrcaShellTests(unittest.TestCase):
                 invocation_record["library_path"].split(os.pathsep)[0],
                 str(runtime_lib),
             )
+            self.assertEqual(invocation_record["pmix_gds"], "hash")
             error_text = (attempt / "stage.err").read_text(encoding="utf-8")
             self.assertIn("STDIN_BYTES=0", error_text)
             scratch = next(

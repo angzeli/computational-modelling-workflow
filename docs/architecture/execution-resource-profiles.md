@@ -55,6 +55,13 @@ maxcore_mb_per_process = floor(usable_memory_mb / nprocs)
 
 The integer result must be positive, and
 `nprocs * maxcore_mb_per_process` must not exceed the declared total budget.
+
+The ORCA runtime contract also records compatibility environment variables that
+CMW derives for a verified MPI stack. On macOS, OpenMPI 4.1.6 with its embedded
+PMIx 3.2.5 runtime is constrained to the available `hash` GDS component to avoid
+the known ds12/ds21 recursive-lock failure during `MPI_Finalize`. The component
+must exist at preflight time, and the recorded setting is exported by the ORCA
+runner for every helper process. Other platforms and MPI versions are unchanged.
 For the example 18 GB, 8-process profile, CMW emits `%maxcore 1843`; the derived
 ORCA allocation is 14,744 MB, below both the 80% usable allowance and the
 18,432 MB declared budget. The unused margin is reserved for program and
