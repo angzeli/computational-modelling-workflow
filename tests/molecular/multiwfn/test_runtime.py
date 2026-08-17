@@ -18,10 +18,13 @@ from cmw.core.process_health import (
 from cmw.molecular.multiwfn.automation import Operation, menu_stream
 from cmw.molecular.multiwfn.runtime import (
     DEFAULT_MULTIWFN_NTHREADS,
+    MENU_CONTRACT,
+    inspect_runtime_compatibility,
     parallelism_warning,
     parse_threads,
     prepare_runtime,
     resolve_executable,
+    resolve_menu_contract,
     resolve_threads,
 )
 
@@ -45,13 +48,13 @@ def _execution_profile():
     ).selected
 
 
-def _fake(root: Path, name: str = "Multiwfn") -> Path:
+def _fake(root: Path, name: str = "Multiwfn", version: str = "3.8") -> Path:
     path = root / name
     path.write_text(
-        """#!/usr/bin/env python3
+        f"""#!/usr/bin/env python3
 import os, sys
 if '--version' in sys.argv:
-    print('Multiwfn -- synthetic\\nVersion 3.8')
+    print('Multiwfn -- synthetic\\nVersion {version}')
     raise SystemExit(0)
 data = sys.stdin.read()
 print('STDIN=' + data.replace('\\n', ','))
@@ -114,6 +117,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertNotEqual(Path(one.settings_path), Path(four.settings_path))
             self.assertEqual(Path(one.settings_path).stat().st_mode & 0o222, 0)
             self.assertEqual(one.version, "3.8")
+            self.assertEqual(one.menu_contract, MENU_CONTRACT)
             self.assertEqual(one.executable_sha256, four.executable_sha256)
 
     def test_execution_profile_threads_use_existing_runtime_contract(self) -> None:
@@ -155,8 +159,44 @@ class RuntimeTests(unittest.TestCase):
                 )
 
     def test_unsupported_version_fails_before_launch(self) -> None:
-        with self.assertRaisesRegex(ValueError, "supported series is 3.8"):
+        with self.assertRaisesRegex(ValueError, "verified versions are 3.8"):
             menu_stream(Operation.ESP, "3.9", {"grid_spacing_bohr": 0.2})
+
+    def test_verified_calendar_release_uses_existing_menu_contract(self) -> None:
+        legacy = menu_stream(
+            Operation.IGMH,
+            "3.8",
+            {"fragment_a": [1, 2], "fragment_b": [3, 4], "grid_spacing_bohr": 0.2},
+        )
+        calendar = menu_stream(
+            Operation.IGMH,
+            "2026.7.15",
+            {"fragment_a": [1, 2], "fragment_b": [3, 4], "grid_spacing_bohr": 0.2},
+        )
+
+        self.assertEqual(resolve_menu_contract("2026.7.15"), MENU_CONTRACT)
+        self.assertEqual(calendar, legacy)
+        with self.assertRaisesRegex(ValueError, "unsupported Multiwfn menu contract"):
+            resolve_menu_contract("2026.7.16")
+
+    def test_calendar_release_is_validated_during_runtime_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = _fake(root, version="2026.7.15")
+            settings = root / "settings.ini"
+            settings.write_text("nthreads= 2\n", encoding="utf-8")
+
+            record = inspect_runtime_compatibility(
+                executable=str(executable),
+                settings_source=settings,
+                threads=8,
+                environment={},
+            )
+
+            self.assertEqual(record["version"], "2026.7.15")
+            self.assertEqual(record["menu_contract"], MENU_CONTRACT)
+            self.assertEqual(record["requested_nthreads"], 8)
+            self.assertEqual(record["validation"]["status"], "PASSED")
 
     def test_operation_stream_forwards_semantic_values(self) -> None:
         text = menu_stream(

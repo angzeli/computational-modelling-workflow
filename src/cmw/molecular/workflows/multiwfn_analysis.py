@@ -45,6 +45,7 @@ from cmw.molecular.multiwfn.adapter import (
     validate_output_specs,
 )
 from cmw.molecular.multiwfn.automation import Operation, menu_stream
+from cmw.molecular.multiwfn.runtime import MENU_CONTRACT
 from cmw.structure.xyz import read_xyz
 
 from .cube import read_cube, validate_cube_compatibility, validate_cube_geometry
@@ -130,7 +131,7 @@ def build_target(
         raise ValueError("IGMH requires an explicit configuration")
     scientific: dict[str, object] = {
         "operation": operation.value,
-        "operation_profile": "multiwfn-3.8",
+        "operation_profile": MENU_CONTRACT,
         "source_target_id": source.target_id,
         "source_wavefunction_sha256": source.wavefunction_sha256,
         "grid_spacing_bohr": config.grid_spacing_bohr,

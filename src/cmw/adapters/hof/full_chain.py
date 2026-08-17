@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 
 from cmw.core.provenance import atomic_write_json, file_hash, stable_hash
 from cmw.core.storage import check_storage_capacity
+from cmw.molecular.multiwfn.runtime import inspect_runtime_compatibility
 from cmw.molecular.orca.runtime import prepare_orca_runtime
 
 from .command_queue import _git_head, _guarded_script, _quote, _write_script
@@ -392,6 +393,12 @@ def generate_hof_full_chain(
     storage = check_storage_capacity(
         hof_root, minimum_free_gb=profile.storage.minimum_free_gb
     )
+    multiwfn_runtime = inspect_runtime_compatibility(
+        executable=str(multiwfn_executable),
+        settings_source=multiwfn_settings,
+        threads=profile.multiwfn.nthreads,
+        environment={},
+    )
     plan = build_hof_workflow_plan(configuration)
     preflight.mkdir(parents=True)
     python_runtime = preflight / "python-runtime"
@@ -403,6 +410,7 @@ def generate_hof_full_chain(
     runtime = prepare_orca_runtime(profile, orca_executable=orca_executable)
     runtime_path = preflight / "orca-runtime.json"
     atomic_write_json(runtime_path, runtime)
+    atomic_write_json(preflight / "multiwfn-runtime-preflight.json", multiwfn_runtime)
     initial = materialize_hof_orca_node(
         systems_path=config / "systems.yaml",
         methods_path=config / "methods.yaml",
@@ -452,6 +460,7 @@ def generate_hof_full_chain(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "repository_commits": {"cmw": _git_head(cmw_root), "hof": _git_head(hof_root)},
         "storage_capacity": storage,
+        "multiwfn_runtime": multiwfn_runtime,
         "initial_attempt": initial,
         "files": {
             str(path.relative_to(preflight)): {
