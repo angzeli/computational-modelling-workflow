@@ -11,6 +11,10 @@ profiles:
     orca:
       nprocs: 8
       total_memory_gb: 18
+      mpi:
+        bin_directory: /absolute/path/to/openmpi/bin
+        library_directories:
+          - /absolute/path/to/openmpi/lib
     multiwfn:
       nthreads: 8
       total_memory_gb: 18
@@ -21,6 +25,11 @@ CMW. The active profile, both program sections, and all positive resource
 values are required. Missing, malformed, non-positive, or unknown selections
 fail closed. Workflows that do not supply this optional document retain their
 existing resource interfaces and defaults.
+
+Parallel ORCA profiles may also declare an MPI runtime. These machine-specific
+paths are execution metadata, not scientific method settings. Paths must be
+absolute; CMW does not guess between multiple MPI installations or silently
+fall back to a different version.
 
 ## Scientific identity and execution identity
 
@@ -50,6 +59,30 @@ For the example 18 GB, 8-process profile, CMW emits `%maxcore 1843`; the derived
 ORCA allocation is 14,744 MB, below both the 80% usable allowance and the
 18,432 MB declared budget. The unused margin is reserved for program and
 operating-system overhead.
+
+## ORCA MPI runtime contract
+
+Before a parallel production launch, `cmw.molecular.orca.cli runtime-prepare`
+resolves the configured `mpirun`, records its version and hash, inspects ORCA's
+parallel helper binaries, and resolves their dynamic-library dependencies
+transitively. On macOS this includes bare dependencies such as
+`libmpi.40.dylib`; on Linux it uses the corresponding ELF linkage report.
+Missing launchers, directories, helper binaries, or libraries fail with
+`FAILED_RUNTIME_CONTRACT` before ORCA is started.
+
+The resulting `orca-runtime.json` records the exact `PATH` and dynamic-library
+prefixes, executable identities, resolved libraries, and a stable runtime ID.
+The shell runner revalidates the contract immediately before execution and
+prepends the recorded paths. On macOS it additionally materializes verified
+bare MPI libraries in the execution working directory and performs an actual
+loader-only probe through the same system-shell boundary ORCA uses. Both the
+static runtime contract and launch-time `orca-runtime-launch.json` are stored
+with attempt provenance. This avoids relying on `DYLD_LIBRARY_PATH`, which
+macOS can strip before ORCA's MPI helper is loaded.
+Production entrypoints should pass both `--runtime-contract` and
+`--require-runtime-contract`. Legacy serial and test entrypoints remain
+readable, but cannot satisfy the strict parallel-production gate without a
+validated runtime contract.
 
 ## Multiwfn translation
 

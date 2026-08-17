@@ -9,6 +9,7 @@ from cmw.molecular.orca.status import (
     ScientificStatus,
     StageType,
     classify_execution,
+    parse_orca_input_echo,
     parse_orca_output,
     validate_stage,
 )
@@ -31,6 +32,66 @@ class OrcaStatusTests(unittest.TestCase):
         self.assertEqual(evidence.multiplicity, 1)
         self.assertEqual(evidence.orca_version, "6.0.1")
         self.assertEqual(evidence.runtime_seconds, 62.5)
+
+    def test_numbered_input_echo_excludes_later_diagnostic_banners(self) -> None:
+        text = """\
+Program Version 6.1.1
+                             INPUT FILE
+================================================================================
+NAME = stage.inp
+|  1> ! r2SCAN-3c Opt
+|  2> %pal nprocs 8 end
+|  3> * xyzfile 0 1 input.xyz
+|  4>                 ****END OF INPUT****
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!   SERIOUS PROBLEM WITH INTERNALS - ANGLE IS APPROACHING 180 DEGREES       !
+!                       REBUILDING A NEW SET OF INTERNALS                    !
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"""
+
+        self.assertEqual(parse_orca_input_echo(text), ("r2SCAN-3c Opt",))
+        self.assertEqual(
+            parse_orca_output(text).input_keyword_tokens,
+            ("r2SCAN-3c", "Opt"),
+        )
+
+    def test_all_numbered_keyword_lines_are_preserved_in_order(self) -> None:
+        text = """\
+INPUT FILE
+| 1> ! DLPNO-CCSD(T) def2-TZVPP
+| 2> ! TightPNO LED
+| 3> ****END OF INPUT****
+INPUT FILE
+| 1> ! CPCM(Water)
+| 2> ****END OF INPUT****
+"""
+
+        self.assertEqual(
+            parse_orca_input_echo(text),
+            ("DLPNO-CCSD(T) def2-TZVPP", "TightPNO LED", "CPCM(Water)"),
+        )
+
+    def test_echo_header_disables_unbounded_legacy_fallback(self) -> None:
+        text = """\
+INPUT FILE
+| 1> ! r2SCAN-3c Opt
+| 2> %pal nprocs 8 end
+| 9> ! B3LYP def2-SVP
+"""
+
+        self.assertEqual(parse_orca_input_echo(text), ())
+
+    def test_legacy_keyword_snippet_remains_supported(self) -> None:
+        text = """\
+! DLPNO-CCSD(T) def2-TZVPP TightPNO LED
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!                 THIS IS A DECORATIVE OUTPUT MESSAGE                        !
+"""
+
+        self.assertEqual(
+            parse_orca_input_echo(text),
+            ("DLPNO-CCSD(T) def2-TZVPP TightPNO LED",),
+        )
 
     def test_normal_termination_is_not_optimization_convergence(self) -> None:
         evidence = self._evidence("normal_but_invalid_opt.out")

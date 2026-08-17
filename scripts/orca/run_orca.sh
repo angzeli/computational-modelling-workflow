@@ -19,6 +19,9 @@ output=""
 stderr_path=""
 layout=""
 geometry_contract=""
+runtime_contract=""
+runtime_launch_manifest=""
+require_runtime_contract=0
 replace_stale=0
 artifacts=()
 
@@ -28,6 +31,8 @@ usage() {
     "                   --output FILE --stderr FILE [--artifact ROLE=FILE]" \
     "                   [--layout FILE]" \
     "                   [--geometry-contract FILE]" \
+    "                   [--runtime-contract FILE]" \
+    "                   [--require-runtime-contract]" \
     "                   [--replace-stale-lock]" >&2
 }
 
@@ -40,6 +45,8 @@ while (($#)); do
     --stderr) stderr_path=${2:?}; shift 2 ;;
     --layout) layout=${2:?}; shift 2 ;;
     --geometry-contract) geometry_contract=${2:?}; shift 2 ;;
+    --runtime-contract) runtime_contract=${2:?}; shift 2 ;;
+    --require-runtime-contract) require_runtime_contract=1; shift ;;
     --artifact) artifacts+=("${2:?}"); shift 2 ;;
     --replace-stale-lock) replace_stale=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -62,6 +69,7 @@ absolute_path() {
 }
 
 input=$(absolute_path "$input")
+input_directory=$(dirname "$input")
 target=$(absolute_path "$target")
 metadata=$(absolute_path "$metadata")
 output=$(absolute_path "$output")
@@ -71,6 +79,9 @@ if [[ -n "$layout" ]]; then
 fi
 if [[ -n "$geometry_contract" ]]; then
   geometry_contract=$(absolute_path "$geometry_contract")
+fi
+if [[ -n "$runtime_contract" ]]; then
+  runtime_contract=$(absolute_path "$runtime_contract")
 fi
 resolved_artifacts=()
 if ((${#artifacts[@]} > 0)); then
@@ -101,6 +112,46 @@ fi
 if ! command -v "$ORCA_EXE" >/dev/null 2>&1 && [[ ! -x "$ORCA_EXE" ]]; then
   printf 'ORCA executable was not found: %s\n' "$ORCA_EXE" >&2
   exit 69
+fi
+if [[ -x "$ORCA_EXE" ]]; then
+  orca_directory=$(cd "$(dirname "$ORCA_EXE")" && pwd -P)
+  orca_command="$orca_directory/$(basename "$ORCA_EXE")"
+else
+  orca_command=$(command -v "$ORCA_EXE")
+fi
+if ((require_runtime_contract == 1)) && [[ -z "$runtime_contract" ]]; then
+  printf 'Parallel production execution requires an ORCA runtime contract\n' >&2
+  exit 69
+fi
+if [[ -n "$runtime_contract" ]]; then
+  if ! runtime_json=$(
+    "$PYTHON_BIN" -m cmw.molecular.orca.cli runtime-validate \
+      --runtime "$runtime_contract" --orca-exe "$orca_command"
+  ); then
+    printf 'ORCA runtime contract validation failed: %s\n' "$runtime_json" >&2
+    exit 69
+  fi
+  runtime_path_prefix=$(printf '%s' "$runtime_json" | "$PYTHON_BIN" -c \
+    'import json,sys; print(":".join(json.load(sys.stdin)["environment"]["path_prepend"]))')
+  runtime_library_variable=$(printf '%s' "$runtime_json" | "$PYTHON_BIN" -c \
+    'import json,sys; print(json.load(sys.stdin)["environment"]["library_path_variable"])')
+  runtime_library_prefix=$(printf '%s' "$runtime_json" | "$PYTHON_BIN" -c \
+    'import json,sys; print(":".join(json.load(sys.stdin)["environment"]["library_path_prepend"]))')
+  export PATH="$runtime_path_prefix${PATH:+:$PATH}"
+  case "$runtime_library_variable" in
+    DYLD_LIBRARY_PATH)
+      export DYLD_LIBRARY_PATH="$runtime_library_prefix${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+      ;;
+    LD_LIBRARY_PATH)
+      export LD_LIBRARY_PATH="$runtime_library_prefix${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+      ;;
+    *)
+      printf 'Unsupported runtime library-path variable: %s\n' "$runtime_library_variable" >&2
+      exit 69
+      ;;
+  esac
+  runtime_launch_manifest="$input_directory/orca-runtime-launch.json"
+  resolved_artifacts+=("runtime_contract=$runtime_contract")
 fi
 
 lock_path="${target}.lock"
@@ -154,22 +205,40 @@ if [[ -e "$metadata" || -e "$output" || -e "$stderr_path" ]]; then
   exit 73
 fi
 
+if [[ -n "$runtime_contract" ]]; then
+  if ! runtime_launch_json=$(
+    "$PYTHON_BIN" -m cmw.molecular.orca.cli runtime-materialize \
+      --runtime "$runtime_contract" --orca-exe "$orca_command" \
+      --working-directory "$input_directory" \
+      --output "$runtime_launch_manifest"
+  ); then
+    printf 'ORCA launch-time runtime validation failed: %s\n' \
+      "$runtime_launch_json" >&2
+    exit 69
+  fi
+  resolved_artifacts+=("runtime_launch_contract=$runtime_launch_manifest")
+fi
+
 scratch_parent=${TMPDIR:-/tmp}
 mkdir -p "$scratch_parent"
 scratch_dir=$(mktemp -d "$scratch_parent/cmw-orca.XXXXXXXX")
 export TMPDIR="$scratch_dir"
 
 orca_version=$(
-  "$ORCA_EXE" --version 2>/dev/null | head -n 1 || true
+  "$orca_command" --version 2>/dev/null | head -n 1 || true
 )
 
-launch=("$ORCA_EXE" "$input")
+input_name=$(basename "$input")
+launch=("$orca_command" "$input_name")
 if [[ ${CMW_CAFFEINATE:-0} == 1 ]] && command -v caffeinate >/dev/null 2>&1; then
   launch=(caffeinate -i "${launch[@]}")
 fi
 
 set +e
-"${launch[@]}" </dev/null >"$output" 2>"$stderr_path" &
+(
+  cd "$input_directory"
+  exec "${launch[@]}"
+) </dev/null >"$output" 2>"$stderr_path" &
 child_pid=$!
 wait "$child_pid"
 process_status=$?
@@ -180,7 +249,7 @@ finalize=(
   "$PYTHON_BIN" -m cmw.molecular.orca.cli finalize
   --target "$target" --metadata "$metadata" --input "$input"
   --output "$output" --stderr "$stderr_path" --process-exit-code "$process_status"
-  --orca-exe "$ORCA_EXE" --orca-version "$orca_version"
+  --orca-exe "$orca_command" --orca-version "$orca_version"
   --nprocs "$NPROCS" --maxcore "$MAXCORE_MB" --repository "$REPO_ROOT"
 )
 [[ -z "$layout" ]] || finalize+=(--layout "$layout")

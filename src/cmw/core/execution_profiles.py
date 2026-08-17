@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .provenance import stable_hash
 
@@ -36,9 +36,16 @@ def _positive_memory(value: object, *, name: str) -> float:
     return float(value)
 
 
-def _resource_keys(value: Mapping[str, Any], expected: set[str], *, name: str) -> None:
+def _resource_keys(
+    value: Mapping[str, Any],
+    expected: set[str],
+    *,
+    name: str,
+    optional: set[str] | None = None,
+) -> None:
+    allowed_optional = optional or set()
     missing = sorted(expected - set(value))
-    extra = sorted(set(value) - expected)
+    extra = sorted(set(value) - expected - allowed_optional)
     if missing or extra:
         detail: list[str] = []
         if missing:
@@ -48,10 +55,56 @@ def _resource_keys(value: Mapping[str, Any], expected: set[str], *, name: str) -
         raise ValueError(f"{name} resource definition is malformed: {'; '.join(detail)}")
 
 
+def _absolute_directory(value: object, *, name: str) -> Path:
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        raise ValueError(f"{name} must be an absolute directory path")
+    selected = Path(value).expanduser()
+    if not selected.is_absolute() or any(
+        character in str(selected) for character in ("\n", "\r", ":")
+    ):
+        raise ValueError(f"{name} must be an absolute colon-free directory path")
+    return selected.resolve()
+
+
+@dataclass(frozen=True)
+class MpiRuntimePolicy:
+    """Profile-scoped MPI executable and dynamic-library search roots."""
+
+    bin_directory: Path
+    library_directories: tuple[Path, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "bin_directory",
+            _absolute_directory(self.bin_directory, name="orca.mpi.bin_directory"),
+        )
+        if not isinstance(self.library_directories, Sequence) or isinstance(
+            self.library_directories, (str, bytes)
+        ):
+            raise ValueError("orca.mpi.library_directories must be a sequence")
+        directories = tuple(
+            _absolute_directory(value, name="orca.mpi.library_directories")
+            for value in self.library_directories
+        )
+        if not directories:
+            raise ValueError("orca.mpi.library_directories must not be empty")
+        if len(set(directories)) != len(directories):
+            raise ValueError("orca.mpi.library_directories contains duplicates")
+        object.__setattr__(self, "library_directories", directories)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "bin_directory": str(self.bin_directory),
+            "library_directories": [str(path) for path in self.library_directories],
+        }
+
+
 @dataclass(frozen=True)
 class OrcaResourcePolicy:
     nprocs: int
     total_memory_gb: float
+    mpi: MpiRuntimePolicy | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -65,11 +118,14 @@ class OrcaResourcePolicy:
             ),
         )
 
-    def to_dict(self) -> dict[str, int | float]:
-        return {
+    def to_dict(self) -> dict[str, object]:
+        value: dict[str, object] = {
             "nprocs": self.nprocs,
             "total_memory_gb": self.total_memory_gb,
         }
+        if self.mpi is not None:
+            value["mpi"] = self.mpi.to_dict()
+        return value
 
 
 @dataclass(frozen=True)
@@ -189,15 +245,51 @@ def execution_profiles_from_mapping(value: Mapping[str, Any]) -> ExecutionProfil
             orca,
             {"nprocs", "total_memory_gb"},
             name=f"profiles.{raw_name}.orca",
+            optional={"mpi"},
         )
         _resource_keys(
             multiwfn,
             {"nthreads", "total_memory_gb"},
             name=f"profiles.{raw_name}.multiwfn",
         )
+        mpi: MpiRuntimePolicy | None = None
+        if "mpi" in orca:
+            mpi_mapping = _mapping(
+                orca["mpi"], name=f"profiles.{raw_name}.orca.mpi"
+            )
+            _resource_keys(
+                mpi_mapping,
+                {"bin_directory", "library_directories"},
+                name=f"profiles.{raw_name}.orca.mpi",
+            )
+            raw_libraries = mpi_mapping["library_directories"]
+            if not isinstance(raw_libraries, Sequence) or isinstance(
+                raw_libraries, (str, bytes)
+            ):
+                raise ValueError(
+                    f"profiles.{raw_name}.orca.mpi.library_directories "
+                    "must be a sequence"
+                )
+            mpi = MpiRuntimePolicy(
+                _absolute_directory(
+                    mpi_mapping["bin_directory"],
+                    name=f"profiles.{raw_name}.orca.mpi.bin_directory",
+                ),
+                tuple(
+                    _absolute_directory(
+                        path,
+                        name=(
+                            f"profiles.{raw_name}.orca.mpi.library_directories"
+                        ),
+                    )
+                    for path in raw_libraries
+                ),
+            )
         profiles[raw_name] = ExecutionProfile(
             raw_name,
-            OrcaResourcePolicy(orca["nprocs"], orca["total_memory_gb"]),
+            OrcaResourcePolicy(
+                orca["nprocs"], orca["total_memory_gb"], mpi=mpi
+            ),
             MultiwfnResourcePolicy(
                 multiwfn["nthreads"], multiwfn["total_memory_gb"]
             ),
@@ -224,6 +316,7 @@ __all__ = [
     "EXECUTION_PROFILE_SCHEMA_VERSION",
     "ExecutionProfile",
     "ExecutionProfiles",
+    "MpiRuntimePolicy",
     "MultiwfnResourcePolicy",
     "OrcaResourcePolicy",
     "execution_profiles_from_mapping",

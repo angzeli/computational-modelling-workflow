@@ -27,7 +27,13 @@ FREQUENCY_RE = re.compile(rf"^\s*\d+:\s+({NUMBER})\s+cm\*\*-1", re.M)
 CHARGE_RE = re.compile(r"^\s*(?:Total Charge|Charge).*?\.\.+\s*(-?\d+)\s*$", re.I | re.M)
 MULTIPLICITY_RE = re.compile(r"^\s*Multiplicity.*?\.\.+\s*(\d+)\s*$", re.I | re.M)
 MEMORY_RE = re.compile(rf"Memory available(?:\s+for [^:\n]+)?:\s*({NUMBER})\s*MB", re.I)
-INPUT_KEYWORD_RE = re.compile(r"^\s*!\s+(.+?)\s*$", re.M)
+INPUT_ECHO_HEADER_RE = re.compile(r"^\s*INPUT\s+FILE\s*$", re.I)
+INPUT_ECHO_END_RE = re.compile(
+    r"^\s*(?:\|\s*\d+\s*>\s*)?\*{4}\s*END\s+OF\s+INPUT\s*\*{4}\s*$",
+    re.I,
+)
+INPUT_ECHO_LINE_RE = re.compile(r"^\s*\|\s*\d+\s*>\s?(.*?)\s*$")
+INPUT_KEYWORD_LINE_RE = re.compile(r"^\s*!\s*(\S.*?)\s*$")
 METHOD_REPORT_RE = re.compile(
     r"^\s*(?:METHOD|METHOD NAME|AB INITIO METHOD)\s*(?:\.{2,}|:|=)\s*(.+?)\s*$",
     re.I | re.M,
@@ -156,6 +162,62 @@ def _number(value: str) -> float:
     return float(value.replace("D", "E").replace("d", "e"))
 
 
+def _keyword_payload(line: str) -> str | None:
+    match = INPUT_KEYWORD_LINE_RE.match(line)
+    if match is None:
+        return None
+    payload = match.group(1).strip()
+    # ORCA diagnostic banners use paired exclamation marks. They are output,
+    # not simple-input keyword lines, and must never become protocol evidence.
+    if not payload or payload.startswith("!") or payload.endswith("!"):
+        return None
+    return payload
+
+
+def parse_orca_input_echo(text: str) -> tuple[str, ...]:
+    """Return simple-keyword payloads from ORCA's bounded input echo.
+
+    ORCA output numbers echoed input lines as ``| N> ...`` between an
+    ``INPUT FILE`` header and ``END OF INPUT`` marker. Only lines inside those
+    sections are trusted when a header is present. A narrow fallback accepts
+    unnumbered keyword lines in legacy output snippets that contain no input
+    header; decorative ``!...!`` diagnostics are excluded.
+    """
+
+    lines = text.splitlines()
+    has_echo_header = any(INPUT_ECHO_HEADER_RE.match(line) for line in lines)
+    payloads: list[str] = []
+
+    if has_echo_header:
+        in_echo = False
+        current_payloads: list[str] = []
+        for line in lines:
+            if INPUT_ECHO_HEADER_RE.match(line):
+                in_echo = True
+                current_payloads = []
+                continue
+            if not in_echo:
+                continue
+            if INPUT_ECHO_END_RE.search(line):
+                payloads.extend(current_payloads)
+                in_echo = False
+                current_payloads = []
+                continue
+            numbered = INPUT_ECHO_LINE_RE.match(line)
+            if numbered is None:
+                continue
+            payload = _keyword_payload(numbered.group(1))
+            if payload is not None:
+                current_payloads.append(payload)
+    else:
+        for line in lines:
+            payload = _keyword_payload(line)
+            if payload is not None:
+                payloads.append(payload)
+
+    return tuple(payloads)
+
+
 def parse_orca_output(text: str, *, stderr_text: str = "") -> OrcaEvidence:
     """Extract factual evidence from possibly partial or redacted ORCA text."""
 
@@ -186,7 +248,7 @@ def parse_orca_output(text: str, *, stderr_text: str = "") -> OrcaEvidence:
     charge = CHARGE_RE.findall(text)
     multiplicity = MULTIPLICITY_RE.findall(text)
     memory = MEMORY_RE.findall(combined)
-    keyword_lines = INPUT_KEYWORD_RE.findall(text)
+    keyword_lines = parse_orca_input_echo(text)
     keyword_tokens = tuple(
         dict.fromkeys(token for line in keyword_lines for token in line.split())
     )
