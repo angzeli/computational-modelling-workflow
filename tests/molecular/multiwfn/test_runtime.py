@@ -60,6 +60,10 @@ data = sys.stdin.read()
 print('STDIN=' + data.replace('\\n', ','))
 print('THREADS=' + os.environ.get('OMP_NUM_THREADS', ''))
 print('PATH=' + os.environ.get('Multiwfnpath', ''))
+if len(sys.argv) > 1:
+    source = sys.argv[1]
+    print('SOURCE=' + source)
+    print('SOURCE_TEXT=' + open(source, encoding='utf-8').read().strip())
 """,
         encoding="utf-8",
     )
@@ -279,6 +283,55 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(all(not Path(alias).exists() for alias in aliases))
             record = json.loads(metadata.read_text())
             self.assertEqual(record["runtime"]["requested_nthreads"], 4)
+
+    def test_shell_uses_short_source_alias_for_long_project_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cmw shell source space ") as temporary:
+            root = Path(temporary)
+            executable = _fake(root, "fake Multiwfn")
+            settings = root / "settings.ini"
+            settings.write_text("nthreads= 2\n", encoding="utf-8")
+            attempt = root / "attempt directory"
+            attempt.mkdir()
+            metadata = attempt / "runtime.json"
+            source_directory = root / ("long source directory " + "x" * 180)
+            source_directory.mkdir()
+            source = source_directory / "wavefunction.molden.input"
+            source.write_text("[Molden Format]\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                (
+                    "bash",
+                    "-c",
+                    'set -euo pipefail; source "$1"; MULTIWFN_EXE="$2"; '
+                    'MULTIWFN_NTHREADS=4; multiwfn_runtime_prepare "$3" "$4" "$5"; '
+                    'cd "$3"; printf "hello\\n" | multiwfn_runtime_launch "$6"',
+                    "_",
+                    str(SHELL),
+                    str(executable),
+                    str(attempt),
+                    str(metadata),
+                    str(settings),
+                    str(source),
+                ),
+                cwd=ROOT,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            source_argument = next(
+                line.removeprefix("SOURCE=")
+                for line in completed.stdout.splitlines()
+                if line.startswith("SOURCE=")
+            )
+            self.assertLess(len(source_argument), 160)
+            self.assertNotIn(" ", source_argument)
+            self.assertIn("SOURCE_TEXT=[Molden Format]", completed.stdout)
+            self.assertFalse(Path(source_argument).exists())
+            alias_record = (attempt / "multiwfn-runtime-alias.txt").read_text()
+            self.assertIn("settings=", alias_record)
+            self.assertIn("source=", alias_record)
 
 
 if __name__ == "__main__":

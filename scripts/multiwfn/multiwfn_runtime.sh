@@ -45,7 +45,7 @@ multiwfn_runtime_prepare() {
 }
 
 multiwfn_runtime_launch() {
-  local alias_root alias_path
+  local alias_root alias_path source_alias="" source_name="" source_path=""
   if [[ -z "$MULTIWFN_RUN_SETTINGS_DIRECTORY" || ! -s "$MULTIWFN_RUN_SETTINGS_PATH" ]]; then
     printf 'Multiwfn run-local settings were not prepared\n' >&2
     return 64
@@ -58,12 +58,33 @@ multiwfn_runtime_launch() {
     alias_root=$(mktemp -d "${TMPDIR:-/tmp}/cmw-multiwfn.XXXXXXXX") || exit 70
     alias_path=$alias_root/runtime
     cleanup_multiwfn_alias() {
+      [[ -z "$source_alias" ]] || rm -f -- "$source_alias"
       rm -f -- "$alias_path"
       rmdir "$alias_root" 2>/dev/null || true
     }
     trap cleanup_multiwfn_alias EXIT
     ln -s "$MULTIWFN_RUN_SETTINGS_DIRECTORY" "$alias_path"
-    printf '%s\n' "$alias_path" > multiwfn-runtime-alias.txt
+    if (($#)); then
+      source_path=$1
+      if [[ ! -f "$source_path" ]]; then
+        printf 'Multiwfn source file is missing: %s\n' "$source_path" >&2
+        exit 66
+      fi
+      source_name=${source_path##*/}
+      source_name=$(printf '%s' "$source_name" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
+      source_name=source-${source_name:-input}
+      if ((${#source_name} > 80)); then
+        source_name=source-${source_name: -73}
+      fi
+      source_alias=$alias_root/$source_name
+      ln -s "$source_path" "$source_alias"
+      shift
+      set -- "$source_alias" "$@"
+    fi
+    {
+      printf 'settings=%s\n' "$alias_path"
+      [[ -z "$source_alias" ]] || printf 'source=%s\n' "$source_alias"
+    } > multiwfn-runtime-alias.txt
     Multiwfnpath="$alias_path" OMP_NUM_THREADS="$MULTIWFN_NTHREADS" \
       "$MULTIWFN_EXE" "$@"
   )
