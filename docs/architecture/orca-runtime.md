@@ -40,7 +40,9 @@ retaining absolute paths in CMW metadata.
 Parallel production launches additionally consume a validated
 `orca-runtime.json`. The runtime contract pins the configured MPI launcher,
 executable and library search roots, ORCA executable, and the transitive
-dynamic libraries used by ORCA's parallel helpers. The runner revalidates this
+dynamic libraries used by ORCA's parallel helpers. The contract also records
+verified OpenMPI Fortran datatype capabilities so an ABI-incomplete MPI build
+cannot pass based on version and library names alone. The runner revalidates this
 identity before acquiring execution state, prepends the recorded `PATH` and
 platform library-path variable, and fails before launching ORCA if the contract
 is missing, stale, or incomplete.
@@ -51,6 +53,6 @@ sufficient launch evidence. Bare dynamic-library dependencies are recorded in
 the runtime contract and materialized as verified symlinks in the attempt
 working directory, which is an explicit dyld search location for ORCA's MPI
 helpers. Before scientific execution, CMW launches `orca_startup_mpi` without
-calculation input through `/bin/sh` and rejects any dyld loading failure. The
+calculation input through `/bin/sh` and rejects dyld loading failures. The
 result is stored as `orca-runtime-launch.json`; collisions, changed sources,
 missing links, and failed loader probes all stop before ORCA receives the input.
