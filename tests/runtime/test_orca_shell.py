@@ -29,6 +29,7 @@ class OrcaShellTests(unittest.TestCase):
             fake = directory / "fake orca"
             count = directory / "execution count.txt"
             invocation = directory / "invocation.json"
+            finalize_invocation = directory / "finalize-invocation.json"
             runtime_contract = attempt / "orca-runtime.json"
             runtime_contract.write_text("{}\n", encoding="utf-8")
             runtime_bin = directory / "mpi runtime" / "bin"
@@ -70,6 +71,10 @@ class OrcaShellTests(unittest.TestCase):
                         output.write_text(json.dumps(record))
                         print(json.dumps(record))
                         raise SystemExit(0)
+                    if sys.argv[1:4] == ["-m", "cmw.molecular.orca.cli", "finalize"]:
+                        pathlib.Path({str(finalize_invocation)!r}).write_text(
+                            json.dumps(sys.argv[4:])
+                        )
                     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
                     """
                 ),
@@ -120,6 +125,8 @@ class OrcaShellTests(unittest.TestCase):
                 "ORCA_EXE": str(fake),
                 "NPROCS": "4",
                 "MAXCORE_MB": "256",
+                "CMW_REQUIRE_MINIMUM": "true",
+                "CMW_IMAGINARY_TOLERANCE_CM1": "7.5",
             }
             prepare = subprocess.run(
                 (
@@ -239,6 +246,12 @@ class OrcaShellTests(unittest.TestCase):
             self.assertIn("runtime_launch_contract", record["artifacts"])
             self.assertTrue((attempt / "orca-runtime-launch.json").is_file())
             self.assertTrue(record["reusable"])
+            finalize_arguments = json.loads(
+                finalize_invocation.read_text(encoding="utf-8")
+            )
+            self.assertIn("--require-minimum", finalize_arguments)
+            tolerance_index = finalize_arguments.index("--imaginary-tolerance")
+            self.assertEqual(finalize_arguments[tolerance_index + 1], "7.5")
 
             second = subprocess.run(
                 command, cwd=ROOT, env=env, check=True, capture_output=True, text=True
