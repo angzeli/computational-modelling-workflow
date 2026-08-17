@@ -300,7 +300,10 @@ def _inspect_linux_dependencies(
 
 
 def _runtime_environment(
-    mpi: MpiRuntimePolicy, *, system_name: str
+    mpi: MpiRuntimePolicy,
+    *,
+    system_name: str,
+    variables: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     if system_name == "Darwin":
         library_variable = "DYLD_LIBRARY_PATH"
@@ -308,11 +311,53 @@ def _runtime_environment(
         library_variable = "LD_LIBRARY_PATH"
     else:
         raise _failure(f"unsupported dynamic-link platform: {system_name}")
-    return {
+    result: dict[str, object] = {
         "path_prepend": [str(mpi.bin_directory)],
         "library_path_variable": library_variable,
         "library_path_prepend": [str(path) for path in mpi.library_directories],
     }
+    if variables:
+        result["variables"] = dict(sorted(variables.items()))
+    return result
+
+
+def _parse_embedded_pmix_version(value: str) -> str | None:
+    prefix = "mca:pmix:pmix3x:param:pmix_pmix3x_library_version:value:"
+    for line in value.splitlines():
+        if line.startswith(prefix):
+            version = line.removeprefix(prefix).strip()
+            return version or None
+    return None
+
+
+def _darwin_openmpi_compatibility_environment(
+    mpi: MpiRuntimePolicy,
+    *,
+    mpi_version: str,
+    pmix_version: str | None,
+    system_name: str,
+) -> dict[str, str]:
+    """Avoid the PMIx ds12/ds21 finalize crash in the affected macOS runtime."""
+
+    if (
+        system_name != "Darwin"
+        or re.search(r"(?<!\d)4\.1\.6(?!\d)", mpi_version) is None
+        or pmix_version is None
+        or re.search(r"(?<!\d)3\.2\.5(?!\d)", pmix_version) is None
+    ):
+        return {}
+    candidates = tuple(
+        path
+        for directory in mpi.library_directories
+        for path in directory.glob("pmix/mca_gds_hash.*")
+        if path.is_file() and path.suffix in {".dylib", ".so"}
+    )
+    if not candidates:
+        raise _failure(
+            "OpenMPI 4.1.6 on macOS requires the PMIx hash datastore "
+            "workaround, but mca_gds_hash is missing"
+        )
+    return {"PMIX_MCA_gds": "hash"}
 
 
 def _parse_openmpi_fortran_datatypes(value: str) -> dict[str, bool]:
@@ -359,6 +404,7 @@ def _inspect_openmpi_capabilities(
         "available_fortran_datatypes": {
             name: available[name] for name in ORCA_REQUIRED_MPI_DATATYPES
         },
+        "embedded_pmix_version": _parse_embedded_pmix_version(output),
         "status": "PASSED",
     }
 
@@ -399,6 +445,18 @@ def _prepare_runtime(
     mpi_capabilities = _inspect_openmpi_capabilities(
         mpi, environment=environment
     )
+    compatibility_variables = _darwin_openmpi_compatibility_environment(
+        mpi,
+        mpi_version=mpi_version,
+        pmix_version=mpi_capabilities["embedded_pmix_version"],
+        system_name=system_name,
+    )
+    environment_contract = _runtime_environment(
+        mpi,
+        system_name=system_name,
+        variables=compatibility_variables,
+    )
+    environment.update(compatibility_variables)
 
     helpers = tuple(
         sorted(
@@ -459,6 +517,7 @@ def _prepare_runtime(
                 "mpi_launcher": True,
                 "mpi_version": True,
                 "mpi_fortran_datatypes": True,
+                "mpi_finalize_compatibility": True,
                 "dynamic_libraries_resolved": True,
                 "parallel_helpers_inspected": bool(helpers),
             },
@@ -695,18 +754,37 @@ def runtime_environment(value: Mapping[str, Any]) -> dict[str, object]:
     path_prepend = environment.get("path_prepend")
     library_prepend = environment.get("library_path_prepend")
     variable = environment.get("library_path_variable")
+    raw_variables = environment.get("variables", {})
     if (
         not isinstance(path_prepend, list)
         or not all(isinstance(path, str) for path in path_prepend)
         or not isinstance(library_prepend, list)
         or not all(isinstance(path, str) for path in library_prepend)
         or variable not in {"DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH"}
+        or not isinstance(raw_variables, Mapping)
     ):
         raise _failure("stored ORCA runtime environment is malformed")
+    variables: dict[str, str] = {}
+    for name, item in raw_variables.items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or not (name[0].isalpha() or name[0] == "_")
+            or not all(
+                character.isalnum() or character == "_" for character in name
+            )
+            or not isinstance(item, str)
+            or "\x00" in item
+            or "\n" in item
+            or "\r" in item
+        ):
+            raise _failure("stored ORCA runtime environment variables are malformed")
+        variables[name] = item
     return {
         "path_prepend": path_prepend,
         "library_path_variable": variable,
         "library_path_prepend": library_prepend,
+        "variables": variables,
     }
 
 

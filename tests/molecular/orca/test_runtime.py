@@ -11,8 +11,10 @@ from cmw.core.provenance import file_hash
 from cmw.molecular.orca.runtime import (
     ORCA_REQUIRED_MPI_DATATYPES,
     OrcaRuntimeError,
+    _darwin_openmpi_compatibility_environment,
     _inspect_macos_dependencies,
     _parse_ldd_dependencies,
+    _parse_embedded_pmix_version,
     _parse_otool_dependencies,
     _parse_otool_rpaths,
     _parse_openmpi_fortran_datatypes,
@@ -53,6 +55,44 @@ def _profile(root: Path):
 
 
 class OrcaRuntimeTests(unittest.TestCase):
+    def test_embedded_pmix_version_is_parsed(self) -> None:
+        self.assertEqual(
+            _parse_embedded_pmix_version(
+                "mca:pmix:pmix3x:param:pmix_pmix3x_library_version:value:"
+                "PMIx library version 3.2.5a1 (embedded in Open MPI)\n"
+            ),
+            "PMIx library version 3.2.5a1 (embedded in Open MPI)",
+        )
+
+    def test_affected_darwin_openmpi_uses_hash_datastore(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            component = root / "mpi" / "lib" / "pmix" / "mca_gds_hash.so"
+            component.parent.mkdir(parents=True)
+            component.write_text("hash", encoding="utf-8")
+            profile = _profile(root)
+
+            self.assertEqual(
+                _darwin_openmpi_compatibility_environment(
+                    profile.orca.mpi,
+                    mpi_version="mpirun (Open MPI) 4.1.6",
+                    pmix_version="PMIx library version 3.2.5a1",
+                    system_name="Darwin",
+                ),
+                {"PMIX_MCA_gds": "hash"},
+            )
+
+    def test_affected_darwin_openmpi_fails_without_hash_datastore(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = _profile(Path(temporary))
+            with self.assertRaisesRegex(OrcaRuntimeError, "mca_gds_hash is missing"):
+                _darwin_openmpi_compatibility_environment(
+                    profile.orca.mpi,
+                    mpi_version="mpirun (Open MPI) 4.1.6",
+                    pmix_version="PMIx library version 3.2.5a1",
+                    system_name="Darwin",
+                )
+
     def test_openmpi_fortran_datatype_capabilities_are_parsed(self) -> None:
         self.assertEqual(
             _parse_openmpi_fortran_datatypes(
@@ -325,6 +365,7 @@ class OrcaRuntimeTests(unittest.TestCase):
                     runtime_environment(record)["library_path_variable"],
                     "DYLD_LIBRARY_PATH",
                 )
+                self.assertEqual(runtime_environment(record)["variables"], {})
 
                 mpirun.write_text("changed launcher", encoding="utf-8")
                 with self.assertRaisesRegex(

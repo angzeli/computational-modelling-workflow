@@ -166,6 +166,10 @@ if [[ -n "$runtime_contract" ]]; then
     'import json,sys; print(json.load(sys.stdin)["environment"]["library_path_variable"])')
   runtime_library_prefix=$(printf '%s' "$runtime_json" | "$PYTHON_BIN" -c \
     'import json,sys; print(":".join(json.load(sys.stdin)["environment"]["library_path_prepend"]))')
+  while IFS= read -r runtime_assignment; do
+    [[ -z "$runtime_assignment" ]] || export "$runtime_assignment"
+  done < <(printf '%s' "$runtime_json" | "$PYTHON_BIN" -c \
+    'import json,sys; value=json.load(sys.stdin)["environment"].get("variables", {}); [print(f"{name}={value[name]}") for name in sorted(value)]')
   export PATH="$runtime_path_prefix${PATH:+:$PATH}"
   case "$runtime_library_variable" in
     DYLD_LIBRARY_PATH)
