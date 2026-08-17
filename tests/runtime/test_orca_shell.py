@@ -19,7 +19,7 @@ FIXTURE = ROOT / "tests" / "fixtures" / "xyz" / "synthetic.xyz"
 
 
 class OrcaShellTests(unittest.TestCase):
-    def test_shell_runs_fake_orca_with_isolated_stdin_and_reuses_result(self) -> None:
+    def test_shell_uses_local_input_name_from_space_path_and_reuses_result(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cmw shell space ") as temporary:
             directory = Path(temporary)
             structure = directory / "source molecule.xyz"
@@ -28,10 +28,59 @@ class OrcaShellTests(unittest.TestCase):
             attempt.mkdir()
             fake = directory / "fake orca"
             count = directory / "execution count.txt"
+            invocation = directory / "invocation.json"
+            runtime_contract = attempt / "orca-runtime.json"
+            runtime_contract.write_text("{}\n", encoding="utf-8")
+            runtime_bin = directory / "mpi runtime" / "bin"
+            runtime_lib = directory / "mpi runtime" / "lib"
+            runtime_bin.mkdir(parents=True)
+            runtime_lib.mkdir(parents=True)
+            python_wrapper = directory / "runtime-aware python"
+            python_wrapper.write_text(
+                textwrap.dedent(
+                    f"""\
+                    #!/usr/bin/env python3
+                    import json
+                    import os
+                    import pathlib
+                    import sys
+
+                    if sys.argv[1:4] == ["-m", "cmw.molecular.orca.cli", "runtime-validate"]:
+                        print(json.dumps({{
+                            "runtime_id": "synthetic-runtime",
+                            "environment": {{
+                                "path_prepend": [{str(runtime_bin)!r}],
+                                "library_path_variable": "LD_LIBRARY_PATH",
+                                "library_path_prepend": [{str(runtime_lib)!r}],
+                            }},
+                            "validation": {{"status": "PASSED"}},
+                        }}))
+                        raise SystemExit(0)
+                    if sys.argv[1:4] == ["-m", "cmw.molecular.orca.cli", "runtime-materialize"]:
+                        output = pathlib.Path(sys.argv[sys.argv.index("--output") + 1])
+                        working = pathlib.Path(sys.argv[sys.argv.index("--working-directory") + 1])
+                        record = {{
+                            "runtime_id": "synthetic-runtime",
+                            "working_directory": str(working),
+                            "strategy": "environment_library_path",
+                            "files": [],
+                            "loader_probe": {{"status": "NOT_REQUIRED"}},
+                            "validation": {{"status": "PASSED"}},
+                        }}
+                        output.write_text(json.dumps(record))
+                        print(json.dumps(record))
+                        raise SystemExit(0)
+                    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+                    """
+                ),
+                encoding="utf-8",
+            )
+            python_wrapper.chmod(0o755)
             fake.write_text(
                 textwrap.dedent(
                     f"""\
-                    #!{sys.executable}
+                    #!/usr/bin/env python3
+                    import json
                     import os
                     import pathlib
                     import shutil
@@ -40,12 +89,18 @@ class OrcaShellTests(unittest.TestCase):
                     if sys.argv[1:] == ["--version"]:
                         print("synthetic ORCA 1.0")
                         raise SystemExit(0)
+                    pathlib.Path({str(invocation)!r}).write_text(json.dumps({{
+                        "arguments": sys.argv[1:],
+                        "working_directory": str(pathlib.Path.cwd()),
+                        "path": os.environ.get("PATH", ""),
+                        "library_path": os.environ.get("LD_LIBRARY_PATH", ""),
+                    }}))
                     count = pathlib.Path({str(count)!r})
                     value = int(count.read_text() if count.exists() else "0") + 1
                     count.write_text(str(value))
                     print("STDIN_BYTES=" + str(len(sys.stdin.buffer.read())), file=sys.stderr)
                     print("SCRATCH=" + os.environ.get("TMPDIR", ""), file=sys.stderr)
-                    source = pathlib.Path(sys.argv[1]).parent / "input.xyz"
+                    source = pathlib.Path.cwd() / "input.xyz"
                     shutil.copyfile(source, pathlib.Path(sys.argv[1]).with_suffix(".xyz"))
                     print("Program Version 1.0.0")
                     print("SCF CONVERGED AFTER 3 CYCLES")
@@ -61,6 +116,7 @@ class OrcaShellTests(unittest.TestCase):
                 **os.environ,
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "PYTHONPATH": str(ROOT / "src"),
+                "PYTHON_BIN": str(python_wrapper),
                 "ORCA_EXE": str(fake),
                 "NPROCS": "4",
                 "MAXCORE_MB": "256",
@@ -112,6 +168,9 @@ class OrcaShellTests(unittest.TestCase):
                 str(attempt / "stage.err"),
                 "--geometry-contract",
                 str(prepare_record["geometry_contract"]),
+                "--runtime-contract",
+                str(runtime_contract),
+                "--require-runtime-contract",
                 "--artifact",
                 f"final_geometry={attempt / 'stage.xyz'}",
             )
@@ -131,11 +190,40 @@ class OrcaShellTests(unittest.TestCase):
                 cwd=ROOT,
                 env=env,
                 input="manifest data that ORCA must not consume\n",
-                check=True,
+                check=False,
                 capture_output=True,
                 text=True,
             )
+            failure_evidence = "\n".join(
+                f"{path.name}:\n{path.read_text(encoding='utf-8')}"
+                for path in (
+                    attempt / "stage.out",
+                    attempt / "stage.err",
+                    attempt / "job.json",
+                )
+                if path.exists()
+            )
+            self.assertEqual(
+                first.returncode,
+                0,
+                msg=(
+                    f"stdout:\n{first.stdout}\nstderr:\n{first.stderr}\n"
+                    f"{failure_evidence}"
+                ),
+            )
             self.assertIn("[COMPLETE]", first.stdout)
+            invocation_record = json.loads(invocation.read_text(encoding="utf-8"))
+            self.assertEqual(invocation_record["arguments"], ["stage.inp"])
+            self.assertEqual(
+                Path(invocation_record["working_directory"]), attempt.resolve()
+            )
+            self.assertEqual(
+                invocation_record["path"].split(os.pathsep)[0], str(runtime_bin)
+            )
+            self.assertEqual(
+                invocation_record["library_path"].split(os.pathsep)[0],
+                str(runtime_lib),
+            )
             error_text = (attempt / "stage.err").read_text(encoding="utf-8")
             self.assertIn("STDIN_BYTES=0", error_text)
             scratch = next(
@@ -147,6 +235,9 @@ class OrcaShellTests(unittest.TestCase):
             record = json.loads((attempt / "job.json").read_text(encoding="utf-8"))
             self.assertEqual(record["attempt"]["resources"]["nprocs"], 4)
             self.assertEqual(record["geometry_input"]["mode"], "xyzfile")
+            self.assertIn("runtime_contract", record["artifacts"])
+            self.assertIn("runtime_launch_contract", record["artifacts"])
+            self.assertTrue((attempt / "orca-runtime-launch.json").is_file())
             self.assertTrue(record["reusable"])
 
             second = subprocess.run(

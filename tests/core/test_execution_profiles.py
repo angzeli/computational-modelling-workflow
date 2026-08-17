@@ -37,6 +37,36 @@ class ExecutionProfileTests(unittest.TestCase):
             selected.execution_profile_hash,
             execution_profiles_from_mapping(_document()).selected.execution_profile_hash,
         )
+        self.assertIsNone(selected.orca.mpi)
+        self.assertNotIn("mpi", selected.orca.to_dict())
+
+    def test_optional_mpi_runtime_paths_are_typed_and_change_execution_identity(self) -> None:
+        configured = deepcopy(_document())
+        configured["profiles"]["local_mac"]["orca"]["mpi"] = {
+            "bin_directory": "/opt/runtime/openmpi/bin",
+            "library_directories": ["/opt/runtime/openmpi/lib"],
+        }
+
+        selected = execution_profiles_from_mapping(configured).selected
+
+        self.assertEqual(
+            selected.orca.mpi.bin_directory, Path("/opt/runtime/openmpi/bin")
+        )
+        self.assertEqual(
+            selected.orca.mpi.library_directories,
+            (Path("/opt/runtime/openmpi/lib"),),
+        )
+        self.assertNotEqual(
+            selected.execution_profile_hash,
+            execution_profiles_from_mapping(_document()).selected.execution_profile_hash,
+        )
+        self.assertEqual(
+            selected.to_dict()["orca"]["mpi"],
+            {
+                "bin_directory": "/opt/runtime/openmpi/bin",
+                "library_directories": ["/opt/runtime/openmpi/lib"],
+            },
+        )
 
     def test_missing_or_unknown_active_profile_fails_closed(self) -> None:
         missing = _document()
@@ -78,6 +108,28 @@ class ExecutionProfileTests(unittest.TestCase):
         unexpected_top_level["scheduler"] = "local"
         with self.assertRaisesRegex(ValueError, "unsupported scheduler"):
             execution_profiles_from_mapping(unexpected_top_level)
+
+    def test_invalid_mpi_runtime_paths_fail_closed(self) -> None:
+        cases = (
+            {
+                "bin_directory": "relative/bin",
+                "library_directories": ["/opt/runtime/lib"],
+            },
+            {
+                "bin_directory": "/opt/runtime/bin",
+                "library_directories": [],
+            },
+            {
+                "bin_directory": "/opt/runtime/bin",
+                "library_directories": "/opt/runtime/lib",
+            },
+        )
+        for mpi in cases:
+            with self.subTest(mpi=mpi):
+                invalid = deepcopy(_document())
+                invalid["profiles"]["local_mac"]["orca"]["mpi"] = mpi
+                with self.assertRaises(ValueError):
+                    execution_profiles_from_mapping(invalid)
 
     def test_yaml_loader_rejects_non_mapping_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

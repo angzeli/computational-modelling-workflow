@@ -23,6 +23,12 @@ from .input import (
     resolve_orca_resources,
 )
 from .job import check_reuse, finalize_attempt, write_target
+from .runtime import (
+    materialize_orca_runtime_contract,
+    prepare_orca_runtime,
+    runtime_environment,
+    validate_orca_runtime_contract,
+)
 from .status import FrequencyPolicy, StageType, classify_execution, read_orca_output, validate_stage
 
 
@@ -171,6 +177,48 @@ def _reuse(args: argparse.Namespace) -> int:
     return 0 if result["reuse"] else 3
 
 
+def _runtime_prepare(args: argparse.Namespace) -> int:
+    profile = load_execution_profiles(Path(args.execution_config)).selected
+    record = prepare_orca_runtime(
+        profile, orca_executable=Path(args.orca_exe)
+    )
+    atomic_write_json(Path(args.output), record)
+    _print(record)
+    return 0
+
+
+def _runtime_validate(args: argparse.Namespace) -> int:
+    value = json.loads(Path(args.runtime).read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("ORCA runtime contract must be a mapping")
+    record = validate_orca_runtime_contract(
+        value, orca_executable=Path(args.orca_exe)
+    )
+    _print(
+        {
+            "runtime_id": record["runtime_id"],
+            "environment": runtime_environment(record),
+            "launch_overlay": record["launch_overlay"],
+            "validation": record["validation"],
+        }
+    )
+    return 0
+
+
+def _runtime_materialize(args: argparse.Namespace) -> int:
+    value = json.loads(Path(args.runtime).read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("ORCA runtime contract must be a mapping")
+    record = materialize_orca_runtime_contract(
+        value,
+        orca_executable=Path(args.orca_exe),
+        working_directory=Path(args.working_directory),
+    )
+    atomic_write_json(Path(args.output), record)
+    _print(record)
+    return 0
+
+
 def _lock(args: argparse.Namespace) -> int:
     path = Path(args.lock)
     if args.lock_action == "inspect":
@@ -248,6 +296,24 @@ def build_parser() -> argparse.ArgumentParser:
     reuse.add_argument("--target", required=True)
     reuse.add_argument("--metadata", required=True)
     reuse.set_defaults(handler=_reuse)
+
+    runtime_prepare = sub.add_parser("runtime-prepare")
+    runtime_prepare.add_argument("--execution-config", required=True)
+    runtime_prepare.add_argument("--orca-exe", required=True)
+    runtime_prepare.add_argument("--output", required=True)
+    runtime_prepare.set_defaults(handler=_runtime_prepare)
+
+    runtime_validate = sub.add_parser("runtime-validate")
+    runtime_validate.add_argument("--runtime", required=True)
+    runtime_validate.add_argument("--orca-exe", required=True)
+    runtime_validate.set_defaults(handler=_runtime_validate)
+
+    runtime_materialize = sub.add_parser("runtime-materialize")
+    runtime_materialize.add_argument("--runtime", required=True)
+    runtime_materialize.add_argument("--orca-exe", required=True)
+    runtime_materialize.add_argument("--working-directory", required=True)
+    runtime_materialize.add_argument("--output", required=True)
+    runtime_materialize.set_defaults(handler=_runtime_materialize)
 
     lock = sub.add_parser("lock")
     lock_sub = lock.add_subparsers(dest="lock_action", required=True)
