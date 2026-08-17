@@ -12,6 +12,7 @@ from cmw.core.artifacts import (
     DeformationEnergyArtifact,
     DensityArtifact,
     FragmentEnergyArtifact,
+    FrequencyArtifact,
     IGMHArtifact,
     OptimizationArtifact,
     StructureArtifact,
@@ -25,6 +26,7 @@ from cmw.core.workflow_graph import (
     ArtifactBinding,
     ArtifactRequirement,
     CalculationNode,
+    DerivedResultNode,
     WorkflowGraph,
 )
 from cmw.molecular.orca.input import OrcaStageSpec, resolve_orca_resources
@@ -218,11 +220,12 @@ def _geometry_branch(
         metadata={"system_id": system.system_id, "structure_role": "input"},
     )
     keywords = geometry_protocol.method
+    frequency_requested = geometry_protocol.task.casefold() == "opt_freq"
     protocol = {
         **geometry_protocol.method_metadata,
         "adapter": "hof",
         "system_identity": system.system_identity,
-        "frequency_requested": geometry_protocol.task.casefold() == "opt_freq",
+        "frequency_requested": frequency_requested,
         "outputs": list(geometry_protocol.outputs),
     }
     calculation = _orca_plan(
@@ -261,42 +264,143 @@ def _geometry_branch(
         multiplicity=input_structure.multiplicity,
         geometry_hash="",
     )
+    nodes: list[CalculationNode | DerivedResultNode] = [
+        CalculationNode(
+            "input_structure",
+            role="structure_input",
+            produces=("StructureArtifact",),
+            configuration={"artifact_id": input_structure.artifact_id},
+        ),
+        CalculationNode(
+            "geometry_optimization",
+            dependencies=("input_structure",),
+            operation="orca_optimization",
+            role="geometry_optimization",
+            requires=(
+                ArtifactRequirement("StructureArtifact", 1, ("input_structure",)),
+            ),
+            produces=("OptimizationArtifact", "StructureArtifact"),
+            configuration={
+                "calculation_id": calculation.calculation_id,
+                "execution_intent": calculation.spec.execution_intent.to_dict(),
+                **protocol,
+            },
+        ),
+    ]
+    artifacts: dict[str, tuple[Artifact, ...]] = {
+        "input_structure": (input_structure,),
+        "geometry_optimization": (optimization, optimized_structure),
+    }
+    calculations = {"geometry_optimization": calculation}
+    downstream_structure = optimized_structure
+    if frequency_requested:
+        frequency_protocol = {
+            **geometry_protocol.method_metadata,
+            "adapter": "hof",
+            "system_identity": system.system_identity,
+            "frequency_requested": True,
+            "geometry_source": "validated_optimization",
+        }
+        frequency_calculation = _orca_plan(
+            configuration,
+            node_id="geometry_frequency",
+            role="geometry_frequency",
+            stage_type=StageType.FREQ,
+            keywords=keywords,
+            protocol=frequency_protocol,
+            geometry_artifact=optimized_structure,
+        )
+        frequency = FrequencyArtifact(
+            producing_calculation=frequency_calculation.calculation_id,
+            method=geometry_protocol.method,
+            protocol=frequency_protocol,
+            parent_artifacts=(optimized_structure.artifact_id,),
+            files={"output": "geometry/frequency.out"},
+            validation=PLANNED,
+            provenance=provenance,
+            metadata={"system_id": system.system_id},
+        )
+        downstream_structure = StructureArtifact(
+            producing_calculation=stable_hash(
+                {
+                    "adapter": "hof",
+                    "operation": "validated_opt_freq_geometry",
+                    "optimization": optimization.artifact_id,
+                    "frequency": frequency.artifact_id,
+                }
+            ),
+            method=geometry_protocol.method,
+            protocol={
+                "validation_contract": "optimization_plus_frequency",
+                "geometry_source": optimized_structure.artifact_id,
+            },
+            parent_artifacts=(optimized_structure.artifact_id, frequency.artifact_id),
+            files=dict(optimized_structure.files),
+            validation=PLANNED,
+            provenance=provenance,
+            metadata={
+                "system_id": system.system_id,
+                "structure_role": "validated_optimized",
+            },
+            source="validated_opt_freq",
+            format=optimized_structure.format,
+            atom_count=optimized_structure.atom_count,
+            elemental_composition=optimized_structure.elemental_composition,
+            charge=optimized_structure.charge,
+            multiplicity=optimized_structure.multiplicity,
+            geometry_hash="",
+        )
+        nodes.extend(
+            (
+                CalculationNode(
+                    "geometry_frequency",
+                    dependencies=("geometry_optimization",),
+                    operation="orca_frequency",
+                    role="geometry_frequency",
+                    requires=(
+                        ArtifactRequirement(
+                            "StructureArtifact", 1, ("geometry_optimization",)
+                        ),
+                    ),
+                    produces=("FrequencyArtifact",),
+                    configuration={
+                        "calculation_id": frequency_calculation.calculation_id,
+                        "execution_intent": (
+                            frequency_calculation.spec.execution_intent.to_dict()
+                        ),
+                        **frequency_protocol,
+                    },
+                ),
+                DerivedResultNode(
+                    "validated_geometry",
+                    dependencies=("geometry_optimization", "geometry_frequency"),
+                    operation="promote_validated_geometry",
+                    role="validated_geometry",
+                    requires=(
+                        ArtifactRequirement(
+                            "StructureArtifact", 1, ("geometry_optimization",)
+                        ),
+                        ArtifactRequirement(
+                            "FrequencyArtifact", 1, ("geometry_frequency",)
+                        ),
+                    ),
+                    produces=("StructureArtifact",),
+                    configuration={
+                        "validation_contract": "optimization_plus_frequency"
+                    },
+                ),
+            )
+        )
+        artifacts["geometry_frequency"] = (frequency,)
+        artifacts["validated_geometry"] = (downstream_structure,)
+        calculations["geometry_frequency"] = frequency_calculation
+
     graph = WorkflowGraph(
         f"hof_geometry_{_node_token(system.system_id)}",
-        (
-            CalculationNode(
-                "input_structure",
-                role="structure_input",
-                produces=("StructureArtifact",),
-                configuration={"artifact_id": input_structure.artifact_id},
-            ),
-            CalculationNode(
-                "geometry_optimization",
-                dependencies=("input_structure",),
-                operation="orca_optimization",
-                role="geometry_optimization",
-                requires=(
-                    ArtifactRequirement("StructureArtifact", 1, ("input_structure",)),
-                ),
-                produces=("OptimizationArtifact", "StructureArtifact"),
-                configuration={
-                    "calculation_id": calculation.calculation_id,
-                    "execution_intent": calculation.spec.execution_intent.to_dict(),
-                    **protocol,
-                },
-            ),
-        ),
+        tuple(nodes),
         provenance={"adapter_branch": "geometry"},
     )
-    return (
-        graph,
-        {
-            "input_structure": (input_structure,),
-            "geometry_optimization": (optimization, optimized_structure),
-        },
-        {"geometry_optimization": calculation},
-        optimized_structure,
-    )
+    return graph, artifacts, calculations, downstream_structure
 
 
 def _deformation_branch(
@@ -787,8 +891,13 @@ def build_hof_workflow_plan(configuration: HofAdapterConfiguration) -> HofWorkfl
         structure_consumers.extend(
             (f"distorted_fragment_{token}_energy", f"relax_fragment_{token}")
         )
+    geometry_source_node = (
+        "validated_geometry"
+        if "validated_geometry" in geometry_graph.node_map
+        else "geometry_optimization"
+    )
     bindings = [
-        ArtifactBinding("geometry_optimization", node_id, "StructureArtifact")
+        ArtifactBinding(geometry_source_node, node_id, "StructureArtifact")
         for node_id in structure_consumers
     ]
     bindings.append(

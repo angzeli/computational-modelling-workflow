@@ -155,10 +155,30 @@ class MultiwfnResourcePolicy:
 
 
 @dataclass(frozen=True)
+class StorageResourcePolicy:
+    """Minimum immediately allocatable storage required before a launch."""
+
+    minimum_free_gb: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "minimum_free_gb",
+            _positive_memory(
+                self.minimum_free_gb, name="storage.minimum_free_gb"
+            ),
+        )
+
+    def to_dict(self) -> dict[str, float]:
+        return {"minimum_free_gb": self.minimum_free_gb}
+
+
+@dataclass(frozen=True)
 class ExecutionProfile:
     name: str
     orca: OrcaResourcePolicy
     multiwfn: MultiwfnResourcePolicy
+    storage: StorageResourcePolicy | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -166,22 +186,29 @@ class ExecutionProfile:
 
     @property
     def execution_profile_hash(self) -> str:
-        return stable_hash(
-            {
-                "schema_version": EXECUTION_PROFILE_SCHEMA_VERSION,
-                "name": self.name,
-                "orca": self.orca.to_dict(),
-                "multiwfn": self.multiwfn.to_dict(),
-            }
-        )
+        return stable_hash(self._identity())
+
+    def _identity(self) -> dict[str, object]:
+        value: dict[str, object] = {
+            "schema_version": EXECUTION_PROFILE_SCHEMA_VERSION,
+            "name": self.name,
+            "orca": self.orca.to_dict(),
+            "multiwfn": self.multiwfn.to_dict(),
+        }
+        if self.storage is not None:
+            value["storage"] = self.storage.to_dict()
+        return value
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "name": self.name,
             "execution_profile_hash": self.execution_profile_hash,
             "orca": self.orca.to_dict(),
             "multiwfn": self.multiwfn.to_dict(),
         }
+        if self.storage is not None:
+            value["storage"] = self.storage.to_dict()
+        return value
 
 
 @dataclass(frozen=True)
@@ -236,7 +263,12 @@ def execution_profiles_from_mapping(value: Mapping[str, Any]) -> ExecutionProfil
         if not isinstance(raw_name, str) or not raw_name.strip():
             raise ValueError("execution profile names must be non-empty strings")
         profile = _mapping(raw_profile, name=f"profiles.{raw_name}")
-        _resource_keys(profile, {"orca", "multiwfn"}, name=f"profiles.{raw_name}")
+        _resource_keys(
+            profile,
+            {"orca", "multiwfn"},
+            name=f"profiles.{raw_name}",
+            optional={"storage"},
+        )
         orca = _mapping(profile["orca"], name=f"profiles.{raw_name}.orca")
         multiwfn = _mapping(
             profile["multiwfn"], name=f"profiles.{raw_name}.multiwfn"
@@ -285,6 +317,17 @@ def execution_profiles_from_mapping(value: Mapping[str, Any]) -> ExecutionProfil
                     for path in raw_libraries
                 ),
             )
+        storage: StorageResourcePolicy | None = None
+        if "storage" in profile:
+            storage_mapping = _mapping(
+                profile["storage"], name=f"profiles.{raw_name}.storage"
+            )
+            _resource_keys(
+                storage_mapping,
+                {"minimum_free_gb"},
+                name=f"profiles.{raw_name}.storage",
+            )
+            storage = StorageResourcePolicy(storage_mapping["minimum_free_gb"])
         profiles[raw_name] = ExecutionProfile(
             raw_name,
             OrcaResourcePolicy(
@@ -293,6 +336,7 @@ def execution_profiles_from_mapping(value: Mapping[str, Any]) -> ExecutionProfil
             MultiwfnResourcePolicy(
                 multiwfn["nthreads"], multiwfn["total_memory_gb"]
             ),
+            storage,
         )
     return ExecutionProfiles(active_profile, profiles)
 
@@ -319,6 +363,7 @@ __all__ = [
     "MpiRuntimePolicy",
     "MultiwfnResourcePolicy",
     "OrcaResourcePolicy",
+    "StorageResourcePolicy",
     "execution_profiles_from_mapping",
     "load_execution_profiles",
 ]

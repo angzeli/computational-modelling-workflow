@@ -38,7 +38,25 @@ class ExecutionProfileTests(unittest.TestCase):
             execution_profiles_from_mapping(_document()).selected.execution_profile_hash,
         )
         self.assertIsNone(selected.orca.mpi)
+        self.assertIsNone(selected.storage)
         self.assertNotIn("mpi", selected.orca.to_dict())
+
+    def test_optional_storage_floor_is_typed_and_changes_execution_identity(self) -> None:
+        configured = deepcopy(_document())
+        configured["profiles"]["local_mac"]["storage"] = {
+            "minimum_free_gb": 100
+        }
+
+        selected = execution_profiles_from_mapping(configured).selected
+
+        self.assertEqual(selected.storage.minimum_free_gb, 100.0)
+        self.assertEqual(
+            selected.to_dict()["storage"], {"minimum_free_gb": 100.0}
+        )
+        self.assertNotEqual(
+            selected.execution_profile_hash,
+            execution_profiles_from_mapping(_document()).selected.execution_profile_hash,
+        )
 
     def test_optional_mpi_runtime_paths_are_typed_and_change_execution_identity(self) -> None:
         configured = deepcopy(_document())
@@ -92,6 +110,11 @@ class ExecutionProfileTests(unittest.TestCase):
                 invalid["profiles"]["local_mac"][section][key] = value
                 with self.assertRaises(ValueError):
                     execution_profiles_from_mapping(invalid)
+
+        invalid = deepcopy(_document())
+        invalid["profiles"]["local_mac"]["storage"] = {"minimum_free_gb": 0}
+        with self.assertRaises(ValueError):
+            execution_profiles_from_mapping(invalid)
 
     def test_malformed_resource_sections_fail_closed(self) -> None:
         missing = deepcopy(_document())

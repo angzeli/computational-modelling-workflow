@@ -10,3 +10,5 @@ profiles:
     multiwfn:
       nthreads: 8
       total_memory_gb: 18
+    storage:
+      minimum_free_gb: 100
