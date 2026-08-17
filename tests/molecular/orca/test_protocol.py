@@ -25,6 +25,11 @@ class OrcaProtocolTests(unittest.TestCase):
         intent = ProtocolIntent(
             method="DLPNO-CCSD(T)",
             basis="def2-TZVPP",
+            auxiliary_basis={
+                "correlation": "def2-TZVPP/C",
+                "coulomb_exchange": "def2/JK",
+            },
+            reference_approximation="RIJK",
             pno="TightPNO",
             led=True,
             fragments_required=True,
@@ -35,12 +40,16 @@ class OrcaProtocolTests(unittest.TestCase):
         )
         self.assertEqual(result.status, ProtocolValidationStatus.PASSED)
         self.assertTrue(all(result.checks.values()))
+        self.assertTrue(result.checks["auxiliary_basis_correlation_match"])
+        self.assertTrue(result.checks["reference_approximation_match"])
         self.assertEqual(result.detected["fragment_count"], 2)
 
     def test_wrong_method_basis_and_missing_features_fail_closed(self) -> None:
         intent = ProtocolIntent(
             method="DLPNO-CCSD(T)",
             basis="def2-TZVPP",
+            auxiliary_basis={"correlation": "def2-TZVPP/C"},
+            reference_approximation="RIJK",
             pno="TightPNO",
             led=True,
             fragments_required=True,
@@ -53,6 +62,8 @@ class OrcaProtocolTests(unittest.TestCase):
         )
         self.assertFalse(result.checks["method_match"])
         self.assertFalse(result.checks["basis_match"])
+        self.assertFalse(result.checks["auxiliary_basis_correlation_match"])
+        self.assertFalse(result.checks["reference_approximation_match"])
         self.assertFalse(result.checks["pno_match"])
         self.assertFalse(result.checks["led_present"])
         self.assertIn("FAILED_PROTOCOL_MISMATCH", result.reason)
@@ -65,10 +76,18 @@ class OrcaProtocolTests(unittest.TestCase):
                 for name in ("opt", "freq", "sp")
             }
             stages["sp"] = {
-                "keywords": "DLPNO-CCSD(T) def2-TZVPP TightPNO",
+                "keywords": (
+                    "DLPNO-CCSD(T) def2-TZVPP def2-TZVPP/C def2/JK "
+                    "RIJK TightPNO"
+                ),
                 "blocks": [],
                 "method": "DLPNO-CCSD(T)",
                 "basis": "def2-TZVPP",
+                "auxiliary_basis": {
+                    "correlation": "def2-TZVPP/C",
+                    "coulomb_exchange": "def2/JK",
+                },
+                "reference_approximation": "RIJK",
                 "pno": "TightPNO",
                 "led": True,
             }
@@ -78,9 +97,12 @@ class OrcaProtocolTests(unittest.TestCase):
             )
             config = load_workflow_config(path, env={})
         sp = config.stages[StageType.SP]
-        self.assertEqual(sp.keywords, "DLPNO-CCSD(T) def2-TZVPP TightPNO")
+        self.assertIn("def2-TZVPP/C def2/JK RIJK", sp.keywords)
         self.assertEqual(sp.protocol["method"], "DLPNO-CCSD(T)")
         self.assertEqual(sp.protocol["basis"], "def2-TZVPP")
+        self.assertEqual(
+            sp.protocol["auxiliary_basis"]["correlation"], "def2-TZVPP/C"
+        )
         self.assertIs(sp.protocol["led"], True)
 
 

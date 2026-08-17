@@ -36,7 +36,7 @@ from cmw.molecular.workflows.multiwfn_analysis import (
 )
 
 from .models import HofAdapterConfiguration, HofFragment
-from .orca import HofOrcaCalculation
+from .orca import HofOrcaCalculation, interaction_orca_keywords
 from .workflow import _node_token, build_hof_interaction_workflow
 
 
@@ -311,17 +311,7 @@ def _deformation_branch(
     calculations: dict[str, HofOrcaCalculation] = {}
     energy_artifacts: list[FragmentEnergyArtifact] = []
     energy_nodes: list[str] = []
-    energy_keywords = " ".join(
-        filter(
-            None,
-            (
-                configuration.interaction.method,
-                configuration.interaction.basis,
-                configuration.interaction.pno,
-                "TightSCF" if configuration.interaction.tight_scf else "",
-            ),
-        )
-    )
+    energy_keywords = interaction_orca_keywords(configuration, led=False)
 
     for fragment in system.fragments:
         token = _node_token(fragment.fragment_id)

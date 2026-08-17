@@ -47,6 +47,9 @@ ALL_STAGES = (StageType.OPT, StageType.FREQ, StageType.SP)
 PROTOCOL_KEYS = {
     "method",
     "basis",
+    "auxiliary_basis",
+    "auto_auxiliary_basis",
+    "reference_approximation",
     "pno",
     "pno_setting",
     "led",

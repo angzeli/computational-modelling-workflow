@@ -9,6 +9,10 @@ high_level:
   program: orca
   method: DLPNO-CCSD(T)
   basis: def2-TZVPP
+  auxiliary_basis:
+    correlation: def2-TZVPP/C
+    coulomb_exchange: def2/JK
+  reference_approximation: RIJK
   pno_setting: TightPNO
   tight_scf: true
 

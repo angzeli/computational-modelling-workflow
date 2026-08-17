@@ -207,11 +207,16 @@ and blocks:
 
 ```json
 {
-  "keywords": "DLPNO-CCSD(T) def2-TZVPP TightPNO",
+  "keywords": "DLPNO-CCSD(T) def2-TZVPP def2-TZVPP/C def2/JK RIJK TightPNO",
   "blocks": [],
   "protocol": {
     "method": "DLPNO-CCSD(T)",
     "basis": "def2-TZVPP",
+    "auxiliary_basis": {
+      "correlation": "def2-TZVPP/C",
+      "coulomb_exchange": "def2/JK"
+    },
+    "reference_approximation": "RIJK",
     "pno": "TightPNO",
     "led": true,
     "fragments_required": true,
@@ -229,6 +234,14 @@ the target protocol. Any required check that is absent or contradictory produces
 `FAILED_PROTOCOL_MISMATCH`, marks the scientific result invalid, records all
 checks in the typed artifact, and prevents reuse.
 
-Legacy stage configurations without a protocol object continue to use the
-existing OPT/FREQ/SP scientific validation policy. Method-aware validation adds
-no inferred method requirement to those existing targets.
+Rendering also validates method prerequisites before an attempt can be
+materialized. DLPNO inputs require an explicit correlation auxiliary basis (or
+an explicit `AutoAux` policy). LED inputs additionally require an explicit
+`RIJK` or `RIJCOSX` reference approximation and its matching auxiliary-basis
+role. Declared auxiliary and reference keywords are retained in target identity
+and checked again against ORCA's input echo during finalization.
+
+Legacy non-correlated stage configurations without a protocol object continue
+to use the existing OPT/FREQ/SP scientific validation policy. A legacy keyword
+line that explicitly requests DLPNO or LED must nevertheless be executable and
+therefore receives the same fail-closed prerequisite validation.

@@ -65,6 +65,79 @@ class OrcaExecutionContractTests(unittest.TestCase):
         ):
             self.render(mismatched)
 
+    def test_dlpno_requires_an_explicit_correlation_auxiliary_basis(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "FAILED_PROTOCOL_MISMATCH.*auxiliary_basis.correlation"
+        ):
+            OrcaStageSpec(
+                StageType.SP,
+                "DLPNO-CCSD(T) def2-TZVPP TightPNO",
+                protocol={"method": "DLPNO-CCSD(T)", "basis": "def2-TZVPP"},
+            )
+
+        valid = OrcaStageSpec(
+            StageType.SP,
+            "DLPNO-CCSD(T) def2-TZVPP def2-TZVPP/C TightPNO",
+            protocol={
+                "method": "DLPNO-CCSD(T)",
+                "basis": "def2-TZVPP",
+                "auxiliary_basis": {"correlation": "def2-TZVPP/C"},
+            },
+        )
+        self.assertIn("def2-TZVPP/C", self.render(valid).splitlines()[0])
+
+    def test_led_requires_explicit_reference_and_matching_auxiliary_basis(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "FAILED_PROTOCOL_MISMATCH.*explicit RIJK or RIJCOSX"
+        ):
+            OrcaStageSpec(
+                StageType.SP,
+                "DLPNO-CCSD(T) def2-TZVPP def2-TZVPP/C TightPNO LED",
+                protocol={
+                    "method": "DLPNO-CCSD(T)",
+                    "auxiliary_basis": {"correlation": "def2-TZVPP/C"},
+                    "led": True,
+                },
+            )
+
+    def test_scientific_contract_rejects_ambiguous_protocol_types(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "FAILED_PROTOCOL_MISMATCH.*led must be a boolean"
+        ):
+            OrcaStageSpec(
+                StageType.SP,
+                "HF STO-3G",
+                protocol={"led": "false"},
+            )
+
+        with self.assertRaisesRegex(
+            ValueError, "FAILED_PROTOCOL_MISMATCH.*duplicate auxiliary_basis role"
+        ):
+            OrcaStageSpec(
+                StageType.SP,
+                "HF STO-3G def2-TZVPP/C",
+                protocol={
+                    "auxiliary_basis": {
+                        "correlation": "def2-TZVPP/C",
+                        "Correlation": "def2-TZVPP/C",
+                    }
+                },
+            )
+
+        with self.assertRaisesRegex(
+            ValueError, "FAILED_PROTOCOL_MISMATCH.*coulomb_exchange"
+        ):
+            OrcaStageSpec(
+                StageType.SP,
+                "DLPNO-CCSD(T) def2-TZVPP def2-TZVPP/C RIJK TightPNO LED",
+                protocol={
+                    "method": "DLPNO-CCSD(T)",
+                    "auxiliary_basis": {"correlation": "def2-TZVPP/C"},
+                    "reference_approximation": "RIJK",
+                    "led": True,
+                },
+            )
+
     def test_rendered_operation_mismatch_fails_closed_during_parsing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "stage.inp"

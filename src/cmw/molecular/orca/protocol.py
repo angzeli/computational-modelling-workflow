@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
@@ -26,6 +26,9 @@ class ProtocolIntent:
 
     method: str | None = None
     basis: str | None = None
+    auxiliary_basis: Mapping[str, str] = field(default_factory=dict)
+    auto_auxiliary_basis: bool = False
+    reference_approximation: str | None = None
     pno: str | None = None
     led: bool = False
     fragments_required: bool = False
@@ -36,11 +39,15 @@ class ProtocolIntent:
     def __post_init__(self) -> None:
         if self.expected_fragments is not None and self.expected_fragments < 1:
             raise ValueError("expected_fragments must be positive")
+        object.__setattr__(self, "auxiliary_basis", dict(self.auxiliary_basis))
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> "ProtocolIntent":
         raw = dict(value or {})
         pno = raw.get("pno", raw.get("pno_setting"))
+        auxiliary = raw.get("auxiliary_basis", {})
+        if not isinstance(auxiliary, Mapping):
+            raise ValueError("auxiliary_basis must be a mapping")
         fragments_value = raw.get("fragments_required", raw.get("fragments", False))
         if isinstance(fragments_value, int) and not isinstance(fragments_value, bool):
             expected_fragments = fragments_value
@@ -52,6 +59,16 @@ class ProtocolIntent:
         return cls(
             method=str(raw["method"]) if raw.get("method") is not None else None,
             basis=str(raw["basis"]) if raw.get("basis") is not None else None,
+            auxiliary_basis={str(key): str(item) for key, item in auxiliary.items()},
+            auto_auxiliary_basis=_boolean(
+                raw.get("auto_auxiliary_basis", False),
+                name="auto_auxiliary_basis",
+            ),
+            reference_approximation=(
+                str(raw["reference_approximation"])
+                if raw.get("reference_approximation") is not None
+                else None
+            ),
             pno=str(pno) if pno is not None else None,
             led=_boolean(raw.get("led", False), name="led"),
             fragments_required=fragments_required,
@@ -130,6 +147,20 @@ def validate_protocol(
     if intent.basis is not None:
         checks["basis_match"] = _reported(
             intent.basis, evidence.reported_basis_sets, evidence.input_keyword_tokens
+        )
+    for role, auxiliary_basis in intent.auxiliary_basis.items():
+        checks[f"auxiliary_basis_{role}_match"] = _reported(
+            auxiliary_basis,
+            evidence.reported_basis_sets,
+            evidence.input_keyword_tokens,
+        )
+    if intent.auto_auxiliary_basis:
+        checks["auto_auxiliary_basis_match"] = _reported(
+            "AutoAux", (), evidence.input_keyword_tokens
+        )
+    if intent.reference_approximation is not None:
+        checks["reference_approximation_match"] = _reported(
+            intent.reference_approximation, (), evidence.input_keyword_tokens
         )
     if intent.pno is not None:
         checks["pno_match"] = _reported(

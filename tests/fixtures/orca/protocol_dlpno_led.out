@@ -1,5 +1,5 @@
 Program Version 6.1.0
-! DLPNO-CCSD(T) def2-TZVPP TightPNO LED
+! DLPNO-CCSD(T) def2-TZVPP def2-TZVPP/C def2/JK RIJK TightPNO LED
 METHOD             : DLPNO-CCSD(T)
 BASIS SET          : def2-TZVPP
 PNO SETTINGS       : TightPNO
