@@ -24,6 +24,7 @@ from cmw.core.execution_layout import (
 from cmw.core.provenance import (
     ArtifactRecord,
     atomic_write_json,
+    canonical_json_bytes,
     file_hash,
     git_state,
     read_json,
@@ -474,7 +475,7 @@ def prepare_analysis(plan: Mapping[str, Any]) -> dict[str, object]:
         target_record["source_density_artifact"] = plan["source_density_artifact"]
     if target_path.exists():
         existing = read_json(target_path)
-        if existing != target_record:
+        if canonical_json_bytes(existing) != canonical_json_bytes(target_record):
             raise FileExistsError(
                 "stored target content conflicts with target identity"
             )
