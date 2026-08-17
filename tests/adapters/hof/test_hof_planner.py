@@ -145,6 +145,17 @@ class HofWorkflowPlannerTests(unittest.TestCase):
             "DLPNO-CCSD(T)",
         )
         self.assertEqual(
+            plan.orca_calculations["dimer"].spec.protocol["auxiliary_basis"],
+            {
+                "correlation": "def2-TZVPP/C",
+                "coulomb_exchange": "def2/JK",
+            },
+        )
+        self.assertIn(
+            "def2-TZVPP/C def2/JK RIJK",
+            plan.orca_calculations["dimer"].spec.keywords,
+        )
+        self.assertEqual(
             set(plan.graph.node_map["cp_interaction"].dependencies),
             {"dimer", "fragment_left", "fragment_right"},
         )

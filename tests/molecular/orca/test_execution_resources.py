@@ -42,8 +42,12 @@ class OrcaExecutionResourceTests(unittest.TestCase):
     def test_resource_changes_do_not_change_scientific_target_identity(self) -> None:
         spec = OrcaStageSpec(
             StageType.SP,
-            "DLPNO-CCSD(T) def2-TZVPP TightPNO",
-            protocol={"method": "DLPNO-CCSD(T)", "basis": "def2-TZVPP"},
+            "DLPNO-CCSD(T) def2-TZVPP def2-TZVPP/C TightPNO",
+            protocol={
+                "method": "DLPNO-CCSD(T)",
+                "basis": "def2-TZVPP",
+                "auxiliary_basis": {"correlation": "def2-TZVPP/C"},
+            },
         )
         target = JobTarget("sp", "geometry", 0, 1, spec.scientific_identity())
         first = resolve_orca_resources(_profile(nprocs=8))

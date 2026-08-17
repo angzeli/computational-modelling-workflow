@@ -167,6 +167,8 @@ class HofInteractionProtocol:
     program: str
     method: str
     basis: str
+    auxiliary_basis: Mapping[str, str]
+    reference_approximation: str
     pno: str
     tight_scf: bool
     counterpoise: bool
@@ -178,15 +180,28 @@ class HofInteractionProtocol:
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not all((self.method_ref, self.program, self.method, self.basis, self.pno)):
-            raise ValueError(
-                "interaction protocol requires program, method, basis, and PNO"
+        if not all(
+            (
+                self.method_ref,
+                self.program,
+                self.method,
+                self.basis,
+                self.reference_approximation,
+                self.pno,
             )
+        ):
+            raise ValueError(
+                "interaction protocol requires program, method, basis, reference "
+                "approximation, and PNO"
+            )
+        if not self.auxiliary_basis:
+            raise ValueError("interaction protocol requires auxiliary basis metadata")
         if not self.geometry_source:
             raise ValueError("interaction protocol geometry_source is required")
         if len(set(self.outputs)) != len(self.outputs):
             raise ValueError("interaction protocol outputs must be unique")
         object.__setattr__(self, "outputs", tuple(self.outputs))
+        object.__setattr__(self, "auxiliary_basis", dict(self.auxiliary_basis))
         object.__setattr__(self, "metadata", dict(self.metadata))
 
     @property
@@ -196,6 +211,8 @@ class HofInteractionProtocol:
         return {
             "method": self.method,
             "basis": self.basis,
+            "auxiliary_basis": dict(self.auxiliary_basis),
+            "reference_approximation": self.reference_approximation,
             "pno": self.pno,
             "tight_scf": self.tight_scf,
             "counterpoise": self.counterpoise,

@@ -41,6 +41,131 @@ ORCA_MEMORY_MB_PER_GB = 1024
 ORCA_MEMORY_SAFETY_FRACTION = 0.80
 
 
+class OrcaScientificInputContractError(ValueError):
+    """Raised when declared ORCA method requirements cannot be executed safely."""
+
+    code = "FAILED_PROTOCOL_MISMATCH"
+
+
+def _scientific_input_failure(reason: str) -> OrcaScientificInputContractError:
+    return OrcaScientificInputContractError(
+        f"{OrcaScientificInputContractError.code}: {reason}"
+    )
+
+
+def validate_orca_scientific_input_contract(
+    *, keywords: str, protocol: Mapping[str, object] | None = None
+) -> None:
+    """Fail closed on method features that require explicit ORCA input support."""
+
+    declared = dict(protocol or {})
+    tokens = tuple(keywords.split())
+    normalized_tokens = {token.casefold() for token in tokens}
+    method = str(declared.get("method", ""))
+    dlpno = "dlpno" in method.casefold() or any(
+        "dlpno" in token for token in normalized_tokens
+    )
+    raw_led = declared.get("led", False)
+    if not isinstance(raw_led, bool):
+        raise _scientific_input_failure("led must be a boolean")
+    led = raw_led or "led" in normalized_tokens
+
+    raw_auxiliary = declared.get("auxiliary_basis", {})
+    if not isinstance(raw_auxiliary, Mapping):
+        raise _scientific_input_failure("auxiliary_basis must be a mapping")
+    auxiliary: dict[str, str] = {}
+    for role, value in raw_auxiliary.items():
+        if not isinstance(role, str) or not role.strip():
+            raise _scientific_input_failure(
+                "auxiliary_basis roles must be non-empty strings"
+            )
+        if not isinstance(value, str) or not value.strip():
+            raise _scientific_input_failure(
+                f"auxiliary_basis.{role} must be a non-empty string"
+            )
+        normalized_role = role.casefold()
+        if normalized_role in auxiliary:
+            raise _scientific_input_failure(
+                f"duplicate auxiliary_basis role: {role}"
+            )
+        auxiliary[normalized_role] = value.strip()
+
+    raw_autoaux = declared.get("auto_auxiliary_basis", False)
+    if not isinstance(raw_autoaux, bool):
+        raise _scientific_input_failure("auto_auxiliary_basis must be a boolean")
+    autoaux = raw_autoaux or "autoaux" in normalized_tokens
+
+    missing_keywords = [
+        value
+        for value in auxiliary.values()
+        if value.casefold() not in normalized_tokens
+    ]
+    if missing_keywords:
+        raise _scientific_input_failure(
+            "declared auxiliary basis is absent from ORCA keywords: "
+            + ", ".join(missing_keywords)
+        )
+
+    correlation_auxiliary = auxiliary.get("correlation")
+    if dlpno and not (
+        autoaux
+        or correlation_auxiliary
+        or any(token.endswith("/c") for token in normalized_tokens)
+    ):
+        raise _scientific_input_failure(
+            "DLPNO calculations require auxiliary_basis.correlation, a /C basis, "
+            "or explicit AutoAux"
+        )
+
+    raw_reference = declared.get("reference_approximation", "")
+    if raw_reference is None:
+        reference = ""
+    elif not isinstance(raw_reference, str):
+        raise _scientific_input_failure(
+            "reference_approximation must be RIJK or RIJCOSX"
+        )
+    else:
+        reference = raw_reference.strip()
+    if not reference:
+        reference = next(
+            (token for token in tokens if token.casefold() in {"rijk", "rijcosx"}),
+            "",
+        )
+    if reference and reference.casefold() not in normalized_tokens:
+        raise _scientific_input_failure(
+            "declared reference approximation is absent from ORCA keywords: "
+            + reference
+        )
+    if led and not reference:
+        raise _scientific_input_failure(
+            "LED calculations require an explicit RIJK or RIJCOSX reference approximation"
+        )
+    if reference:
+        normalized_reference = reference.casefold()
+        if normalized_reference == "rijk":
+            supported = (
+                autoaux
+                or "coulomb_exchange" in auxiliary
+                or any(token.endswith("/jk") for token in normalized_tokens)
+            )
+            required_role = "auxiliary_basis.coulomb_exchange or a /JK basis"
+        elif normalized_reference == "rijcosx":
+            supported = (
+                autoaux
+                or "coulomb" in auxiliary
+                or any(token.endswith("/j") for token in normalized_tokens)
+            )
+            required_role = "auxiliary_basis.coulomb or a /J basis"
+        else:
+            raise _scientific_input_failure(
+                "reference_approximation must be RIJK or RIJCOSX"
+            )
+        if not supported:
+            raise _scientific_input_failure(
+                f"{reference} requires {required_role}, or explicit AutoAux"
+            )
+
+
 @dataclass(frozen=True)
 class OrcaStageSpec:
     """Small inspectable stage contract; keywords remain user-controlled."""
@@ -65,6 +190,9 @@ class OrcaStageSpec:
         if any(line.lstrip().lower().startswith(reserved) for line in block_lines):
             raise ValueError("resources and geometry directives cannot be duplicated in stage blocks")
         object.__setattr__(self, "protocol", dict(self.protocol))
+        validate_orca_scientific_input_contract(
+            keywords=self.keywords, protocol=self.protocol
+        )
         selected_task = self.task or STAGE_TASKS[self.stage_type]
         object.__setattr__(self, "task", ComputationalTask(selected_task))
 

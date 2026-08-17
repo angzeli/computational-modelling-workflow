@@ -257,10 +257,18 @@ class ReuseTests(unittest.TestCase):
             target, metadata, _, record = self._attempt(
                 Path(temporary),
                 StageType.SP,
-                keywords="DLPNO-CCSD(T) def2-TZVPP TightPNO",
+                keywords=(
+                    "DLPNO-CCSD(T) def2-TZVPP def2-TZVPP/C def2/JK "
+                    "RIJK TightPNO"
+                ),
                 protocol={
                     "method": "DLPNO-CCSD(T)",
                     "basis": "def2-TZVPP",
+                    "auxiliary_basis": {
+                        "correlation": "def2-TZVPP/C",
+                        "coulomb_exchange": "def2/JK",
+                    },
+                    "reference_approximation": "RIJK",
                     "pno": "TightPNO",
                     "led": True,
                 },

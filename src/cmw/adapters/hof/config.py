@@ -249,6 +249,27 @@ def _parse_interaction_protocol(
         resolved.get("method"), name=f"methods.{method_ref}.method"
     )
     basis = _required_string(resolved.get("basis"), name=f"methods.{method_ref}.basis")
+    raw_auxiliary = _mapping(
+        resolved.get("auxiliary_basis"),
+        name=f"methods.{method_ref}.auxiliary_basis",
+    )
+    auxiliary_basis: dict[str, str] = {}
+    for role, value in raw_auxiliary.items():
+        normalized_role = _required_string(
+            role, name=f"methods.{method_ref}.auxiliary_basis role"
+        ).casefold()
+        if normalized_role in auxiliary_basis:
+            raise ValueError(
+                f"methods.{method_ref}.auxiliary_basis contains duplicate roles"
+            )
+        auxiliary_basis[normalized_role] = _required_string(
+            value,
+            name=f"methods.{method_ref}.auxiliary_basis.{role}",
+        )
+    reference_approximation = _required_string(
+        resolved.get("reference_approximation"),
+        name=f"methods.{method_ref}.reference_approximation",
+    )
     pno = _required_string(
         resolved.get("pno", resolved.get("pno_setting")),
         name=f"methods.{method_ref}.pno",
@@ -282,6 +303,25 @@ def _parse_interaction_protocol(
         raise ValueError(
             "DLPNO HOF interaction protocol requires basis and PNO settings"
         )
+    if "correlation" not in auxiliary_basis:
+        raise ValueError(
+            "DLPNO HOF interaction protocol requires "
+            "auxiliary_basis.correlation"
+        )
+    normalized_reference = reference_approximation.casefold()
+    if normalized_reference == "rijk":
+        required_auxiliary = "coulomb_exchange"
+    elif normalized_reference == "rijcosx":
+        required_auxiliary = "coulomb"
+    else:
+        raise ValueError(
+            "HOF interaction reference_approximation must be RIJK or RIJCOSX"
+        )
+    if required_auxiliary not in auxiliary_basis:
+        raise ValueError(
+            f"{reference_approximation} HOF interaction protocol requires "
+            f"auxiliary_basis.{required_auxiliary}"
+        )
 
     outputs = _strings(
         interaction.get("outputs"), name="workflow.interaction_energy.outputs"
@@ -306,6 +346,8 @@ def _parse_interaction_protocol(
         "program",
         "method",
         "basis",
+        "auxiliary_basis",
+        "reference_approximation",
         "pno",
         "pno_setting",
         "tight_scf",
@@ -318,6 +360,8 @@ def _parse_interaction_protocol(
         program=program,
         method=method,
         basis=basis,
+        auxiliary_basis=auxiliary_basis,
+        reference_approximation=reference_approximation,
         pno=pno,
         tight_scf=tight_scf,
         counterpoise=counterpoise,

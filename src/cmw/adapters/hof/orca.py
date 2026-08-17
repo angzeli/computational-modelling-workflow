@@ -90,9 +90,24 @@ class HofOrcaCalculation:
         return value
 
 
-def _keywords(configuration: HofAdapterConfiguration, *, led: bool) -> str:
+def interaction_orca_keywords(
+    configuration: HofAdapterConfiguration, *, led: bool
+) -> str:
+    """Render one deterministic high-level ORCA method contract."""
+
     protocol = configuration.interaction
-    tokens = [protocol.method, protocol.basis, protocol.pno]
+    role_order = ("correlation", "coulomb", "coulomb_exchange", "cabs")
+    ordered_roles = [
+        *[role for role in role_order if role in protocol.auxiliary_basis],
+        *sorted(set(protocol.auxiliary_basis) - set(role_order)),
+    ]
+    tokens = [
+        protocol.method,
+        protocol.basis,
+        *(protocol.auxiliary_basis[role] for role in ordered_roles),
+        protocol.reference_approximation,
+        protocol.pno,
+    ]
     if protocol.tight_scf:
         tokens.append("TightSCF")
     if led:
@@ -177,7 +192,7 @@ def build_hof_orca_calculations(
         multiplicity=system.multiplicity,
         spec=OrcaStageSpec(
             StageType.SP,
-            _keywords(configuration, led=True),
+            interaction_orca_keywords(configuration, led=True),
             protocol=dimer_protocol,
         ),
         geometry_artifact=geometry_artifact,
@@ -214,7 +229,7 @@ def build_hof_orca_calculations(
             multiplicity=fragment.multiplicity,
             spec=OrcaStageSpec(
                 StageType.SP,
-                _keywords(configuration, led=False),
+                interaction_orca_keywords(configuration, led=False),
                 protocol=fragment_protocol,
             ),
             geometry_artifact=geometry_artifact,
@@ -389,6 +404,7 @@ def render_hof_orca_input(
 __all__ = [
     "HofOrcaCalculation",
     "build_hof_orca_calculations",
+    "interaction_orca_keywords",
     "prepare_hof_orca_geometry_input",
     "render_hof_orca_input",
 ]

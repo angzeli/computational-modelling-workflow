@@ -134,7 +134,10 @@ class HofAdapterTests(unittest.TestCase):
             dimer_xyz = dimer_geometry.read_text(encoding="utf-8")
             fragment_xyz = fragment_geometry.read_text(encoding="utf-8")
 
-        self.assertIn("TightPNO TightSCF LED SP", dimer.splitlines()[0])
+        self.assertIn(
+            "def2-TZVPP/C def2/JK RIJK TightPNO TightSCF LED SP",
+            dimer.splitlines()[0],
+        )
         self.assertIn("* xyzfile 0 1 dimer.xyz", dimer)
         self.assertNotIn("O(1)", dimer)
         self.assertIn("O(1)", dimer_xyz)
@@ -296,6 +299,20 @@ class HofAdapterTests(unittest.TestCase):
         missing_basis["high_level"]["basis"] = None
         with self.assertRaisesRegex(ValueError, "basis must be a non-empty string"):
             self.configuration(systems, missing_basis, protocol)
+
+        missing_correlation_auxiliary = deepcopy(methods)
+        missing_correlation_auxiliary["high_level"]["auxiliary_basis"].pop(
+            "correlation"
+        )
+        with self.assertRaisesRegex(ValueError, "auxiliary_basis.correlation"):
+            self.configuration(systems, missing_correlation_auxiliary, protocol)
+
+        missing_reference_auxiliary = deepcopy(methods)
+        missing_reference_auxiliary["high_level"]["auxiliary_basis"].pop(
+            "coulomb_exchange"
+        )
+        with self.assertRaisesRegex(ValueError, "auxiliary_basis.coulomb_exchange"):
+            self.configuration(systems, missing_reference_auxiliary, protocol)
 
     def test_symmetry_equivalent_metadata_must_be_consistent(self) -> None:
         systems, methods, protocol = self.documents()
