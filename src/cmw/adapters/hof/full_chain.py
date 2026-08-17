@@ -265,7 +265,20 @@ def _multiwfn_script(
         "\n".join(
             (
                 f"density_result={density_result}",
+                "set +e",
                 f"conversion_plan=$({plan})",
+                "conversion_status=$?",
+                "set -e",
+                "if ((conversion_status == 0)); then",
+                "  printf 'ORCA-to-Molden result is not reusable; run the conversion step before IGMH\\n' >&2",
+                "  printf '%s\\n' \"$conversion_plan\" >&2",
+                "  exit 70",
+                "fi",
+                "if ((conversion_status != 10)); then",
+                "  printf 'ORCA-to-Molden planning failed before IGMH\\n' >&2",
+                "  printf '%s\\n' \"$conversion_plan\" >&2",
+                "  exit \"$conversion_status\"",
+                "fi",
                 "source_result=$(printf '%s' \"$conversion_plan\" | "
                 + _quote(python_bin)
                 + " -c 'import json,sys; print(json.load(sys.stdin)[\"result_path\"])')",
