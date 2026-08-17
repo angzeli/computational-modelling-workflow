@@ -23,7 +23,7 @@ from cmw.core.execution_layout import (
     next_attempt_identifier,
 )
 from cmw.core.job import GeometryLineage
-from cmw.core.provenance import atomic_write_json, read_json
+from cmw.core.provenance import atomic_write_json, canonical_json_bytes, read_json
 from cmw.core.structure_artifacts import structure_artifact_from_file
 from cmw.molecular.orca.input import make_target_from_geometry_input, render_orca_input
 from cmw.molecular.orca.job import check_reuse, write_target
@@ -232,10 +232,15 @@ def _reused_attempt_state(
     return result
 
 
-def _find_pristine_prepared_attempt(target_directory: Path) -> dict[str, object] | None:
+def _find_pristine_prepared_attempt(
+    target_directory: Path, *, runtime_contract_source: Path
+) -> dict[str, object] | None:
     attempts = target_directory / "attempts"
     if not attempts.is_dir():
         return None
+    expected_runtime = read_json(
+        runtime_contract_source.expanduser().resolve(strict=True)
+    )
     for attempt in sorted(attempts.iterdir(), reverse=True):
         required = {
             "stage.inp",
@@ -249,6 +254,11 @@ def _find_pristine_prepared_attempt(target_directory: Path) -> dict[str, object]
             continue
         spent = {"job.json", "stage.out", "stage.err"}
         if any((attempt / name).exists() for name in spent):
+            continue
+        stored_runtime = read_json(attempt / "orca-runtime.json")
+        if canonical_json_bytes(stored_runtime) != canonical_json_bytes(
+            expected_runtime
+        ):
             continue
         layout = read_json(attempt / "execution-layout.json")
         if layout.get("target_directory") != str(target_directory):
@@ -359,7 +369,9 @@ def _materialize_calculation(
         return _reused_attempt_state(
             reusable, node_id=calculation.node_id, target_id=target.target_id
         )
-    prepared = _find_pristine_prepared_attempt(target_directory)
+    prepared = _find_pristine_prepared_attempt(
+        target_directory, runtime_contract_source=runtime_contract_source
+    )
     if prepared is not None:
         return prepared
     layout = ExecutionLayout(
