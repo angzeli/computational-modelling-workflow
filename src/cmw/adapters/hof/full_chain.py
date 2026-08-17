@@ -578,6 +578,8 @@ def generate_hof_full_chain(
         cmw_root / "scripts/orca/run_orca.sh",
         cmw_root / "scripts/orca/convert_orca_wavefunction.sh",
         cmw_root / "scripts/workflows/generate_igmh_cubes.sh",
+        cmw_root / "scripts/workflows/multiwfn_cube_workflow.sh",
+        cmw_root / "scripts/multiwfn/multiwfn_runtime.sh",
         cmw_root / "src/cmw/adapters/hof/full_chain.py",
         cmw_root / "src/cmw/adapters/hof/execution.py",
         cmw_root / "src/cmw/adapters/hof/execution_cli.py",
