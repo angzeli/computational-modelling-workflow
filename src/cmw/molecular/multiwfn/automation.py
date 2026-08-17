@@ -23,7 +23,7 @@ def menu_stream(
     version: str,
     parameters: Mapping[str, object],
 ) -> str:
-    """Render the supported 3.8 operation profile."""
+    """Render the verified 3.8-compatible operation profile."""
 
     require_supported_version(version)
     if operation is Operation.FMO:

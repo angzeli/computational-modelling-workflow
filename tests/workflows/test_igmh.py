@@ -278,7 +278,7 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
         unsupported.chmod(0o755)
         completed = self.run_igmh(executable=unsupported, check=False)
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("supported series is 3.8", completed.stdout)
+        self.assertIn("verified versions are 3.8.x and 2026.7.15", completed.stdout)
         self.assertFalse(self.log.exists())
 
 

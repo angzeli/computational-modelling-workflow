@@ -26,6 +26,8 @@ from cmw.core.provenance import file_hash
 
 DEFAULT_MULTIWFN_NTHREADS = 8
 SUPPORTED_VERSION_SERIES = (3, 8)
+VERIFIED_EXACT_VERSIONS = {(2026, 7, 15)}
+MENU_CONTRACT = "multiwfn-3.8-compatible-v1"
 SETTINGS_MECHANISM = "run_local_multiwfnpath"
 
 
@@ -42,6 +44,7 @@ class MultiwfnRuntime:
     executable: str
     executable_sha256: str
     version: str
+    menu_contract: str
     requested_nthreads: int
     settings_mechanism: str
     settings_source: str
@@ -144,16 +147,22 @@ def parse_version(text: str) -> str | None:
     return match.group(1) if match else None
 
 
-def require_supported_version(version: str) -> None:
+def resolve_menu_contract(version: str) -> str:
     try:
         fields = tuple(int(value) for value in version.split("."))
     except ValueError as exc:
         raise ValueError(f"invalid Multiwfn version: {version!r}") from exc
-    if fields[:2] != SUPPORTED_VERSION_SERIES:
-        raise ValueError(
-            "unsupported Multiwfn menu contract: "
-            f"{version}; supported series is 3.8.x"
-        )
+    if fields[:2] == SUPPORTED_VERSION_SERIES or fields in VERIFIED_EXACT_VERSIONS:
+        return MENU_CONTRACT
+    verified = ", ".join(".".join(map(str, item)) for item in VERIFIED_EXACT_VERSIONS)
+    raise ValueError(
+        "unsupported Multiwfn menu contract: "
+        f"{version}; verified versions are 3.8.x and {verified}"
+    )
+
+
+def require_supported_version(version: str) -> None:
+    resolve_menu_contract(version)
 
 
 def detect_version(executable: Path) -> str:
@@ -287,6 +296,49 @@ def detect_openmp(executable: Path) -> OpenMPCapability:
     )
 
 
+def inspect_runtime_compatibility(
+    *,
+    executable: str,
+    settings_source: Path,
+    threads: str | int,
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Validate an installed runtime without creating an analysis attempt."""
+
+    env = os.environ if environment is None else environment
+    resolved_executable = resolve_executable(explicit=executable, environment=env)
+    requested_threads = resolve_threads(cli_value=threads, environment=env)
+    source = resolve_settings_source(
+        resolved_executable, explicit=settings_source, environment=env
+    )
+    render_settings(source.read_bytes(), requested_threads)
+    version = detect_version(resolved_executable)
+    menu_contract = resolve_menu_contract(version)
+    openmp = detect_openmp(resolved_executable)
+    return {
+        "schema_version": 1,
+        "executable": str(resolved_executable),
+        "executable_sha256": file_hash(resolved_executable),
+        "version": version,
+        "menu_contract": menu_contract,
+        "requested_nthreads": requested_threads,
+        "settings_source": str(source),
+        "settings_source_sha256": file_hash(source),
+        "openmp_capability": openmp.value,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "validation": {
+            "status": "PASSED",
+            "code": "VALID_MULTIWFN_RUNTIME_CONTRACT",
+            "checks": {
+                "executable": True,
+                "version": True,
+                "menu_contract": True,
+                "settings": True,
+            },
+        },
+    }
+
+
 def prepare_runtime(
     *,
     attempt_directory: Path,
@@ -321,11 +373,14 @@ def prepare_runtime(
     source = resolve_settings_source(
         resolved_executable, explicit=settings_source, environment=env
     )
+    version = detect_version(resolved_executable)
+    menu_contract = resolve_menu_contract(version)
     settings = prepare_settings(source, attempt_directory, threads)
     return MultiwfnRuntime(
         executable=str(resolved_executable),
         executable_sha256=file_hash(resolved_executable),
-        version=detect_version(resolved_executable),
+        version=version,
+        menu_contract=menu_contract,
         requested_nthreads=threads,
         settings_mechanism=SETTINGS_MECHANISM,
         settings_source=str(source),
