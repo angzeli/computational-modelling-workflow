@@ -25,6 +25,12 @@ from .orca import (
 from .validation import HofValidationError, validate_hof_system
 from .workflow import HofInteractionPlan, build_hof_interaction_workflow
 from .planner import HofWorkflowPlan, build_hof_workflow_plan
+from .execution import materialize_relaxed_fragment_energy
+from .command_queue import (
+    authorize_hof_command_queue,
+    generate_hof_command_queue,
+    verify_hof_command_queue,
+)
 
 __all__ = [
     "HOF_ADAPTER_SCHEMA_VERSION",
@@ -40,13 +46,17 @@ __all__ = [
     "HofSystem",
     "HofValidationError",
     "HofWorkflowPlan",
+    "authorize_hof_command_queue",
     "build_hof_interaction_workflow",
     "build_hof_orca_calculations",
     "build_hof_workflow_plan",
     "configuration_from_documents",
+    "generate_hof_command_queue",
     "load_hof_configuration",
     "load_yaml_document",
+    "materialize_relaxed_fragment_energy",
     "prepare_hof_orca_geometry_input",
     "render_hof_orca_input",
     "validate_hof_system",
+    "verify_hof_command_queue",
 ]

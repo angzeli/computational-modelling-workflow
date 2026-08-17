@@ -98,7 +98,7 @@ def _write_orca_xyzfile(
         raise _fail("ORCA atom labels do not match the selected geometry")
     rows = [str(geometry.atom_count), comment]
     rows.extend(
-        f"{label:<8s} {atom.x: .12f} {atom.y: .12f} {atom.z: .12f}"
+        f"{label:<8s} {atom.x: .17g} {atom.y: .17g} {atom.z: .17g}"
         for label, atom in zip(labels, geometry.atoms, strict=True)
     )
     path.parent.mkdir(parents=True, exist_ok=True)

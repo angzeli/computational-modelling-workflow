@@ -11,6 +11,8 @@ PYTHON_BIN=${PYTHON_BIN:-python3}
 ORCA_EXE=${ORCA_EXE:-orca}
 NPROCS=${NPROCS:-1}
 MAXCORE_MB=${MAXCORE_MB:-1000}
+CMW_REQUIRE_MINIMUM=${CMW_REQUIRE_MINIMUM:-0}
+CMW_IMAGINARY_TOLERANCE_CM1=${CMW_IMAGINARY_TOLERANCE_CM1:-0.0}
 
 input=""
 target=""
@@ -58,6 +60,14 @@ if [[ -z "$input" || -z "$target" || -z "$metadata" || -z "$output" || -z "$stde
   usage
   exit 64
 fi
+case "$CMW_REQUIRE_MINIMUM" in
+  1|true|TRUE|True|yes|YES|Yes) require_minimum=1 ;;
+  0|false|FALSE|False|no|NO|No) require_minimum=0 ;;
+  *)
+    printf 'CMW_REQUIRE_MINIMUM must be true or false\n' >&2
+    exit 64
+    ;;
+esac
 
 absolute_path() {
   local path=$1 directory name
@@ -251,7 +261,9 @@ finalize=(
   --output "$output" --stderr "$stderr_path" --process-exit-code "$process_status"
   --orca-exe "$orca_command" --orca-version "$orca_version"
   --nprocs "$NPROCS" --maxcore "$MAXCORE_MB" --repository "$REPO_ROOT"
+  --imaginary-tolerance "$CMW_IMAGINARY_TOLERANCE_CM1"
 )
+((require_minimum == 0)) || finalize+=(--require-minimum)
 [[ -z "$layout" ]] || finalize+=(--layout "$layout")
 [[ -z "$geometry_contract" ]] || finalize+=(--geometry-contract "$geometry_contract")
 if ((${#resolved_artifacts[@]} > 0)); then
@@ -259,9 +271,6 @@ if ((${#resolved_artifacts[@]} > 0)); then
     finalize+=(--artifact "$item")
   done
 fi
-[[ ${CMW_REQUIRE_MINIMUM:-0} == 1 ]] && finalize+=(--require-minimum)
-finalize+=(--imaginary-tolerance "${CMW_IMAGINARY_TOLERANCE_CM1:-0.0}")
-
 if ! "${finalize[@]}" >/dev/null; then
   printf 'ORCA attempt did not satisfy execution, scientific, or artifact validation\n' >&2
   exit 70

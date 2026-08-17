@@ -96,6 +96,26 @@ class OrcaGeometryInputTests(unittest.TestCase):
         ):
             validate_orca_geometry_input(geometry_input)
 
+    def test_high_precision_coordinates_round_trip_without_identity_drift(self) -> None:
+        source = self.directory / "high-precision.xyz"
+        source.write_text(
+            "2\noptimized geometry\n"
+            "H -0.99948315458624 -0.95055704304975 0.68943286244937\n"
+            "H 1.23456789012345 2.34567890123456 -3.45678901234567\n",
+            encoding="utf-8",
+        )
+        artifact = structure_artifact_from_file(
+            source,
+            source="high-precision optimization",
+        )
+
+        geometry_input = prepare_orca_geometry_input(
+            artifact, self.directory / "high-precision-input.xyz"
+        )
+
+        self.assertEqual(geometry_input.geometry_hash, artifact.geometry_hash)
+        validate_orca_geometry_input(geometry_input)
+
     def test_missing_source_or_materialized_geometry_fails_closed(self) -> None:
         missing = replace(
             self.artifact,
