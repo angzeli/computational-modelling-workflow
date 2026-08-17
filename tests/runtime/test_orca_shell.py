@@ -181,6 +181,23 @@ class OrcaShellTests(unittest.TestCase):
                 "--artifact",
                 f"final_geometry={attempt / 'stage.xyz'}",
             )
+            insufficient = subprocess.run(
+                (
+                    *command,
+                    "--minimum-free-disk-gb",
+                    "999999999",
+                    "--disk-check-path",
+                    str(directory),
+                ),
+                cwd=ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(insufficient.returncode, 74)
+            self.assertIn("FAILED_STORAGE_CAPACITY", insufficient.stderr)
+            self.assertFalse(count.exists())
             held_lock = acquire_lock(
                 attempt / "target.json.lock", job_id="held", owner_pid=os.getpid()
             )

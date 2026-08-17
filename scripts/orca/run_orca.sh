@@ -24,6 +24,8 @@ geometry_contract=""
 runtime_contract=""
 runtime_launch_manifest=""
 require_runtime_contract=0
+minimum_free_disk_gb=""
+disk_check_path=""
 replace_stale=0
 artifacts=()
 
@@ -35,6 +37,7 @@ usage() {
     "                   [--geometry-contract FILE]" \
     "                   [--runtime-contract FILE]" \
     "                   [--require-runtime-contract]" \
+    "                   [--minimum-free-disk-gb NUMBER --disk-check-path DIR]" \
     "                   [--replace-stale-lock]" >&2
 }
 
@@ -49,6 +52,8 @@ while (($#)); do
     --geometry-contract) geometry_contract=${2:?}; shift 2 ;;
     --runtime-contract) runtime_contract=${2:?}; shift 2 ;;
     --require-runtime-contract) require_runtime_contract=1; shift ;;
+    --minimum-free-disk-gb) minimum_free_disk_gb=${2:?}; shift 2 ;;
+    --disk-check-path) disk_check_path=${2:?}; shift 2 ;;
     --artifact) artifacts+=("${2:?}"); shift 2 ;;
     --replace-stale-lock) replace_stale=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -107,6 +112,20 @@ if ((${#artifacts[@]} > 0)); then
 fi
 
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
+if [[ -n "$minimum_free_disk_gb" || -n "$disk_check_path" ]]; then
+  if [[ -z "$minimum_free_disk_gb" || -z "$disk_check_path" ]]; then
+    printf 'Disk-capacity protection requires both a threshold and check path\n' >&2
+    exit 64
+  fi
+  if ! storage_json=$(
+    "$PYTHON_BIN" -m cmw.core.storage_cli \
+      --path "$disk_check_path" --minimum-free-gb "$minimum_free_disk_gb"
+  ); then
+    printf 'Storage-capacity preflight failed: %s\n' "$storage_json" >&2
+    exit 74
+  fi
+fi
 
 if "$PYTHON_BIN" -m cmw.molecular.orca.cli reuse \
   --target "$target" --metadata "$metadata" >/dev/null 2>&1

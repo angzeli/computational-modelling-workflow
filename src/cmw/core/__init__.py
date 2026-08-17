@@ -57,6 +57,7 @@ from .workflow_graph import (
     WorkflowNode,
     compose_workflow_graphs,
 )
+from .storage import StorageCapacityError, check_storage_capacity
 
 __all__ = [
     "AggregationNode",
@@ -91,6 +92,8 @@ __all__ = [
     "WorkflowCompositionError",
     "WorkflowGraph",
     "WorkflowNode",
+    "StorageCapacityError",
+    "check_storage_capacity",
     "compose_workflow_graphs",
     "execution_profiles_from_mapping",
     "execution_target_directory",

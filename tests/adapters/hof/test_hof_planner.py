@@ -16,6 +16,7 @@ from cmw.adapters.hof import (
 from cmw.core.artifacts import (
     DeformationEnergyArtifact,
     DensityArtifact,
+    FrequencyArtifact,
     IGMHArtifact,
     OptimizationArtifact,
     StructureArtifact,
@@ -63,7 +64,7 @@ class HofWorkflowPlannerTests(unittest.TestCase):
     def test_complete_hof_workflow_graph_is_composed_and_closed(self) -> None:
         plan = self.plan()
 
-        self.assertEqual(len(plan.graph.nodes), 16)
+        self.assertEqual(len(plan.graph.nodes), 18)
         self.assertEqual(plan.graph.external_inputs, ())
         self.assertEqual(
             set(plan.metadata["branches"]),
@@ -72,7 +73,7 @@ class HofWorkflowPlannerTests(unittest.TestCase):
         self.assertEqual(plan.metadata["execution"], "planned_only")
         self.assertFalse(plan.metadata["synthetic_results"])
         self.assertEqual(set(plan.artifact_templates), set(plan.graph.node_map))
-        self.assertEqual(len(plan.orca_calculations), 11)
+        self.assertEqual(len(plan.orca_calculations), 12)
         json.dumps(plan.to_dict())
 
     def test_geometry_branch_maps_structure_to_optimization_plan(self) -> None:
@@ -96,6 +97,26 @@ class HofWorkflowPlannerTests(unittest.TestCase):
             plan.orca_calculations["geometry_optimization"].spec.protocol[
                 "frequency_requested"
             ]
+        )
+        frequency = plan.graph.node_map["geometry_frequency"]
+        promoted = plan.graph.node_map["validated_geometry"]
+        self.assertEqual(frequency.dependencies, ("geometry_optimization",))
+        self.assertEqual(frequency.produces, ("FrequencyArtifact",))
+        self.assertIsInstance(
+            plan.artifact_templates["geometry_frequency"][0], FrequencyArtifact
+        )
+        self.assertEqual(
+            plan.orca_calculations["geometry_frequency"].spec.stage_type,
+            StageType.FREQ,
+        )
+        self.assertEqual(
+            promoted.dependencies,
+            ("geometry_optimization", "geometry_frequency"),
+        )
+        self.assertEqual(promoted.produces, ("StructureArtifact",))
+        self.assertEqual(
+            plan.artifact_templates["validated_geometry"][0].source,
+            "validated_opt_freq",
         )
         with tempfile.TemporaryDirectory() as temporary:
             geometry_path = Path(temporary) / "input.xyz"
@@ -134,10 +155,10 @@ class HofWorkflowPlannerTests(unittest.TestCase):
     def test_interaction_branch_uses_composed_optimized_structure(self) -> None:
         plan = self.plan()
         dimer = plan.graph.node_map["dimer"]
-        optimized = plan.artifact_templates["geometry_optimization"][1]
+        optimized = plan.artifact_templates["validated_geometry"][0]
         dimer_energy, wavefunction = plan.artifact_templates["dimer"]
 
-        self.assertEqual(dimer.dependencies, ("geometry_optimization",))
+        self.assertEqual(dimer.dependencies, ("validated_geometry",))
         self.assertIn(optimized.artifact_id, dimer_energy.parent_artifacts)
         self.assertIn(optimized.artifact_id, wavefunction.parent_artifacts)
         self.assertEqual(
@@ -206,7 +227,7 @@ class HofWorkflowPlannerTests(unittest.TestCase):
 
         self.assertEqual(
             plan.graph.node_map["igmh_density"].dependencies,
-            ("geometry_optimization",),
+            ("validated_geometry",),
         )
         self.assertEqual(
             plan.graph.node_map["multiwfn_igmh"].dependencies, ("igmh_density",)
