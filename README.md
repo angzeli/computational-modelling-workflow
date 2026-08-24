@@ -13,7 +13,7 @@ This repository currently contains:
 - an installable `cmw` Python package with safe YAML loading for domain adapters;
 - advisory process-tree health monitoring;
 - strict XYZ parsing and stable geometry identity;
-- factual ORCA output parsing with separate OPT/FREQ/SP validation;
+- factual ORCA output parsing with separate OPT/FREQ/SP/TDDFT validation;
 - versioned targets, attempts, artifacts, lineage, local locks, and fail-closed
   reuse;
 - a system-agnostic calculation/aggregation/derived-result workflow graph with
@@ -22,15 +22,19 @@ This repository currently contains:
   fragment, SCF, optimization, and frequency evidence;
 - a HOF domain adapter that validates two-fragment hydrogen-bonded systems and
   translates their YAML configuration into generic CP/LED workflow contracts;
-- shell-owned ORCA execution; and
+- shell-owned ORCA execution;
 - a configurable, resumable `opt`, `opt+sp`, `opt+freq`, or `opt+freq+sp`
   molecular workflow with synthetic integration tests;
 - a reusable Multiwfn 3.8.x runtime with immutable run-local settings,
-  eight-thread default, executable provenance, and advisory process health; and
+  eight-thread default, executable provenance, and advisory process health;
 - independent, source-aware HOMO/LUMO, density/ESP, and interfragment IGMH cube
   workflows with structural validation, grid compatibility, and fail-closed
   reuse, plus deterministic command/output contracts and typed
-  density-to-IGMH artifact lineage.
+  density-to-IGMH artifact lineage; and
+- a molecule-agnostic vertical stacking framework for explicit periodic
+  registry extraction, deterministic dimer assembly, constrained/full
+  relaxation planning, TDDFT/TDA and NTO artifacts, and Multiwfn-style
+  hole/electron analysis.
 
 It does **not** redistribute Multiwfn or contain dimer-selection science,
 catalytic pathways, ASE, pymatgen, VASP, scheduler execution, cluster locking,
@@ -56,6 +60,8 @@ and current method strategy.
 The composite graph, typed artifact, compatibility, and protocol-validation
 contracts are documented in
 [`docs/architecture/composite-workflow-engine.md`](docs/architecture/composite-workflow-engine.md).
+The reusable stacking contracts and artifact lineage are documented in
+[`docs/architecture/vertical-stacking-workflow.md`](docs/architecture/vertical-stacking-workflow.md).
 The HOF YAML mapping, validators, CP/LED graph, and non-executing ORCA input
 plans are documented in [`docs/adapters/hof.md`](docs/adapters/hof.md).
 

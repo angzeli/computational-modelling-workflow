@@ -55,7 +55,12 @@ identity.
 See the focused boundary documents in this directory and the
 [workflow guide](../molecular/orca-opt-freq-sp.md). Composite graphs, typed
 artifacts, and method-aware validation are described in the
-[composite workflow engine guide](composite-workflow-engine.md).
+[composite workflow engine guide](composite-workflow-engine.md). The
+molecule-agnostic
+[vertical stacking workflow](vertical-stacking-workflow.md) composes explicit
+periodic registry extraction, deterministic dimer assembly, hierarchical
+relaxation, TDDFT/TDA planning, and Multiwfn hole/electron analysis through
+those same contracts.
 Domain-specific translation remains outside the core graph. The first adapter,
 documented in the [HOF adapter guide](../adapters/hof.md), validates the HOF
 system schema and maps it onto those generic graph and artifact contracts.
@@ -140,7 +145,8 @@ cmw
 ├── structure
 ├── molecular
 │   ├── orca
-│   └── multiwfn
+│   ├── multiwfn
+│   └── stacking
 ├── periodic
 │   ├── vasp
 │   └── pymatgen

@@ -48,6 +48,12 @@ FRAGMENT_COUNT_RE = re.compile(
     re.I,
 )
 LED_RE = re.compile(r"LOCAL\s+ENERGY\s+DECOMPOSITION|\bLED\s+(?:ANALYSIS|DECOMPOSITION)\b", re.I)
+EXCITED_STATE_HEADER_RE = re.compile(
+    r"(?:TD-?DFT(?:/TDA)?|TDA)\s+EXCITED\s+STATES?|"
+    r"EXCITED\s+STATE\s+PROPERTIES",
+    re.I,
+)
+EXCITED_STATE_RE = re.compile(r"^\s*STATE\s+(\d+)\s*:", re.I | re.M)
 FATAL_PATTERNS = tuple(
     re.compile(pattern, re.I)
     for pattern in (
@@ -67,6 +73,7 @@ class StageType(str, Enum):
     OPT = "OPT"
     FREQ = "FREQ"
     SP = "SP"
+    TDDFT = "TDDFT"
 
 
 class ExecutionStatus(str, Enum):
@@ -108,6 +115,8 @@ class OrcaEvidence:
     reported_pno_settings: tuple[str, ...] = ()
     led_present: bool = False
     fragment_count: int | None = None
+    excited_state_analysis_completed: bool = False
+    excited_state_count: int | None = None
 
     @property
     def final_energy_hartree(self) -> float | None:
@@ -265,6 +274,9 @@ def parse_orca_output(text: str, *, stderr_text: str = "") -> OrcaEvidence:
         )
     )
     fragments = FRAGMENT_COUNT_RE.findall(text)
+    excited_states = tuple(
+        dict.fromkeys(int(value) for value in EXCITED_STATE_RE.findall(text))
+    )
     return OrcaEvidence(
         normal_termination="ORCA TERMINATED NORMALLY" in text,
         final_energies_hartree=energies,
@@ -290,6 +302,10 @@ def parse_orca_output(text: str, *, stderr_text: str = "") -> OrcaEvidence:
         reported_pno_settings=pno,
         led_present=bool(LED_RE.search(text)),
         fragment_count=int(fragments[-1]) if fragments else None,
+        excited_state_analysis_completed=bool(
+            EXCITED_STATE_HEADER_RE.search(text) and excited_states
+        ),
+        excited_state_count=len(excited_states) if excited_states else None,
     )
 
 
@@ -386,6 +402,19 @@ def validate_stage(
             "FREQ evidence satisfies the configured policy",
             imaginary,
             significant,
+        )
+
+    if stage_type is StageType.TDDFT:
+        if not evidence.excited_state_analysis_completed:
+            return ScientificResult(
+                ScientificStatus.INVALID,
+                stage_type,
+                "excited-state analysis evidence is incomplete",
+            )
+        return ScientificResult(
+            ScientificStatus.VALID,
+            stage_type,
+            "TDDFT evidence is complete",
         )
 
     return ScientificResult(ScientificStatus.VALID, stage_type, "SP evidence is complete")

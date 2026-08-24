@@ -253,6 +253,43 @@ class IGMHArtifact(AnalysisArtifact):
     TYPE = "IGMHArtifact"
 
 
+class StackingTemplateArtifact(Artifact):
+    """Periodic-structure-derived registry for assembling a molecular pair."""
+
+    TYPE = "StackingTemplateArtifact"
+
+
+@dataclass(frozen=True)
+class DimerStructureArtifact(StructureArtifact):
+    """Ordered two-component structure assembled from explicit parent structures."""
+
+    TYPE: ClassVar[str] = "DimerStructureArtifact"
+
+
+class ConstrainedOptimizationArtifact(OptimizationArtifact):
+    """Optimization result produced under an explicit structural constraint set."""
+
+    TYPE = "ConstrainedOptimizationArtifact"
+
+
+class ExcitedStateArtifact(CalculationArtifact):
+    """Electronic excited-state calculation with explicit state-selection intent."""
+
+    TYPE = "ExcitedStateArtifact"
+
+
+class NTOArtifact(AnalysisArtifact):
+    """Natural-transition-orbital analysis derived from an excited-state result."""
+
+    TYPE = "NTOArtifact"
+
+
+class HoleElectronArtifact(AnalysisArtifact):
+    """Hole/electron separation analysis derived from an excited-state result."""
+
+    TYPE = "HoleElectronArtifact"
+
+
 ARTIFACT_TYPES: dict[str, type[Artifact]] = {
     item.TYPE: item
     for item in (
@@ -273,6 +310,12 @@ ARTIFACT_TYPES: dict[str, type[Artifact]] = {
         LEDArtifact,
         DensityArtifact,
         IGMHArtifact,
+        StackingTemplateArtifact,
+        DimerStructureArtifact,
+        ConstrainedOptimizationArtifact,
+        ExcitedStateArtifact,
+        NTOArtifact,
+        HoleElectronArtifact,
     )
 }
 
@@ -508,6 +551,64 @@ def validate_artifact_compatibility(
                 "IGMHArtifact requires a validated DensityArtifact parent"
             )
 
+    if isinstance(artifact, DimerStructureArtifact):
+        templates = [
+            parent for parent in selected if isinstance(parent, StackingTemplateArtifact)
+        ]
+        structures = [parent for parent in selected if isinstance(parent, StructureArtifact)]
+        if len(templates) != 1 or not structures:
+            raise ArtifactCompatibilityError(
+                "DimerStructureArtifact requires a StackingTemplateArtifact and "
+                "at least one StructureArtifact parent"
+            )
+
+    if isinstance(artifact, ConstrainedOptimizationArtifact):
+        if not any(isinstance(parent, StructureArtifact) for parent in selected):
+            raise ArtifactCompatibilityError(
+                "ConstrainedOptimizationArtifact requires a StructureArtifact parent"
+            )
+        constraints = artifact.protocol.get("constraints")
+        if not isinstance(constraints, Mapping) or not constraints.get("fixed_regions"):
+            raise ArtifactCompatibilityError(
+                "ConstrainedOptimizationArtifact requires explicit fixed_regions"
+            )
+
+    if isinstance(artifact, ExcitedStateArtifact):
+        if not any(isinstance(parent, StructureArtifact) for parent in selected):
+            raise ArtifactCompatibilityError(
+                "ExcitedStateArtifact requires a StructureArtifact parent"
+            )
+        roots = artifact.protocol.get("number_of_roots")
+        if isinstance(roots, bool) or not isinstance(roots, int) or roots < 1:
+            raise ArtifactCompatibilityError(
+                "ExcitedStateArtifact requires a positive number_of_roots"
+            )
+        if not isinstance(artifact.protocol.get("state_selection"), Mapping):
+            raise ArtifactCompatibilityError(
+                "ExcitedStateArtifact requires state_selection metadata"
+            )
+        if not artifact.metadata.get("source_geometry_hash"):
+            raise ArtifactCompatibilityError(
+                "ExcitedStateArtifact requires a source_geometry_hash"
+            )
+
+    if isinstance(artifact, NTOArtifact):
+        if not any(isinstance(parent, ExcitedStateArtifact) for parent in selected):
+            raise ArtifactCompatibilityError(
+                "NTOArtifact requires an ExcitedStateArtifact parent"
+            )
+
+    if isinstance(artifact, HoleElectronArtifact):
+        if not any(isinstance(parent, ExcitedStateArtifact) for parent in selected):
+            raise ArtifactCompatibilityError(
+                "HoleElectronArtifact requires an ExcitedStateArtifact parent"
+            )
+        protocol = artifact.metadata.get("multiwfn_protocol")
+        if not isinstance(protocol, Mapping) or not protocol:
+            raise ArtifactCompatibilityError(
+                "HoleElectronArtifact requires Multiwfn protocol metadata"
+            )
+
 
 def _method_metadata(calculation: Mapping[str, Any]) -> tuple[str | None, str | None, dict[str, object]]:
     protocol = dict(calculation.get("protocol", {}))
@@ -611,11 +712,13 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
         "OPT": ComputationalTask.OPTIMIZATION,
         "FREQ": ComputationalTask.FREQUENCY,
         "SP": ComputationalTask.SINGLE_POINT,
+        "TDDFT": ComputationalTask.EXCITED_STATE,
     }
     task_artifacts: dict[ComputationalTask, type[Artifact]] = {
         ComputationalTask.OPTIMIZATION: OptimizationArtifact,
         ComputationalTask.FREQUENCY: FrequencyArtifact,
         ComputationalTask.SINGLE_POINT: SinglePointArtifact,
+        ComputationalTask.EXCITED_STATE: ExcitedStateArtifact,
     }
     if stage_type in stage_tasks:
         task = stage_tasks[stage_type]
@@ -666,6 +769,10 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
     geometry_input = record.get("geometry_input")
     if isinstance(geometry_input, Mapping):
         geometry_provenance = {"geometry_input": dict(geometry_input)}
+        if stage_type == "TDDFT" and geometry_input.get("geometry_hash"):
+            metadata["source_geometry_hash"] = str(
+                geometry_input["geometry_hash"]
+            )
     return cls(
         producing_calculation=target_id,
         method=method,
@@ -694,17 +801,23 @@ __all__ = [
     "ArtifactValidation",
     "CPInteractionArtifact",
     "CalculationArtifact",
+    "ConstrainedOptimizationArtifact",
     "DeformationEnergyArtifact",
     "DensityArtifact",
     "DimerEnergyArtifact",
+    "DimerStructureArtifact",
     "EnergyArtifact",
+    "ExcitedStateArtifact",
     "FragmentEnergyArtifact",
     "FrequencyArtifact",
     "IGMHArtifact",
+    "HoleElectronArtifact",
     "InteractionEnergyArtifact",
     "LEDArtifact",
+    "NTOArtifact",
     "OptimizationArtifact",
     "SinglePointArtifact",
+    "StackingTemplateArtifact",
     "StructureArtifact",
     "ValidationStatus",
     "WavefunctionArtifact",

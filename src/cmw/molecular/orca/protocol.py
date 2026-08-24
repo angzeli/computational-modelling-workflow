@@ -35,10 +35,18 @@ class ProtocolIntent:
     expected_fragments: int | None = None
     optimization_required: bool | None = None
     frequency_required: bool | None = None
+    excited_state_required: bool | None = None
+    minimum_excited_states: int | None = None
 
     def __post_init__(self) -> None:
         if self.expected_fragments is not None and self.expected_fragments < 1:
             raise ValueError("expected_fragments must be positive")
+        if self.minimum_excited_states is not None and (
+            isinstance(self.minimum_excited_states, bool)
+            or not isinstance(self.minimum_excited_states, int)
+            or self.minimum_excited_states < 1
+        ):
+            raise ValueError("minimum_excited_states must be a positive integer")
         object.__setattr__(self, "auxiliary_basis", dict(self.auxiliary_basis))
 
     @classmethod
@@ -56,6 +64,12 @@ class ProtocolIntent:
             fragments_required = _boolean(fragments_value, name="fragments_required")
             expected = raw.get("expected_fragments", raw.get("fragment_count"))
             expected_fragments = int(expected) if expected is not None else None
+        minimum_raw = raw.get("minimum_excited_states")
+        if isinstance(minimum_raw, bool):
+            raise ValueError("minimum_excited_states must be a positive integer")
+        minimum_excited_states = (
+            int(minimum_raw) if minimum_raw is not None else None
+        )
         return cls(
             method=str(raw["method"]) if raw.get("method") is not None else None,
             basis=str(raw["basis"]) if raw.get("basis") is not None else None,
@@ -83,6 +97,12 @@ class ProtocolIntent:
                 if raw.get("frequency_required") is not None
                 else None
             ),
+            excited_state_required=(
+                _boolean(raw["excited_state_required"], name="excited_state_required")
+                if raw.get("excited_state_required") is not None
+                else None
+            ),
+            minimum_excited_states=minimum_excited_states,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -177,10 +197,22 @@ def validate_protocol(
         if intent.frequency_required is None
         else intent.frequency_required
     )
+    require_excited_states = (
+        stage_type is StageType.TDDFT
+        if intent.excited_state_required is None
+        else intent.excited_state_required
+    )
     if require_optimization:
         checks["optimization_converged"] = evidence.optimization_converged
     if require_frequency:
         checks["frequency_completed"] = evidence.frequency_analysis_completed
+    if require_excited_states:
+        checks["excited_state_completed"] = evidence.excited_state_analysis_completed
+    if intent.minimum_excited_states is not None:
+        checks["excited_state_count"] = (
+            evidence.excited_state_count is not None
+            and evidence.excited_state_count >= intent.minimum_excited_states
+        )
     if intent.led:
         checks["led_present"] = evidence.led_present
     if intent.fragments_required or intent.expected_fragments is not None:
@@ -208,6 +240,10 @@ def validate_protocol(
             "scf_converged": evidence.scf_converged,
             "optimization_converged": evidence.optimization_converged,
             "frequency_analysis_completed": evidence.frequency_analysis_completed,
+            "excited_state_analysis_completed": (
+                evidence.excited_state_analysis_completed
+            ),
+            "excited_state_count": evidence.excited_state_count,
         },
         tuple(failures),
     )

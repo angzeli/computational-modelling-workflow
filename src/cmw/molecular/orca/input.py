@@ -29,12 +29,14 @@ STAGE_TASKS = {
     StageType.OPT: ComputationalTask.OPTIMIZATION,
     StageType.FREQ: ComputationalTask.FREQUENCY,
     StageType.SP: ComputationalTask.SINGLE_POINT,
+    StageType.TDDFT: ComputationalTask.EXCITED_STATE,
 }
 
 ORCA_TASK_BEHAVIORS = {
     ComputationalTask.OPTIMIZATION: "Opt",
     ComputationalTask.FREQUENCY: "Freq",
     ComputationalTask.SINGLE_POINT: "SP",
+    ComputationalTask.EXCITED_STATE: "SP",
 }
 
 ORCA_MEMORY_MB_PER_GB = 1024
@@ -190,6 +192,10 @@ class OrcaStageSpec:
         if any(line.lstrip().lower().startswith(reserved) for line in block_lines):
             raise ValueError("resources and geometry directives cannot be duplicated in stage blocks")
         object.__setattr__(self, "protocol", dict(self.protocol))
+        if self.stage_type is StageType.TDDFT and not any(
+            line.lstrip().casefold().startswith("%tddft") for line in block_lines
+        ):
+            raise ValueError("TDDFT stages require an explicit %tddft block")
         validate_orca_scientific_input_contract(
             keywords=self.keywords, protocol=self.protocol
         )
