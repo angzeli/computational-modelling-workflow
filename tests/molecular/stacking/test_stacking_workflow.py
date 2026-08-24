@@ -823,6 +823,9 @@ class CompleteWorkflowTests(StackingFixture):
         self.assertIn("{ C 6 C }", stage_input)
         self.assertIn("nprocs 8", stage_input)
         self.assertEqual(
+            Path(first.output_files["final_geometry"]).name, "stage.xyz"
+        )
+        self.assertEqual(
             first.layout.project_root, (self.root / "stacking").resolve()
         )
         self.assertNotIn(

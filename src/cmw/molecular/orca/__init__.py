@@ -42,16 +42,29 @@ from .renderer import (
     OrcaExecutionRenderer,
     orca_execution_plan_node,
 )
+from .properties import (
+    AtomicCharge,
+    FragmentOrbitalPopulation,
+    FrontierAtomicPopulation,
+    OrcaGroundStateProperties,
+    OrbitalEnergy,
+    parse_ground_state_properties,
+)
 
 __all__ = [
     "ExecutionResult",
     "ExecutionStatus",
+    "AtomicCharge",
+    "FragmentOrbitalPopulation",
+    "FrontierAtomicPopulation",
     "FrequencyPolicy",
     "OrcaEvidence",
     "OrcaGeometryContractError",
     "OrcaGeometryInput",
     "OrcaGeometryMode",
     "OrcaRuntimeError",
+    "OrcaGroundStateProperties",
+    "OrbitalEnergy",
     "ORCA_GEOMETRY_SCHEMA_VERSION",
     "ORCA_RUNTIME_SCHEMA_VERSION",
     "ORCA_RENDERER_ID",
@@ -65,6 +78,7 @@ __all__ = [
     "classify_execution",
     "parse_orca_input_echo",
     "parse_orca_output",
+    "parse_ground_state_properties",
     "materialize_orca_runtime_contract",
     "prepare_orca_runtime",
     "prepare_orca_geometry_input",

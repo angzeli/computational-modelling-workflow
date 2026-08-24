@@ -583,7 +583,7 @@ def build_vertical_stacking_workflow(
             relaxation_specs["constrained_optimization"],
             {
                 "output": "relaxation/constrained/stage.out",
-                "optimized_structure": "relaxation/constrained/stage.xyz",
+                "final_geometry": "relaxation/constrained/stage.xyz",
             },
         )
     }
@@ -594,7 +594,7 @@ def build_vertical_stacking_workflow(
             relaxation_specs["full_optimization"],
             {
                 "output": "relaxation/full/stage.out",
-                "optimized_structure": "relaxation/full/stage.xyz",
+                "final_geometry": "relaxation/full/stage.xyz",
             },
         )
     if frequency_artifact is not None:

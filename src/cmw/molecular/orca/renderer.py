@@ -17,7 +17,11 @@ from cmw.core.plan_materialization import (
     RenderedExecutionInput,
 )
 from cmw.core.provenance import atomic_write_json
-from cmw.core.structure_artifacts import validate_structure_artifact
+from cmw.core.structure_artifacts import (
+    structure_artifact_path,
+    validate_structure_artifact,
+)
+from cmw.structure.xyz import Atom, XYZGeometry, geometry_hash, read_xyz
 
 from .geometry import prepare_orca_geometry_input
 from .input import (
@@ -33,6 +37,13 @@ from .status import StageType
 ORCA_RENDERER_ID = "orca"
 
 
+def _base_orca_element(label: str) -> str:
+    selected = label[:-1] if label.endswith(":") else label
+    if "(" in selected and selected.endswith(")"):
+        selected = selected.split("(", 1)[0]
+    return selected
+
+
 def orca_execution_plan_node(
     node_id: str,
     spec: OrcaStageSpec,
@@ -40,6 +51,7 @@ def orca_execution_plan_node(
     input_artifacts: Sequence[Artifact] = (),
     planned_artifacts: Sequence[Artifact] = (),
     geometry_artifact_id: str | None = None,
+    geometry_selection: Mapping[str, object] | None = None,
     outputs: Mapping[str, str] | None = None,
     lineage: Mapping[str, object] | None = None,
 ) -> ExecutionPlanNode:
@@ -51,6 +63,8 @@ def orca_execution_plan_node(
     }
     if geometry_artifact_id is not None:
         configuration["geometry_artifact_id"] = geometry_artifact_id
+    if geometry_selection is not None:
+        configuration["geometry_selection"] = dict(geometry_selection)
     if lineage is not None:
         configuration["lineage"] = dict(lineage)
     return ExecutionPlanNode(
@@ -155,11 +169,80 @@ class OrcaExecutionRenderer:
             )
         return outputs
 
+    @staticmethod
+    def _geometry_selection(
+        node: ExecutionPlanNode, structure: StructureArtifact
+    ) -> tuple[tuple[int, ...], tuple[str, ...], int, int, bool]:
+        raw = node.renderer_configuration.get("geometry_selection", {})
+        if not isinstance(raw, Mapping):
+            raise ValueError("ORCA geometry selection must be a mapping")
+        path = structure_artifact_path(structure)
+        if path is None:
+            raise ValueError("ORCA geometry StructureArtifact lacks a structure file")
+        geometry = read_xyz(path)
+        raw_indices = raw.get("atom_indices")
+        indices = (
+            tuple(range(geometry.atom_count))
+            if raw_indices is None
+            else tuple(int(item) for item in raw_indices)  # type: ignore[arg-type]
+        )
+        if (
+            not indices
+            or len(set(indices)) != len(indices)
+            or any(index < 0 or index >= geometry.atom_count for index in indices)
+        ):
+            raise ValueError("ORCA geometry atom selection is invalid")
+        raw_labels = raw.get("atom_labels")
+        labels = (
+            tuple(geometry.atoms[index].element for index in indices)
+            if raw_labels is None
+            else tuple(str(item) for item in raw_labels)  # type: ignore[arg-type]
+        )
+        if len(labels) != len(indices):
+            raise ValueError("ORCA geometry labels do not match selected atoms")
+        for label, index in zip(labels, indices, strict=True):
+            atom = geometry.atoms[index]
+            if _base_orca_element(label) != atom.element:
+                raise ValueError("ORCA geometry label contradicts the source element")
+        charge = int(raw.get("charge", structure.charge))
+        multiplicity = int(raw.get("multiplicity", structure.multiplicity))
+        allow_override = bool(raw.get("allow_electronic_state_override", False))
+        if multiplicity < 1:
+            raise ValueError("ORCA geometry multiplicity must be positive")
+        if not allow_override and (charge, multiplicity) != (
+            structure.charge,
+            structure.multiplicity,
+        ):
+            raise ValueError(
+                "ORCA selected electronic state conflicts with its StructureArtifact"
+            )
+        return indices, labels, charge, multiplicity, allow_override
+
+    @classmethod
+    def _selected_geometry(
+        cls, node: ExecutionPlanNode, structure: StructureArtifact
+    ) -> tuple[XYZGeometry, int, int]:
+        indices, labels, charge, multiplicity, _ = cls._geometry_selection(
+            node, structure
+        )
+        path = structure_artifact_path(structure)
+        assert path is not None
+        source = read_xyz(path)
+        selected = XYZGeometry(
+            tuple(
+                Atom(_base_orca_element(label), *source.atoms[index].coordinates)
+                for index, label in zip(indices, labels, strict=True)
+            ),
+            source.comment,
+        )
+        return selected, charge, multiplicity
+
     def validate(
         self, node: ExecutionPlanNode, input_artifacts: Sequence[Artifact]
     ) -> None:
         self._spec(node)
-        self._geometry(node, input_artifacts)
+        structure = self._geometry(node, input_artifacts)
+        self._geometry_selection(node, structure)
         self._output_names(node)
 
     def build_target(
@@ -167,13 +250,12 @@ class OrcaExecutionRenderer:
     ) -> JobTarget:
         spec = self._spec(node)
         structure = self._geometry(node, input_artifacts)
-        assert structure.charge is not None
-        assert structure.multiplicity is not None
+        selected, charge, multiplicity = self._selected_geometry(node, structure)
         return JobTarget(
             stage_type=spec.stage_type.value,
-            geometry_sha256=structure.geometry_hash,
-            charge=structure.charge,
-            multiplicity=structure.multiplicity,
+            geometry_sha256=geometry_hash(selected),
+            charge=charge,
+            multiplicity=multiplicity,
             calculation=spec.scientific_identity(),
         )
 
@@ -193,10 +275,18 @@ class OrcaExecutionRenderer:
             raise TypeError("ORCA renderer requires a JobTarget")
         spec = self._spec(node)
         structure = self._geometry(node, input_artifacts)
+        indices, labels, charge, multiplicity, allow_override = (
+            self._geometry_selection(node, structure)
+        )
         resources = resolve_orca_resources(resource_profile)
         geometry_input = prepare_orca_geometry_input(
             structure,
             layout.input_path("input.xyz"),
+            atom_indices=indices,
+            atom_labels=labels,
+            charge=charge,
+            multiplicity=multiplicity,
+            allow_electronic_state_override=allow_override,
             provenance={
                 "materializer": "cmw.core.WorkflowPlanMaterializer",
                 "workflow_node": node.node_id,
