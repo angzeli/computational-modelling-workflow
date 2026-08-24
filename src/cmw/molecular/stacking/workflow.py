@@ -64,6 +64,7 @@ class VerticalStackingProtocol:
     ground_state: GroundStateProtocol
     excited_state: ExcitedStateProtocol
     hole_electron: HoleElectronProtocol
+    frequency_method: GroundStateProtocol | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -72,6 +73,11 @@ class VerticalStackingProtocol:
             "ground_state": self.ground_state.to_dict(),
             "excited_state": self.excited_state.to_dict(),
             "hole_electron": self.hole_electron.to_dict(),
+            "frequency_method": (
+                self.frequency_method.to_dict()
+                if self.frequency_method is not None
+                else None
+            ),
         }
 
 
@@ -298,13 +304,14 @@ def build_vertical_stacking_workflow(
         final_optimization = full_artifact
         final_structure = full_structure
 
+    frequency_protocol = protocol.frequency_method or protocol.ground_state
     frequency_artifact: FrequencyArtifact | None = None
-    if protocol.ground_state.frequency:
+    if frequency_protocol.frequency:
         frequency_artifact = FrequencyArtifact(
             producing_calculation="frequency",
-            method=protocol.ground_state.method,
-            basis=protocol.ground_state.basis,
-            protocol=dict(protocol.ground_state.protocol),
+            method=frequency_protocol.method,
+            basis=frequency_protocol.basis,
+            protocol=dict(frequency_protocol.protocol),
             parent_artifacts=(
                 final_optimization.artifact_id,
                 final_structure.artifact_id,
@@ -596,11 +603,11 @@ def build_vertical_stacking_workflow(
             final_structure,
             OrcaStageSpec(
                 StageType.FREQ,
-                protocol.ground_state.keyword_line,
+                frequency_protocol.keyword_line,
                 protocol={
-                    **dict(protocol.ground_state.protocol),
-                    "method": protocol.ground_state.method,
-                    "basis": protocol.ground_state.basis,
+                    **dict(frequency_protocol.protocol),
+                    "method": frequency_protocol.method,
+                    "basis": frequency_protocol.basis,
                 },
             ),
             {"output": "ground_state/frequency.out"},
