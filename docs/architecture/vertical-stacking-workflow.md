@@ -78,10 +78,12 @@ the ORCA execution contract. TDDFT and TDA plans require a positive number of
 roots, explicit state-selection criteria, and a `%tddft` block. ORCA still
 performs an SP operation, but it cannot be confused with a ground-state SP:
 the stage type, task, required behavior, output validation, and
-`ExcitedStateArtifact` are distinct. The artifact records method, basis,
-number of roots, state selection, source structure, and source geometry hash.
-Optional natural transition orbitals produce an `NTOArtifact` parented by the
-excited-state result.
+`ExcitedStateArtifact` are distinct. A finalized quantitative artifact records
+method, basis, functional, spin manifold, program/version, number of roots,
+state energies and oscillator strengths, selection labels and rationale,
+source structure, and source geometry hash. Optional natural transition
+orbitals produce a state-resolved `NTOArtifact` parented by the excited-state
+result.
 
 `HoleElectronProtocol` supplies a versioned, explicit Multiwfn menu contract,
 state index, deterministic input stream, semantic output specifications, and
@@ -95,8 +97,9 @@ finalization. A finalized `HoleElectronArtifact` records:
 - Multiwfn executable and version provenance;
 - the complete analysis protocol and declared output roles;
 - hole and electron centroids in ångström;
-- their separation distance, overlap, and separation index;
-- project-declared fragment contributions; and
+- their separation distance, overlap, separation index, and spatial extents;
+- normalized hole and electron populations keyed by generic fragment IDs;
+- a complete, non-overlapping source-atom partition; and
 - visualization metadata.
 
 ## Workflow graph and artifact lineage
@@ -189,6 +192,7 @@ workflow:
       method: PBE0
       basis: def2-SVP
       theory: TDA
+      spin_manifold: singlet
       number_of_roots: 10
       state_selection:
         states: [1, 2]
@@ -199,6 +203,13 @@ workflow:
       enabled: true
       state_index: 1
       menu_contract: explicit-versioned-contract
+      fragments:
+        indexing: zero_based
+        definitions:
+          - fragment_id: fragment_1
+            atom_indices: [0, 1, 2, 3]
+          - fragment_id: fragment_2
+            atom_indices: [4, 5, 6, 7]
       outputs:
         - role: hole_density
           raw_path: hole.cub

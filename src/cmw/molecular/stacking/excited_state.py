@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import math
+from pathlib import Path
 from typing import Mapping, Sequence
 
 from cmw.core.artifacts import (
@@ -25,6 +27,144 @@ class ExcitedStateContractError(ValueError):
     code = "FAILED_PROTOCOL_MISMATCH"
 
 
+SPIN_MANIFOLDS = frozenset({"singlet", "triplet"})
+
+
+@dataclass(frozen=True)
+class ExcitedStateRecord:
+    """One quantitative excited state and its optional selection labels."""
+
+    state_index: int
+    excitation_energy_ev: float
+    oscillator_strength: float
+    spin_manifold: str
+    selection_labels: tuple[str, ...] = ()
+    selection_rationale: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.state_index, bool)
+            or not isinstance(self.state_index, int)
+            or self.state_index < 1
+        ):
+            raise ExcitedStateContractError(
+                "excited-state index must be a positive integer"
+            )
+        energy = float(self.excitation_energy_ev)
+        oscillator = float(self.oscillator_strength)
+        if not math.isfinite(energy) or energy <= 0:
+            raise ExcitedStateContractError(
+                "excitation energy must be a positive finite value"
+            )
+        if not math.isfinite(oscillator) or oscillator < 0:
+            raise ExcitedStateContractError(
+                "oscillator strength must be a non-negative finite value"
+            )
+        manifold = str(self.spin_manifold).strip().casefold()
+        if manifold not in SPIN_MANIFOLDS:
+            raise ExcitedStateContractError(
+                "spin manifold must be singlet or triplet"
+            )
+        labels = tuple(str(item).strip() for item in self.selection_labels)
+        if any(not item for item in labels) or len(set(labels)) != len(labels):
+            raise ExcitedStateContractError(
+                "state-selection labels must be unique non-empty strings"
+            )
+        rationale = (
+            str(self.selection_rationale).strip()
+            if self.selection_rationale is not None
+            else None
+        )
+        if labels and not rationale:
+            raise ExcitedStateContractError(
+                "selected excited states require a selection rationale"
+            )
+        object.__setattr__(self, "excitation_energy_ev", energy)
+        object.__setattr__(self, "oscillator_strength", oscillator)
+        object.__setattr__(self, "spin_manifold", manifold)
+        object.__setattr__(self, "selection_labels", labels)
+        object.__setattr__(self, "selection_rationale", rationale)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "state_index": self.state_index,
+            "excitation_energy_ev": self.excitation_energy_ev,
+            "oscillator_strength": self.oscillator_strength,
+            "spin_manifold": self.spin_manifold,
+            "selection_labels": list(self.selection_labels),
+            "selection_rationale": self.selection_rationale,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "ExcitedStateRecord":
+        labels = value.get("selection_labels", ())
+        if not isinstance(labels, Sequence) or isinstance(labels, (str, bytes)):
+            raise ExcitedStateContractError(
+                "excited-state selection_labels must be a sequence"
+            )
+        return cls(
+            int(value["state_index"]),
+            float(value["excitation_energy_ev"]),
+            float(value["oscillator_strength"]),
+            str(value["spin_manifold"]),
+            tuple(str(item) for item in labels),
+            (
+                str(value["selection_rationale"])
+                if value.get("selection_rationale") is not None
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class NTOOrbitalRecord:
+    """One hole/electron NTO pair for one excited state."""
+
+    state_index: int
+    pair_index: int
+    weight: float
+    hole_file_role: str
+    electron_file_role: str
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.state_index, "state_index"),
+            (self.pair_index, "pair_index"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ExcitedStateContractError(
+                    f"NTO {name} must be a positive integer"
+                )
+        weight = float(self.weight)
+        if not math.isfinite(weight) or weight < 0:
+            raise ExcitedStateContractError(
+                "NTO pair weight must be a non-negative finite value"
+            )
+        for role in (self.hole_file_role, self.electron_file_role):
+            if not role.strip():
+                raise ExcitedStateContractError("NTO orbital file roles are required")
+        object.__setattr__(self, "weight", weight)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "state_index": self.state_index,
+            "pair_index": self.pair_index,
+            "weight": self.weight,
+            "hole_file_role": self.hole_file_role,
+            "electron_file_role": self.electron_file_role,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "NTOOrbitalRecord":
+        return cls(
+            int(value["state_index"]),
+            int(value["pair_index"]),
+            float(value["weight"]),
+            str(value["hole_file_role"]),
+            str(value["electron_file_role"]),
+        )
+
+
 @dataclass(frozen=True)
 class ExcitedStateProtocol:
     method: str
@@ -36,6 +176,9 @@ class ExcitedStateProtocol:
     keywords: tuple[str, ...] = ()
     additional_tddft_lines: tuple[str, ...] = ()
     visualization: Mapping[str, object] = field(default_factory=dict)
+    functional: str | None = None
+    spin_manifold: str = "singlet"
+    nto_threshold: float = 1.0e-4
 
     def __post_init__(self) -> None:
         if not self.method.strip() or not self.basis.strip():
@@ -78,12 +221,28 @@ class ExcitedStateProtocol:
         )
         if any("\n" in item or "\r" in item for item in single_line):
             raise ExcitedStateContractError("excited-state input values must be single-line")
+        functional = str(self.functional or self.method).strip()
+        if not functional:
+            raise ExcitedStateContractError("excited-state functional is required")
+        spin_manifold = str(self.spin_manifold).strip().casefold()
+        if spin_manifold not in SPIN_MANIFOLDS:
+            raise ExcitedStateContractError(
+                "spin manifold must be singlet or triplet"
+            )
+        nto_threshold = float(self.nto_threshold)
+        if not math.isfinite(nto_threshold) or nto_threshold <= 0:
+            raise ExcitedStateContractError(
+                "NTO threshold must be a positive finite value"
+            )
         object.__setattr__(self, "state_selection", selection)
         object.__setattr__(self, "keywords", tuple(self.keywords))
         object.__setattr__(
             self, "additional_tddft_lines", tuple(self.additional_tddft_lines)
         )
         object.__setattr__(self, "visualization", dict(self.visualization))
+        object.__setattr__(self, "functional", functional)
+        object.__setattr__(self, "spin_manifold", spin_manifold)
+        object.__setattr__(self, "nto_threshold", nto_threshold)
 
     @property
     def keyword_line(self) -> str:
@@ -96,6 +255,14 @@ class ExcitedStateProtocol:
             f"  nroots {self.number_of_roots}",
             f"  tda {'true' if self.tda else 'false'}",
         ]
+        if self.spin_manifold == "triplet":
+            rows.append("  triplets true")
+        if self.generate_ntos:
+            rows.append("  DoNTO true")
+            states = self.state_selection.get("states")
+            if isinstance(states, Sequence) and not isinstance(states, (str, bytes)):
+                rows.append("  NTOStates " + ",".join(str(item) for item in states))
+            rows.append(f"  NTOThresh {self.nto_threshold:g}")
         rows.extend(f"  {line.strip()}" for line in self.additional_tddft_lines)
         rows.append("end")
         return "\n".join(rows)
@@ -104,13 +271,16 @@ class ExcitedStateProtocol:
         return {
             "method": self.method,
             "basis": self.basis,
+            "functional": self.functional,
             "theory": "TDA" if self.tda else "TDDFT",
+            "spin_manifold": self.spin_manifold,
             "number_of_roots": self.number_of_roots,
             "state_selection": dict(self.state_selection),
             "generate_ntos": self.generate_ntos,
             "keywords": list(self.keywords),
             "additional_tddft_lines": list(self.additional_tddft_lines),
             "visualization": dict(self.visualization),
+            "nto_threshold": self.nto_threshold,
             "excited_state_required": True,
             "minimum_excited_states": self.number_of_roots,
         }
@@ -135,17 +305,31 @@ def validate_excited_state_artifact(
 
     checks: dict[str, bool | None] = {
         "source_parent": source.artifact_id in artifact.parent_artifacts,
+        "source_valid": source.validation.passed,
         "parent_identity": False,
+        "geometry_source_artifact": artifact.metadata.get(
+            "geometry_source_artifact"
+        )
+        == source.artifact_id,
         "source_geometry_hash": artifact.metadata.get("source_geometry_hash")
         == source.geometry_hash,
         "method_match": artifact.method == protocol.method,
         "basis_match": artifact.basis == protocol.basis,
+        "functional_match": artifact.protocol.get("functional")
+        == protocol.functional
+        and artifact.metadata.get("functional") == protocol.functional,
+        "spin_manifold_match": artifact.protocol.get("spin_manifold")
+        == protocol.spin_manifold,
         "root_count_match": artifact.protocol.get("number_of_roots")
         == protocol.number_of_roots,
         "state_selection_match": artifact.protocol.get("state_selection")
         == dict(protocol.state_selection),
         "orca_contract": False,
         "artifact_compatibility": False,
+        "state_observables": False,
+        "selection_rationale": False,
+        "runtime_provenance": False,
+        "output_available": False,
     }
     try:
         parent_objects = {source.artifact_id: source}
@@ -165,6 +349,35 @@ def validate_excited_state_artifact(
         )
         validate_artifact_compatibility(artifact, tuple(parent_objects.values()))
         checks["artifact_compatibility"] = True
+        records = _state_records(artifact.metadata.get("excited_states"))
+        selected = artifact.metadata.get("selected_state_indices")
+        checks["state_observables"] = (
+            all(item.state_index <= protocol.number_of_roots for item in records)
+            and all(item.spin_manifold == protocol.spin_manifold for item in records)
+            and isinstance(selected, list)
+            and bool(selected)
+            and set(int(item) for item in selected).issubset(
+                {item.state_index for item in records}
+            )
+        )
+        rationale = artifact.metadata.get("state_selection_rationale")
+        checks["selection_rationale"] = (
+            isinstance(rationale, str) and bool(rationale.strip())
+        )
+        runtime = artifact.provenance.get("runtime")
+        checks["runtime_provenance"] = (
+            isinstance(runtime, Mapping)
+            and artifact.metadata.get("program") == runtime.get("program")
+            and artifact.metadata.get("program_version") == runtime.get("version")
+            and bool(runtime.get("program"))
+            and bool(runtime.get("version"))
+        )
+        output = artifact.files.get("output")
+        checks["output_available"] = (
+            bool(output)
+            and Path(str(output)).is_file()
+            and Path(str(output)).stat().st_size > 0
+        )
     except (ArtifactCompatibilityError, TypeError, ValueError) as exc:
         return ArtifactValidation(
             ValidationStatus.FAILED,
@@ -185,6 +398,257 @@ def validate_excited_state_artifact(
         "VALID_EXCITED_STATE_ARTIFACT",
         "excited-state lineage and protocol metadata are consistent",
     )
+
+
+def _state_records(value: object) -> tuple[ExcitedStateRecord, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ExcitedStateContractError("excited-state records must be a sequence")
+    if not all(isinstance(item, Mapping) for item in value):
+        raise ExcitedStateContractError("excited-state records must be mappings")
+    records = tuple(ExcitedStateRecord.from_mapping(item) for item in value)
+    if not records or len({item.state_index for item in records}) != len(records):
+        raise ExcitedStateContractError(
+            "excited-state records require unique state indices"
+        )
+    return records
+
+
+def create_excited_state_artifact(
+    source: StructureArtifact,
+    protocol: ExcitedStateProtocol,
+    states: Sequence[ExcitedStateRecord],
+    *,
+    state_selection_rationale: str,
+    runtime_provenance: Mapping[str, object],
+    files: Mapping[str, str],
+    parents: Sequence[Artifact] = (),
+    producing_calculation: str = "excited_state",
+) -> ExcitedStateArtifact:
+    """Create a manuscript-ready excited-state artifact from supplied evidence."""
+
+    records = tuple(states)
+    if not records or len({item.state_index for item in records}) != len(records):
+        raise ExcitedStateContractError(
+            "excited-state evidence requires unique state records"
+        )
+    if any(item.state_index > protocol.number_of_roots for item in records):
+        raise ExcitedStateContractError(
+            "excited-state record exceeds the configured number of roots"
+        )
+    if any(item.spin_manifold != protocol.spin_manifold for item in records):
+        raise ExcitedStateContractError(
+            "excited-state spin metadata does not match the protocol"
+        )
+    rationale = str(state_selection_rationale).strip()
+    if not rationale:
+        raise ExcitedStateContractError("state-selection rationale is required")
+    requested = protocol.state_selection.get("states")
+    selected = (
+        tuple(int(item) for item in requested)
+        if isinstance(requested, Sequence) and not isinstance(requested, (str, bytes))
+        else tuple(
+            item.state_index for item in records if item.selection_labels
+        )
+    )
+    available = {item.state_index for item in records}
+    if not selected or not set(selected).issubset(available):
+        raise ExcitedStateContractError(
+            "selected excited states are absent from quantitative state evidence"
+        )
+    program = runtime_provenance.get("program")
+    version = runtime_provenance.get("version")
+    if (
+        not isinstance(program, str)
+        or not program
+        or not isinstance(version, str)
+        or not version
+    ):
+        raise ExcitedStateContractError(
+            "excited-state runtime provenance requires program and version"
+        )
+    output = files.get("output")
+    if not output or not Path(output).is_file() or Path(output).stat().st_size < 1:
+        raise ExcitedStateContractError(
+            "excited-state output file is missing or empty"
+        )
+    parent_objects = {source.artifact_id: source}
+    parent_objects.update({item.artifact_id: item for item in parents})
+    validation = ArtifactValidation(
+        ValidationStatus.PASSED,
+        {
+            "source_geometry": source.validation.passed,
+            "state_records": True,
+            "state_selection": True,
+            "runtime_provenance": True,
+            "output_available": True,
+        },
+        "VALID_EXCITED_STATE_ARTIFACT",
+        "excited-state observables, selection, runtime, and lineage are complete",
+    )
+    artifact = ExcitedStateArtifact(
+        producing_calculation=producing_calculation,
+        method=protocol.method,
+        basis=protocol.basis,
+        protocol=protocol.to_dict(),
+        parent_artifacts=tuple(parent_objects),
+        files=dict(files),
+        validation=validation,
+        provenance={"runtime": dict(runtime_provenance)},
+        metadata={
+            "excited_state_contract": "quantitative_v1",
+            "geometry_source_artifact": source.artifact_id,
+            "source_geometry_hash": source.geometry_hash,
+            "functional": protocol.functional,
+            "program": program,
+            "program_version": version,
+            "tddft_settings": {
+                "theory": "TDA" if protocol.tda else "TDDFT",
+                "spin_manifold": protocol.spin_manifold,
+                "number_of_roots": protocol.number_of_roots,
+            },
+            "excited_states": [item.to_dict() for item in records],
+            "selected_state_indices": list(selected),
+            "state_selection_rationale": rationale,
+        },
+    )
+    result = validate_excited_state_artifact(
+        artifact,
+        source=source,
+        protocol=protocol,
+        parents=parents,
+    )
+    if not result.passed:
+        raise ExcitedStateContractError(result.reason)
+    return replace(artifact, validation=result)
+
+
+def validate_nto_artifact(
+    artifact: NTOArtifact,
+    *,
+    excited_state: ExcitedStateArtifact,
+) -> ArtifactValidation:
+    """Fail closed on NTO state identity, orbital pairs, files, and runtime."""
+
+    checks: dict[str, bool | None] = {
+        "excited_state_parent": artifact.parent_artifacts
+        == (excited_state.artifact_id,),
+        "excited_state_valid": excited_state.validation.passed,
+        "excited_state_identity": artifact.metadata.get(
+            "excited_state_artifact"
+        )
+        == excited_state.artifact_id,
+        "generation_method": False,
+        "orbital_pairs": False,
+        "orbital_files": False,
+        "runtime_provenance": False,
+        "visualization": isinstance(artifact.metadata.get("visualization"), Mapping),
+    }
+    try:
+        generation_method = artifact.metadata.get("generation_method")
+        checks["generation_method"] = (
+            isinstance(generation_method, str) and bool(generation_method.strip())
+        )
+        raw_pairs = artifact.metadata.get("orbital_pairs")
+        if not isinstance(raw_pairs, Sequence) or isinstance(raw_pairs, (str, bytes)):
+            raise ExcitedStateContractError("NTO orbital_pairs must be a sequence")
+        if not all(isinstance(item, Mapping) for item in raw_pairs):
+            raise ExcitedStateContractError("NTO orbital_pairs must be mappings")
+        pairs = tuple(NTOOrbitalRecord.from_mapping(item) for item in raw_pairs)
+        pair_ids = {(item.state_index, item.pair_index) for item in pairs}
+        excited_indices = {
+            item.state_index
+            for item in _state_records(excited_state.metadata.get("excited_states"))
+        }
+        checks["orbital_pairs"] = (
+            bool(pairs)
+            and len(pair_ids) == len(pairs)
+            and all(item.state_index in excited_indices for item in pairs)
+        )
+        required_roles = {
+            role
+            for item in pairs
+            for role in (item.hole_file_role, item.electron_file_role)
+        }
+        checks["orbital_files"] = all(
+            role in artifact.files
+            and Path(artifact.files[role]).is_file()
+            and Path(artifact.files[role]).stat().st_size > 0
+            for role in required_roles
+        )
+        runtime = artifact.provenance.get("runtime")
+        checks["runtime_provenance"] = (
+            isinstance(runtime, Mapping)
+            and bool(runtime.get("program"))
+            and bool(runtime.get("version"))
+        )
+        validate_artifact_compatibility(artifact, (excited_state,))
+    except (ArtifactCompatibilityError, KeyError, TypeError, ValueError) as exc:
+        return ArtifactValidation(
+            ValidationStatus.FAILED,
+            checks,
+            ExcitedStateContractError.code,
+            str(exc),
+        )
+    if not all(value is True for value in checks.values()):
+        return ArtifactValidation(
+            ValidationStatus.FAILED,
+            checks,
+            ExcitedStateContractError.code,
+            "NTO artifact metadata, lineage, or orbital evidence is incomplete",
+        )
+    return ArtifactValidation(
+        ValidationStatus.PASSED,
+        checks,
+        "VALID_NTO_ARTIFACT",
+        "NTO state identity, orbitals, runtime, and lineage are complete",
+    )
+
+
+def create_nto_artifact(
+    excited_state: ExcitedStateArtifact,
+    orbital_pairs: Sequence[NTOOrbitalRecord],
+    *,
+    generation_method: str,
+    runtime_provenance: Mapping[str, object],
+    files: Mapping[str, str],
+    visualization: Mapping[str, object] | None = None,
+    producing_calculation: str = "natural_transition_orbitals",
+) -> NTOArtifact:
+    """Create a validated NTO artifact from explicit orbital-pair evidence."""
+
+    pairs = tuple(orbital_pairs)
+    method = str(generation_method).strip()
+    if not method:
+        raise ExcitedStateContractError("NTO generation method is required")
+    artifact = NTOArtifact(
+        producing_calculation=producing_calculation,
+        method=excited_state.method,
+        basis=excited_state.basis,
+        protocol={
+            "generation_method": method,
+            "state_indices": sorted({item.state_index for item in pairs}),
+        },
+        parent_artifacts=(excited_state.artifact_id,),
+        files=dict(files),
+        validation=ArtifactValidation(
+            ValidationStatus.PASSED,
+            {"supplied_evidence": True},
+            "VALID_NTO_ARTIFACT",
+            "NTO evidence was supplied for validation",
+        ),
+        provenance={"runtime": dict(runtime_provenance)},
+        metadata={
+            "nto_contract": "orbital_pairs_v1",
+            "excited_state_artifact": excited_state.artifact_id,
+            "generation_method": method,
+            "orbital_pairs": [item.to_dict() for item in pairs],
+            "visualization": dict(visualization or {}),
+        },
+    )
+    validation = validate_nto_artifact(artifact, excited_state=excited_state)
+    if not validation.passed:
+        raise ExcitedStateContractError(validation.reason)
+    return replace(artifact, validation=validation)
 
 
 def planned_excited_state_artifacts(
@@ -209,7 +673,9 @@ def planned_excited_state_artifacts(
         validation=planned,
         provenance={"execution": "planned_only"},
         metadata={
+            "geometry_source_artifact": source.artifact_id,
             "source_geometry_hash": source.geometry_hash,
+            "functional": protocol.functional,
             "state_selection": dict(protocol.state_selection),
         },
     )
@@ -227,7 +693,12 @@ def planned_excited_state_artifacts(
         files={"orbitals": "excited_state/nto.molden.input"},
         validation=planned,
         provenance={"execution": "planned_only"},
-        metadata={"visualization": dict(protocol.visualization)},
+        metadata={
+            "excited_state_artifact": excited.artifact_id,
+            "generation_method": "ORCA TDDFT/TDA natural transition orbitals",
+            "planned_state_selection": dict(protocol.state_selection),
+            "visualization": dict(protocol.visualization),
+        },
     )
     return excited, nto
 
@@ -235,6 +706,11 @@ def planned_excited_state_artifacts(
 __all__ = [
     "ExcitedStateContractError",
     "ExcitedStateProtocol",
+    "ExcitedStateRecord",
+    "NTOOrbitalRecord",
+    "create_excited_state_artifact",
+    "create_nto_artifact",
     "planned_excited_state_artifacts",
     "validate_excited_state_artifact",
+    "validate_nto_artifact",
 ]

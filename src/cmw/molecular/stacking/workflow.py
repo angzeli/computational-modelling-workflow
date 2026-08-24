@@ -354,8 +354,10 @@ def build_vertical_stacking_workflow(
         validation=planned,
         provenance={"execution": "planned_only"},
         metadata={
+            "geometry_source_artifact": final_structure.artifact_id,
             "source_geometry_hash": final_structure.geometry_hash,
             "planned_source_artifact": final_structure.artifact_id,
+            "functional": protocol.excited_state.functional,
             "state_selection": dict(protocol.excited_state.state_selection),
         },
     )
@@ -375,6 +377,13 @@ def build_vertical_stacking_workflow(
             validation=planned,
             provenance={"execution": "planned_only"},
             metadata={
+                "excited_state_artifact": excited.artifact_id,
+                "generation_method": (
+                    "ORCA TDDFT/TDA natural transition orbitals"
+                ),
+                "planned_state_selection": dict(
+                    protocol.excited_state.state_selection
+                ),
                 "visualization": dict(protocol.excited_state.visualization)
             },
         )
@@ -536,6 +545,16 @@ def build_vertical_stacking_workflow(
                 ArtifactRequirement(
                     "ExcitedStateArtifact", from_nodes=("excited_state",)
                 ),
+            )
+            + (
+                (
+                    ArtifactRequirement(
+                        "NTOArtifact",
+                        from_nodes=("natural_transition_orbitals",),
+                    ),
+                )
+                if nto is not None
+                else ()
             ),
             produces=("HoleElectronArtifact",),
             configuration={"multiwfn_protocol": protocol.hole_electron.to_dict()},
