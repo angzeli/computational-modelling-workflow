@@ -31,6 +31,75 @@ from cmw.molecular.orca.status import StageType
 
 
 class OrcaPlanRendererTests(unittest.TestCase):
+    def test_fragment_selection_and_ghost_labels_are_artifact_backed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / "dimer.xyz"
+            source.write_text(
+                "4\ntwo fragments\nH 0 0 0\nH 0 0 0.74\nH 0 0 3\nH 0 0 3.74\n",
+                encoding="utf-8",
+            )
+            structure = structure_artifact_from_file(
+                source, source="synthetic CP test", charge=0, multiplicity=1
+            )
+            spec = OrcaStageSpec(StageType.SP, "HF def2-SVP")
+            graph = WorkflowGraph(
+                "orca-selected-geometry",
+                (
+                    CalculationNode("structure", produces=("StructureArtifact",)),
+                    CalculationNode(
+                        "fragment_a",
+                        dependencies=("structure",),
+                        requires=(
+                            ArtifactRequirement(
+                                "StructureArtifact", from_nodes=("structure",)
+                            ),
+                        ),
+                        produces=("SinglePointArtifact",),
+                        configuration={
+                            "execution_intent": spec.execution_intent.to_dict()
+                        },
+                    ),
+                ),
+            )
+            labels = ("H", "H", "H:", "H:")
+            plan = ExecutionPlan(
+                graph,
+                (
+                    orca_execution_plan_node(
+                        "fragment_a",
+                        spec,
+                        geometry_artifact_id=structure.artifact_id,
+                        geometry_selection={
+                            "atom_indices": [0, 1, 2, 3],
+                            "atom_labels": list(labels),
+                        },
+                    ),
+                ),
+                available_artifacts={"structure": (structure,)},
+            )
+            profile = ExecutionProfile(
+                "test",
+                OrcaResourcePolicy(1, 1.0),
+                MultiwfnResourcePolicy(1, 1.0),
+            )
+            result = WorkflowPlanMaterializer(
+                {ORCA_RENDERER_ID: OrcaExecutionRenderer()}
+            ).materialize_node(
+                plan,
+                "fragment_a",
+                project_root=root,
+                system_identifier="pair",
+                resource_profile=profile,
+                runtime_identity={"orca": {"path": "/synthetic/orca"}},
+            )
+            geometry_lines = Path(result.input_files["geometry"]).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("H:", geometry_lines)
+            self.assertEqual(result.target["charge"], 0)
+            self.assertEqual(result.target["multiplicity"], 1)
+
     def test_structure_artifact_materializes_xyzfile_optimization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
