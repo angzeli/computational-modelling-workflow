@@ -353,6 +353,47 @@ class RelaxationTests(StackingFixture):
         with self.assertRaisesRegex(RelaxationContractError, "exceeds"):
             validate_relaxation_protocol(relaxation, atom_count=8)
 
+    def test_composite_method_and_separate_frequency_protocol(self) -> None:
+        relaxation = GroundStateProtocol("r2SCAN-3c", "")
+        frequency = GroundStateProtocol(
+            "r2SCAN-3c",
+            "",
+            frequency=True,
+            protocol={"maximum_imaginary_modes": 0},
+        )
+        protocol = self.stacking_protocol()
+        protocol = VerticalStackingProtocol(
+            protocol.relaxation,
+            relaxation,
+            GroundStateProtocol("wB97X-D4", "def2-TZVPP"),
+            protocol.excited_state,
+            protocol.hole_electron,
+            frequency_method=frequency,
+        )
+
+        plan = prepare_vertical_stacking_workflow(
+            periodic_source=self.periodic,
+            pair=self.pair,
+            monomer_a=self.monomer,
+            dimer_output_path=self.root / "composite-method-dimer.xyz",
+            protocol=protocol,
+            extraction_method="ordered_core_plane_fit_v1",
+        )
+
+        self.assertEqual(relaxation.keyword_line, "r2SCAN-3c")
+        self.assertEqual(
+            plan.orca_plans["constrained_optimization"].spec.keywords,
+            "r2SCAN-3c",
+        )
+        self.assertEqual(
+            plan.orca_plans["frequency"].spec.keywords,
+            "r2SCAN-3c",
+        )
+        self.assertEqual(
+            plan.orca_plans["ground_state"].spec.keywords,
+            "wB97X-D4 def2-TZVPP",
+        )
+
 
 class ExcitedStateAndAnalysisTests(StackingFixture):
     def test_excited_state_protocol_and_artifact_metadata_are_explicit(self) -> None:

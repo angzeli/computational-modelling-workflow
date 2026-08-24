@@ -322,8 +322,8 @@ class GroundStateProtocol:
     protocol: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.method.strip() or not self.basis.strip():
-            raise ValueError("ground-state method and basis are required")
+        if not self.method.strip():
+            raise ValueError("ground-state method is required")
         if any("\n" in item or "\r" in item for item in (self.method, self.basis, *self.keywords)):
             raise ValueError("ORCA keywords must be single-line values")
         object.__setattr__(self, "keywords", tuple(self.keywords))
@@ -331,7 +331,9 @@ class GroundStateProtocol:
 
     @property
     def keyword_line(self) -> str:
-        return " ".join((self.method, self.basis, *self.keywords))
+        return " ".join(
+            item for item in (self.method, self.basis, *self.keywords) if item
+        )
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
