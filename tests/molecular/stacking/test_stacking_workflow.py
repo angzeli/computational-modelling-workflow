@@ -12,6 +12,15 @@ from cmw.core.artifacts import (
     NTOArtifact,
     artifact_from_dict,
 )
+from cmw.core.execution_profiles import (
+    ExecutionProfile,
+    MultiwfnResourcePolicy,
+    OrcaResourcePolicy,
+)
+from cmw.core.plan_materialization import (
+    WorkflowPlanMaterializationError,
+    WorkflowPlanMaterializer,
+)
 from cmw.core.provenance import file_hash
 from cmw.core.structure_artifacts import structure_artifact_from_file
 from cmw.molecular.multiwfn.adapter import MultiwfnOutputSpec
@@ -20,6 +29,7 @@ from cmw.molecular.orca.protocol import (
     ProtocolValidationStatus,
     validate_protocol,
 )
+from cmw.molecular.orca.renderer import ORCA_RENDERER_ID, OrcaExecutionRenderer
 from cmw.molecular.orca.status import (
     ScientificStatus,
     StageType,
@@ -27,6 +37,7 @@ from cmw.molecular.orca.status import (
     validate_stage,
 )
 from cmw.molecular.stacking import (
+    DeferredStateSelectionError,
     ExcitedStateContractError,
     ExcitedStateProtocol,
     ExcitedStateRecord,
@@ -46,6 +57,7 @@ from cmw.molecular.stacking import (
     assemble_vertical_dimer,
     build_hole_electron_command_spec,
     build_relaxation_stage_specs,
+    build_vertical_stacking_workflow,
     create_excited_state_artifact,
     create_hole_electron_artifact,
     create_nto_artifact,
@@ -53,6 +65,7 @@ from cmw.molecular.stacking import (
     plan_hole_electron_analysis,
     prepare_vertical_stacking_workflow,
     render_orca_fixed_region_block,
+    stacking_execution_plan,
     validate_dimer_structure,
     validate_excited_state_artifact,
     validate_hole_electron_artifact,
@@ -731,8 +744,103 @@ ORCA TERMINATED NORMALLY
                 stdin_path=stdin,
             )
 
+    def test_deferred_state_selection_cannot_render_multiwfn_command(self) -> None:
+        protocol = replace(
+            self.stacking_protocol().hole_electron,
+            state_index=None,
+            menu_contract="",
+            menu_sequence=(),
+            execution_ready=False,
+            state_selection={
+                "criteria": ("lowest_bright_state", "lowest_ct_like_state"),
+                "selection_timing": "post_tddft",
+            },
+        )
+        plan = plan_hole_electron_analysis(self.excited_artifact(), protocol)
+
+        self.assertFalse(plan.protocol.to_dict()["execution_ready"])
+        with self.assertRaises(DeferredStateSelectionError) as caught:
+            build_hole_electron_command_spec(
+                plan,
+                runtime={},
+                source_path=self.root / "unavailable.molden.input",
+                attempt_directory=self.root / "attempt_001",
+                stdin_path=self.root / "unavailable.in",
+            )
+        self.assertEqual(caught.exception.code, "DEFERRED_STATE_SELECTION")
+        self.assertIn("lowest bright", str(caught.exception).replace("_", " "))
+
 
 class CompleteWorkflowTests(StackingFixture):
+    def test_stacking_plan_materializes_only_dependency_ready_orca_stage(self) -> None:
+        dimer = assemble_vertical_dimer(
+            self.monomer,
+            self.template(),
+            self.root / "materialized-dimer.xyz",
+            charge=0,
+            multiplicity=1,
+        )
+        protocol = replace(
+            self.stacking_protocol(),
+            relaxation_method=GroundStateProtocol(
+                "r2SCAN-3c", "", keywords=("TightSCF",)
+            ),
+        )
+        scientific_plan = build_vertical_stacking_workflow(
+            periodic_source=self.periodic,
+            monomer_a=self.monomer,
+            template=self.template(),
+            dimer=dimer,
+            protocol=protocol,
+            graph_id="materialized_vertical_stacking",
+        )
+        execution_plan = stacking_execution_plan(scientific_plan)
+        profile = ExecutionProfile(
+            "local-test",
+            OrcaResourcePolicy(8, 18.0),
+            MultiwfnResourcePolicy(8, 18.0),
+        )
+        materializer = WorkflowPlanMaterializer(
+            {ORCA_RENDERER_ID: OrcaExecutionRenderer()}
+        )
+        materialized = materializer.materialize_ready(
+            execution_plan,
+            project_root=self.root / "stacking",
+            system_identifier="generic_pair",
+            resource_profile=profile,
+            runtime_identity={"orca": {"path": "/synthetic/orca", "version": "6.1"}},
+        )
+
+        self.assertEqual(
+            tuple(node.node_id for node in materialized.nodes),
+            ("constrained_optimization",),
+        )
+        first = materialized.nodes[0]
+        stage_input = Path(first.input_files["primary"]).read_text(encoding="utf-8")
+        self.assertIn("! r2SCAN-3c TightSCF Opt", stage_input)
+        self.assertIn("* xyzfile 0 1 input.xyz", stage_input)
+        self.assertIn("{ C 0 C }", stage_input)
+        self.assertIn("{ C 6 C }", stage_input)
+        self.assertIn("nprocs 8", stage_input)
+        self.assertEqual(
+            first.layout.project_root, (self.root / "stacking").resolve()
+        )
+        self.assertNotIn(
+            "calculation/calculation", str(first.layout.working_directory)
+        )
+        with self.assertRaises(WorkflowPlanMaterializationError) as caught:
+            materializer.materialize_node(
+                execution_plan,
+                "full_optimization",
+                project_root=self.root / "stacking",
+                system_identifier="generic_pair",
+                resource_profile=profile,
+                runtime_identity={
+                    "orca": {"path": "/synthetic/orca", "version": "6.1"}
+                },
+            )
+        self.assertEqual(caught.exception.code, "MISSING_ARTIFACT_DEPENDENCY")
+
     def test_complete_dag_has_explicit_lineage_and_execution_layouts(self) -> None:
         output = self.root / "workflow-dimer.xyz"
         project_root = self.root / "calculation"

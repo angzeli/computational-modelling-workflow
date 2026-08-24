@@ -31,6 +31,7 @@ from .excited_state import (
     validate_nto_artifact,
 )
 from .hole_electron import (
+    DeferredStateSelectionError,
     FragmentDefinition,
     HoleElectronAnalysisPlan,
     HoleElectronContractError,
@@ -41,6 +42,7 @@ from .hole_electron import (
     plan_hole_electron_analysis,
     validate_hole_electron_artifact,
 )
+from .materialization import stacking_execution_plan
 from .models import (
     FixedRegion,
     GroundStateProtocol,
@@ -68,6 +70,7 @@ from .workflow import (
 __all__ = [
     "ConstrainedOptimizationArtifact",
     "DimerStructureArtifact",
+    "DeferredStateSelectionError",
     "ExcitedStateArtifact",
     "ExcitedStateContractError",
     "ExcitedStateProtocol",
@@ -104,6 +107,7 @@ __all__ = [
     "plan_hole_electron_analysis",
     "planned_excited_state_artifacts",
     "prepare_vertical_stacking_workflow",
+    "stacking_execution_plan",
     "render_orca_fixed_region_block",
     "validate_dimer_structure",
     "validate_excited_state_artifact",
