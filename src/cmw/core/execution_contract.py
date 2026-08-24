@@ -13,6 +13,7 @@ class ComputationalTask(str, Enum):
     OPTIMIZATION = "optimization"
     FREQUENCY = "frequency"
     SINGLE_POINT = "single_point"
+    EXCITED_STATE = "excited_state"
 
 
 class ExecutionContractError(ValueError):
