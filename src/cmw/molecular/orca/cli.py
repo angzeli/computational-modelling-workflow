@@ -7,10 +7,12 @@ import json
 import os
 from pathlib import Path
 
+from cmw.core.artifacts import Artifact, artifact_from_dict
 from cmw.core.execution_layout import ExecutionLayout
 from cmw.core.execution_profiles import load_execution_profiles
 from cmw.core.job import GeometryLineage
 from cmw.core.locks import acquire_lock, inspect_lock, release_lock
+from cmw.core.plan_materialization import ExecutionPlan, WorkflowPlanMaterializer
 from cmw.core.provenance import atomic_write_json
 from cmw.core.structure_artifacts import structure_artifact_from_file
 
@@ -29,6 +31,7 @@ from .runtime import (
     runtime_environment,
     validate_orca_runtime_contract,
 )
+from .renderer import ORCA_RENDERER_ID, OrcaExecutionRenderer
 from .status import FrequencyPolicy, StageType, classify_execution, read_orca_output, validate_stage
 
 
@@ -219,6 +222,53 @@ def _runtime_materialize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _artifact_manifest(path: str) -> dict[str, tuple[Artifact, ...]]:
+    if not path:
+        return {}
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("artifact manifest must be a mapping")
+    raw = value.get("artifacts_by_node", value)
+    if not isinstance(raw, dict):
+        raise ValueError("artifacts_by_node must be a mapping")
+    parsed: dict[str, tuple[Artifact, ...]] = {}
+    for node_id, artifacts in raw.items():
+        values = artifacts if isinstance(artifacts, list) else [artifacts]
+        if any(not isinstance(item, dict) for item in values):
+            raise ValueError("artifact manifest entries must be objects")
+        parsed[str(node_id)] = tuple(
+            artifact_from_dict(dict(item)) for item in values
+        )
+    return parsed
+
+
+def _materialize_plan(args: argparse.Namespace) -> int:
+    raw_plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+    raw_runtime = json.loads(
+        Path(args.runtime_contract).read_text(encoding="utf-8")
+    )
+    if not isinstance(raw_plan, dict):
+        raise ValueError("execution plan must be a mapping")
+    if not isinstance(raw_runtime, dict):
+        raise ValueError("runtime contract must be a mapping")
+    plan = ExecutionPlan.from_mapping(raw_plan)
+    profile = load_execution_profiles(Path(args.execution_config)).selected
+    materializer = WorkflowPlanMaterializer(
+        {ORCA_RENDERER_ID: OrcaExecutionRenderer()}
+    )
+    result = materializer.materialize_node(
+        plan,
+        args.node,
+        project_root=Path(args.project_root),
+        system_identifier=args.system,
+        resource_profile=profile,
+        runtime_identity=raw_runtime,
+        artifacts_by_node=_artifact_manifest(args.artifact_manifest),
+    )
+    _print(result.to_dict())
+    return 0
+
+
 def _lock(args: argparse.Namespace) -> int:
     path = Path(args.lock)
     if args.lock_action == "inspect":
@@ -314,6 +364,19 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_materialize.add_argument("--working-directory", required=True)
     runtime_materialize.add_argument("--output", required=True)
     runtime_materialize.set_defaults(handler=_runtime_materialize)
+
+    materialize_plan = sub.add_parser(
+        "materialize-plan",
+        help="prepare one execution-plan node without launching ORCA",
+    )
+    materialize_plan.add_argument("--plan", required=True)
+    materialize_plan.add_argument("--node", required=True)
+    materialize_plan.add_argument("--project-root", required=True)
+    materialize_plan.add_argument("--system", required=True)
+    materialize_plan.add_argument("--execution-config", required=True)
+    materialize_plan.add_argument("--runtime-contract", required=True)
+    materialize_plan.add_argument("--artifact-manifest", default="")
+    materialize_plan.set_defaults(handler=_materialize_plan)
 
     lock = sub.add_parser("lock")
     lock_sub = lock.add_subparsers(dest="lock_action", required=True)
