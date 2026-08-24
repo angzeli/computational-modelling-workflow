@@ -37,6 +37,11 @@ from .runtime import (
     runtime_environment,
     validate_orca_runtime_contract,
 )
+from .renderer import (
+    ORCA_RENDERER_ID,
+    OrcaExecutionRenderer,
+    orca_execution_plan_node,
+)
 
 __all__ = [
     "ExecutionResult",
@@ -49,6 +54,8 @@ __all__ = [
     "OrcaRuntimeError",
     "ORCA_GEOMETRY_SCHEMA_VERSION",
     "ORCA_RUNTIME_SCHEMA_VERSION",
+    "ORCA_RENDERER_ID",
+    "OrcaExecutionRenderer",
     "ProtocolIntent",
     "ProtocolValidation",
     "ProtocolValidationStatus",
@@ -61,6 +68,7 @@ __all__ = [
     "materialize_orca_runtime_contract",
     "prepare_orca_runtime",
     "prepare_orca_geometry_input",
+    "orca_execution_plan_node",
     "read_orca_xyzfile_geometry",
     "validate_stage",
     "validate_orca_geometry_input",

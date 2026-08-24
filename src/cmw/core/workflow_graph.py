@@ -157,6 +157,9 @@ class WorkflowNode:
             value.get("produces", value.get("outputs", value.get("artifacts"))),
             name=f"outputs for {node_id}",
         )
+        raw_configuration = value.get("configuration", {})
+        if not isinstance(raw_configuration, Mapping):
+            raise ValueError(f"configuration for {node_id} must be an object")
         reserved = {
             "id",
             "node_id",
@@ -175,8 +178,17 @@ class WorkflowNode:
             "type",
             "method",
             "role",
+            "configuration",
         }
-        configuration = {key: item for key, item in value.items() if key not in reserved}
+        configuration = dict(raw_configuration)
+        for key, item in value.items():
+            if key in reserved:
+                continue
+            if key in configuration and configuration[key] != item:
+                raise ValueError(
+                    f"configuration for {node_id} defines {key!r} twice"
+                )
+            configuration[key] = item
         operation = value.get("operation", value.get("type", value.get("method")))
         node_class = {
             NodeKind.CALCULATION: CalculationNode,
@@ -258,7 +270,9 @@ class WorkflowGraph:
         cls, value: Mapping[str, Any], *, workflow_id: str | None = None
     ) -> "WorkflowGraph":
         selected: Mapping[str, Any] = value
-        graph_id = workflow_id or str(value.get("id", "workflow"))
+        graph_id = workflow_id or str(
+            value.get("graph_id", value.get("id", "workflow"))
+        )
         workflow = value.get("workflow")
         if isinstance(workflow, Mapping):
             if "nodes" in workflow:
