@@ -34,6 +34,12 @@ class HoleElectronContractError(ValueError):
     code = "FAILED_HOLE_ELECTRON_CONTRACT"
 
 
+class DeferredStateSelectionError(HoleElectronContractError):
+    """Raised when state-resolved analysis is requested before state selection."""
+
+    code = "DEFERRED_STATE_SELECTION"
+
+
 @dataclass(frozen=True)
 class FragmentDefinition:
     """One generic zero-based atom partition used by an analysis."""
@@ -214,15 +220,17 @@ class HoleElectronMetrics:
 
 @dataclass(frozen=True)
 class HoleElectronProtocol:
-    state_index: int
+    state_index: int | None
     menu_contract: str
     menu_sequence: tuple[str, ...]
     outputs: tuple[MultiwfnOutputSpec, ...]
     visualization: Mapping[str, object] = field(default_factory=dict)
     fragments: tuple[FragmentDefinition, ...] = ()
+    execution_ready: bool = True
+    state_selection: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if (
+        if self.state_index is not None and (
             isinstance(self.state_index, bool)
             or not isinstance(self.state_index, int)
             or self.state_index < 1
@@ -230,16 +238,27 @@ class HoleElectronProtocol:
             raise HoleElectronContractError(
                 "hole/electron state_index must be a positive integer"
             )
-        if not self.menu_contract.strip():
+        execution_ready = bool(self.execution_ready)
+        if execution_ready and self.state_index is None:
+            raise HoleElectronContractError(
+                "execution-ready hole/electron analysis requires state_index"
+            )
+        if execution_ready and not self.menu_contract.strip():
             raise HoleElectronContractError("Multiwfn menu contract is required")
         menu = tuple(str(item) for item in self.menu_sequence)
-        if not menu or any("\n" in item or "\r" in item for item in menu):
+        if execution_ready and not menu:
+            raise HoleElectronContractError(
+                "execution-ready Multiwfn analysis requires a menu sequence"
+            )
+        if any("\n" in item or "\r" in item for item in menu):
             raise HoleElectronContractError(
                 "Multiwfn menu sequence requires explicit single-line entries"
             )
         object.__setattr__(self, "menu_sequence", menu)
         object.__setattr__(self, "outputs", validate_output_specs(self.outputs))
         object.__setattr__(self, "visualization", dict(self.visualization))
+        object.__setattr__(self, "execution_ready", execution_ready)
+        object.__setattr__(self, "state_selection", dict(self.state_selection))
         fragments = tuple(self.fragments)
         if fragments:
             if len(fragments) < 2:
@@ -278,10 +297,24 @@ class HoleElectronProtocol:
     def stdin_text(self) -> str:
         return "\n".join(self.menu_sequence) + "\n"
 
+    def require_execution_ready(self) -> None:
+        if not self.execution_ready:
+            criteria = self.state_selection.get("criteria", ())
+            detail = (
+                ", ".join(str(item) for item in criteria)
+                or "configured criteria"
+            )
+            raise DeferredStateSelectionError(
+                "hole/electron execution is deferred until quantitative excited-state "
+                f"and NTO artifacts resolve: {detail}"
+            )
+
     def to_dict(self) -> dict[str, object]:
         return {
             "operation": "hole_electron_analysis",
             "state_index": self.state_index,
+            "execution_ready": self.execution_ready,
+            "state_selection": dict(self.state_selection),
             "menu_contract": self.menu_contract,
             "menu_sequence": list(self.menu_sequence),
             "outputs": [item.to_dict() for item in self.outputs],
@@ -316,6 +349,8 @@ def build_hole_electron_command_spec(
     stdin_path: Path,
 ) -> MultiwfnCommandSpec:
     """Translate a hole/electron plan through the existing Multiwfn adapter."""
+
+    plan.protocol.require_execution_ready()
 
     if runtime.get("menu_contract") != plan.protocol.menu_contract:
         raise HoleElectronContractError(
@@ -397,6 +432,8 @@ def create_hole_electron_artifact(
     source_structure: StructureArtifact | None = None,
 ) -> HoleElectronArtifact:
     """Create a validated analysis artifact without interpreting its chemistry."""
+
+    protocol.require_execution_ready()
 
     version = runtime_provenance.get("version")
     executable = runtime_provenance.get("executable")
