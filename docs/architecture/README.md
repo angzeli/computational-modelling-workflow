@@ -60,7 +60,9 @@ molecule-agnostic
 [vertical stacking workflow](vertical-stacking-workflow.md) composes explicit
 periodic registry extraction, deterministic dimer assembly, hierarchical
 relaxation, TDDFT/TDA planning, and Multiwfn hole/electron analysis through
-those same contracts.
+those same contracts. Its quantitative excited-state, NTO, and
+fragment-resolved readiness is assessed in the
+[excited-state artifact audit](stacking-excited-state-artifact-audit.md).
 Domain-specific translation remains outside the core graph. The first adapter,
 documented in the [HOF adapter guide](../adapters/hof.md), validates the HOF
 system schema and maps it onto those generic graph and artifact contracts.

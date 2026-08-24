@@ -7,11 +7,9 @@ import unittest
 from pathlib import Path
 
 from cmw.core.artifacts import (
-    ArtifactValidation,
     ExcitedStateArtifact,
     HoleElectronArtifact,
     NTOArtifact,
-    ValidationStatus,
     artifact_from_dict,
 )
 from cmw.core.provenance import file_hash
@@ -31,27 +29,36 @@ from cmw.molecular.orca.status import (
 from cmw.molecular.stacking import (
     ExcitedStateContractError,
     ExcitedStateProtocol,
+    ExcitedStateRecord,
     FixedRegion,
+    FragmentDefinition,
     GroundStateProtocol,
     HoleElectronMetrics,
     HoleElectronProtocol,
+    NTOOrbitalRecord,
     PeriodicPairDefinition,
     RelaxationContractError,
     RelaxationProtocol,
     StackingAssemblyError,
     StackingRegistryError,
+    StackingWorkflowValidationError,
     VerticalStackingProtocol,
     assemble_vertical_dimer,
     build_hole_electron_command_spec,
     build_relaxation_stage_specs,
+    create_excited_state_artifact,
     create_hole_electron_artifact,
+    create_nto_artifact,
     extract_stacking_template,
     plan_hole_electron_analysis,
     prepare_vertical_stacking_workflow,
     render_orca_fixed_region_block,
     validate_dimer_structure,
     validate_excited_state_artifact,
+    validate_hole_electron_artifact,
+    validate_nto_artifact,
     validate_relaxation_protocol,
+    validate_stacking_artifact_lineage,
     validate_stacking_template,
 )
 
@@ -93,14 +100,6 @@ def periodic_xyz(angle_degrees: float = 30.0) -> str:
         tx, ty, tz = transformed(x, y)
         rows.append(f"{element} {tx:.12f} {ty:.12f} {tz:.12f}")
     return "\n".join(rows) + "\n"
-
-
-PASSED = ArtifactValidation(
-    ValidationStatus.PASSED,
-    {"synthetic_fixture": True},
-    "VALID_SYNTHETIC_FIXTURE",
-    "synthetic evidence is complete",
-)
 
 
 class StackingFixture(unittest.TestCase):
@@ -165,6 +164,7 @@ class StackingFixture(unittest.TestCase):
             {"states": [1, 2], "criterion": "explicit"},
             tda=True,
             visualization={"isovalue": 0.03},
+            functional="PBE0",
         )
         hole = HoleElectronProtocol(
             1,
@@ -183,8 +183,74 @@ class StackingFixture(unittest.TestCase):
                 ),
             ),
             {"format": "cube"},
+            (
+                FragmentDefinition("fragment_1", (0, 1, 2, 3)),
+                FragmentDefinition("fragment_2", (4, 5, 6, 7)),
+            ),
         )
         return VerticalStackingProtocol(relaxation, ground, ground, excited, hole)
+
+    def excited_artifact(self, source=None) -> ExcitedStateArtifact:
+        selected_source = source or self.dimer()
+        output = self.root / f"{selected_source.artifact_id[:8]}-tddft.out"
+        output.write_text("synthetic TDDFT evidence\n", encoding="utf-8")
+        return create_excited_state_artifact(
+            selected_source,
+            self.stacking_protocol().excited_state,
+            (
+                ExcitedStateRecord(
+                    1,
+                    2.40,
+                    0.18,
+                    "singlet",
+                    ("lowest_bright",),
+                    "first state above the declared oscillator-strength threshold",
+                ),
+                ExcitedStateRecord(
+                    2,
+                    2.75,
+                    0.01,
+                    "singlet",
+                    ("lowest_ct_like", "experimentally_relevant"),
+                    "selected by a declared fragment-transfer criterion",
+                ),
+            ),
+            state_selection_rationale=(
+                "retain the lowest bright and lowest declared transfer-like states"
+            ),
+            runtime_provenance={"program": "ORCA", "version": "synthetic-6.1"},
+            files={"output": str(output)},
+            producing_calculation="synthetic_tddft",
+        )
+
+    def nto_artifact(self, excited: ExcitedStateArtifact) -> NTOArtifact:
+        files: dict[str, str] = {}
+        pairs = []
+        for state_index in (1, 2):
+            hole_role = f"state_{state_index}_hole"
+            electron_role = f"state_{state_index}_electron"
+            for role in (hole_role, electron_role):
+                path = self.root / f"{role}.cube"
+                path.write_text("synthetic orbital evidence\n", encoding="utf-8")
+                files[role] = str(path)
+            pairs.append(
+                NTOOrbitalRecord(
+                    state_index,
+                    1,
+                    0.90,
+                    hole_role,
+                    electron_role,
+                )
+            )
+        return create_nto_artifact(
+            excited,
+            pairs,
+            generation_method="ORCA TDDFT natural transition orbitals",
+            runtime_provenance={"program": "ORCA", "version": "synthetic-6.1"},
+            files=files,
+            visualization={"isovalue": 0.03},
+            producing_calculation="synthetic_nto",
+        )
 
 
 class TemplateAndAssemblyTests(StackingFixture):
@@ -297,23 +363,69 @@ class ExcitedStateAndAnalysisTests(StackingFixture):
         self.assertEqual(stage.execution_intent.required_behavior, "SP")
         self.assertIn("nroots 3", stage.blocks[0])
         self.assertIn("tda true", stage.blocks[0])
+        self.assertIn("DoNTO true", stage.blocks[0])
+        self.assertIn("NTOStates 1,2", stage.blocks[0])
 
-        artifact = ExcitedStateArtifact(
-            producing_calculation="synthetic_tddft",
-            method=protocol.method,
-            basis=protocol.basis,
-            protocol=protocol.to_dict(),
-            parent_artifacts=(self.monomer.artifact_id,),
-            validation=PASSED,
-            metadata={"source_geometry_hash": self.monomer.geometry_hash},
-        )
+        artifact = self.excited_artifact(self.monomer)
         validation = validate_excited_state_artifact(
             artifact, source=self.monomer, protocol=protocol
         )
         self.assertTrue(validation.passed)
+        self.assertEqual(artifact.metadata["functional"], "PBE0")
+        self.assertEqual(artifact.metadata["program"], "ORCA")
+        self.assertEqual(artifact.metadata["program_version"], "synthetic-6.1")
+        self.assertEqual(artifact.metadata["selected_state_indices"], [1, 2])
+        self.assertEqual(
+            artifact.metadata["excited_states"][0]["oscillator_strength"],
+            0.18,
+        )
+        self.assertIn("lowest_bright", artifact.metadata["excited_states"][0]["selection_labels"])
+        restored = artifact_from_dict(artifact.to_dict())
+        self.assertEqual(restored.artifact_id, artifact.artifact_id)
+        self.assertEqual(
+            restored.metadata["state_selection_rationale"],
+            artifact.metadata["state_selection_rationale"],
+        )
+
+        incomplete = replace(
+            artifact,
+            metadata={
+                key: value
+                for key, value in artifact.metadata.items()
+                if key != "excited_states"
+            },
+        )
+        self.assertFalse(
+            validate_excited_state_artifact(
+                incomplete,
+                source=self.monomer,
+                protocol=protocol,
+            ).passed
+        )
 
         with self.assertRaisesRegex(ExcitedStateContractError, "within number_of_roots"):
             ExcitedStateProtocol("PBE0", "def2-SVP", 2, {"states": [3]})
+
+    def test_excited_state_artifact_fails_without_selection_evidence(self) -> None:
+        output = self.root / "incomplete-tddft.out"
+        output.write_text("synthetic TDDFT evidence\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            ExcitedStateContractError, "rationale is required"
+        ):
+            create_excited_state_artifact(
+                self.monomer,
+                self.stacking_protocol().excited_state,
+                (
+                    ExcitedStateRecord(1, 2.4, 0.18, "singlet"),
+                    ExcitedStateRecord(2, 2.7, 0.01, "singlet"),
+                ),
+                state_selection_rationale="",
+                runtime_provenance={
+                    "program": "ORCA",
+                    "version": "synthetic-6.1",
+                },
+                files={"output": str(output)},
+            )
 
     def test_tddft_output_and_protocol_validation_fail_closed(self) -> None:
         valid_output = """INPUT FILE
@@ -362,22 +474,15 @@ ORCA TERMINATED NORMALLY
 
     def test_hole_electron_artifact_records_lineage_metrics_and_runtime(self) -> None:
         stacking_protocol = self.stacking_protocol()
-        excited_protocol = stacking_protocol.excited_state
-        excited = ExcitedStateArtifact(
-            producing_calculation="synthetic_tddft",
-            method=excited_protocol.method,
-            basis=excited_protocol.basis,
-            protocol=excited_protocol.to_dict(),
-            parent_artifacts=(self.monomer.artifact_id,),
-            validation=PASSED,
-            metadata={"source_geometry_hash": self.monomer.geometry_hash},
-        )
-        nto = NTOArtifact(
-            producing_calculation="synthetic_nto",
-            method=excited.method,
-            basis=excited.basis,
-            parent_artifacts=(excited.artifact_id,),
-            validation=PASSED,
+        dimer = self.dimer()
+        excited = self.excited_artifact(dimer)
+        nto = self.nto_artifact(excited)
+        self.assertTrue(validate_nto_artifact(nto, excited_state=excited).passed)
+        restored_nto = artifact_from_dict(nto.to_dict())
+        self.assertEqual(restored_nto.artifact_id, nto.artifact_id)
+        self.assertEqual(
+            restored_nto.metadata["orbital_pairs"],
+            nto.metadata["orbital_pairs"],
         )
         metrics = HoleElectronMetrics(
             (0.0, 0.0, 0.0),
@@ -386,9 +491,11 @@ ORCA TERMINATED NORMALLY
             0.35,
             0.65,
             {
-                "fragment_A": {"hole": 0.8, "electron": 0.2},
-                "fragment_B": {"hole": 0.2, "electron": 0.8},
+                "fragment_1": {"hole": 0.8, "electron": 0.2},
+                "fragment_2": {"hole": 0.2, "electron": 0.8},
             },
+            1.2,
+            1.4,
         )
         files = {
             item.role: str(self.root / item.output_path)
@@ -409,6 +516,7 @@ ORCA TERMINATED NORMALLY
                 "menu_contract": "explicit-test-menu-v1",
             },
             files=files,
+            source_structure=dimer,
         )
 
         self.assertIsInstance(artifact, HoleElectronArtifact)
@@ -423,19 +531,111 @@ ORCA TERMINATED NORMALLY
         self.assertEqual(
             artifact.metadata["visualization"], {"format": "cube"}
         )
+        self.assertEqual(
+            artifact.metadata["hole_population"],
+            {"fragment_1": 0.8, "fragment_2": 0.2},
+        )
+        self.assertEqual(
+            artifact.metadata["electron_population"],
+            {"fragment_1": 0.2, "fragment_2": 0.8},
+        )
+        self.assertEqual(artifact.metadata["hole_extent_angstrom"], 1.2)
+        restored_hole = artifact_from_dict(artifact.to_dict())
+        self.assertEqual(restored_hole.artifact_id, artifact.artifact_id)
+        self.assertEqual(
+            restored_hole.metadata["fragment_partition_hash"],
+            artifact.metadata["fragment_partition_hash"],
+        )
+        self.assertTrue(
+            validate_hole_electron_artifact(
+                artifact,
+                excited_state=excited,
+                protocol=stacking_protocol.hole_electron,
+                source_structure=dimer,
+                nto=nto,
+            ).passed
+        )
+
+    def test_fragment_mapping_and_state_identity_fail_closed(self) -> None:
+        dimer = self.dimer()
+        excited = self.excited_artifact(dimer)
+        metrics = HoleElectronMetrics(
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 2.1),
+            2.1,
+            0.35,
+            0.65,
+            {
+                "fragment_1": {"hole": 0.8, "electron": 0.2},
+                "fragment_2": {"hole": 0.2, "electron": 0.8},
+            },
+            1.2,
+            1.4,
+        )
+        files = {
+            item.role: str(self.root / f"invalid-{item.output_path}")
+            for item in self.stacking_protocol().hole_electron.outputs
+        }
+        for path in files.values():
+            selected = Path(path)
+            selected.parent.mkdir(parents=True, exist_ok=True)
+            selected.write_text("synthetic output\n", encoding="utf-8")
+        incomplete_partition = replace(
+            self.stacking_protocol().hole_electron,
+            fragments=(
+                FragmentDefinition("fragment_1", (0, 1, 2, 3)),
+                FragmentDefinition("fragment_2", (4, 5, 6)),
+            ),
+        )
+        with self.assertRaisesRegex(
+            ValueError, "cover the source structure exactly"
+        ):
+            create_hole_electron_artifact(
+                excited,
+                incomplete_partition,
+                metrics,
+                runtime_provenance={
+                    "version": "synthetic-3.8",
+                    "executable": "/synthetic/Multiwfn",
+                    "menu_contract": "explicit-test-menu-v1",
+                },
+                files=files,
+                source_structure=dimer,
+            )
+        missing_state = replace(
+            self.stacking_protocol().hole_electron,
+            state_index=3,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "absent from the excited-state artifact"
+        ):
+            create_hole_electron_artifact(
+                excited,
+                missing_state,
+                metrics,
+                runtime_provenance={
+                    "version": "synthetic-3.8",
+                    "executable": "/synthetic/Multiwfn",
+                    "menu_contract": "explicit-test-menu-v1",
+                },
+                files=files,
+                source_structure=dimer,
+            )
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            HoleElectronProtocol(
+                1,
+                "explicit-test-menu-v1",
+                ("18", "q"),
+                self.stacking_protocol().hole_electron.outputs,
+                fragments=(
+                    FragmentDefinition("fragment_1", (0, 1)),
+                    FragmentDefinition("fragment_2", (1, 2)),
+                ),
+            )
 
     def test_hole_electron_command_reuses_multiwfn_runtime_contract(self) -> None:
         protocol = self.stacking_protocol().hole_electron
-        excited_protocol = self.stacking_protocol().excited_state
-        excited = ExcitedStateArtifact(
-            producing_calculation="synthetic_tddft",
-            method=excited_protocol.method,
-            basis=excited_protocol.basis,
-            protocol=excited_protocol.to_dict(),
-            parent_artifacts=(self.monomer.artifact_id,),
-            validation=PASSED,
-            metadata={"source_geometry_hash": self.monomer.geometry_hash},
-        )
+        excited = self.excited_artifact(self.monomer)
         plan = plan_hole_electron_analysis(excited, protocol)
         executable = self.root / "Multiwfn"
         settings = self.root / "settings.ini"
@@ -480,6 +680,16 @@ ORCA TERMINATED NORMALLY
                 stdin_path=stdin,
             )
 
+        stdin.write_text("different menu\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "planned menu sequence"):
+            build_hole_electron_command_spec(
+                plan,
+                runtime=runtime,
+                source_path=source,
+                attempt_directory=attempt,
+                stdin_path=stdin,
+            )
+
 
 class CompleteWorkflowTests(StackingFixture):
     def test_complete_dag_has_explicit_lineage_and_execution_layouts(self) -> None:
@@ -519,6 +729,12 @@ class CompleteWorkflowTests(StackingFixture):
             plan.graph.node_map["hole_electron_analysis"].dependencies,
             ("excited_state", "natural_transition_orbitals"),
         )
+        self.assertEqual(
+            {item.artifact_type for item in plan.graph.node_map[
+                "hole_electron_analysis"
+            ].requires},
+            {"ExcitedStateArtifact", "NTOArtifact"},
+        )
         self.assertEqual(plan.orca_plans["excited_state"].spec.stage_type, StageType.TDDFT)
         self.assertEqual(
             set(plan.execution_layouts),
@@ -544,6 +760,13 @@ class CompleteWorkflowTests(StackingFixture):
                 plan.artifact_templates["constrained_optimization"][1].artifact_id,
             ),
         )
+
+        missing_nto = dict(plan.artifact_templates)
+        del missing_nto["natural_transition_orbitals"]
+        with self.assertRaisesRegex(
+            StackingWorkflowValidationError, "missing parent"
+        ):
+            validate_stacking_artifact_lineage(plan.graph, missing_nto)
 
 
 if __name__ == "__main__":

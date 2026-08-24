@@ -591,12 +591,65 @@ def validate_artifact_compatibility(
             raise ArtifactCompatibilityError(
                 "ExcitedStateArtifact requires a source_geometry_hash"
             )
+        if artifact.metadata.get("excited_state_contract") == "quantitative_v1":
+            records = artifact.metadata.get("excited_states")
+            selected_states = artifact.metadata.get("selected_state_indices")
+            if (
+                not isinstance(records, Sequence)
+                or isinstance(records, (str, bytes))
+                or not records
+                or not all(isinstance(item, Mapping) for item in records)
+            ):
+                raise ArtifactCompatibilityError(
+                    "quantitative ExcitedStateArtifact requires excited-state records"
+                )
+            state_indices = {
+                item.get("state_index") for item in records if isinstance(item, Mapping)
+            }
+            if (
+                not isinstance(selected_states, Sequence)
+                or isinstance(selected_states, (str, bytes))
+                or not selected_states
+                or not set(selected_states).issubset(state_indices)
+            ):
+                raise ArtifactCompatibilityError(
+                    "quantitative ExcitedStateArtifact requires valid selected states"
+                )
+            if not all(
+                artifact.metadata.get(key)
+                for key in (
+                    "geometry_source_artifact",
+                    "functional",
+                    "program",
+                    "program_version",
+                    "state_selection_rationale",
+                )
+            ):
+                raise ArtifactCompatibilityError(
+                    "quantitative ExcitedStateArtifact provenance is incomplete"
+                )
 
     if isinstance(artifact, NTOArtifact):
         if not any(isinstance(parent, ExcitedStateArtifact) for parent in selected):
             raise ArtifactCompatibilityError(
                 "NTOArtifact requires an ExcitedStateArtifact parent"
             )
+        if artifact.metadata.get("nto_contract") == "orbital_pairs_v1":
+            pairs = artifact.metadata.get("orbital_pairs")
+            runtime = artifact.provenance.get("runtime")
+            if (
+                not artifact.metadata.get("excited_state_artifact")
+                or not artifact.metadata.get("generation_method")
+                or not isinstance(pairs, Sequence)
+                or isinstance(pairs, (str, bytes))
+                or not pairs
+                or not isinstance(runtime, Mapping)
+                or not runtime.get("program")
+                or not runtime.get("version")
+            ):
+                raise ArtifactCompatibilityError(
+                    "state-resolved NTOArtifact provenance is incomplete"
+                )
 
     if isinstance(artifact, HoleElectronArtifact):
         if not any(isinstance(parent, ExcitedStateArtifact) for parent in selected):
@@ -608,6 +661,37 @@ def validate_artifact_compatibility(
             raise ArtifactCompatibilityError(
                 "HoleElectronArtifact requires Multiwfn protocol metadata"
             )
+        if artifact.metadata.get("hole_electron_contract") == "fragment_resolved_v1":
+            partition = artifact.metadata.get("fragment_definitions")
+            hole = artifact.metadata.get("hole_population")
+            electron = artifact.metadata.get("electron_population")
+            if (
+                not artifact.metadata.get("source_structure_artifact")
+                or not artifact.metadata.get("source_geometry_hash")
+                or not artifact.metadata.get("analyzed_state_index")
+                or not isinstance(partition, Mapping)
+                or not isinstance(hole, Mapping)
+                or not isinstance(electron, Mapping)
+                or not hole
+                or set(hole) != set(electron)
+            ):
+                raise ArtifactCompatibilityError(
+                    "fragment-resolved HoleElectronArtifact metadata is incomplete"
+                )
+            try:
+                normalized = (
+                    abs(sum(float(value) for value in hole.values()) - 1.0) <= 1.0e-6
+                    and abs(
+                        sum(float(value) for value in electron.values()) - 1.0
+                    )
+                    <= 1.0e-6
+                )
+            except (TypeError, ValueError):
+                normalized = False
+            if not normalized:
+                raise ArtifactCompatibilityError(
+                    "fragment-resolved hole/electron populations must sum to 1"
+                )
 
 
 def _method_metadata(calculation: Mapping[str, Any]) -> tuple[str | None, str | None, dict[str, object]]:
