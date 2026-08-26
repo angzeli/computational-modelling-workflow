@@ -64,12 +64,16 @@ class OrcaRuntimeTests(unittest.TestCase):
             "PMIx library version 3.2.5a1 (embedded in Open MPI)",
         )
 
-    def test_affected_darwin_openmpi_uses_hash_datastore(self) -> None:
+    def test_affected_darwin_openmpi_uses_stable_pmix_components(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            component = root / "mpi" / "lib" / "pmix" / "mca_gds_hash.so"
-            component.parent.mkdir(parents=True)
-            component.write_text("hash", encoding="utf-8")
+            components = (
+                root / "mpi" / "lib" / "pmix" / "mca_gds_hash.so",
+                root / "mpi" / "lib" / "pmix" / "mca_plog_stdfd.so",
+            )
+            components[0].parent.mkdir(parents=True)
+            for component in components:
+                component.write_text("component", encoding="utf-8")
             profile = _profile(root)
 
             self.assertEqual(
@@ -79,13 +83,28 @@ class OrcaRuntimeTests(unittest.TestCase):
                     pmix_version="PMIx library version 3.2.5a1",
                     system_name="Darwin",
                 ),
-                {"PMIX_MCA_gds": "hash"},
+                {"PMIX_MCA_gds": "hash", "PMIX_MCA_plog": "stdfd"},
             )
 
     def test_affected_darwin_openmpi_fails_without_hash_datastore(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             profile = _profile(Path(temporary))
-            with self.assertRaisesRegex(OrcaRuntimeError, "mca_gds_hash is missing"):
+            with self.assertRaisesRegex(OrcaRuntimeError, "mca_gds_hash"):
+                _darwin_openmpi_compatibility_environment(
+                    profile.orca.mpi,
+                    mpi_version="mpirun (Open MPI) 4.1.6",
+                    pmix_version="PMIx library version 3.2.5a1",
+                    system_name="Darwin",
+                )
+
+    def test_affected_darwin_openmpi_fails_without_stdfd_plog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            component = root / "mpi" / "lib" / "pmix" / "mca_gds_hash.so"
+            component.parent.mkdir(parents=True)
+            component.write_text("hash", encoding="utf-8")
+            profile = _profile(root)
+            with self.assertRaisesRegex(OrcaRuntimeError, "mca_plog_stdfd"):
                 _darwin_openmpi_compatibility_environment(
                     profile.orca.mpi,
                     mpi_version="mpirun (Open MPI) 4.1.6",

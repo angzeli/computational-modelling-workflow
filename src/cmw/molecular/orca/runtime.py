@@ -337,7 +337,7 @@ def _darwin_openmpi_compatibility_environment(
     pmix_version: str | None,
     system_name: str,
 ) -> dict[str, str]:
-    """Avoid the PMIx ds12/ds21 finalize crash in the affected macOS runtime."""
+    """Avoid affected macOS PMIx datastore and default-plog shutdown crashes."""
 
     if (
         system_name != "Darwin"
@@ -346,18 +346,23 @@ def _darwin_openmpi_compatibility_environment(
         or re.search(r"(?<!\d)3\.2\.5(?!\d)", pmix_version) is None
     ):
         return {}
-    candidates = tuple(
-        path
-        for directory in mpi.library_directories
-        for path in directory.glob("pmix/mca_gds_hash.*")
-        if path.is_file() and path.suffix in {".dylib", ".so"}
-    )
-    if not candidates:
-        raise _failure(
-            "OpenMPI 4.1.6 on macOS requires the PMIx hash datastore "
-            "workaround, but mca_gds_hash is missing"
+    required_components = {
+        "mca_gds_hash": "pmix/mca_gds_hash.*",
+        "mca_plog_stdfd": "pmix/mca_plog_stdfd.*",
+    }
+    for component, pattern in required_components.items():
+        candidates = tuple(
+            path
+            for directory in mpi.library_directories
+            for path in directory.glob(pattern)
+            if path.is_file() and path.suffix in {".dylib", ".so"}
         )
-    return {"PMIX_MCA_gds": "hash"}
+        if not candidates:
+            raise _failure(
+                "OpenMPI 4.1.6 on macOS requires PMIx compatibility "
+                f"component {component}, but it is missing"
+            )
+    return {"PMIX_MCA_gds": "hash", "PMIX_MCA_plog": "stdfd"}
 
 
 def _parse_openmpi_fortran_datatypes(value: str) -> dict[str, bool]:
