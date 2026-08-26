@@ -10,7 +10,12 @@ from cmw.core.provenance import atomic_write_json, git_state, read_json, stable_
 from cmw.core.structure_artifacts import structure_artifact_from_file
 from cmw.molecular.orca.geometry import prepare_orca_geometry_input
 from cmw.molecular.orca.input import OrcaResources, OrcaStageSpec, make_target, render_orca_input
-from cmw.molecular.orca.job import check_reuse, finalize_attempt, write_target
+from cmw.molecular.orca.job import (
+    check_reuse,
+    finalize_attempt,
+    revalidate_attempt,
+    write_target,
+)
 from cmw.molecular.orca.status import StageType
 from cmw.structure.xyz import geometry_hash, read_xyz, write_xyz
 
@@ -151,6 +156,43 @@ class ReuseTests(unittest.TestCase):
             record["scientific_artifact"]["validation"]["status"], "PASSED"
         )
         self.assertEqual(record["geometry_input"]["mode"], "legacy_xyzfile")
+
+    def test_revalidation_preserves_attempt_identity_and_rechecks_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target, metadata, _, record = self._attempt(Path(temporary))
+            invalid = read_json(metadata)
+            invalid["reusable"] = False
+            invalid["scientific"]["status"] = "INVALID"
+            invalid["validation"]["status"] = "FAILED_PROTOCOL_MISMATCH"
+            atomic_write_json(metadata, invalid)
+
+            revalidated = revalidate_attempt(
+                target_path=target,
+                metadata_path=metadata,
+                reason="validator regression correction",
+            )
+
+        self.assertTrue(revalidated["reusable"])
+        self.assertEqual(revalidated["attempt"], record["attempt"])
+        self.assertEqual(
+            revalidated["provenance"]["revalidation"]["reason"],
+            "validator regression correction",
+        )
+        self.assertFalse(
+            revalidated["provenance"]["revalidation"]["previous_reusable"]
+        )
+
+    def test_revalidation_fails_before_rewriting_tampered_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target, metadata, output, _ = self._attempt(Path(temporary))
+            output.write_text("tampered\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "artifact integrity mismatch"):
+                revalidate_attempt(
+                    target_path=target,
+                    metadata_path=metadata,
+                    reason="validator regression correction",
+                )
 
     def test_layout_identity_and_resolved_paths_reach_artifact_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
