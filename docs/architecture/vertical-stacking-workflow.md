@@ -57,6 +57,25 @@ checks atom identity, parent identity, plane separation, centroid separation,
 slip, and rotation. This validated XYZ-backed `StructureArtifact` is directly
 usable by the existing ORCA geometry contract.
 
+For templates whose rigidly placed peripheral groups overlap,
+`identify_peripheral_rotatable_bonds` and `deterministic_torsion_search`
+provide an optional preprocessing layer before artifact creation. Detection is
+graph based: ring bonds and any rotation that moves a configured core atom are
+excluded. The search uses a bounded low-discrepancy coarse schedule followed
+by deterministic coordinate and pair refinement. Candidates are rejected
+before scoring when element-aware covalent/van-der-Waals thresholds identify
+an interfragment clash or when either fragment's inferred covalent graph
+changes. The neutral score combines only soft overlap, torsion displacement,
+and peripheral Cartesian displacement; it does not use electronic energies or
+fragment roles.
+
+`dimer_structure_artifact_from_file` imports the selected, already assembled
+geometry without moving coordinates. It applies the same atom, template
+registry, parent, and geometry-hash checks as direct assembly, while retaining
+the preprocessing protocol and candidate identity in provenance. This keeps
+torsion resolution separate from optimization and preserves the original
+periodic registry as the scientific parent.
+
 ## Relaxation and electronic-analysis contracts
 
 `RelaxationProtocol` describes a hierarchy rather than a molecule:

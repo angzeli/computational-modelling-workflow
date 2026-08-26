@@ -11,6 +11,7 @@ from .artifacts import (
 from .assembly import (
     StackingAssemblyError,
     assemble_vertical_dimer,
+    dimer_structure_artifact_from_file,
     validate_dimer_structure,
 )
 from .constraints import (
@@ -58,6 +59,18 @@ from .ground_state import (
     stacking_geometry_metrics,
     torsion_angle_degrees,
 )
+from .torsion_search import (
+    ContactRecord,
+    RotatableBond,
+    TorsionSearchProtocol,
+    TorsionSearchResult,
+    VDW_RADII_ANGSTROM,
+    apply_torsion_angles,
+    classify_interfragment_contacts,
+    deterministic_torsion_search,
+    identify_peripheral_rotatable_bonds,
+    offset_rotatable_bond,
+)
 from .models import (
     FixedRegion,
     GroundStateProtocol,
@@ -84,6 +97,7 @@ from .workflow import (
 
 __all__ = [
     "ConstrainedOptimizationArtifact",
+    "ContactRecord",
     "DimerStructureArtifact",
     "DeferredStateSelectionError",
     "ExcitedStateArtifact",
@@ -108,6 +122,7 @@ __all__ = [
     "PeriodicPairDefinition",
     "RelaxationContractError",
     "RelaxationProtocol",
+    "RotatableBond",
     "StackingAssemblyError",
     "StackingGeometry",
     "StackingGeometryMetrics",
@@ -115,21 +130,30 @@ __all__ = [
     "StackingRegistryError",
     "StackingTemplateArtifact",
     "StackingWorkflowValidationError",
+    "TorsionSearchProtocol",
+    "TorsionSearchResult",
+    "VDW_RADII_ANGSTROM",
     "VerticalStackingProtocol",
     "VerticalStackingWorkflowPlan",
     "assemble_vertical_dimer",
+    "apply_torsion_angles",
     "build_hole_electron_command_spec",
     "build_relaxation_stage_specs",
     "build_vertical_stacking_workflow",
     "compare_stacking_geometries",
     "compare_molecular_connectivity",
+    "classify_interfragment_contacts",
     "cp_interaction_energy",
     "create_hole_electron_artifact",
     "create_excited_state_artifact",
     "create_nto_artifact",
     "extract_stacking_template",
     "energy_decomposition",
+    "deterministic_torsion_search",
+    "dimer_structure_artifact_from_file",
     "heterostack_mixing_metric",
+    "identify_peripheral_rotatable_bonds",
+    "offset_rotatable_bond",
     "plan_hole_electron_analysis",
     "planned_excited_state_artifacts",
     "prepare_vertical_stacking_workflow",
