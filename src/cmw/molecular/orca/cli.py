@@ -24,7 +24,7 @@ from .input import (
     render_orca_input,
     resolve_orca_resources,
 )
-from .job import check_reuse, finalize_attempt, write_target
+from .job import check_reuse, finalize_attempt, revalidate_attempt, write_target
 from .runtime import (
     materialize_orca_runtime_contract,
     prepare_orca_runtime,
@@ -178,6 +178,20 @@ def _reuse(args: argparse.Namespace) -> int:
     result = check_reuse(Path(args.target), Path(args.metadata))
     _print(result)
     return 0 if result["reuse"] else 3
+
+
+def _revalidate(args: argparse.Namespace) -> int:
+    record = revalidate_attempt(
+        target_path=Path(args.target),
+        metadata_path=Path(args.metadata),
+        reason=args.reason,
+        repository=Path(args.repository) if args.repository else None,
+        frequency_policy=FrequencyPolicy(
+            args.require_minimum, args.imaginary_tolerance
+        ),
+    )
+    _print(record)
+    return 0 if record["reusable"] else 70
 
 
 def _runtime_prepare(args: argparse.Namespace) -> int:
@@ -346,6 +360,18 @@ def build_parser() -> argparse.ArgumentParser:
     reuse.add_argument("--target", required=True)
     reuse.add_argument("--metadata", required=True)
     reuse.set_defaults(handler=_reuse)
+
+    revalidate = sub.add_parser(
+        "revalidate",
+        help="re-evaluate immutable attempt evidence without rerunning ORCA",
+    )
+    revalidate.add_argument("--target", required=True)
+    revalidate.add_argument("--metadata", required=True)
+    revalidate.add_argument("--reason", required=True)
+    revalidate.add_argument("--repository", default="")
+    revalidate.add_argument("--require-minimum", action="store_true")
+    revalidate.add_argument("--imaginary-tolerance", type=float, default=0.0)
+    revalidate.set_defaults(handler=_revalidate)
 
     runtime_prepare = sub.add_parser("runtime-prepare")
     runtime_prepare.add_argument("--execution-config", required=True)

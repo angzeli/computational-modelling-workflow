@@ -104,6 +104,8 @@ def finalize_attempt(
     execution_layout: ExecutionLayout | None = None,
     geometry_input: OrcaGeometryInput | None = None,
     geometry_contract_path: Path | None = None,
+    existing_attempt: Mapping[str, object] | None = None,
+    revalidation: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """Validate and atomically record one immutable ORCA attempt."""
 
@@ -212,11 +214,34 @@ def finalize_attempt(
         generated_input_sha256=actual_input_hash,
         parent_attempt_id=parent_attempt_id,
         attempt_id=(
-            execution_layout.attempt_identifier
+            str(existing_attempt["attempt_id"])
+            if existing_attempt is not None
+            else execution_layout.attempt_identifier
             if execution_layout is not None
             else None
         ),
     )
+    attempt_record = attempt.to_dict()
+    if existing_attempt is not None:
+        preserved = dict(existing_attempt)
+        comparable_fields = (
+            "attempt_id",
+            "target_id",
+            "resources",
+            "executable",
+            "generated_input_sha256",
+            "parent_attempt_id",
+        )
+        conflicts = [
+            name
+            for name in comparable_fields
+            if preserved.get(name) != attempt_record.get(name)
+        ]
+        if conflicts or not isinstance(preserved.get("created_at"), str):
+            raise ValueError(
+                "existing attempt identity conflicts with immutable execution evidence"
+            )
+        attempt_record = preserved
 
     selected_artifacts: dict[str, ArtifactRecord] = {}
     geometry_artifacts: dict[str, Path] = {}
@@ -301,14 +326,22 @@ def finalize_attempt(
         ),
         "parent_artifacts": parent_artifacts,
         "lineage": target_record["lineage"],
-        "attempt": attempt.to_dict(),
+        "attempt": attempt_record,
         "execution": {**asdict(execution), "status": execution.status.value},
         "scientific": {**asdict(scientific), "status": scientific.status.value, "stage_type": stage_type.value},
         "validation": protocol_validation.to_dict(),
         "evidence": evidence.to_dict(),
         "artifacts": records_to_dict(selected_artifacts),
         "required_artifact_roles": required_roles,
-        "provenance": {"git": git_state(repository), "executable": dict(executable)},
+        "provenance": {
+            "git": git_state(repository),
+            "executable": dict(executable),
+            **(
+                {"revalidation": dict(revalidation)}
+                if revalidation is not None
+                else {}
+            ),
+        },
         "reusable": execution.status is ExecutionStatus.SUCCESS
         and scientific.status is ScientificStatus.VALID
         and not missing_roles,
@@ -316,6 +349,132 @@ def finalize_attempt(
     record["scientific_artifact"] = artifact_from_result(record).to_dict()
     atomic_write_json(metadata_path, record)
     return record
+
+
+def revalidate_attempt(
+    *,
+    target_path: Path,
+    metadata_path: Path,
+    reason: str,
+    repository: Path | None = None,
+    frequency_policy: FrequencyPolicy = FrequencyPolicy(),
+) -> dict[str, Any]:
+    """Re-evaluate immutable attempt evidence after validation logic changes."""
+
+    if not reason.strip():
+        raise ValueError("revalidation reason must not be empty")
+    prior = read_json(metadata_path)
+    if prior.get("schema_version") != ORCA_JOB_SCHEMA_VERSION:
+        raise ValueError("unsupported ORCA attempt schema")
+    target, _ = load_target(target_path)
+    if prior.get("target", {}).get("target_id") != target.target_id:
+        raise ValueError("stored attempt target identity differs")
+
+    layout_record = prior.get("execution_layout")
+    layout = None
+    if layout_record is not None:
+        if not isinstance(layout_record, Mapping):
+            raise ValueError("execution layout must be a mapping")
+        layout = ExecutionLayout.from_mapping(layout_record)
+        layout.validate(require_existing=True)
+
+    artifacts_record = prior.get("artifacts")
+    if not isinstance(artifacts_record, Mapping):
+        raise ValueError("artifact manifest is missing")
+
+    resolved_artifacts: dict[str, Path] = {}
+    for role, artifact in artifacts_record.items():
+        if not isinstance(artifact, Mapping):
+            raise ValueError(f"artifact manifest entry is invalid: {role}")
+        stored = Path(str(artifact.get("path", "")))
+        path = (
+            stored
+            if stored.is_absolute()
+            else layout.working_directory / stored
+            if layout is not None
+            else metadata_path.parent / stored
+        )
+        if not path.is_file():
+            raise ValueError(f"artifact is missing: {role}")
+        if (
+            path.stat().st_size != artifact.get("size_bytes")
+            or file_hash(path) != artifact.get("sha256")
+        ):
+            raise ValueError(f"artifact integrity mismatch: {role}")
+        resolved_artifacts[str(role)] = path
+
+    required = ("input", "output", "stderr")
+    missing = [role for role in required if role not in resolved_artifacts]
+    if missing:
+        raise ValueError("attempt evidence is incomplete: " + ", ".join(missing))
+
+    geometry_record = prior.get("geometry_input")
+    geometry_input = None
+    geometry_contract_path = None
+    if (
+        isinstance(geometry_record, Mapping)
+        and geometry_record.get("mode") == OrcaGeometryMode.XYZFILE.value
+    ):
+        geometry_input = OrcaGeometryInput.from_mapping(geometry_record)
+        geometry_contract_value = prior.get("geometry_contract_path")
+        if not geometry_contract_value:
+            raise ValueError("geometry contract metadata is missing")
+        geometry_contract_path = Path(str(geometry_contract_value))
+
+    automatic_roles = {
+        "input",
+        "output",
+        "stderr",
+        "input_geometry",
+        "source_structure",
+        "geometry_contract",
+    }
+    supplied_artifacts = {
+        role: path
+        for role, path in resolved_artifacts.items()
+        if role not in automatic_roles
+    }
+    execution = prior.get("execution")
+    attempt = prior.get("attempt")
+    if not isinstance(execution, Mapping) or not isinstance(attempt, Mapping):
+        raise ValueError("attempt execution metadata is missing")
+    process_exit_code = execution.get("process_exit_code")
+    if isinstance(process_exit_code, bool) or not isinstance(process_exit_code, int):
+        raise ValueError("attempt process exit code is invalid")
+    resources = attempt.get("resources")
+    executable = attempt.get("executable")
+    if not isinstance(resources, Mapping) or not isinstance(executable, Mapping):
+        raise ValueError("attempt resource or executable metadata is invalid")
+
+    return finalize_attempt(
+        target_path=target_path,
+        metadata_path=metadata_path,
+        input_path=resolved_artifacts["input"],
+        output_path=resolved_artifacts["output"],
+        stderr_path=resolved_artifacts["stderr"],
+        process_exit_code=process_exit_code,
+        executable=executable,
+        resources=resources,
+        artifacts=supplied_artifacts,
+        repository=repository,
+        frequency_policy=frequency_policy,
+        parent_attempt_id=(
+            str(attempt["parent_attempt_id"])
+            if attempt.get("parent_attempt_id") is not None
+            else None
+        ),
+        execution_layout=layout,
+        geometry_input=geometry_input,
+        geometry_contract_path=geometry_contract_path,
+        existing_attempt=attempt,
+        revalidation={
+            "reason": reason.strip(),
+            "previous_reusable": bool(prior.get("reusable")),
+            "previous_validation": prior.get("validation"),
+            "previous_provenance": prior.get("provenance"),
+            "source_metadata_sha256": file_hash(metadata_path),
+        },
+    )
 
 
 def check_reuse(target_path: Path, metadata_path: Path) -> dict[str, Any]:

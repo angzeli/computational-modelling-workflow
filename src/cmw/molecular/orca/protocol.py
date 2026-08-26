@@ -39,6 +39,10 @@ class ProtocolIntent:
     minimum_excited_states: int | None = None
 
     def __post_init__(self) -> None:
+        for name in ("method", "basis", "reference_approximation", "pno"):
+            value = getattr(self, name)
+            if isinstance(value, str):
+                object.__setattr__(self, name, value.strip() or None)
         if self.expected_fragments is not None and self.expected_fragments < 1:
             raise ValueError("expected_fragments must be positive")
         if self.minimum_excited_states is not None and (

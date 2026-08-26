@@ -68,6 +68,16 @@ class OrcaProtocolTests(unittest.TestCase):
         self.assertFalse(result.checks["led_present"])
         self.assertIn("FAILED_PROTOCOL_MISMATCH", result.reason)
 
+    def test_empty_optional_basis_does_not_create_a_protocol_requirement(self) -> None:
+        intent = ProtocolIntent(basis="   ")
+        result = validate_protocol(
+            self._evidence("protocol_dlpno_led.out"), intent, StageType.SP
+        )
+
+        self.assertEqual(result.status, ProtocolValidationStatus.PASSED)
+        self.assertIsNone(result.expected["basis"])
+        self.assertNotIn("basis_match", result.checks)
+
     def test_workflow_config_records_method_intent_without_changing_keywords(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "workflow.json"
