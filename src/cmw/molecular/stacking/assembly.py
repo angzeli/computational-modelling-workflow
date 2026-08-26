@@ -415,8 +415,117 @@ def assemble_vertical_dimer(
     return replace(artifact, validation=validation)
 
 
+def dimer_structure_artifact_from_file(
+    monomer_a: StructureArtifact,
+    template: StackingTemplateArtifact,
+    structure_path: str | Path,
+    *,
+    monomer_b: StructureArtifact | None = None,
+    charge: int | None = None,
+    multiplicity: int | None = None,
+    producing_calculation: str = "validated_preassembled_vertical_dimer",
+    preprocessing_provenance: Mapping[str, object] | None = None,
+) -> DimerStructureArtifact:
+    """Validate a preassembled dimer without changing any coordinates."""
+
+    if not validate_stacking_template(template).passed:
+        raise StackingAssemblyError("StackingTemplateArtifact is not valid")
+    selected_b = monomer_b or monomer_a
+    expected_ids = template_pair_identities(template)
+    actual_ids = (_molecule_identity(monomer_a), _molecule_identity(selected_b))
+    if actual_ids != expected_ids:
+        raise StackingAssemblyError(
+            f"monomer identities {actual_ids!r} do not match template {expected_ids!r}"
+        )
+    geometry_a = _validated_geometry(monomer_a)
+    geometry_b = _validated_geometry(selected_b)
+    cores = template_core_indices(template)
+    target = Path(structure_path).resolve(strict=True)
+    dimer = read_xyz(target)
+    if dimer.elements != (*geometry_a.elements, *geometry_b.elements):
+        raise StackingAssemblyError(
+            "preassembled dimer does not preserve ordered monomer atom identity"
+        )
+    if charge is None:
+        if monomer_a.charge is None or selected_b.charge is None:
+            raise StackingAssemblyError(
+                "dimer charge must be explicit when monomer charge is absent"
+            )
+        charge = monomer_a.charge + selected_b.charge
+    if multiplicity is None:
+        if monomer_a.multiplicity == selected_b.multiplicity == 1:
+            multiplicity = 1
+        else:
+            raise StackingAssemblyError(
+                "dimer multiplicity must be explicit for non-singlet monomers"
+            )
+    offset = geometry_a.atom_count
+    parents = tuple(
+        dict.fromkeys((monomer_a.artifact_id, selected_b.artifact_id, template.artifact_id))
+    )
+    component_metadata = {
+        "A": {
+            "molecule_id": actual_ids[0],
+            "source_artifact": monomer_a.artifact_id,
+            "atom_count": geometry_a.atom_count,
+            "atom_indices": list(range(geometry_a.atom_count)),
+            "core_atom_indices": list(cores["A"]),
+        },
+        "B": {
+            "molecule_id": actual_ids[1],
+            "source_artifact": selected_b.artifact_id,
+            "atom_count": geometry_b.atom_count,
+            "atom_indices": list(range(offset, offset + geometry_b.atom_count)),
+            "core_atom_indices": list(cores["B"]),
+        },
+    }
+    artifact = DimerStructureArtifact(
+        producing_calculation=producing_calculation,
+        parent_artifacts=parents,
+        files={"structure": str(target)},
+        provenance={
+            "assembly_operation": "validated_preassembled_vertical_dimer",
+            "monomer_artifacts": [monomer_a.artifact_id, selected_b.artifact_id],
+            "stacking_template": template.artifact_id,
+            "preprocessing": dict(preprocessing_provenance or {}),
+        },
+        metadata={
+            "molecular_pair": list(actual_ids),
+            "components": component_metadata,
+            "stacking_registry": {
+                "template_artifact": template.artifact_id,
+                "geometry": template_geometry(template).to_dict(),
+            },
+            "ordered_element_identity": stable_hash({"elements": list(dimer.elements)}),
+            "structure_role": "preassembled_input",
+        },
+        source="validated_preassembled_vertical_dimer",
+        format="xyz",
+        atom_count=dimer.atom_count,
+        elemental_composition=dict(Counter(dimer.elements)),
+        charge=charge,
+        multiplicity=multiplicity,
+        geometry_hash=geometry_hash(dimer),
+    )
+    parent_objects_by_id = {
+        parent.artifact_id: parent for parent in (monomer_a, selected_b, template)
+    }
+    validation = validate_dimer_structure(
+        artifact, parents=tuple(parent_objects_by_id.values())
+    )
+    if not validation.passed:
+        failed_checks = sorted(
+            name for name, passed in validation.checks.items() if passed is not True
+        )
+        raise StackingAssemblyError(
+            f"{validation.reason}; failed checks: {', '.join(failed_checks)}"
+        )
+    return replace(artifact, validation=validation)
+
+
 __all__ = [
     "StackingAssemblyError",
     "assemble_vertical_dimer",
+    "dimer_structure_artifact_from_file",
     "validate_dimer_structure",
 ]

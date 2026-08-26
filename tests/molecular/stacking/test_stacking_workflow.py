@@ -61,6 +61,7 @@ from cmw.molecular.stacking import (
     create_excited_state_artifact,
     create_hole_electron_artifact,
     create_nto_artifact,
+    dimer_structure_artifact_from_file,
     extract_stacking_template,
     plan_hole_electron_analysis,
     prepare_vertical_stacking_workflow,
@@ -339,6 +340,33 @@ class TemplateAndAssemblyTests(StackingFixture):
                 self.template(),
                 self.root / "not-written.xyz",
             )
+
+    def test_preassembled_dimer_preserves_identity_and_registry(self) -> None:
+        template = self.template()
+        assembled = assemble_vertical_dimer(
+            self.monomer,
+            template,
+            self.root / "assembled-source.xyz",
+        )
+        imported = dimer_structure_artifact_from_file(
+            self.monomer,
+            template,
+            self.root / "assembled-source.xyz",
+            preprocessing_provenance={
+                "protocol": "synthetic-v1",
+                "candidate_id": 7,
+            },
+        )
+
+        self.assertEqual(imported.geometry_hash, assembled.geometry_hash)
+        self.assertEqual(imported.parent_artifacts, assembled.parent_artifacts)
+        self.assertEqual(imported.metadata["components"], assembled.metadata["components"])
+        self.assertEqual(imported.provenance["preprocessing"]["candidate_id"], 7)
+        self.assertTrue(
+            validate_dimer_structure(
+                imported, parents=(self.monomer, self.monomer, template)
+            ).passed
+        )
 
 
 class RelaxationTests(StackingFixture):
