@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import hashlib
 import math
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -17,6 +18,13 @@ from cmw.core.artifacts import (
     ValidationStatus,
     validate_artifact_compatibility,
 )
+from cmw.core.provenance import stable_hash
+from cmw.molecular.excited_states import (
+    SPIN_MANIFOLDS,
+    ExcitedStateRecord,
+    StateSelectionResult,
+    StateSelectionStatus,
+)
 from cmw.molecular.orca.input import OrcaStageSpec
 from cmw.molecular.orca.status import StageType
 
@@ -27,93 +35,7 @@ class ExcitedStateContractError(ValueError):
     code = "FAILED_PROTOCOL_MISMATCH"
 
 
-SPIN_MANIFOLDS = frozenset({"singlet", "triplet"})
-
-
-@dataclass(frozen=True)
-class ExcitedStateRecord:
-    """One quantitative excited state and its optional selection labels."""
-
-    state_index: int
-    excitation_energy_ev: float
-    oscillator_strength: float
-    spin_manifold: str
-    selection_labels: tuple[str, ...] = ()
-    selection_rationale: str | None = None
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.state_index, bool)
-            or not isinstance(self.state_index, int)
-            or self.state_index < 1
-        ):
-            raise ExcitedStateContractError(
-                "excited-state index must be a positive integer"
-            )
-        energy = float(self.excitation_energy_ev)
-        oscillator = float(self.oscillator_strength)
-        if not math.isfinite(energy) or energy <= 0:
-            raise ExcitedStateContractError(
-                "excitation energy must be a positive finite value"
-            )
-        if not math.isfinite(oscillator) or oscillator < 0:
-            raise ExcitedStateContractError(
-                "oscillator strength must be a non-negative finite value"
-            )
-        manifold = str(self.spin_manifold).strip().casefold()
-        if manifold not in SPIN_MANIFOLDS:
-            raise ExcitedStateContractError(
-                "spin manifold must be singlet or triplet"
-            )
-        labels = tuple(str(item).strip() for item in self.selection_labels)
-        if any(not item for item in labels) or len(set(labels)) != len(labels):
-            raise ExcitedStateContractError(
-                "state-selection labels must be unique non-empty strings"
-            )
-        rationale = (
-            str(self.selection_rationale).strip()
-            if self.selection_rationale is not None
-            else None
-        )
-        if labels and not rationale:
-            raise ExcitedStateContractError(
-                "selected excited states require a selection rationale"
-            )
-        object.__setattr__(self, "excitation_energy_ev", energy)
-        object.__setattr__(self, "oscillator_strength", oscillator)
-        object.__setattr__(self, "spin_manifold", manifold)
-        object.__setattr__(self, "selection_labels", labels)
-        object.__setattr__(self, "selection_rationale", rationale)
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "state_index": self.state_index,
-            "excitation_energy_ev": self.excitation_energy_ev,
-            "oscillator_strength": self.oscillator_strength,
-            "spin_manifold": self.spin_manifold,
-            "selection_labels": list(self.selection_labels),
-            "selection_rationale": self.selection_rationale,
-        }
-
-    @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> "ExcitedStateRecord":
-        labels = value.get("selection_labels", ())
-        if not isinstance(labels, Sequence) or isinstance(labels, (str, bytes)):
-            raise ExcitedStateContractError(
-                "excited-state selection_labels must be a sequence"
-            )
-        return cls(
-            int(value["state_index"]),
-            float(value["excitation_energy_ev"]),
-            float(value["oscillator_strength"]),
-            str(value["spin_manifold"]),
-            tuple(str(item) for item in labels),
-            (
-                str(value["selection_rationale"])
-                if value.get("selection_rationale") is not None
-                else None
-            ),
-        )
+CALCULATION_SPIN_SCOPES = frozenset({*SPIN_MANIFOLDS, "mixed"})
 
 
 @dataclass(frozen=True)
@@ -225,9 +147,9 @@ class ExcitedStateProtocol:
         if not functional:
             raise ExcitedStateContractError("excited-state functional is required")
         spin_manifold = str(self.spin_manifold).strip().casefold()
-        if spin_manifold not in SPIN_MANIFOLDS:
+        if spin_manifold not in CALCULATION_SPIN_SCOPES:
             raise ExcitedStateContractError(
-                "spin manifold must be singlet or triplet"
+                "spin manifold must be singlet, triplet, or mixed"
             )
         nto_threshold = float(self.nto_threshold)
         if not math.isfinite(nto_threshold) or nto_threshold <= 0:
@@ -255,7 +177,7 @@ class ExcitedStateProtocol:
             f"  nroots {self.number_of_roots}",
             f"  tda {'true' if self.tda else 'false'}",
         ]
-        if self.spin_manifold == "triplet":
+        if self.spin_manifold in {"triplet", "mixed"}:
             rows.append("  triplets true")
         if self.generate_ntos:
             rows.append("  DoNTO true")
@@ -330,6 +252,8 @@ def validate_excited_state_artifact(
         "selection_rationale": False,
         "runtime_provenance": False,
         "output_available": False,
+        "parsed_protocol": False,
+        "source_output_identity": False,
     }
     try:
         parent_objects = {source.artifact_id: source}
@@ -351,13 +275,43 @@ def validate_excited_state_artifact(
         checks["artifact_compatibility"] = True
         records = _state_records(artifact.metadata.get("excited_states"))
         selected = artifact.metadata.get("selected_state_indices")
+        selected_identities = artifact.metadata.get("selected_state_identities")
+        available_identities = {item.canonical_key for item in records}
+        identity_selection_valid = False
+        if isinstance(selected_identities, Sequence) and not isinstance(
+            selected_identities, (str, bytes)
+        ):
+            parsed_identities = {
+                (
+                    str(item.get("spin_manifold", "")).casefold(),
+                    int(item.get("local_state_index", 0)),
+                )
+                for item in selected_identities
+                if isinstance(item, Mapping)
+            }
+            identity_selection_valid = bool(parsed_identities) and parsed_identities.issubset(
+                available_identities
+            )
         checks["state_observables"] = (
             all(item.state_index <= protocol.number_of_roots for item in records)
-            and all(item.spin_manifold == protocol.spin_manifold for item in records)
-            and isinstance(selected, list)
-            and bool(selected)
-            and set(int(item) for item in selected).issubset(
-                {item.state_index for item in records}
+            and all(
+                protocol.spin_manifold == "mixed"
+                or item.spin_manifold == protocol.spin_manifold
+                for item in records
+            )
+            and (
+                protocol.spin_manifold != "mixed"
+                or {item.spin_manifold for item in records} == set(SPIN_MANIFOLDS)
+            )
+            and (
+                identity_selection_valid
+                or (
+                    isinstance(selected, list)
+                    and bool(selected)
+                    and set(int(item) for item in selected).issubset(
+                        {item.state_index for item in records}
+                    )
+                )
             )
         )
         rationale = artifact.metadata.get("state_selection_rationale")
@@ -378,6 +332,24 @@ def validate_excited_state_artifact(
             and Path(str(output)).is_file()
             and Path(str(output)).stat().st_size > 0
         )
+        if artifact.metadata.get("excited_state_contract") == "quantitative_v2":
+            parser_evidence = artifact.provenance.get("parser")
+            if not isinstance(parser_evidence, Mapping) or not checks["output_available"]:
+                raise ExcitedStateContractError(
+                    "parser-backed artifact lacks parser or output evidence"
+                )
+            _validate_parsed_records_against_protocol(
+                records,
+                protocol,
+                runtime if isinstance(runtime, Mapping) else {},
+                parser_evidence,
+                Path(str(output)),
+            )
+            checks["parsed_protocol"] = True
+            checks["source_output_identity"] = True
+        else:
+            checks["parsed_protocol"] = True
+            checks["source_output_identity"] = True
     except (ArtifactCompatibilityError, TypeError, ValueError) as exc:
         return ArtifactValidation(
             ValidationStatus.FAILED,
@@ -406,11 +378,84 @@ def _state_records(value: object) -> tuple[ExcitedStateRecord, ...]:
     if not all(isinstance(item, Mapping) for item in value):
         raise ExcitedStateContractError("excited-state records must be mappings")
     records = tuple(ExcitedStateRecord.from_mapping(item) for item in value)
-    if not records or len({item.state_index for item in records}) != len(records):
+    if not records or len({item.canonical_key for item in records}) != len(records):
         raise ExcitedStateContractError(
-            "excited-state records require unique state indices"
+            "excited-state records require unique canonical identities"
         )
     return records
+
+
+def _validate_parsed_records_against_protocol(
+    records: Sequence[ExcitedStateRecord],
+    protocol: ExcitedStateProtocol,
+    runtime_provenance: Mapping[str, object],
+    parser_provenance: Mapping[str, object],
+    output_path: Path,
+) -> None:
+    parsed = [item for item in records if item.protocol_metadata]
+    if not parsed:
+        return
+    if len(parsed) != len(records):
+        raise ExcitedStateContractError(
+            "parsed and legacy excited-state records cannot be mixed"
+        )
+    protocol_identities = {
+        stable_hash(dict(item.protocol_metadata)) for item in parsed
+    }
+    source_identities = {
+        str(item.source_provenance.get("source_sha256", "")) for item in parsed
+    }
+    if len(protocol_identities) != 1 or len(source_identities) != 1 or "" in source_identities:
+        raise ExcitedStateContractError(
+            "parsed excited states do not share one protocol and source identity"
+        )
+    observed = parsed[0].protocol_metadata
+    if (
+        str(observed.get("functional", "")).casefold()
+        != str(protocol.functional).casefold()
+        or str(observed.get("basis", "")).casefold()
+        != str(protocol.basis).casefold()
+        or bool(observed.get("tda")) != protocol.tda
+    ):
+        raise ExcitedStateContractError(
+            "parsed excited-state method, basis, or theory does not match the protocol"
+        )
+    expected_roots = {
+        "singlet": int(observed.get("requested_singlet_roots", 0)),
+        "triplet": int(observed.get("requested_triplet_roots", 0)),
+    }
+    required_manifolds = (
+        set(SPIN_MANIFOLDS)
+        if protocol.spin_manifold == "mixed"
+        else {protocol.spin_manifold}
+    )
+    if any(
+        expected_roots[manifold] != protocol.number_of_roots
+        for manifold in required_manifolds
+    ):
+        raise ExcitedStateContractError(
+            "parsed root counts do not match the excited-state protocol"
+        )
+    observed_version = str(observed.get("orca_version", ""))
+    if observed_version != str(runtime_provenance.get("version", "")):
+        raise ExcitedStateContractError(
+            "parsed ORCA version does not match runtime provenance"
+        )
+    expected_sha = str(parser_provenance.get("source_sha256", ""))
+    expected_size = parser_provenance.get("source_size_bytes")
+    if not expected_sha or expected_size is None:
+        raise ExcitedStateContractError(
+            "parser provenance requires source hash and size"
+        )
+    if output_path.stat().st_size != int(expected_size):
+        raise ExcitedStateContractError(
+            "excited-state output size does not match parser provenance"
+        )
+    digest = hashlib.sha256(output_path.read_bytes()).hexdigest()
+    if digest != expected_sha or source_identities != {expected_sha}:
+        raise ExcitedStateContractError(
+            "excited-state output hash does not match parsed records"
+        )
 
 
 def create_excited_state_artifact(
@@ -421,40 +466,64 @@ def create_excited_state_artifact(
     state_selection_rationale: str,
     runtime_provenance: Mapping[str, object],
     files: Mapping[str, str],
+    selection_results: Sequence[StateSelectionResult] = (),
+    parser_provenance: Mapping[str, object] | None = None,
+    execution_attempt: Mapping[str, object] | None = None,
     parents: Sequence[Artifact] = (),
     producing_calculation: str = "excited_state",
 ) -> ExcitedStateArtifact:
     """Create a manuscript-ready excited-state artifact from supplied evidence."""
 
     records = tuple(states)
-    if not records or len({item.state_index for item in records}) != len(records):
+    if not records or len({item.canonical_key for item in records}) != len(records):
         raise ExcitedStateContractError(
-            "excited-state evidence requires unique state records"
+            "excited-state evidence requires unique canonical state records"
         )
     if any(item.state_index > protocol.number_of_roots for item in records):
         raise ExcitedStateContractError(
             "excited-state record exceeds the configured number of roots"
         )
-    if any(item.spin_manifold != protocol.spin_manifold for item in records):
+    if any(
+        protocol.spin_manifold != "mixed"
+        and item.spin_manifold != protocol.spin_manifold
+        for item in records
+    ) or (
+        protocol.spin_manifold == "mixed"
+        and {item.spin_manifold for item in records} != set(SPIN_MANIFOLDS)
+    ):
         raise ExcitedStateContractError(
             "excited-state spin metadata does not match the protocol"
         )
     rationale = str(state_selection_rationale).strip()
     if not rationale:
         raise ExcitedStateContractError("state-selection rationale is required")
-    requested = protocol.state_selection.get("states")
-    selected = (
-        tuple(int(item) for item in requested)
-        if isinstance(requested, Sequence) and not isinstance(requested, (str, bytes))
-        else tuple(
-            item.state_index for item in records if item.selection_labels
-        )
+    results = tuple(selection_results)
+    selected_identities = tuple(
+        item.selected_identity
+        for item in results
+        if item.status is StateSelectionStatus.SELECTED
+        and item.selected_identity is not None
     )
-    available = {item.state_index for item in records}
-    if not selected or not set(selected).issubset(available):
+    requested = protocol.state_selection.get("states")
+    if not selected_identities:
+        selected_indices = (
+            tuple(int(item) for item in requested)
+            if isinstance(requested, Sequence)
+            and not isinstance(requested, (str, bytes))
+            else tuple(item.state_index for item in records if item.selection_labels)
+        )
+        selected_identities = tuple(
+            item.identity for item in records if item.state_index in selected_indices
+        )
+    available = {item.canonical_key for item in records}
+    selected_keys = {
+        (item.spin_manifold, item.local_state_index) for item in selected_identities
+    }
+    if not selected_keys or not selected_keys.issubset(available):
         raise ExcitedStateContractError(
             "selected excited states are absent from quantitative state evidence"
         )
+    selected = tuple(item.local_state_index for item in selected_identities)
     program = runtime_provenance.get("program")
     version = runtime_provenance.get("version")
     if (
@@ -471,6 +540,19 @@ def create_excited_state_artifact(
         raise ExcitedStateContractError(
             "excited-state output file is missing or empty"
         )
+    parser_evidence = dict(parser_provenance or {})
+    attempt_evidence = dict(execution_attempt or {})
+    if parser_evidence and not attempt_evidence:
+        raise ExcitedStateContractError(
+            "parser-backed excited-state artifacts require execution-attempt provenance"
+        )
+    _validate_parsed_records_against_protocol(
+        records,
+        protocol,
+        runtime_provenance,
+        parser_evidence,
+        Path(output),
+    )
     parent_objects = {source.artifact_id: source}
     parent_objects.update({item.artifact_id: item for item in parents})
     validation = ArtifactValidation(
@@ -493,11 +575,20 @@ def create_excited_state_artifact(
         parent_artifacts=tuple(parent_objects),
         files=dict(files),
         validation=validation,
-        provenance={"runtime": dict(runtime_provenance)},
+        provenance={
+            "runtime": dict(runtime_provenance),
+            "parser": parser_evidence,
+            "execution_attempt": attempt_evidence,
+        },
         metadata={
-            "excited_state_contract": "quantitative_v1",
+            "excited_state_contract": (
+                "quantitative_v2"
+                if parser_provenance or results
+                else "quantitative_v1"
+            ),
             "geometry_source_artifact": source.artifact_id,
             "source_geometry_hash": source.geometry_hash,
+            "scientific_protocol_hash": stable_hash(protocol.to_dict()),
             "functional": protocol.functional,
             "program": program,
             "program_version": version,
@@ -508,7 +599,15 @@ def create_excited_state_artifact(
             },
             "excited_states": [item.to_dict() for item in records],
             "selected_state_indices": list(selected),
+            "selected_state_identities": [item.to_dict() for item in selected_identities],
+            "state_selection_results": [item.to_dict() for item in results],
             "state_selection_rationale": rationale,
+            "source_output_identity": parser_evidence,
+            "parser_version": parser_evidence.get("parser_version"),
+            "fixture_tested_grammar_version": parser_evidence.get(
+                "fixture_tested_grammar_version"
+            ),
+            "execution_attempt": attempt_evidence,
         },
     )
     result = validate_excited_state_artifact(

@@ -591,7 +591,8 @@ def validate_artifact_compatibility(
             raise ArtifactCompatibilityError(
                 "ExcitedStateArtifact requires a source_geometry_hash"
             )
-        if artifact.metadata.get("excited_state_contract") == "quantitative_v1":
+        excited_state_contract = artifact.metadata.get("excited_state_contract")
+        if excited_state_contract in {"quantitative_v1", "quantitative_v2"}:
             records = artifact.metadata.get("excited_states")
             selected_states = artifact.metadata.get("selected_state_indices")
             if (
@@ -628,6 +629,62 @@ def validate_artifact_compatibility(
                 raise ArtifactCompatibilityError(
                     "quantitative ExcitedStateArtifact provenance is incomplete"
                 )
+            if excited_state_contract == "quantitative_v2":
+                selected_identities = artifact.metadata.get(
+                    "selected_state_identities"
+                )
+                record_identities = {
+                    (
+                        str(item.get("spin_manifold", "")).casefold(),
+                        item.get("local_state_index", item.get("state_index")),
+                    )
+                    for item in records
+                    if isinstance(item, Mapping)
+                }
+                if (
+                    not isinstance(selected_identities, Sequence)
+                    or isinstance(selected_identities, (str, bytes))
+                    or not selected_identities
+                    or not all(isinstance(item, Mapping) for item in selected_identities)
+                ):
+                    raise ArtifactCompatibilityError(
+                        "quantitative_v2 ExcitedStateArtifact requires canonical selections"
+                    )
+                selected_identity_keys = {
+                    (
+                        str(item.get("spin_manifold", "")).casefold(),
+                        item.get("local_state_index"),
+                    )
+                    for item in selected_identities
+                    if isinstance(item, Mapping)
+                }
+                if not selected_identity_keys.issubset(record_identities):
+                    raise ArtifactCompatibilityError(
+                        "canonical selected states are absent from excited-state records"
+                    )
+                if not all(
+                    artifact.metadata.get(key)
+                    for key in (
+                        "scientific_protocol_hash",
+                        "parser_version",
+                        "fixture_tested_grammar_version",
+                        "source_output_identity",
+                        "execution_attempt",
+                    )
+                ):
+                    raise ArtifactCompatibilityError(
+                        "quantitative_v2 parser provenance is incomplete"
+                    )
+                source_output_identity = artifact.metadata.get(
+                    "source_output_identity"
+                )
+                if not isinstance(source_output_identity, Mapping) or not all(
+                    source_output_identity.get(key)
+                    for key in ("source_sha256", "source_size_bytes")
+                ):
+                    raise ArtifactCompatibilityError(
+                        "quantitative_v2 source-output identity is incomplete"
+                    )
 
     if isinstance(artifact, NTOArtifact):
         if not any(isinstance(parent, ExcitedStateArtifact) for parent in selected):

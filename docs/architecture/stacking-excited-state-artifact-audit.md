@@ -244,3 +244,21 @@ Validation result for this audit:
 - focused vertical-stacking suite: 13 tests passed;
 - complete repository regression suite: 221 tests passed; and
 - no ORCA or Multiwfn execution was performed.
+
+## 8. ORCA 6.1 TDA parser implementation update
+
+The previously pending ORCA result parser is now implemented as the generic
+`cmw.molecular.orca.excited_states` capability. It is deliberately separate
+from advisory status extraction and is fixture-limited to ORCA 6.1.x,
+operative TDA, non-SOC singlet-only or mixed singlet/triplet results. It joins
+detailed state blocks to electric- and velocity-dipole spectra using the
+canonical `(spin_manifold, local_state_index)` identity and retains raw ORCA
+global indices as source provenance.
+
+The molecule-agnostic quantitative records and deterministic non-CT resolver
+live in `cmw.molecular.excited_states`. Parser-backed stacking artifacts use
+the additive `quantitative_v2` metadata contract; legacy `quantitative_v1`
+artifacts remain readable. Full TDDFT, SOC, NTO, Multiwfn hole/electron
+parsing, fragment-resolved classification, and CT-like selection remain
+outside this implementation. Detailed support boundaries and fixture
+provenance are recorded in `docs/molecular/orca-6.1-tda-excited-states.md`.
