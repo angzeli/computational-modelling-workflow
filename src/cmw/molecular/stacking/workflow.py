@@ -171,6 +171,7 @@ def _execution_layouts(
     graph: WorkflowGraph,
     orca_plans: Mapping[str, StackingOrcaPlan],
     hole_plan: HoleElectronAnalysisPlan,
+    nto: NTOArtifact | None,
     attempt_identifiers: Mapping[str, str],
 ) -> dict[str, ExecutionLayout]:
     if project_root is None:
@@ -191,6 +192,13 @@ def _execution_layouts(
         "protocol": hole_plan.protocol.to_dict(),
         "parent_artifacts": list(hole_plan.artifact.parent_artifacts),
     }
+    if nto is not None:
+        identities["natural_transition_orbitals"] = {
+            "graph_id": graph.graph_id,
+            "node_id": "natural_transition_orbitals",
+            "protocol": dict(nto.protocol),
+            "parent_artifacts": list(nto.parent_artifacts),
+        }
     for node_id, identity in identities.items():
         layouts[node_id] = ExecutionLayout(
             Path(project_root),
@@ -380,14 +388,15 @@ def build_vertical_stacking_workflow(
                 "source_number_of_roots": protocol.excited_state.number_of_roots,
             },
             parent_artifacts=(excited.artifact_id,),
-            files={"orbitals": "excited_state/nto.molden.input"},
+            files={
+                "nto_mwfn": "multiwfn/nto/selected_state.mwfn",
+                "session_log": "multiwfn/nto/session.log",
+            },
             validation=planned,
             provenance={"execution": "planned_only"},
             metadata={
                 "excited_state_artifact": excited.artifact_id,
-                "generation_method": (
-                    "ORCA TDDFT/TDA natural transition orbitals"
-                ),
+                "generation_method": "Multiwfn natural transition orbitals",
                 "planned_state_selection": dict(
                     protocol.excited_state.state_selection
                 ),
@@ -395,9 +404,7 @@ def build_vertical_stacking_workflow(
             },
         )
         artifact_templates["natural_transition_orbitals"] = (nto,)
-    hole_plan = plan_hole_electron_analysis(
-        excited, protocol.hole_electron, nto=nto
-    )
+    hole_plan = plan_hole_electron_analysis(excited, protocol.hole_electron)
     artifact_templates["hole_electron_analysis"] = (hole_plan.artifact,)
 
     nodes = [
@@ -527,13 +534,12 @@ def build_vertical_stacking_workflow(
             ),
         )
     )
-    hole_dependencies = ["excited_state"]
     if nto is not None:
         nodes.append(
             DerivedResultNode(
                 "natural_transition_orbitals",
                 dependencies=("excited_state",),
-                operation="generate_ntos",
+                operation="multiwfn_nto",
                 requires=(
                     ArtifactRequirement(
                         "ExcitedStateArtifact", from_nodes=("excited_state",)
@@ -542,26 +548,15 @@ def build_vertical_stacking_workflow(
                 produces=("NTOArtifact",),
             )
         )
-        hole_dependencies.append("natural_transition_orbitals")
     nodes.append(
         DerivedResultNode(
             "hole_electron_analysis",
-            dependencies=tuple(hole_dependencies),
+            dependencies=("excited_state",),
             operation="multiwfn_hole_electron",
             requires=(
                 ArtifactRequirement(
                     "ExcitedStateArtifact", from_nodes=("excited_state",)
                 ),
-            )
-            + (
-                (
-                    ArtifactRequirement(
-                        "NTOArtifact",
-                        from_nodes=("natural_transition_orbitals",),
-                    ),
-                )
-                if nto is not None
-                else ()
             ),
             produces=("HoleElectronArtifact",),
             configuration={"multiwfn_protocol": protocol.hole_electron.to_dict()},
@@ -645,6 +640,7 @@ def build_vertical_stacking_workflow(
         graph=graph,
         orca_plans=orca_plans,
         hole_plan=hole_plan,
+        nto=nto,
         attempt_identifiers=dict(attempt_identifiers or {}),
     )
     return VerticalStackingWorkflowPlan(

@@ -87,11 +87,18 @@ class HoleElectronMetrics:
     separation_distance_angstrom: float
     overlap: float
     separation_index: float
-    fragment_contributions: Mapping[str, Mapping[str, float]]
+    fragment_contributions: Mapping[str, Mapping[str, float]] = field(
+        default_factory=dict
+    )
     hole_extent_angstrom: float | None = None
     electron_extent_angstrom: float | None = None
     hole_population: Mapping[str, float] = field(default_factory=dict)
     electron_population: Mapping[str, float] = field(default_factory=dict)
+    reported_D_angstrom: float | None = None
+    derived_D_from_reported_centroids_angstrom: float | None = None
+    centroid_decimal_places: int | None = None
+    reported_D_decimal_places: int | None = None
+    D_consistency: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         hole = vector3(self.hole_centroid_angstrom, name="hole centroid")
@@ -110,14 +117,60 @@ class HoleElectronMetrics:
                 for index in range(3)
             )
         )
-        if not math.isclose(
-            separation,
-            observed_separation,
-            abs_tol=1.0e-8,
+        if (
+            self.derived_D_from_reported_centroids_angstrom is not None
+            and not math.isclose(
+                float(self.derived_D_from_reported_centroids_angstrom),
+                observed_separation,
+                abs_tol=1.0e-12,
+            )
         ):
             raise HoleElectronContractError(
-                "hole/electron separation does not match the declared centroids"
+                "derived D does not match the declared reported centroids"
             )
+        precision_fields = (
+            self.reported_D_angstrom,
+            self.centroid_decimal_places,
+            self.reported_D_decimal_places,
+        )
+        D_consistency: dict[str, object]
+        if any(value is not None for value in precision_fields):
+            if not all(value is not None for value in precision_fields):
+                raise HoleElectronContractError(
+                    "precision-aware D validation requires reported D and both precisions"
+                )
+            reported_D = float(self.reported_D_angstrom)
+            if not math.isclose(separation, reported_D, abs_tol=1.0e-12):
+                raise HoleElectronContractError(
+                    "separation distance must preserve the printed Multiwfn D value"
+                )
+            from cmw.molecular.multiwfn.excited_states import (
+                validate_reported_D_precision,
+            )
+
+            validation = validate_reported_D_precision(
+                hole,
+                electron,
+                reported_D_angstrom=reported_D,
+                centroid_decimal_places=int(self.centroid_decimal_places),
+                reported_D_decimal_places=int(self.reported_D_decimal_places),
+            )
+            if not validation.consistent:
+                raise HoleElectronContractError(
+                    "printed D is inconsistent with centroid rounding intervals"
+                )
+            D_consistency = validation.to_dict()
+        else:
+            if not math.isclose(
+                separation,
+                observed_separation,
+                abs_tol=1.0e-8,
+            ):
+                raise HoleElectronContractError(
+                    "hole/electron separation does not match the declared centroids"
+                )
+            reported_D = None
+            D_consistency = dict(self.D_consistency)
         if not 0.0 <= overlap <= 1.0:
             raise HoleElectronContractError("hole/electron overlap must be in [0, 1]")
         hole_extent = (
@@ -151,45 +204,54 @@ class HoleElectronMetrics:
                     "fragment contributions must be finite"
                 )
             contributions[str(fragment)] = selected
-        if not contributions:
-            raise HoleElectronContractError("fragment contributions are required")
-        derived_hole = {
-            fragment: values["hole"]
-            for fragment, values in contributions.items()
-            if "hole" in values
-        }
-        derived_electron = {
-            fragment: values["electron"]
-            for fragment, values in contributions.items()
-            if "electron" in values
-        }
-        hole_population = _population(
-            self.hole_population or derived_hole,
-            name="hole population",
-        )
-        electron_population = _population(
-            self.electron_population or derived_electron,
-            name="electron population",
-        )
-        if set(hole_population) != set(electron_population):
-            raise HoleElectronContractError(
-                "hole and electron populations require the same fragment identifiers"
+        if contributions:
+            derived_hole = {
+                fragment: values["hole"]
+                for fragment, values in contributions.items()
+                if "hole" in values
+            }
+            derived_electron = {
+                fragment: values["electron"]
+                for fragment, values in contributions.items()
+                if "electron" in values
+            }
+            hole_population = _population(
+                self.hole_population or derived_hole,
+                name="hole population",
             )
-        if set(contributions) != set(hole_population):
-            raise HoleElectronContractError(
-                "fragment contributions and populations use different fragments"
+            electron_population = _population(
+                self.electron_population or derived_electron,
+                name="electron population",
             )
-        for fragment, values in contributions.items():
-            if (
-                not math.isclose(values.get("hole", float("nan")), hole_population[fragment])
-                or not math.isclose(
-                    values.get("electron", float("nan")),
-                    electron_population[fragment],
-                )
-            ):
+            if set(hole_population) != set(electron_population):
                 raise HoleElectronContractError(
-                    "fragment contributions conflict with canonical populations"
+                    "hole and electron populations require the same fragment identifiers"
                 )
+            if set(contributions) != set(hole_population):
+                raise HoleElectronContractError(
+                    "fragment contributions and populations use different fragments"
+                )
+            for fragment, values in contributions.items():
+                if (
+                    not math.isclose(
+                        values.get("hole", float("nan")),
+                        hole_population[fragment],
+                    )
+                    or not math.isclose(
+                        values.get("electron", float("nan")),
+                        electron_population[fragment],
+                    )
+                ):
+                    raise HoleElectronContractError(
+                        "fragment contributions conflict with canonical populations"
+                    )
+        else:
+            if self.hole_population or self.electron_population:
+                raise HoleElectronContractError(
+                    "fragment populations require fragment contributions"
+                )
+            hole_population = {}
+            electron_population = {}
         object.__setattr__(self, "hole_centroid_angstrom", hole)
         object.__setattr__(self, "electron_centroid_angstrom", electron)
         object.__setattr__(self, "separation_distance_angstrom", separation)
@@ -200,6 +262,13 @@ class HoleElectronMetrics:
         object.__setattr__(self, "fragment_contributions", contributions)
         object.__setattr__(self, "hole_population", hole_population)
         object.__setattr__(self, "electron_population", electron_population)
+        object.__setattr__(self, "reported_D_angstrom", reported_D)
+        object.__setattr__(
+            self,
+            "derived_D_from_reported_centroids_angstrom",
+            observed_separation,
+        )
+        object.__setattr__(self, "D_consistency", D_consistency)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -208,6 +277,13 @@ class HoleElectronMetrics:
             "separation_distance_angstrom": self.separation_distance_angstrom,
             "overlap": self.overlap,
             "separation_index": self.separation_index,
+            "reported_D_angstrom": self.reported_D_angstrom,
+            "derived_D_from_reported_centroids_angstrom": (
+                self.derived_D_from_reported_centroids_angstrom
+            ),
+            "centroid_decimal_places": self.centroid_decimal_places,
+            "reported_D_decimal_places": self.reported_D_decimal_places,
+            "D_consistency": dict(self.D_consistency),
             "hole_extent_angstrom": self.hole_extent_angstrom,
             "electron_extent_angstrom": self.electron_extent_angstrom,
             "hole_population": dict(self.hole_population),
@@ -306,7 +382,7 @@ class HoleElectronProtocol:
             )
             raise DeferredStateSelectionError(
                 "hole/electron execution is deferred until quantitative excited-state "
-                f"and NTO artifacts resolve: {detail}"
+                f"selection resolves: {detail}"
             )
 
     def to_dict(self) -> dict[str, object]:

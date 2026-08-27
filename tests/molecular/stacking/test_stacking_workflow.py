@@ -907,13 +907,13 @@ class CompleteWorkflowTests(StackingFixture):
         )
         self.assertEqual(
             plan.graph.node_map["hole_electron_analysis"].dependencies,
-            ("excited_state", "natural_transition_orbitals"),
+            ("excited_state",),
         )
         self.assertEqual(
             {item.artifact_type for item in plan.graph.node_map[
                 "hole_electron_analysis"
             ].requires},
-            {"ExcitedStateArtifact", "NTOArtifact"},
+            {"ExcitedStateArtifact"},
         )
         self.assertEqual(plan.orca_plans["excited_state"].spec.stage_type, StageType.TDDFT)
         self.assertEqual(
@@ -924,6 +924,7 @@ class CompleteWorkflowTests(StackingFixture):
                 "frequency",
                 "ground_state",
                 "excited_state",
+                "natural_transition_orbitals",
                 "hole_electron_analysis",
             },
         )
@@ -943,10 +944,13 @@ class CompleteWorkflowTests(StackingFixture):
 
         missing_nto = dict(plan.artifact_templates)
         del missing_nto["natural_transition_orbitals"]
+        validate_stacking_artifact_lineage(plan.graph, missing_nto)
+        missing_excited_state = dict(plan.artifact_templates)
+        del missing_excited_state["excited_state"]
         with self.assertRaisesRegex(
             StackingWorkflowValidationError, "missing parent"
         ):
-            validate_stacking_artifact_lineage(plan.graph, missing_nto)
+            validate_stacking_artifact_lineage(plan.graph, missing_excited_state)
 
 
 if __name__ == "__main__":

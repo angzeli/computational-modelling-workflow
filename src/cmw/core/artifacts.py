@@ -707,6 +707,39 @@ def validate_artifact_compatibility(
                 raise ArtifactCompatibilityError(
                     "state-resolved NTOArtifact provenance is incomplete"
                 )
+        if artifact.metadata.get("nto_contract") == "multiwfn_nto_v1":
+            pairs = artifact.metadata.get("orbital_pairs")
+            identity = artifact.metadata.get("selected_state_identity")
+            runtime = artifact.provenance.get("runtime")
+            execution = artifact.provenance.get("execution_attempt")
+            if (
+                not isinstance(identity, Mapping)
+                or not identity.get("spin_manifold")
+                or not identity.get("local_state_index")
+                or not isinstance(pairs, Sequence)
+                or isinstance(pairs, (str, bytes))
+                or not pairs
+                or not all(isinstance(item, Mapping) for item in pairs)
+                or not artifact.metadata.get("output_mwfn_file")
+                or not artifact.metadata.get("source_geometry_hash")
+                or not artifact.metadata.get("scientific_protocol_hash")
+                or not artifact.metadata.get("renderer_grammar")
+                or not artifact.metadata.get("parser_grammar")
+                or not artifact.metadata.get("stdin_sha256")
+                or not isinstance(
+                    artifact.metadata.get("source_wavefunction_identity"), Mapping
+                )
+                or not isinstance(
+                    artifact.metadata.get("orca_source_output_identity"), Mapping
+                )
+                or not isinstance(runtime, Mapping)
+                or not runtime.get("version")
+                or not isinstance(execution, Mapping)
+                or execution.get("process_exit_code") != 0
+            ):
+                raise ArtifactCompatibilityError(
+                    "Multiwfn NTO artifact execution or parser provenance is incomplete"
+                )
 
     if isinstance(artifact, HoleElectronArtifact):
         if not any(isinstance(parent, ExcitedStateArtifact) for parent in selected):
@@ -748,6 +781,43 @@ def validate_artifact_compatibility(
             if not normalized:
                 raise ArtifactCompatibilityError(
                     "fragment-resolved hole/electron populations must sum to 1"
+                )
+        if (
+            artifact.metadata.get("hole_electron_contract")
+            == "multiwfn_nonfragment_hea_v1"
+        ):
+            identity = artifact.metadata.get("selected_state_identity")
+            D_validation = artifact.metadata.get("D_validation")
+            runtime = artifact.provenance.get("runtime")
+            execution = artifact.provenance.get("execution_attempt")
+            if (
+                artifact.metadata.get("fragment_resolved") is not False
+                or artifact.metadata.get("fragment_contributions")
+                or artifact.metadata.get("hole_population")
+                or artifact.metadata.get("electron_population")
+                or not isinstance(identity, Mapping)
+                or not identity.get("spin_manifold")
+                or not identity.get("local_state_index")
+                or not isinstance(D_validation, Mapping)
+                or D_validation.get("consistent") is not True
+                or not artifact.metadata.get("source_geometry_hash")
+                or not artifact.metadata.get("scientific_protocol_hash")
+                or not artifact.metadata.get("renderer_grammar")
+                or not artifact.metadata.get("parser_grammar")
+                or not artifact.metadata.get("stdin_sha256")
+                or not isinstance(
+                    artifact.metadata.get("source_wavefunction_identity"), Mapping
+                )
+                or not isinstance(
+                    artifact.metadata.get("orca_source_output_identity"), Mapping
+                )
+                or not isinstance(runtime, Mapping)
+                or not runtime.get("version")
+                or not isinstance(execution, Mapping)
+                or execution.get("process_exit_code") != 0
+            ):
+                raise ArtifactCompatibilityError(
+                    "Multiwfn non-fragment HEA provenance is incomplete"
                 )
 
 

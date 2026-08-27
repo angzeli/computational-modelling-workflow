@@ -262,3 +262,19 @@ artifacts remain readable. Full TDDFT, SOC, NTO, Multiwfn hole/electron
 parsing, fragment-resolved classification, and CT-like selection remain
 outside this implementation. Detailed support boundaries and fixture
 provenance are recorded in `docs/molecular/orca-6.1-tda-excited-states.md`.
+
+## 9. Multiwfn 3.8 NTO and non-fragment HEA implementation update
+
+Fixture-driven Multiwfn 3.8 renderers and session parsers now consume the
+canonical state selected from the quantitative ORCA artifact. The wavefunction
+is the process argument and the matching ORCA output is an explicit menu input.
+Rendered menus, input hashes, source identities, output specifications, runtime
+requirements, execution layouts, and attempts are retained as provenance.
+
+NTO and non-fragment HEA are independent analyses of the same selected state;
+the stacking graph no longer imposes an NTO-to-HEA scientific dependency.
+Artifact finalization requires a captured zero exit code, complete parser
+evidence, and all declared files. HEA preserves printed and centroid-derived
+`D` separately under a decimal-rounding interval policy. Fragment-resolved HEA
+and CT-state resolution remain deferred pending a real two-fragment HOF dimer
+transcript. See `docs/molecular/multiwfn-3.8-excited-state-analysis.md`.

@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "statement": "Scientific text was copied verbatim from the listed Multiwfn 3.8 session logs without numerical editing.",
+  "fixtures": [
+    {
+      "reduced_fixture": "multiwfn_3_8_s1_nto.session.log",
+      "reduced_fixture_sha256": "57ad27e9c36d2239252a7f5e247fd06c9c3b4cffcb392b6146cb166a39691968",
+      "reduced_fixture_size_bytes": 4515,
+      "original_absolute_source_path": "/Users/liangze/Desktop/Tsinghua 2026 Summer/pdi_h2o2_production/pdi-theory-demo/calculations/pdi/multiwfn_analysis/excited_state/nto/s1/pdi_S1_nto.session.log",
+      "source_sha256": "5147eae83edbcdd0f96afab95b175355cabb0a213bebb6ff4027a098f4751177",
+      "source_size_bytes": 11431,
+      "retained_section_headings": [
+        "Multiwfn banner and version",
+        "source wavefunction load",
+        "Electronic excitation analyses",
+        "Summary of excited states",
+        "NTO eigenvalue result block",
+        "mwfn export completion"
+      ],
+      "extraction_method": "Byte-preserving line-range extraction from source lines 1-7, 14-32, 64-91, and 122-144, concatenated in original order."
+    },
+    {
+      "reduced_fixture": "multiwfn_3_8_t2_nto.session.log",
+      "reduced_fixture_sha256": "7bda29841c816071f20695727f90b4d6b6c7874dd4baaa1159c0f985506db199",
+      "reduced_fixture_size_bytes": 4649,
+      "original_absolute_source_path": "/Users/liangze/Desktop/Tsinghua 2026 Summer/pdi_h2o2_production/pdi-theory-demo/calculations/pdi/multiwfn_analysis/excited_state/nto/t2/pdi_T2_nto.session.log",
+      "source_sha256": "65a728e16d726e93cee788b4118216ac2da9f34a71ab911585fbdfa7a9c72a65",
+      "source_size_bytes": 10397,
+      "retained_section_headings": [
+        "Multiwfn banner and version",
+        "source wavefunction load",
+        "Electronic excitation analyses",
+        "triplet selection and state summary",
+        "NTO eigenvalue result block",
+        "mwfn export completion"
+      ],
+      "extraction_method": "Byte-preserving line-range extraction from source lines 1-7, 14-32, 64-94, and 109-131, concatenated in original order."
+    },
+    {
+      "reduced_fixture": "multiwfn_3_8_s1_hea.session.log",
+      "reduced_fixture_sha256": "8bba4fea208caebc5c09aeaa63a9d3b9272531977ff86992420eb4864d38837e",
+      "reduced_fixture_size_bytes": 9955,
+      "original_absolute_source_path": "/Users/liangze/Desktop/Tsinghua 2026 Summer/pdi_h2o2_production/pdi-theory-demo/calculations/pdi/multiwfn_analysis/excited_state/hea/s1/pdi_S1_hea.session.log",
+      "source_sha256": "da5f348380aa4e9048f61d8690ec40cfde054737c68055216a4c6a8e1b28e108",
+      "source_size_bytes": 26854,
+      "retained_section_headings": [
+        "Multiwfn banner and version",
+        "source wavefunction load",
+        "Electronic excitation analyses",
+        "singlet state selection",
+        "medium-grid menu and realized grid",
+        "hole-electron descriptor block",
+        "hole and electron cube export completion"
+      ],
+      "extraction_method": "Byte-preserving line-range extraction from source lines 1-7, 14-33, 64-92, 123-160, 163-185, 187-213, and 215-241, concatenated in original order; progress animation lines were omitted."
+    },
+    {
+      "reduced_fixture": "multiwfn_3_8_t1_hea.session.log",
+      "reduced_fixture_sha256": "2497109c5adc0b0ac619a4147046a46f3cec70f75973365b2c0fa9eb5173155d",
+      "reduced_fixture_size_bytes": 10147,
+      "original_absolute_source_path": "/Users/liangze/Desktop/Tsinghua 2026 Summer/pdi_h2o2_production/pdi-theory-demo/calculations/pdi/multiwfn_analysis/excited_state/hea/t1/pdi_T1_hea.session.log",
+      "source_sha256": "f97ac3d530ca9c45535a78e7cca725d7ade7f79fcaeb09d7c70c47ba8780b9a3",
+      "source_size_bytes": 25951,
+      "retained_section_headings": [
+        "Multiwfn banner and version",
+        "source wavefunction load",
+        "Electronic excitation analyses",
+        "triplet T1 selection",
+        "medium-grid menu and realized grid",
+        "hole-electron descriptor block",
+        "hole and electron cube export completion"
+      ],
+      "extraction_method": "Byte-preserving line-range extraction from source lines 1-7, 14-33, 64-94, 110-147, 150-174, 176-202, and 204-230, concatenated in original order; progress animation lines were omitted."
+    },
+    {
+      "reduced_fixture": "multiwfn_3_8_t2_hea.session.log",
+      "reduced_fixture_sha256": "a82271807c38ec716525672f36662fbfc1bb716a7c1e8c2bfa41ecb0da1378eb",
+      "reduced_fixture_size_bytes": 10220,
+      "original_absolute_source_path": "/Users/liangze/Desktop/Tsinghua 2026 Summer/pdi_h2o2_production/pdi-theory-demo/calculations/pdi/multiwfn_analysis/excited_state/hea/t2/pdi_T2_hea.session.log",
+      "source_sha256": "ebd48a7577377021317b0661380a67659675c94285c4ad85c7d56c5bd294af16",
+      "source_size_bytes": 25951,
+      "retained_section_headings": [
+        "Multiwfn banner and version",
+        "source wavefunction load",
+        "Electronic excitation analyses",
+        "triplet T2 selection",
+        "medium-grid menu and realized grid",
+        "hole-electron descriptor block",
+        "hole and electron cube export completion"
+      ],
+      "extraction_method": "Byte-preserving line-range extraction from source lines 1-7, 14-33, 64-95, 110-147, 150-174, 176-202, and 204-230, concatenated in original order; progress animation lines were omitted."
+    }
+  ]
+}
