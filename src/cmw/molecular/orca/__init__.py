@@ -46,8 +46,11 @@ from .properties import (
     AtomicCharge,
     FragmentOrbitalPopulation,
     FrontierAtomicPopulation,
+    FrontierOrbital,
+    FrontierOrbitalSemantics,
     OrcaGroundStateProperties,
     OrbitalEnergy,
+    parse_ground_state_frontier_orbitals,
     parse_ground_state_properties,
 )
 from .excited_states import (
@@ -72,6 +75,8 @@ __all__ = [
     "AtomicCharge",
     "FragmentOrbitalPopulation",
     "FrontierAtomicPopulation",
+    "FrontierOrbital",
+    "FrontierOrbitalSemantics",
     "FrequencyPolicy",
     "OrcaEvidence",
     "OrcaGeometryContractError",
@@ -100,6 +105,7 @@ __all__ = [
     "parse_orca_output",
     "parse_orca_tda_excited_states",
     "parse_orca_tda_excited_states_file",
+    "parse_ground_state_frontier_orbitals",
     "parse_ground_state_properties",
     "materialize_orca_runtime_contract",
     "prepare_orca_runtime",

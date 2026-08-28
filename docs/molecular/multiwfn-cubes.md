@@ -30,7 +30,8 @@ and provenance.
 - record `wavefunction_semantics.spin_mode`; and
 - record an explicit Multiwfn-compatible format (`molden`, `mwfn`, `wfn`,
   `wfx`, `fch`, or `fchk`); and
-- for FMO, record positive one-based `homo_index` and `lumo_index` values.
+- for FMO, record positive, contiguous, one-based `homo_index` and
+  `lumo_index` values.
 
 The preferred source is a finalized CMW ORCA result whose explicit artifacts
 were recorded at ORCA finalization. Workflows never select the first file with
@@ -41,10 +42,31 @@ An ORCA `.gbw` file is not guessed to be directly compatible. If conversion is
 needed, the converted wavefunction must be an explicit, hash-recorded source
 artifact; CMW will not run an unrecorded conversion behind the user's back.
 
+The generic ORCA-to-Molden conversion finalizer derives restricted HOMO/LUMO
+identity from the finalized ORCA output's occupation table. It requires normal
+termination, unambiguous SCF convergence, a strict `2.0 -> 0.0` occupation
+boundary, and monotonically ordered orbital rows. ORCA's printed orbital label
+is retained as `source_index`, while the downstream Multiwfn contract records
+the orbital's one-based ordinal as `index`, `homo_index`, and `lumo_index`.
+CMW then cross-validates both frontier ordinals, occupations, and energies
+against the generated Molden `[MO]` records before finalizing the converted
+wavefunction.
+
+The resulting `WavefunctionArtifact` records the source result, attempt,
+scientific-artifact parent when available, ORCA output hash, GBW hash,
+converter hash, geometry identity, typed frontier records, and the
+`orca_molden_frontier_v1` semantic contract. These inputs are also part of the
+conversion target/reuse contract, so a changed ORCA result cannot silently
+reuse frontier metadata from an earlier conversion.
+
 For the supported FMO subset, `spin_mode` must be `restricted`, multiplicity
-must be one, and the LUMO index must exceed the HOMO index. Unrestricted and
-open-shell sources fail clearly because alpha and beta frontiers are not
-silently collapsed.
+must be one, `orbital_indexing` must be `one_based`, and the LUMO must be the
+first unoccupied orbital immediately after the HOMO. Unrestricted and
+open-shell conversions retain their spin provenance but deliberately omit a
+flat frontier pair; FMO fails clearly because alpha and beta frontiers are not
+silently collapsed. Version-1 legacy source manifests with positive flat
+frontier indices and no `orbital_indexing` field remain readable as one-based,
+but newly converted ORCA results always carry the explicit typed contract.
 
 ## Runtime
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -18,11 +19,33 @@ from cmw.structure.xyz import geometry_hash, read_xyz
 
 
 @dataclass(frozen=True)
+class FrontierOrbitalIdentity:
+    index: int
+    source_index: int
+    occupation: float
+    energy_hartree: float | None = None
+    energy_ev: float | None = None
+
+
+@dataclass(frozen=True)
+class FrontierSemantics:
+    semantic_contract: str
+    spin_mode: str
+    indexing: str
+    source_indexing: str
+    homo: FrontierOrbitalIdentity
+    lumo: FrontierOrbitalIdentity
+
+
+@dataclass(frozen=True)
 class WavefunctionSemantics:
     spin_mode: str
     format: str
     homo_index: int | None = None
     lumo_index: int | None = None
+    orbital_indexing: str | None = None
+    semantic_contract: str | None = None
+    frontier_orbitals: FrontierSemantics | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +156,97 @@ def validate_source_result(path: Path) -> ValidatedSource:
         raise ValueError("HOMO index must be a positive one-based integer")
     if lumo is not None and (not isinstance(lumo, int) or lumo < 1):
         raise ValueError("LUMO index must be a positive one-based integer")
+    indexing_value = semantics.get("orbital_indexing")
+    if indexing_value is None and (homo is not None or lumo is not None):
+        orbital_indexing = "one_based"
+    elif indexing_value is None:
+        orbital_indexing = None
+    else:
+        orbital_indexing = str(indexing_value).casefold()
+        if orbital_indexing != "one_based":
+            raise ValueError("frontier orbital indexing must be explicitly one_based")
+    semantic_contract = (
+        str(semantics["semantic_contract"])
+        if semantics.get("semantic_contract") is not None
+        else None
+    )
+    frontier_semantics = None
+    raw_frontier = semantics.get("frontier_orbitals")
+    if isinstance(raw_frontier, Mapping) and raw_frontier.get("status") is None:
+        if spin_mode != "restricted":
+            raise ValueError("unrestricted frontier semantics require explicit spin channels")
+        try:
+            raw_homo = raw_frontier["homo"]
+            raw_lumo = raw_frontier["lumo"]
+            if not isinstance(raw_homo, Mapping) or not isinstance(raw_lumo, Mapping):
+                raise TypeError("frontier orbital records must be mappings")
+            frontier_semantics = FrontierSemantics(
+                semantic_contract=str(raw_frontier["semantic_contract"]),
+                spin_mode=str(raw_frontier["spin_mode"]).casefold(),
+                indexing=str(raw_frontier["indexing"]).casefold(),
+                source_indexing=str(raw_frontier["source_indexing"]),
+                homo=FrontierOrbitalIdentity(
+                    index=int(raw_homo["index"]),
+                    source_index=int(raw_homo["source_index"]),
+                    occupation=float(raw_homo["occupation"]),
+                    energy_hartree=(
+                        float(raw_homo["energy_hartree"])
+                        if raw_homo.get("energy_hartree") is not None
+                        else None
+                    ),
+                    energy_ev=(
+                        float(raw_homo["energy_ev"])
+                        if raw_homo.get("energy_ev") is not None
+                        else None
+                    ),
+                ),
+                lumo=FrontierOrbitalIdentity(
+                    index=int(raw_lumo["index"]),
+                    source_index=int(raw_lumo["source_index"]),
+                    occupation=float(raw_lumo["occupation"]),
+                    energy_hartree=(
+                        float(raw_lumo["energy_hartree"])
+                        if raw_lumo.get("energy_hartree") is not None
+                        else None
+                    ),
+                    energy_ev=(
+                        float(raw_lumo["energy_ev"])
+                        if raw_lumo.get("energy_ev") is not None
+                        else None
+                    ),
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("frontier_orbitals semantics are incomplete") from exc
+        if (
+            frontier_semantics.semantic_contract != semantic_contract
+            or frontier_semantics.spin_mode != "restricted"
+            or frontier_semantics.indexing != "one_based"
+            or frontier_semantics.homo.index != homo
+            or frontier_semantics.lumo.index != lumo
+            or frontier_semantics.lumo.index != frontier_semantics.homo.index + 1
+        ):
+            raise ValueError("nested frontier semantics contradict flat one-based indices")
+        for label, orbital, expected_occupation in (
+            ("HOMO", frontier_semantics.homo, 2.0),
+            ("LUMO", frontier_semantics.lumo, 0.0),
+        ):
+            if orbital.index < 1 or orbital.source_index < 0:
+                raise ValueError(f"{label} frontier identity is invalid")
+            values = (
+                orbital.occupation,
+                *(
+                    value
+                    for value in (orbital.energy_hartree, orbital.energy_ev)
+                    if value is not None
+                ),
+            )
+            if any(not math.isfinite(value) for value in values):
+                raise ValueError(f"{label} frontier metadata is not finite")
+            if abs(orbital.occupation - expected_occupation) > 1.0e-6:
+                raise ValueError(f"{label} frontier occupation is incompatible")
+    elif semantic_contract is not None and spin_mode == "restricted":
+        raise ValueError("restricted semantic contract lacks frontier_orbitals evidence")
     wavefunction_path, wavefunction_hash = _validated_artifact(
         result_path, artifacts, "wavefunction"
     )
@@ -171,7 +285,15 @@ def validate_source_result(path: Path) -> ValidatedSource:
         wavefunction_sha256=wavefunction_hash,
         charge=int(target["charge"]),
         multiplicity=int(target["multiplicity"]),
-        wavefunction=WavefunctionSemantics(spin_mode, wavefunction_format, homo, lumo),
+        wavefunction=WavefunctionSemantics(
+            spin_mode,
+            wavefunction_format,
+            homo,
+            lumo,
+            orbital_indexing,
+            semantic_contract,
+            frontier_semantics,
+        ),
         method=method,
         basis=basis,
         upstream_artifact_id=upstream_artifact_id,
@@ -220,6 +342,8 @@ def density_artifact_from_source(source: ValidatedSource) -> DensityArtifact:
 
 __all__ = [
     "ValidatedSource",
+    "FrontierOrbitalIdentity",
+    "FrontierSemantics",
     "WavefunctionSemantics",
     "density_artifact_from_source",
     "validate_source_result",

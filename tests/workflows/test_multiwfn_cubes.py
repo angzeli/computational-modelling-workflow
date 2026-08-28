@@ -52,6 +52,8 @@ class MultiwfnCubeHarness(unittest.TestCase):
         spin_mode: str = "restricted",
         multiplicity: int = 1,
         geometry_identity: str | None = None,
+        orbital_indexing: str | None = "one_based",
+        include_frontiers: bool = True,
     ) -> None:
         identity = geometry_identity or geometry_hash(read_xyz(self.geometry))
         target = JobTarget(
@@ -83,9 +85,16 @@ class MultiwfnCubeHarness(unittest.TestCase):
                     "wavefunction_semantics": {
                         "spin_mode": spin_mode,
                         "format": "molden",
-                        "homo_index": 5,
-                        "lumo_index": 6,
-                        "orbital_indexing": "one_based",
+                        **(
+                            {"homo_index": 5, "lumo_index": 6}
+                            if include_frontiers
+                            else {}
+                        ),
+                        **(
+                            {"orbital_indexing": orbital_indexing}
+                            if orbital_indexing is not None
+                            else {}
+                        ),
                     },
                     "reusable": True,
                 },
@@ -164,6 +173,22 @@ class FmoWorkflowTests(MultiwfnCubeHarness):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("open-shell/unrestricted", completed.stdout)
         self.assertFalse(self.output.exists())
+
+    def test_legacy_flat_frontiers_remain_readable(self) -> None:
+        self.write_source(orbital_indexing=None)
+        plan = json.loads(self.run_workflow(FMO, extra=("--plan",)).stdout)
+        self.assertEqual(plan["configuration"]["homo_index"], 5)
+        self.assertEqual(plan["configuration"]["lumo_index"], 6)
+
+    def test_missing_or_non_one_based_frontiers_fail_closed(self) -> None:
+        self.write_source(include_frontiers=False, orbital_indexing=None)
+        missing = self.run_workflow(FMO, extra=("--plan",), check=False)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("one-based HOMO and LUMO", missing.stdout)
+        self.write_source(orbital_indexing="zero_based")
+        wrong = self.run_workflow(FMO, extra=("--plan",), check=False)
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertIn("explicitly one_based", wrong.stdout)
 
     def test_wrong_lineage_and_missing_cube_fail_closed(self) -> None:
         self.write_source(geometry_identity="0" * 64)
