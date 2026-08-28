@@ -13,6 +13,8 @@ This repository currently contains:
 - an installable `cmw` Python package with safe YAML loading for domain adapters;
 - advisory process-tree health monitoring;
 - strict XYZ parsing and stable geometry identity;
+- ASE-based molecular XYZ-to-POSCAR conversion with deterministic species
+  grouping, atom mapping, vacuum validation, and provenance;
 - factual ORCA output parsing with separate OPT/FREQ/SP/TDDFT validation;
 - versioned targets, attempts, artifacts, lineage, local locks, and fail-closed
   reuse;
@@ -37,8 +39,8 @@ This repository currently contains:
   hole/electron analysis.
 
 It does **not** redistribute Multiwfn or contain dimer-selection science,
-catalytic pathways, ASE, pymatgen, VASP, scheduler execution, cluster locking,
-or generic retry ladders.
+catalytic pathways, pymatgen, VASP execution, `INCAR`/`KPOINTS`/`POTCAR`
+generation, scheduler execution, cluster locking, or generic retry ladders.
 
 ## Architectural scope
 
@@ -75,6 +77,7 @@ plans are documented in [`docs/adapters/hof.md`](docs/adapters/hof.md).
 ├── docs/
 │   ├── architecture/
 │   ├── molecular/
+│   ├── structure/
 │   └── website/
 ├── examples/molecular/
 │   ├── orca/
@@ -114,8 +117,8 @@ plans are documented in [`docs/adapters/hof.md`](docs/adapters/hof.md).
 ## Molecular workflow
 
 The distribution is `computational-modelling-workflow`; its import namespace is
-`cmw`. Version `0.1.0` remains a pre-alpha API. PyYAML is the only runtime
-dependency and is used with `safe_load` for explicit adapter configuration.
+`cmw`. Version `0.1.0` remains a pre-alpha API. ASE provides structure I/O and
+PyYAML is used with `safe_load` for explicit adapter configuration.
 Inspect a public synthetic example without launching ORCA:
 
 ```sh
@@ -127,6 +130,12 @@ geometry lineage, and resume behavior are documented in
 [`docs/molecular/orca-opt-freq-sp.md`](docs/molecular/orca-opt-freq-sp.md).
 Shell owns operational orchestration; Python owns scientific semantics and
 structured state.
+
+Molecular XYZ files can be converted to centered orthorhombic or cubic VASP
+POSCAR cells with charge-aware automatic cell selection, per-face vacuum,
+deterministic species grouping, read-back validation, atom-index mapping, and
+conversion provenance. See
+[`docs/structure/xyz-to-poscar.md`](docs/structure/xyz-to-poscar.md).
 
 Validated ORCA results can be consumed independently by the downstream FMO,
 ESP, and IGMH shell interfaces. Their source contract, explicit grid/fragment
