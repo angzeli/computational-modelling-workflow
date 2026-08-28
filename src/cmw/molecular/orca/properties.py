@@ -48,6 +48,39 @@ class OrbitalEnergy:
 
 
 @dataclass(frozen=True)
+class FrontierOrbital:
+    """One frontier orbital with distinct source and downstream identities."""
+
+    index: int
+    source_index: int
+    occupation: float
+    energy_hartree: float
+    energy_ev: float
+
+
+@dataclass(frozen=True)
+class FrontierOrbitalSemantics:
+    """Validated restricted frontier boundary for Molden/Multiwfn consumers."""
+
+    spin_mode: str
+    indexing: str
+    source_indexing: str
+    homo: FrontierOrbital
+    lumo: FrontierOrbital
+    semantic_contract: str = "orca_molden_frontier_v1"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "semantic_contract": self.semantic_contract,
+            "spin_mode": self.spin_mode,
+            "indexing": self.indexing,
+            "source_indexing": self.source_indexing,
+            "homo": asdict(self.homo),
+            "lumo": asdict(self.lumo),
+        }
+
+
+@dataclass(frozen=True)
 class AtomicCharge:
     atom_index: int
     element: str
@@ -222,7 +255,83 @@ def _orbital_energies(lines: Sequence[str]) -> tuple[OrbitalEnergy, ...]:
             break
     if not rows or len({item.index for item in rows}) != len(rows):
         raise ValueError("ORCA output lacks one unambiguous orbital-energy table")
+    if any(right.index <= left.index for left, right in zip(rows, rows[1:])):
+        raise ValueError("ORCA orbital indices are not strictly increasing")
+    if any(
+        right.energy_hartree < left.energy_hartree - 1.0e-8
+        for left, right in zip(rows, rows[1:])
+    ):
+        raise ValueError("ORCA orbital energies are not monotonically ordered")
     return tuple(rows)
+
+
+def _restricted_frontier(
+    orbitals: Sequence[OrbitalEnergy],
+) -> FrontierOrbitalSemantics:
+    occupation_tolerance = 1.0e-6
+    occupied: list[tuple[int, OrbitalEnergy]] = []
+    virtual: list[tuple[int, OrbitalEnergy]] = []
+    virtual_started = False
+    for ordinal, orbital in enumerate(orbitals, start=1):
+        if abs(orbital.occupation - 2.0) <= occupation_tolerance:
+            if virtual_started:
+                raise ValueError(
+                    "ORCA restricted occupation sequence becomes occupied after a virtual orbital"
+                )
+            occupied.append((ordinal, orbital))
+        elif abs(orbital.occupation) <= occupation_tolerance:
+            virtual_started = True
+            virtual.append((ordinal, orbital))
+        else:
+            raise ValueError(
+                "ORCA restricted frontier is ambiguous because a molecular orbital "
+                f"has partial occupation {orbital.occupation:g}"
+            )
+    if not occupied or not virtual:
+        raise ValueError("ORCA orbital table does not identify HOMO and LUMO")
+    homo_ordinal, homo_source = occupied[-1]
+    lumo_ordinal, lumo_source = virtual[0]
+    if lumo_ordinal != homo_ordinal + 1:
+        raise ValueError("ORCA occupation boundary is not contiguous")
+    return FrontierOrbitalSemantics(
+        spin_mode="restricted",
+        indexing="one_based",
+        source_indexing="orca_output",
+        homo=FrontierOrbital(
+            homo_ordinal,
+            homo_source.index,
+            homo_source.occupation,
+            homo_source.energy_hartree,
+            homo_source.energy_ev,
+        ),
+        lumo=FrontierOrbital(
+            lumo_ordinal,
+            lumo_source.index,
+            lumo_source.occupation,
+            lumo_source.energy_hartree,
+            lumo_source.energy_ev,
+        ),
+    )
+
+
+def parse_ground_state_frontier_orbitals(
+    text: str, *, spin_mode: str
+) -> FrontierOrbitalSemantics:
+    """Derive one-based restricted frontiers from validated ORCA occupations."""
+
+    from .status import parse_orca_output
+
+    normalized_spin = spin_mode.casefold()
+    if normalized_spin != "restricted":
+        raise ValueError(
+            "unrestricted ORCA frontier parsing requires explicit alpha/beta semantics"
+        )
+    evidence = parse_orca_output(text)
+    if not evidence.normal_termination:
+        raise ValueError("ORCA frontier semantics require normal termination")
+    if not evidence.scf_converged or evidence.scf_failure_evidence:
+        raise ValueError("ORCA frontier semantics require unambiguous SCF convergence")
+    return _restricted_frontier(_orbital_energies(text.splitlines()))
 
 
 def _dipole(lines: Sequence[str]) -> tuple[tuple[float, float, float], float]:
@@ -331,14 +440,10 @@ def parse_ground_state_properties(text: str) -> OrcaGroundStateProperties:
     if evidence.final_energy_hartree is None:
         raise ValueError("ORCA output lacks a final electronic energy")
     orbitals = _orbital_energies(text.splitlines())
-    occupied = [item for item in orbitals if item.occupation > 1.0e-8]
-    virtual = [item for item in orbitals if item.occupation <= 1.0e-8]
-    if not occupied or not virtual:
-        raise ValueError("ORCA orbital table does not identify HOMO and LUMO")
-    homo = occupied[-1]
-    lumo = next((item for item in virtual if item.index > homo.index), None)
-    if lumo is None:
-        raise ValueError("ORCA orbital table lacks a LUMO after the HOMO")
+    frontier_semantics = _restricted_frontier(orbitals)
+    by_source_index = {item.index: item for item in orbitals}
+    homo = by_source_index[frontier_semantics.homo.source_index]
+    lumo = by_source_index[frontier_semantics.lumo.source_index]
     vector, magnitude = _dipole(text.splitlines())
     charges = _hirshfeld(text.splitlines())
     frontier, indices = _frontier_populations(text.splitlines(), len(charges))
@@ -365,7 +470,10 @@ __all__ = [
     "AtomicCharge",
     "FrontierAtomicPopulation",
     "FragmentOrbitalPopulation",
+    "FrontierOrbital",
+    "FrontierOrbitalSemantics",
     "OrcaGroundStateProperties",
     "OrbitalEnergy",
+    "parse_ground_state_frontier_orbitals",
     "parse_ground_state_properties",
 ]

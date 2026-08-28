@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from cmw.molecular.orca.properties import parse_ground_state_properties
+from cmw.molecular.orca.properties import (
+    parse_ground_state_frontier_orbitals,
+    parse_ground_state_properties,
+)
 
 
 OUTPUT = """
@@ -48,6 +51,36 @@ ORCA TERMINATED NORMALLY
 
 
 class OrcaGroundStatePropertyTests(unittest.TestCase):
+    def test_derives_result_backed_one_based_frontier_semantics(self) -> None:
+        result = parse_ground_state_frontier_orbitals(
+            OUTPUT, spin_mode="restricted"
+        )
+
+        self.assertEqual((result.homo.index, result.lumo.index), (2, 3))
+        self.assertEqual(
+            (result.homo.source_index, result.lumo.source_index), (1, 2)
+        )
+        self.assertEqual(result.indexing, "one_based")
+        self.assertEqual(result.source_indexing, "orca_output")
+
+    def test_frontier_parser_fails_on_partial_occupation(self) -> None:
+        partial = OUTPUT.replace("1   2.0000", "1   1.5000")
+        with self.assertRaisesRegex(ValueError, "partial occupation"):
+            parse_ground_state_frontier_orbitals(
+                partial, spin_mode="restricted"
+            )
+
+    def test_frontier_parser_requires_valid_result_and_spin_contract(self) -> None:
+        with self.assertRaisesRegex(ValueError, "normal termination"):
+            parse_ground_state_frontier_orbitals(
+                OUTPUT.replace("ORCA TERMINATED NORMALLY", ""),
+                spin_mode="restricted",
+            )
+        with self.assertRaisesRegex(ValueError, "alpha/beta"):
+            parse_ground_state_frontier_orbitals(
+                OUTPUT, spin_mode="unrestricted"
+            )
+
     def test_extracts_energy_frontiers_dipole_charge_and_populations(self) -> None:
         result = parse_ground_state_properties(OUTPUT)
 
