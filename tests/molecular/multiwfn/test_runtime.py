@@ -331,7 +331,15 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(Path(source_argument).exists())
             alias_record = (attempt / "multiwfn-runtime-alias.txt").read_text()
             self.assertIn("settings=", alias_record)
+            self.assertIn("settings_target=", alias_record)
+            settings_target = next(
+                line.removeprefix("settings_target=")
+                for line in alias_record.splitlines()
+                if line.startswith("settings_target=")
+            )
+            self.assertTrue(Path(settings_target, "settings.ini").is_file())
             self.assertIn("source=", alias_record)
+            self.assertIn(f"source_target={source.resolve()}", alias_record)
 
 
 if __name__ == "__main__":

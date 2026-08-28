@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 from pathlib import Path
 import re
 import tempfile
@@ -16,6 +17,7 @@ from cmw.core.artifacts import (
     validate_artifact_compatibility,
 )
 from cmw.core.execution_layout import ExecutionLayout
+from cmw.core.provenance import file_hash
 from cmw.molecular.excited_states import (
     StateSelectionResult,
     StateSelectionStatus,
@@ -23,11 +25,13 @@ from cmw.molecular.excited_states import (
 from cmw.molecular.multiwfn.excited_states import (
     Multiwfn38HoleElectronRenderer,
     Multiwfn38NtoRenderer,
+    Multiwfn2026NtoRenderer,
     MultiwfnFinalizationError,
     finalize_multiwfn_hole_electron_artifact,
     finalize_multiwfn_nto_artifact,
     parse_multiwfn38_hole_electron_session_file,
     parse_multiwfn38_nto_session_file,
+    parse_multiwfn2026_nto_session_file,
 )
 from cmw.molecular.multiwfn.runtime import MENU_CONTRACT
 from cmw.molecular.orca.excited_states import parse_orca_tda_excited_states_file
@@ -335,6 +339,87 @@ class MultiwfnArtifactIntegrationTests(unittest.TestCase):
                 runtime_provenance=self.runtime,
             )
         self.assertNotEqual(excited.artifact_id, s1_excited.artifact_id)
+
+    def test_2026_artifact_finalizes_through_verified_short_alias_lineage(self) -> None:
+        excited, state, output = self._excited_artifact("singlet", 1)
+        layout = self._layout("multiwfn_2026_nto")
+        settings = self.root / "settings.ini"
+        settings.write_text("nthreads= 8\n", encoding="utf-8")
+        settings_identity = {
+            "settings_path": str(settings.resolve()),
+            "settings_sha256": file_hash(settings),
+            "settings_source_sha256": "a" * 64,
+            "requested_nthreads": 8,
+        }
+        rendered = Multiwfn2026NtoRenderer().render(
+            state,
+            orca_output_path=output,
+            source_wavefunction_path=self.wavefunction,
+            scientific_protocol_hash=excited.metadata["scientific_protocol_hash"],
+            source_geometry_hash=excited.metadata["source_geometry_hash"],
+            execution_layout=layout.to_dict(),
+            execution_attempt={"attempt_id": "attempt_001"},
+            settings_identity=settings_identity,
+        )
+        source_alias = "/tmp/cmw-multiwfn.fixture/source-wavefunction"
+        text = (
+            MULTIWFN_ROOT / "multiwfn_2026_7_15_s1_nto.session.log"
+        ).read_text()
+        text = re.sub(
+            r"(?m)^(\s*Loaded\s+).+?(\s+successfully!\s*)$",
+            rf"\g<1>{source_alias}\g<2>",
+            text,
+            count=1,
+        )
+        files = self._materialize_outputs(rendered, text)
+        parsed = parse_multiwfn2026_nto_session_file(
+            Path(files["session_log"]),
+            expected_state=state,
+            output_mwfn_path=files["nto_mwfn"],
+        )
+        manifest = layout.working_directory / "multiwfn-runtime-alias.txt"
+        manifest.write_text(
+            "settings=/tmp/cmw-multiwfn.fixture/runtime\n"
+            f"settings_target={settings.parent.resolve()}\n"
+            f"source={source_alias}\n"
+            f"source_target={self.wavefunction.resolve()}\n",
+            encoding="utf-8",
+        )
+        runtime = {
+            "program": "Multiwfn",
+            "version": "2026.7.15",
+            "menu_contract": MENU_CONTRACT,
+            "executable": "/fixture/Multiwfn",
+            **settings_identity,
+            "alias_manifest_path": str(manifest),
+            "alias_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        }
+
+        artifact = finalize_multiwfn_nto_artifact(
+            excited,
+            rendered,
+            parsed,
+            process_exit_code=0,
+            files=files,
+            runtime_provenance=runtime,
+        )
+
+        self.assertTrue(artifact.validation.passed)
+        self.assertEqual(artifact.metadata["parser_grammar"], rendered.grammar_id)
+        self.assertEqual(
+            artifact.metadata["generation_method"],
+            "Multiwfn 2026.7.15 natural transition orbitals",
+        )
+        manifest.write_text("tampered\n", encoding="utf-8")
+        with self.assertRaisesRegex(MultiwfnFinalizationError, "manifest hash"):
+            finalize_multiwfn_nto_artifact(
+                excited,
+                rendered,
+                parsed,
+                process_exit_code=0,
+                files=files,
+                runtime_provenance=runtime,
+            )
 
 
 if __name__ == "__main__":

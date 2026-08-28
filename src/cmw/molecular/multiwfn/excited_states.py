@@ -1,4 +1,4 @@
-"""Versioned Multiwfn 3.8 excited-state render, parse, and finalization contracts."""
+"""Versioned Multiwfn excited-state render, parse, and finalization contracts."""
 
 from __future__ import annotations
 
@@ -33,10 +33,16 @@ MULTIWFN_EXCITED_STATE_RENDERER_VERSION = "1.0.0"
 MULTIWFN_EXCITED_STATE_PARSER_VERSION = "1.0.0"
 MULTIWFN38_NTO_GRAMMAR = "multiwfn_3_8_nto_v1"
 MULTIWFN38_HEA_GRAMMAR = "multiwfn_3_8_nonfragment_hea_v1"
+MULTIWFN2026_7_15_VERSION = "2026.7.15"
+MULTIWFN2026_NTO_GRAMMAR = "multiwfn_2026_7_15_nto_v1"
+MULTIWFN2026_HEA_GRAMMAR = "multiwfn_2026_7_15_nonfragment_hea_v1"
 D_ROUNDING_POLICY = "decimal_rounding_interval_overlap_v1"
 
 FLOAT = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][+-]?\d+)?"
-VERSION_RE = re.compile(r"^\s*Version\s+([^,\s]+)", re.I | re.M)
+ANSI_ESCAPE = r"(?:\x1b\[[0-9;]*m)*"
+VERSION_RE = re.compile(
+    rf"^{ANSI_ESCAPE}\s*Version\s+([^,\s]+)", re.I | re.M
+)
 THREAD_RE = re.compile(r"Number of parallel threads:\s*(\d+)", re.I)
 LOADED_WAVEFUNCTION_RE = re.compile(r"^\s*Loaded\s+(.+?)\s+successfully!\s*$", re.M)
 SELECTED_STATE_RE = re.compile(
@@ -104,17 +110,73 @@ def _required_match(pattern: re.Pattern[str], text: str, label: str) -> re.Match
     return match
 
 
-def _require_multiwfn38(version: str) -> None:
+def _version_fields(version: str) -> tuple[int, ...]:
     try:
-        fields = tuple(int(item) for item in version.split("."))
+        return tuple(int(item) for item in version.split("."))
     except ValueError as exc:
         raise UnsupportedMultiwfnFormatError(
             f"invalid Multiwfn version {version!r}"
         ) from exc
-    if fields[:2] != (3, 8):
-        raise UnsupportedMultiwfnFormatError(
-            f"only fixture-tested Multiwfn 3.8 is supported; found {version}"
+
+
+def _grammar_for_version(version: str, analysis: str) -> str:
+    fields = _version_fields(version)
+    if fields[:2] == (3, 8):
+        return (
+            MULTIWFN38_NTO_GRAMMAR
+            if analysis == "nto"
+            else MULTIWFN38_HEA_GRAMMAR
         )
+    if version == MULTIWFN2026_7_15_VERSION:
+        return (
+            MULTIWFN2026_NTO_GRAMMAR
+            if analysis == "nto"
+            else MULTIWFN2026_HEA_GRAMMAR
+        )
+    raise UnsupportedMultiwfnFormatError(
+        "only fixture-tested Multiwfn 3.8.x and exact 2026.7.15 "
+        f"excited-state grammars are supported; found {version}"
+    )
+
+
+def _require_grammar(version: str, analysis: str, grammar_id: str) -> None:
+    resolved = _grammar_for_version(version, analysis)
+    if resolved != grammar_id:
+        raise UnsupportedMultiwfnFormatError(
+            f"Multiwfn {version} requires {resolved}, not {grammar_id}"
+        )
+
+
+def _settings_identity(
+    value: Mapping[str, object] | None,
+    *,
+    required: bool,
+) -> dict[str, object]:
+    if value is None:
+        if required:
+            raise MultiwfnExcitedStateError(
+                "exact-version renderer requires immutable settings identity"
+            )
+        return {}
+    settings = dict(value)
+    path_value = settings.get("settings_path")
+    digest = settings.get("settings_sha256")
+    source_digest = settings.get("settings_source_sha256")
+    threads = settings.get("requested_nthreads")
+    if not isinstance(path_value, str) or not Path(path_value).is_absolute():
+        raise MultiwfnExcitedStateError("settings_path must be absolute")
+    try:
+        path = Path(path_value).resolve(strict=True)
+    except OSError as exc:
+        raise MultiwfnExcitedStateError("settings_path is missing") from exc
+    if not isinstance(digest, str) or digest != file_hash(path):
+        raise MultiwfnExcitedStateError("settings identity hash mismatch")
+    if not isinstance(source_digest, str) or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None:
+        raise MultiwfnExcitedStateError("settings source hash is required")
+    if isinstance(threads, bool) or not isinstance(threads, int) or threads < 1:
+        raise MultiwfnExcitedStateError("settings thread count must be positive")
+    settings["settings_path"] = str(path)
+    return settings
 
 
 def _safe_prefix(value: str) -> str:
@@ -247,6 +309,8 @@ class Multiwfn38NtoRenderer:
     """Render the fixture-tested Multiwfn 3.8 NTO menu grammar."""
 
     grammar_id = MULTIWFN38_NTO_GRAMMAR
+    exact_version: str | None = None
+    settings_required = False
 
     def render(
         self,
@@ -259,6 +323,7 @@ class Multiwfn38NtoRenderer:
         execution_layout: Mapping[str, object],
         execution_attempt: Mapping[str, object],
         output_prefix: str | None = None,
+        settings_identity: Mapping[str, object] | None = None,
     ) -> RenderedMultiwfnExcitedStateInput:
         prefix = _safe_prefix(output_prefix or selected_state.identity.label)
         orca = _file_identity(orca_output_path)
@@ -307,7 +372,15 @@ class Multiwfn38NtoRenderer:
             execution_attempt,
             {
                 "required_menu_contract": MENU_CONTRACT,
-                "supported_multiwfn_series": "3.8",
+                **(
+                    {"exact_multiwfn_version": self.exact_version}
+                    if self.exact_version is not None
+                    else {"supported_multiwfn_series": "3.8"}
+                ),
+                **_settings_identity(
+                    settings_identity,
+                    required=self.settings_required,
+                ),
             },
         )
 
@@ -316,6 +389,9 @@ class Multiwfn38HoleElectronRenderer:
     """Render the fixture-tested non-fragment Multiwfn 3.8 HEA grammar."""
 
     grammar_id = MULTIWFN38_HEA_GRAMMAR
+    exact_version: str | None = None
+    settings_required = False
+    exit_menu = ("0", "0", "q")
 
     def render(
         self,
@@ -329,6 +405,7 @@ class Multiwfn38HoleElectronRenderer:
         execution_attempt: Mapping[str, object],
         output_prefix: str | None = None,
         fragment_definitions: Sequence[object] | None = None,
+        settings_identity: Mapping[str, object] | None = None,
     ) -> RenderedMultiwfnExcitedStateInput:
         if fragment_definitions:
             raise DeferredFragmentAnalysisError(
@@ -352,9 +429,7 @@ class Multiwfn38HoleElectronRenderer:
             "1",
             "11",
             "1",
-            "0",
-            "0",
-            "q",
+            *self.exit_menu,
         )
         outputs = (
             MultiwfnOutputSpec(
@@ -388,11 +463,36 @@ class Multiwfn38HoleElectronRenderer:
             execution_attempt,
             {
                 "required_menu_contract": MENU_CONTRACT,
-                "supported_multiwfn_series": "3.8",
+                **(
+                    {"exact_multiwfn_version": self.exact_version}
+                    if self.exact_version is not None
+                    else {"supported_multiwfn_series": "3.8"}
+                ),
                 "grid_quality": "medium",
                 "fragment_resolved": False,
+                **_settings_identity(
+                    settings_identity,
+                    required=self.settings_required,
+                ),
             },
         )
+
+
+class Multiwfn2026NtoRenderer(Multiwfn38NtoRenderer):
+    """Render the empirically validated exact Multiwfn 2026.7.15 NTO grammar."""
+
+    grammar_id = MULTIWFN2026_NTO_GRAMMAR
+    exact_version = MULTIWFN2026_7_15_VERSION
+    settings_required = True
+
+
+class Multiwfn2026HoleElectronRenderer(Multiwfn38HoleElectronRenderer):
+    """Render the exact Multiwfn 2026.7.15 non-fragment HEA grammar."""
+
+    grammar_id = MULTIWFN2026_HEA_GRAMMAR
+    exact_version = MULTIWFN2026_7_15_VERSION
+    settings_required = True
+    exit_menu = ("0", "0", "0", "q")
 
 
 def build_excited_state_command_spec(
@@ -407,11 +507,23 @@ def build_excited_state_command_spec(
     version = runtime.get("version")
     if not isinstance(version, str):
         raise MultiwfnExcitedStateError("Multiwfn runtime version is required")
-    _require_multiwfn38(version)
+    analysis = "nto" if rendered.analysis == "nto" else "hole_electron"
+    _require_grammar(version, analysis, rendered.grammar_id)
     if runtime.get("menu_contract") != MENU_CONTRACT:
         raise MultiwfnExcitedStateError(
             "Multiwfn runtime menu contract does not match the renderer"
         )
+    if version == MULTIWFN2026_7_15_VERSION:
+        for key in (
+            "settings_path",
+            "settings_sha256",
+            "settings_source_sha256",
+            "requested_nthreads",
+        ):
+            if rendered.settings_metadata.get(key) != runtime.get(key):
+                raise MultiwfnExcitedStateError(
+                    f"runtime {key} does not match the rendered settings identity"
+                )
     planned_directory = Path(
         str(rendered.execution_layout["working_directory"])
     ).resolve()
@@ -491,13 +603,16 @@ def _rounded_value_contains(
 def _parse_state_evidence(
     text: str,
     expected_state: ExcitedStateRecord,
+    *,
+    analysis: str,
+    grammar_id: str,
 ) -> MultiwfnSessionStateEvidence:
     version_match = _single_match(VERSION_RE, text, "Multiwfn version banner")
     version = version_match.group(1)
     parsed_by_runtime = parse_version(version_match.group(0))
     if parsed_by_runtime != version:
         raise MultiwfnSessionParseError("Multiwfn version banner is ambiguous")
-    _require_multiwfn38(version)
+    _require_grammar(version, analysis, grammar_id)
     selected = int(
         _single_match(
             SELECTED_STATE_RE,
@@ -698,16 +813,22 @@ NTO_SUM_RE = re.compile(
 )
 
 
-def parse_multiwfn38_nto_session(
+def _parse_multiwfn_nto_session(
     text: str,
     *,
     expected_state: ExcitedStateRecord,
+    grammar_id: str,
     output_mwfn_path: str | None = None,
     generated_output_references: Sequence[str] = (),
     cumulative_weight_cutoff: float | None = None,
     source_provenance: Mapping[str, object] | None = None,
 ) -> ParsedMultiwfnNto:
-    state = _parse_state_evidence(text, expected_state)
+    state = _parse_state_evidence(
+        text,
+        expected_state,
+        analysis="nto",
+        grammar_id=grammar_id,
+    )
     header = _single_match(NTO_HEADER_RE, text, "NTO eigenvalue header")
     sum_matches = list(NTO_SUM_RE.finditer(text, header.end()))
     if len(sum_matches) != 1:
@@ -757,6 +878,80 @@ def parse_multiwfn38_nto_session(
         tuple(str(item) for item in generated_output_references),
         True,
         dict(source_provenance or {}),
+        grammar_id=grammar_id,
+    )
+
+
+def parse_multiwfn38_nto_session(
+    text: str,
+    *,
+    expected_state: ExcitedStateRecord,
+    output_mwfn_path: str | None = None,
+    generated_output_references: Sequence[str] = (),
+    cumulative_weight_cutoff: float | None = None,
+    source_provenance: Mapping[str, object] | None = None,
+) -> ParsedMultiwfnNto:
+    return _parse_multiwfn_nto_session(
+        text,
+        expected_state=expected_state,
+        grammar_id=MULTIWFN38_NTO_GRAMMAR,
+        output_mwfn_path=output_mwfn_path,
+        generated_output_references=generated_output_references,
+        cumulative_weight_cutoff=cumulative_weight_cutoff,
+        source_provenance=source_provenance,
+    )
+
+
+def parse_multiwfn2026_nto_session(
+    text: str,
+    *,
+    expected_state: ExcitedStateRecord,
+    output_mwfn_path: str | None = None,
+    generated_output_references: Sequence[str] = (),
+    cumulative_weight_cutoff: float | None = None,
+    source_provenance: Mapping[str, object] | None = None,
+) -> ParsedMultiwfnNto:
+    return _parse_multiwfn_nto_session(
+        text,
+        expected_state=expected_state,
+        grammar_id=MULTIWFN2026_NTO_GRAMMAR,
+        output_mwfn_path=output_mwfn_path,
+        generated_output_references=generated_output_references,
+        cumulative_weight_cutoff=cumulative_weight_cutoff,
+        source_provenance=source_provenance,
+    )
+
+
+def _parse_multiwfn_nto_session_file(
+    path: Path,
+    *,
+    expected_state: ExcitedStateRecord,
+    grammar_id: str,
+    output_mwfn_path: str | None = None,
+    generated_output_references: Sequence[str] = (),
+    cumulative_weight_cutoff: float | None = None,
+) -> ParsedMultiwfnNto:
+    source = path.expanduser().resolve(strict=True)
+    data = source.read_bytes()
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MultiwfnSessionParseError("NTO session log is not UTF-8 text") from exc
+    return _parse_multiwfn_nto_session(
+        text,
+        expected_state=expected_state,
+        grammar_id=grammar_id,
+        output_mwfn_path=output_mwfn_path,
+        generated_output_references=generated_output_references,
+        cumulative_weight_cutoff=cumulative_weight_cutoff,
+        source_provenance={
+            "session_log_path": str(source),
+            "session_log_sha256": hashlib.sha256(data).hexdigest(),
+            "session_log_size_bytes": len(data),
+            "parser_version": MULTIWFN_EXCITED_STATE_PARSER_VERSION,
+            "fixture_tested_grammar_version": grammar_id,
+            "process_exit_code_recorded": False,
+        },
     )
 
 
@@ -768,26 +963,31 @@ def parse_multiwfn38_nto_session_file(
     generated_output_references: Sequence[str] = (),
     cumulative_weight_cutoff: float | None = None,
 ) -> ParsedMultiwfnNto:
-    source = path.expanduser().resolve(strict=True)
-    data = source.read_bytes()
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise MultiwfnSessionParseError("NTO session log is not UTF-8 text") from exc
-    return parse_multiwfn38_nto_session(
-        text,
+    return _parse_multiwfn_nto_session_file(
+        path,
         expected_state=expected_state,
+        grammar_id=MULTIWFN38_NTO_GRAMMAR,
         output_mwfn_path=output_mwfn_path,
         generated_output_references=generated_output_references,
         cumulative_weight_cutoff=cumulative_weight_cutoff,
-        source_provenance={
-            "session_log_path": str(source),
-            "session_log_sha256": hashlib.sha256(data).hexdigest(),
-            "session_log_size_bytes": len(data),
-            "parser_version": MULTIWFN_EXCITED_STATE_PARSER_VERSION,
-            "fixture_tested_grammar_version": MULTIWFN38_NTO_GRAMMAR,
-            "process_exit_code_recorded": False,
-        },
+    )
+
+
+def parse_multiwfn2026_nto_session_file(
+    path: Path,
+    *,
+    expected_state: ExcitedStateRecord,
+    output_mwfn_path: str | None = None,
+    generated_output_references: Sequence[str] = (),
+    cumulative_weight_cutoff: float | None = None,
+) -> ParsedMultiwfnNto:
+    return _parse_multiwfn_nto_session_file(
+        path,
+        expected_state=expected_state,
+        grammar_id=MULTIWFN2026_NTO_GRAMMAR,
+        output_mwfn_path=output_mwfn_path,
+        generated_output_references=generated_output_references,
+        cumulative_weight_cutoff=cumulative_weight_cutoff,
     )
 
 
@@ -1036,18 +1236,24 @@ def _scalar(pattern: str, text: str, label: str) -> tuple[float, str]:
     return _number(match.group(1)), match.group(1)
 
 
-def parse_multiwfn38_hole_electron_session(
+def _parse_multiwfn_hole_electron_session(
     text: str,
     *,
     expected_state: ExcitedStateRecord,
     expected_grid_quality: str,
+    grammar_id: str,
     source_provenance: Mapping[str, object] | None = None,
 ) -> ParsedMultiwfnHoleElectron:
     if expected_grid_quality != "medium":
         raise UnsupportedMultiwfnFormatError(
             "only the fixture-tested medium-grid HEA contract is supported"
         )
-    state = _parse_state_evidence(text, expected_state)
+    state = _parse_state_evidence(
+        text,
+        expected_state,
+        analysis="hole_electron",
+        grammar_id=grammar_id,
+    )
     origin = _vector_match(GRID_ORIGIN_RE, text, "grid origin")
     end = _vector_match(GRID_END_RE, text, "grid end point")
     spacing = _vector_match(GRID_SPACING_RE, text, "grid spacing")
@@ -1234,6 +1440,68 @@ def parse_multiwfn38_hole_electron_session(
         ("hole.cub", "electron.cub"),
         True,
         dict(source_provenance or {}),
+        grammar_id=grammar_id,
+    )
+
+
+def parse_multiwfn38_hole_electron_session(
+    text: str,
+    *,
+    expected_state: ExcitedStateRecord,
+    expected_grid_quality: str,
+    source_provenance: Mapping[str, object] | None = None,
+) -> ParsedMultiwfnHoleElectron:
+    return _parse_multiwfn_hole_electron_session(
+        text,
+        expected_state=expected_state,
+        expected_grid_quality=expected_grid_quality,
+        grammar_id=MULTIWFN38_HEA_GRAMMAR,
+        source_provenance=source_provenance,
+    )
+
+
+def parse_multiwfn2026_hole_electron_session(
+    text: str,
+    *,
+    expected_state: ExcitedStateRecord,
+    expected_grid_quality: str,
+    source_provenance: Mapping[str, object] | None = None,
+) -> ParsedMultiwfnHoleElectron:
+    return _parse_multiwfn_hole_electron_session(
+        text,
+        expected_state=expected_state,
+        expected_grid_quality=expected_grid_quality,
+        grammar_id=MULTIWFN2026_HEA_GRAMMAR,
+        source_provenance=source_provenance,
+    )
+
+
+def _parse_multiwfn_hole_electron_session_file(
+    path: Path,
+    *,
+    expected_state: ExcitedStateRecord,
+    expected_grid_quality: str,
+    grammar_id: str,
+) -> ParsedMultiwfnHoleElectron:
+    source = path.expanduser().resolve(strict=True)
+    data = source.read_bytes()
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MultiwfnSessionParseError("HEA session log is not UTF-8 text") from exc
+    return _parse_multiwfn_hole_electron_session(
+        text,
+        expected_state=expected_state,
+        expected_grid_quality=expected_grid_quality,
+        grammar_id=grammar_id,
+        source_provenance={
+            "session_log_path": str(source),
+            "session_log_sha256": hashlib.sha256(data).hexdigest(),
+            "session_log_size_bytes": len(data),
+            "parser_version": MULTIWFN_EXCITED_STATE_PARSER_VERSION,
+            "fixture_tested_grammar_version": grammar_id,
+            "process_exit_code_recorded": False,
+        },
     )
 
 
@@ -1243,24 +1511,25 @@ def parse_multiwfn38_hole_electron_session_file(
     expected_state: ExcitedStateRecord,
     expected_grid_quality: str,
 ) -> ParsedMultiwfnHoleElectron:
-    source = path.expanduser().resolve(strict=True)
-    data = source.read_bytes()
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise MultiwfnSessionParseError("HEA session log is not UTF-8 text") from exc
-    return parse_multiwfn38_hole_electron_session(
-        text,
+    return _parse_multiwfn_hole_electron_session_file(
+        path,
         expected_state=expected_state,
         expected_grid_quality=expected_grid_quality,
-        source_provenance={
-            "session_log_path": str(source),
-            "session_log_sha256": hashlib.sha256(data).hexdigest(),
-            "session_log_size_bytes": len(data),
-            "parser_version": MULTIWFN_EXCITED_STATE_PARSER_VERSION,
-            "fixture_tested_grammar_version": MULTIWFN38_HEA_GRAMMAR,
-            "process_exit_code_recorded": False,
-        },
+        grammar_id=MULTIWFN38_HEA_GRAMMAR,
+    )
+
+
+def parse_multiwfn2026_hole_electron_session_file(
+    path: Path,
+    *,
+    expected_state: ExcitedStateRecord,
+    expected_grid_quality: str,
+) -> ParsedMultiwfnHoleElectron:
+    return _parse_multiwfn_hole_electron_session_file(
+        path,
+        expected_state=expected_state,
+        expected_grid_quality=expected_grid_quality,
+        grammar_id=MULTIWFN2026_HEA_GRAMMAR,
     )
 
 
@@ -1299,6 +1568,79 @@ def _excited_state_parent_check(
         )
 
 
+def _alias_manifest(
+    runtime_provenance: Mapping[str, object],
+) -> dict[str, str] | None:
+    value = runtime_provenance.get("alias_manifest_path")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise MultiwfnFinalizationError("runtime alias manifest path is invalid")
+    try:
+        path = Path(value).expanduser().resolve(strict=True)
+        data = path.read_bytes()
+        text = data.decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise MultiwfnFinalizationError(
+            "runtime alias manifest is missing or unreadable"
+        ) from exc
+    expected_hash = runtime_provenance.get("alias_manifest_sha256")
+    if not isinstance(expected_hash, str) or hashlib.sha256(data).hexdigest() != expected_hash:
+        raise MultiwfnFinalizationError("runtime alias manifest hash mismatch")
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line or "=" not in line:
+            raise MultiwfnFinalizationError("runtime alias manifest is malformed")
+        key, item = line.split("=", 1)
+        if key in result or key not in {
+            "settings",
+            "settings_target",
+            "source",
+            "source_target",
+        }:
+            raise MultiwfnFinalizationError("runtime alias manifest is malformed")
+        result[key] = item
+    required = {"settings", "settings_target", "source", "source_target"}
+    if set(result) != required:
+        raise MultiwfnFinalizationError(
+            "runtime alias manifest lacks required source/settings identities"
+        )
+    return result
+
+
+def _validate_loaded_wavefunction(
+    loaded_wavefunction_path: str,
+    rendered: RenderedMultiwfnExcitedStateInput,
+    runtime_provenance: Mapping[str, object],
+) -> None:
+    expected_wavefunction = Path(
+        str(rendered.source_wavefunction_identity["path"])
+    ).resolve()
+    manifest = _alias_manifest(runtime_provenance)
+    if manifest is None:
+        loaded = Path(loaded_wavefunction_path).expanduser().resolve()
+        if loaded != expected_wavefunction:
+            raise MultiwfnFinalizationError(
+                "session wavefunction does not match the rendered command source"
+            )
+        return
+    if loaded_wavefunction_path != manifest["source"]:
+        raise MultiwfnFinalizationError(
+            "session wavefunction does not match the recorded runtime alias"
+        )
+    source_target = Path(manifest["source_target"]).expanduser().resolve()
+    if source_target != expected_wavefunction:
+        raise MultiwfnFinalizationError(
+            "runtime alias source target differs from the rendered source"
+        )
+    settings_target = Path(manifest["settings_target"]).expanduser().resolve()
+    expected_settings = Path(str(runtime_provenance.get("settings_path", ""))).resolve()
+    if settings_target != expected_settings.parent:
+        raise MultiwfnFinalizationError(
+            "runtime alias settings target differs from runtime provenance"
+        )
+
+
 def _finalization_evidence(
     excited_state: ExcitedStateArtifact,
     rendered: RenderedMultiwfnExcitedStateInput,
@@ -1314,7 +1656,8 @@ def _finalization_evidence(
         raise MultiwfnFinalizationError(
             "artifact finalization requires a captured zero process exit code"
         )
-    _require_multiwfn38(parsed_version)
+    analysis = "nto" if rendered.analysis == "nto" else "hole_electron"
+    _require_grammar(parsed_version, analysis, rendered.grammar_id)
     runtime_version = runtime_provenance.get("version")
     if not isinstance(runtime_version, str) or runtime_version != parsed_version:
         raise MultiwfnFinalizationError(
@@ -1324,14 +1667,11 @@ def _finalization_evidence(
         raise MultiwfnFinalizationError("runtime menu contract is incompatible")
     if parsed_identity != rendered.canonical_identity:
         raise MultiwfnFinalizationError("parsed and rendered state identities differ")
-    loaded = Path(loaded_wavefunction_path).expanduser().resolve()
-    expected_wavefunction = Path(
-        str(rendered.source_wavefunction_identity["path"])
-    ).resolve()
-    if loaded != expected_wavefunction:
-        raise MultiwfnFinalizationError(
-            "session wavefunction does not match the rendered command source"
-        )
+    _validate_loaded_wavefunction(
+        loaded_wavefunction_path,
+        rendered,
+        runtime_provenance,
+    )
     if rendered.scientific_protocol_hash != excited_state.metadata.get(
         "scientific_protocol_hash"
     ):
@@ -1387,8 +1727,13 @@ def finalize_multiwfn_nto_artifact(
     files: Mapping[str, str | Path],
     runtime_provenance: Mapping[str, object],
 ) -> NTOArtifact:
-    if rendered.analysis != "nto" or rendered.grammar_id != MULTIWFN38_NTO_GRAMMAR:
+    if rendered.analysis != "nto" or rendered.grammar_id not in {
+        MULTIWFN38_NTO_GRAMMAR,
+        MULTIWFN2026_NTO_GRAMMAR,
+    }:
         raise MultiwfnFinalizationError("NTO finalization received another grammar")
+    if parsed.grammar_id != rendered.grammar_id:
+        raise MultiwfnFinalizationError("NTO parser and renderer grammars differ")
     if not parsed.parser_complete:
         raise MultiwfnFinalizationError("NTO parser evidence is incomplete")
     _excited_state_parent_check(excited_state, rendered.selected_state)
@@ -1448,7 +1793,10 @@ def finalize_multiwfn_nto_artifact(
             "excited_state_artifact": excited_state.artifact_id,
             "selected_state_identity": rendered.canonical_identity.to_dict(),
             "state_source_indices": _state_metadata(rendered.selected_state),
-            "generation_method": "Multiwfn 3.8 natural transition orbitals",
+            "generation_method": (
+                f"Multiwfn {parsed.state_evidence.multiwfn_version} "
+                "natural transition orbitals"
+            ),
             "orbital_pairs": [item.to_dict() for item in parsed.pairs],
             "printed_pair_count": parsed.printed_pair_count,
             "printed_cumulative_weight": (
@@ -1491,9 +1839,14 @@ def finalize_multiwfn_hole_electron_artifact(
 ) -> HoleElectronArtifact:
     if (
         rendered.analysis != "hole_electron"
-        or rendered.grammar_id != MULTIWFN38_HEA_GRAMMAR
+        or rendered.grammar_id not in {
+            MULTIWFN38_HEA_GRAMMAR,
+            MULTIWFN2026_HEA_GRAMMAR,
+        }
     ):
         raise MultiwfnFinalizationError("HEA finalization received another grammar")
+    if parsed.grammar_id != rendered.grammar_id:
+        raise MultiwfnFinalizationError("HEA parser and renderer grammars differ")
     if not parsed.parser_complete:
         raise MultiwfnFinalizationError("HEA parser evidence is incomplete")
     _excited_state_parent_check(excited_state, rendered.selected_state)
@@ -1582,10 +1935,15 @@ __all__ = [
     "DeferredFragmentAnalysisError",
     "MULTIWFN38_HEA_GRAMMAR",
     "MULTIWFN38_NTO_GRAMMAR",
+    "MULTIWFN2026_7_15_VERSION",
+    "MULTIWFN2026_HEA_GRAMMAR",
+    "MULTIWFN2026_NTO_GRAMMAR",
     "MULTIWFN_EXCITED_STATE_PARSER_VERSION",
     "MULTIWFN_EXCITED_STATE_RENDERER_VERSION",
     "Multiwfn38HoleElectronRenderer",
     "Multiwfn38NtoRenderer",
+    "Multiwfn2026HoleElectronRenderer",
+    "Multiwfn2026NtoRenderer",
     "MultiwfnExcitedStateError",
     "MultiwfnFinalizationError",
     "MultiwfnSessionParseError",
@@ -1604,6 +1962,10 @@ __all__ = [
     "parse_multiwfn38_hole_electron_session_file",
     "parse_multiwfn38_nto_session",
     "parse_multiwfn38_nto_session_file",
+    "parse_multiwfn2026_hole_electron_session",
+    "parse_multiwfn2026_hole_electron_session_file",
+    "parse_multiwfn2026_nto_session",
+    "parse_multiwfn2026_nto_session_file",
     "select_nto_pairs_for_cumulative_cutoff",
     "validate_reported_D_precision",
 ]

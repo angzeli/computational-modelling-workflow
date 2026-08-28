@@ -12,6 +12,8 @@ from cmw.molecular.multiwfn.excited_states import (
     DeferredFragmentAnalysisError,
     Multiwfn38HoleElectronRenderer,
     Multiwfn38NtoRenderer,
+    Multiwfn2026HoleElectronRenderer,
+    Multiwfn2026NtoRenderer,
     MultiwfnSessionParseError,
     MultiwfnStateIdentityError,
     UnsupportedMultiwfnFormatError,
@@ -20,6 +22,10 @@ from cmw.molecular.multiwfn.excited_states import (
     parse_multiwfn38_hole_electron_session_file,
     parse_multiwfn38_nto_session,
     parse_multiwfn38_nto_session_file,
+    parse_multiwfn2026_hole_electron_session,
+    parse_multiwfn2026_hole_electron_session_file,
+    parse_multiwfn2026_nto_session,
+    parse_multiwfn2026_nto_session_file,
 )
 from cmw.molecular.multiwfn.runtime import MENU_CONTRACT
 from cmw.molecular.orca.excited_states import parse_orca_tda_excited_states_file
@@ -351,6 +357,202 @@ class Multiwfn38NegativeParserTests(MultiwfnFixtureMixin, unittest.TestCase):
                         expected_state=self.s1,
                         expected_grid_quality="medium",
                     )
+
+
+class Multiwfn2026FixtureTests(MultiwfnFixtureMixin, unittest.TestCase):
+    def test_real_2026_nto_fixtures_match_historical_values(self) -> None:
+        s1 = parse_multiwfn2026_nto_session_file(
+            MULTIWFN_ROOT / "multiwfn_2026_7_15_s1_nto.session.log",
+            expected_state=self.s1,
+            cumulative_weight_cutoff=0.90,
+        )
+        t2 = parse_multiwfn2026_nto_session_file(
+            MULTIWFN_ROOT / "multiwfn_2026_7_15_t2_nto.session.log",
+            expected_state=self.t2,
+            cumulative_weight_cutoff=0.90,
+        )
+        historical_s1 = parse_multiwfn38_nto_session_file(
+            MULTIWFN_ROOT / "multiwfn_3_8_s1_nto.session.log",
+            expected_state=self.s1,
+        )
+        historical_t2 = parse_multiwfn38_nto_session_file(
+            MULTIWFN_ROOT / "multiwfn_3_8_t2_nto.session.log",
+            expected_state=self.t2,
+        )
+
+        self.assertEqual(s1.state_evidence.multiwfn_version, "2026.7.15")
+        self.assertEqual(s1.state_evidence.parallel_threads, 8)
+        self.assertEqual(s1.state_evidence.selected_identity.label, "S1")
+        self.assertEqual(t2.state_evidence.selected_identity.label, "T2")
+        self.assertEqual(t2.state_evidence.selected_local_state_index, 2)
+        self.assertNotEqual(t2.state_evidence.selected_local_state_index, 17)
+        self.assertEqual(
+            [item.weight for item in s1.pairs],
+            [item.weight for item in historical_s1.pairs],
+        )
+        self.assertEqual(
+            [item.weight for item in t2.pairs],
+            [item.weight for item in historical_t2.pairs],
+        )
+        self.assertEqual(s1.reported_printed_cumulative_weight, 0.991604)
+        self.assertEqual(t2.reported_printed_cumulative_weight, 0.996808)
+
+    def test_real_2026_hea_fixtures_match_historical_values(self) -> None:
+        cases = (
+            ("s1", self.s1, 0.86964, 3.622, 3.917, -1.281),
+            ("t2", self.t2, 0.90133, 3.688, 3.954, -1.768),
+        )
+        for label, state, sr, hole, electron, t_value in cases:
+            with self.subTest(state=label):
+                current = parse_multiwfn2026_hole_electron_session_file(
+                    MULTIWFN_ROOT / f"multiwfn_2026_7_15_{label}_hea.session.log",
+                    expected_state=state,
+                    expected_grid_quality="medium",
+                )
+                historical = parse_multiwfn38_hole_electron_session_file(
+                    MULTIWFN_ROOT / f"multiwfn_3_8_{label}_hea.session.log",
+                    expected_state=state,
+                    expected_grid_quality="medium",
+                )
+                self.assertEqual(current.state_evidence.multiwfn_version, "2026.7.15")
+                self.assertEqual(current.state_evidence.parallel_threads, 8)
+                self.assertEqual(current.sr, sr)
+                self.assertEqual(current.hole_extent_angstrom, hole)
+                self.assertEqual(current.electron_extent_angstrom, electron)
+                self.assertEqual(current.t_angstrom, t_value)
+                self.assertEqual(current.grid_dimensions, (134, 90, 44))
+                self.assertEqual(current.total_grid_points, 530640)
+                self.assertEqual(current.coefficient_cross_term_threshold, 0.01)
+                self.assertEqual(current.sr, historical.sr)
+                self.assertEqual(current.reported_D_angstrom, historical.reported_D_angstrom)
+                self.assertEqual(current.hole_extent_angstrom, historical.hole_extent_angstrom)
+                self.assertEqual(current.electron_extent_angstrom, historical.electron_extent_angstrom)
+                self.assertEqual(current.t_angstrom, historical.t_angstrom)
+
+    def test_exact_parser_rejects_future_and_cross_version_grammar(self) -> None:
+        text = (MULTIWFN_ROOT / "multiwfn_2026_7_15_s1_nto.session.log").read_text()
+        with self.assertRaises(UnsupportedMultiwfnFormatError):
+            parse_multiwfn2026_nto_session(
+                text.replace("2026.7.15", "2026.7.16", 1),
+                expected_state=self.s1,
+            )
+        with self.assertRaises(UnsupportedMultiwfnFormatError):
+            parse_multiwfn38_nto_session(text, expected_state=self.s1)
+        hea = (MULTIWFN_ROOT / "multiwfn_2026_7_15_s1_hea.session.log").read_text()
+        with self.assertRaises(UnsupportedMultiwfnFormatError):
+            parse_multiwfn38_hole_electron_session(
+                hea,
+                expected_state=self.s1,
+                expected_grid_quality="medium",
+            )
+
+
+class Multiwfn2026RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="cmw multiwfn 2026 ")
+        self.root = Path(self.temporary.name)
+        self.layout = ExecutionLayout(
+            self.root,
+            "pdi",
+            "multiwfn_excited_state",
+            "state-analysis",
+            "attempt_001",
+        )
+        self.layout.create_working_directory()
+        self.wavefunction = self.root / "source.molden.input"
+        self.wavefunction.write_text("[Molden Format]\n", encoding="utf-8")
+        self.settings = self.root / "settings.ini"
+        self.settings.write_text("nthreads= 8\n", encoding="utf-8")
+        self.settings_identity = {
+            "settings_path": str(self.settings.resolve()),
+            "settings_sha256": file_hash(self.settings),
+            "settings_source_sha256": "a" * 64,
+            "requested_nthreads": 8,
+        }
+        self.attempt = {"attempt_id": "attempt_001"}
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _render(self, renderer, state, output):
+        return renderer.render(
+            state,
+            orca_output_path=ORCA_ROOT / output,
+            source_wavefunction_path=self.wavefunction,
+            scientific_protocol_hash="protocol-hash",
+            source_geometry_hash="b" * 64,
+            execution_layout=self.layout.to_dict(),
+            execution_attempt=self.attempt,
+            settings_identity=self.settings_identity,
+        )
+
+    def test_exact_nto_s1_and_t2_menus(self) -> None:
+        renderer = Multiwfn2026NtoRenderer()
+        s1 = self._render(renderer, self.s1, "orca_6_1_1_tda_singlets.out")
+        t2 = self._render(renderer, self.t2, "orca_6_1_1_tda_mixed.out")
+        self.assertEqual(
+            s1.menu_sequence,
+            (
+                "18", "6", str((ORCA_ROOT / "orca_6_1_1_tda_singlets.out").resolve()),
+                "1", "3", "S1_nto.mwfn", "0", "0", "q",
+            ),
+        )
+        self.assertEqual(t2.menu_sequence[3:5], ("3", "2"))
+        self.assertNotIn("17", t2.menu_sequence)
+        self.assertEqual(t2.grammar_id, "multiwfn_2026_7_15_nto_v1")
+        self.assertEqual(t2.to_dict(), self._render(renderer, self.t2, "orca_6_1_1_tda_mixed.out").to_dict())
+
+    def test_exact_hea_s1_and_t2_menus(self) -> None:
+        renderer = Multiwfn2026HoleElectronRenderer()
+        s1 = self._render(renderer, self.s1, "orca_6_1_1_tda_singlets.out")
+        t2 = self._render(renderer, self.t2, "orca_6_1_1_tda_mixed.out")
+        self.assertEqual(s1.menu_sequence[-4:], ("0", "0", "0", "q"))
+        self.assertEqual(t2.menu_sequence[3:5], ("3", "2"))
+        self.assertNotIn("17", t2.menu_sequence)
+        self.assertEqual(t2.grammar_id, "multiwfn_2026_7_15_nonfragment_hea_v1")
+
+    def test_settings_identity_is_required_and_command_must_match_it(self) -> None:
+        with self.assertRaisesRegex(ValueError, "settings identity"):
+            Multiwfn2026NtoRenderer().render(
+                self.s1,
+                orca_output_path=ORCA_ROOT / "orca_6_1_1_tda_singlets.out",
+                source_wavefunction_path=self.wavefunction,
+                scientific_protocol_hash="protocol-hash",
+                source_geometry_hash="b" * 64,
+                execution_layout=self.layout.to_dict(),
+                execution_attempt=self.attempt,
+            )
+        rendered = self._render(
+            Multiwfn2026NtoRenderer(),
+            self.s1,
+            "orca_6_1_1_tda_singlets.out",
+        )
+        executable = self.root / "Multiwfn"
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+        stdin = self.layout.working_directory / "multiwfn.in"
+        stdin.write_text(rendered.stdin_text, encoding="utf-8")
+        runtime = {
+            "executable": str(executable),
+            "executable_sha256": file_hash(executable),
+            "version": "2026.7.15",
+            "menu_contract": MENU_CONTRACT,
+            **self.settings_identity,
+        }
+        command = build_excited_state_command_spec(
+            rendered,
+            runtime=runtime,
+            attempt_directory=self.layout.working_directory,
+            stdin_path=stdin,
+        )
+        self.assertEqual(command.argv[1], str(self.wavefunction.resolve()))
+        with self.assertRaisesRegex(ValueError, "settings_sha256"):
+            build_excited_state_command_spec(
+                rendered,
+                runtime={**runtime, "settings_sha256": "c" * 64},
+                attempt_directory=self.layout.working_directory,
+                stdin_path=stdin,
+            )
 
 
 if __name__ == "__main__":

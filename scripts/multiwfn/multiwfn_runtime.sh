@@ -70,6 +70,7 @@ multiwfn_runtime_launch() {
         printf 'Multiwfn source file is missing: %s\n' "$source_path" >&2
         exit 66
       fi
+      source_path=$(cd "$(dirname "$source_path")" && pwd -P)/$(basename "$source_path")
       source_name=${source_path##*/}
       source_name=$(printf '%s' "$source_name" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
       source_name=source-${source_name:-input}
@@ -83,7 +84,11 @@ multiwfn_runtime_launch() {
     fi
     {
       printf 'settings=%s\n' "$alias_path"
-      [[ -z "$source_alias" ]] || printf 'source=%s\n' "$source_alias"
+      printf 'settings_target=%s\n' "$MULTIWFN_RUN_SETTINGS_DIRECTORY"
+      if [[ -n "$source_alias" ]]; then
+        printf 'source=%s\n' "$source_alias"
+        printf 'source_target=%s\n' "$source_path"
+      fi
     } > multiwfn-runtime-alias.txt
     Multiwfnpath="$alias_path" OMP_NUM_THREADS="$MULTIWFN_NTHREADS" \
       "$MULTIWFN_EXE" "$@"
