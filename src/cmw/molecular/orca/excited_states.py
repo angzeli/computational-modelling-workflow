@@ -18,7 +18,7 @@ from cmw.molecular.excited_states import (
 from .status import parse_orca_input_echo, parse_orca_output
 
 
-ORCA_EXCITED_STATE_PARSER_VERSION = "1.0.0"
+ORCA_EXCITED_STATE_PARSER_VERSION = "1.0.1"
 ORCA_EXCITED_STATE_GRAMMAR = "orca_6_1_tda_v1"
 DEFAULT_ENERGY_JOIN_TOLERANCE_EV = 0.002
 
@@ -71,6 +71,19 @@ INPUT_TPRINT_RE = re.compile(
 INPUT_DOSOC_RE = re.compile(
     r"^\s*\|\s*\d+\s*>\s*DoSOC\s+true\s*$", re.I | re.M
 )
+D4_DISPERSION_RE = re.compile(
+    r"(?:based on EEQ partial charges\s*\(D4\)|^\s*DFTD4\s+V\d)",
+    re.I | re.M,
+)
+
+# ORCA reports the base XC functional separately from an empirical dispersion
+# correction.  Keep this allowlist tied to documented ORCA composite methods so
+# that an input echo alone can never turn an arbitrary output functional into a
+# protocol match.
+ORCA_COMPOSITE_FUNCTIONAL_CONTRACTS = {
+    "wb97xd4": ("wb97xv", "d4"),
+    "wb97xd4rev": ("wb97xv", "d4"),
+}
 
 ELECTRIC_HEADING = "ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC DIPOLE MOMENTS"
 VELOCITY_HEADING = "ABSORPTION SPECTRUM VIA TRANSITION VELOCITY DIPOLE MOMENTS"
@@ -111,6 +124,7 @@ class OrcaTDAProtocolMetadata:
     solvent_name: str | None
     tprint_threshold: float | None
     input_keyword_line: str
+    dispersion_correction: str | None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -126,6 +140,7 @@ class OrcaTDAProtocolMetadata:
             "solvent_name": self.solvent_name,
             "tprint_threshold": self.tprint_threshold,
             "input_keyword_line": self.input_keyword_line,
+            "dispersion_correction": self.dispersion_correction,
         }
 
 
@@ -349,6 +364,7 @@ def _parse_protocol(text: str, version: str) -> OrcaTDAProtocolMetadata:
         solvent_name=solvent.group(2) if solvent else None,
         tprint_threshold=tprint_values[0] if tprint_values else None,
         input_keyword_line=keyword_line,
+        dispersion_correction="D4" if D4_DISPERSION_RE.search(text) else None,
     )
 
 
@@ -577,7 +593,13 @@ def _validate_declared_protocol(
         if key is None or value is None:
             continue
         actual = observed[key]
-        if isinstance(value, float) and actual is not None:
+        if (
+            supplied_key in {"functional", "method"}
+            and isinstance(value, str)
+            and isinstance(actual, str)
+        ):
+            matches = _functional_contract_matches(value, parsed)
+        elif isinstance(value, float) and actual is not None:
             matches = math.isclose(float(actual), value, rel_tol=1.0e-12, abs_tol=1.0e-15)
         elif isinstance(value, str) and isinstance(actual, str):
             matches = value.casefold() == actual.casefold()
@@ -589,6 +611,34 @@ def _validate_declared_protocol(
         raise ExcitedStateParseError(
             "declared protocol does not match ORCA output: " + ", ".join(mismatches)
         )
+
+
+def _canonical_functional_label(value: str) -> str:
+    label = value.casefold().replace("ω", "w").replace("omega", "w")
+    return re.sub(r"[^a-z0-9]+", "", label)
+
+
+def _functional_contract_matches(
+    expected: str, parsed: OrcaTDAProtocolMetadata
+) -> bool:
+    declared = _canonical_functional_label(expected)
+    observed = _canonical_functional_label(parsed.functional)
+    if declared == observed:
+        return True
+    contract = ORCA_COMPOSITE_FUNCTIONAL_CONTRACTS.get(declared)
+    if contract is None:
+        return False
+    base_functional, dispersion = contract
+    input_tokens = {
+        _canonical_functional_label(token)
+        for token in parsed.input_keyword_line.split()
+    }
+    return (
+        declared in input_tokens
+        and observed == base_functional
+        and _canonical_functional_label(parsed.dispersion_correction or "")
+        == dispersion
+    )
 
 
 def _source_provenance(

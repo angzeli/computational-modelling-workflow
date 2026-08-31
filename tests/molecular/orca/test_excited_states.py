@@ -123,6 +123,47 @@ class Orca611TDAParserTests(unittest.TestCase):
                 expected_protocol={"basis": "def2-SVP"},
             )
 
+    def test_documented_wb97x_d4_composite_identity_is_validated(self) -> None:
+        text = self.singlet_text.replace("wB97X-D3", "wB97X-D4", 1)
+        text = text.replace("WB97X-D3", "WB97X-V")
+        text = text.replace(
+            "Exchange functional (TD-DFT)",
+            "DFTD4 V3.4.0\nExchange functional (TD-DFT)",
+            1,
+        )
+
+        parsed = parse_orca_tda_excited_states(
+            text,
+            expected_protocol={
+                "method": "wB97X-D4",
+                "functional": "wB97X-D4",
+                "basis": "6-31+G(d,p)",
+            },
+        )
+
+        self.assertEqual(parsed.protocol.functional, "WB97X-V")
+        self.assertEqual(parsed.protocol.dispersion_correction, "D4")
+
+    def test_wb97x_d4_composite_validation_fails_closed(self) -> None:
+        text = self.singlet_text.replace("wB97X-D3", "wB97X-D4", 1)
+        base_only = text.replace("WB97X-D3", "WB97X-V")
+        wrong_base = base_only.replace("WB97X-V", "PBE0")
+        with_d4 = wrong_base.replace(
+            "Exchange functional (TD-DFT)",
+            "DFTD4 V3.4.0\nExchange functional (TD-DFT)",
+            1,
+        )
+
+        for invalid in (base_only, with_d4):
+            with self.subTest(d4_present="DFTD4" in invalid):
+                with self.assertRaisesRegex(
+                    ExcitedStateParseError, "declared protocol"
+                ):
+                    parse_orca_tda_excited_states(
+                        invalid,
+                        expected_protocol={"method": "wB97X-D4"},
+                    )
+
     def test_incomplete_and_abnormally_terminated_outputs_fail_closed(self) -> None:
         without_completion = self.singlet_text.replace(
             "*** ORCA-CIS/TD-DFT FINISHED WITHOUT ERROR ***", "COMPLETION OMITTED"

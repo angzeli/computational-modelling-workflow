@@ -91,7 +91,7 @@ class ParsedExcitedStateArtifactTests(unittest.TestCase):
         self.assertEqual(
             artifact.metadata["selected_state_identities"][0]["label"], "S1"
         )
-        self.assertEqual(artifact.metadata["parser_version"], "1.0.0")
+        self.assertEqual(artifact.metadata["parser_version"], "1.0.1")
         self.assertEqual(
             artifact.metadata["fixture_tested_grammar_version"],
             "orca_6_1_tda_v1",
