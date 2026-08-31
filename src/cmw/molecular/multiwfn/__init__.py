@@ -2,10 +2,13 @@
 
 from .adapter import (
     MultiwfnAdapterError,
+    MultiwfnAuxiliaryInputSpec,
     MultiwfnCommandSpec,
     MultiwfnOutputSpec,
     build_command_spec,
     discover_outputs,
+    materialize_auxiliary_inputs,
+    runtime_provenance_with_alias_manifest,
 )
 from .excited_states import (
     DPrecisionValidation,
@@ -45,6 +48,7 @@ __all__ = [
     "DPrecisionValidation",
     "DeferredFragmentAnalysisError",
     "MultiwfnAdapterError",
+    "MultiwfnAuxiliaryInputSpec",
     "Multiwfn38HoleElectronRenderer",
     "Multiwfn38NtoRenderer",
     "Multiwfn2026HoleElectronRenderer",
@@ -65,6 +69,8 @@ __all__ = [
     "build_command_spec",
     "build_excited_state_command_spec",
     "discover_outputs",
+    "materialize_auxiliary_inputs",
+    "runtime_provenance_with_alias_manifest",
     "finalize_multiwfn_hole_electron_artifact",
     "finalize_multiwfn_nto_artifact",
     "parse_multiwfn38_hole_electron_session",

@@ -21,9 +21,12 @@ from cmw.core.provenance import file_hash
 from cmw.molecular.excited_states import ExcitedStateIdentity, ExcitedStateRecord
 
 from .adapter import (
+    MultiwfnAuxiliaryInputSpec,
     MultiwfnCommandSpec,
     MultiwfnOutputSpec,
     build_command_spec,
+    materialize_auxiliary_inputs,
+    validate_auxiliary_input_specs,
     validate_output_specs,
 )
 from .runtime import MENU_CONTRACT, parse_version
@@ -37,6 +40,7 @@ MULTIWFN2026_7_15_VERSION = "2026.7.15"
 MULTIWFN2026_NTO_GRAMMAR = "multiwfn_2026_7_15_nto_v1"
 MULTIWFN2026_HEA_GRAMMAR = "multiwfn_2026_7_15_nonfragment_hea_v1"
 D_ROUNDING_POLICY = "decimal_rounding_interval_overlap_v1"
+ORCA_OUTPUT_LOCAL_PATH = "cmw-orca-excited-state.out"
 
 FLOAT = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][+-]?\d+)?"
 ANSI_ESCAPE = r"(?:\x1b\[[0-9;]*m)*"
@@ -228,6 +232,7 @@ class RenderedMultiwfnExcitedStateInput:
     execution_layout: Mapping[str, object]
     execution_attempt: Mapping[str, object]
     settings_metadata: Mapping[str, object]
+    auxiliary_inputs: tuple[MultiwfnAuxiliaryInputSpec, ...] = ()
     renderer_version: str = MULTIWFN_EXCITED_STATE_RENDERER_VERSION
 
     def __post_init__(self) -> None:
@@ -266,6 +271,11 @@ class RenderedMultiwfnExcitedStateInput:
         object.__setattr__(self, "outputs", validate_output_specs(self.outputs))
         object.__setattr__(
             self,
+            "auxiliary_inputs",
+            validate_auxiliary_input_specs(self.auxiliary_inputs),
+        )
+        object.__setattr__(
+            self,
             "source_wavefunction_identity",
             dict(self.source_wavefunction_identity),
         )
@@ -302,6 +312,7 @@ class RenderedMultiwfnExcitedStateInput:
             "execution_layout": dict(self.execution_layout),
             "execution_attempt": dict(self.execution_attempt),
             "settings_metadata": dict(self.settings_metadata),
+            "auxiliary_inputs": [item.to_dict() for item in self.auxiliary_inputs],
         }
 
 
@@ -336,7 +347,7 @@ class Multiwfn38NtoRenderer:
         menu = (
             "18",
             "6",
-            str(orca["path"]),
+            ORCA_OUTPUT_LOCAL_PATH,
             *state_menu,
             "3",
             output_name,
@@ -382,6 +393,11 @@ class Multiwfn38NtoRenderer:
                     required=self.settings_required,
                 ),
             },
+            auxiliary_inputs=(
+                MultiwfnAuxiliaryInputSpec(
+                    "orca_excited_state_output", orca, ORCA_OUTPUT_LOCAL_PATH
+                ),
+            ),
         )
 
 
@@ -421,7 +437,7 @@ class Multiwfn38HoleElectronRenderer:
         menu = (
             "18",
             "1",
-            str(orca["path"]),
+            ORCA_OUTPUT_LOCAL_PATH,
             *state_menu,
             "1",
             "2",
@@ -475,6 +491,11 @@ class Multiwfn38HoleElectronRenderer:
                     required=self.settings_required,
                 ),
             },
+            auxiliary_inputs=(
+                MultiwfnAuxiliaryInputSpec(
+                    "orca_excited_state_output", orca, ORCA_OUTPUT_LOCAL_PATH
+                ),
+            ),
         )
 
 
@@ -543,6 +564,7 @@ def build_excited_state_command_spec(
         raise MultiwfnExcitedStateError(
             "materialized Multiwfn stdin differs from the rendered menu"
         )
+    materialize_auxiliary_inputs(attempt_directory, rendered.auxiliary_inputs)
     for identity in (
         rendered.source_wavefunction_identity,
         rendered.orca_output_identity,

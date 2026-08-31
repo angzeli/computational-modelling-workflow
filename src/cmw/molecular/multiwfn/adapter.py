@@ -83,6 +83,119 @@ class MultiwfnOutputSpec:
         )
 
 
+@dataclass(frozen=True)
+class MultiwfnAuxiliaryInputSpec:
+    """Immutable source identity exposed to Multiwfn under a short local path."""
+
+    role: str
+    source_identity: Mapping[str, object]
+    local_path: str
+
+    def __post_init__(self) -> None:
+        if not self.role or not self.role.strip():
+            raise ValueError("Multiwfn auxiliary input role is required")
+        local_path = _relative_path(self.local_path, name="local_path")
+        if len(Path(local_path).parts) != 1:
+            raise ValueError("Multiwfn auxiliary local_path must be a filename")
+        source = dict(self.source_identity)
+        path = source.get("path")
+        sha256 = source.get("sha256")
+        size_bytes = source.get("size_bytes")
+        if not isinstance(path, str) or not Path(path).is_absolute():
+            raise ValueError("Multiwfn auxiliary source path must be absolute")
+        if (
+            not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
+            raise ValueError("Multiwfn auxiliary source SHA-256 is required")
+        if not isinstance(size_bytes, int) or size_bytes < 0:
+            raise ValueError("Multiwfn auxiliary source size is required")
+        object.__setattr__(self, "role", self.role.strip())
+        object.__setattr__(self, "source_identity", source)
+        object.__setattr__(self, "local_path", local_path)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "role": self.role,
+            "source_identity": dict(self.source_identity),
+            "local_path": self.local_path,
+        }
+
+
+def validate_auxiliary_input_specs(
+    values: Sequence[MultiwfnAuxiliaryInputSpec],
+) -> tuple[MultiwfnAuxiliaryInputSpec, ...]:
+    inputs = tuple(values)
+    roles = [item.role for item in inputs]
+    paths = [item.local_path for item in inputs]
+    if len(set(roles)) != len(roles):
+        raise ValueError("Multiwfn auxiliary input roles must be unique")
+    if len(set(paths)) != len(paths):
+        raise ValueError("Multiwfn auxiliary local paths must be unique")
+    return inputs
+
+
+def materialize_auxiliary_inputs(
+    attempt_directory: Path,
+    values: Sequence[MultiwfnAuxiliaryInputSpec],
+) -> dict[str, dict[str, object]]:
+    """Create deterministic attempt-local aliases without weakening provenance."""
+
+    attempt = attempt_directory.expanduser().resolve(strict=True)
+    if not attempt.is_dir():
+        raise ValueError("Multiwfn attempt directory is not a directory")
+    materialized: dict[str, dict[str, object]] = {}
+    for item in validate_auxiliary_input_specs(values):
+        source = Path(str(item.source_identity["path"])).expanduser().resolve(
+            strict=True
+        )
+        if not source.is_file():
+            raise ValueError(f"Multiwfn auxiliary source is not a file: {source}")
+        if (
+            file_hash(source) != item.source_identity["sha256"]
+            or source.stat().st_size != item.source_identity["size_bytes"]
+        ):
+            raise ValueError(
+                f"Multiwfn auxiliary source identity changed before execution: {source}"
+            )
+        alias = attempt / item.local_path
+        if alias.is_symlink():
+            if alias.resolve(strict=True) != source:
+                raise ValueError(
+                    f"Multiwfn auxiliary alias conflicts with its source: {alias}"
+                )
+        elif alias.exists():
+            raise ValueError(f"Multiwfn auxiliary alias already exists: {alias}")
+        else:
+            alias.symlink_to(source)
+        materialized[item.role] = {
+            **item.to_dict(),
+            "materialized_path": str(alias),
+        }
+    return materialized
+
+
+def runtime_provenance_with_alias_manifest(
+    runtime: Mapping[str, object], attempt_directory: Path
+) -> dict[str, object]:
+    """Attach the immutable shell alias record needed for finalization."""
+
+    attempt = attempt_directory.expanduser().resolve(strict=True)
+    manifest = (attempt / "multiwfn-runtime-alias.txt").resolve(strict=True)
+    if not manifest.is_file() or manifest.stat().st_size == 0:
+        raise ValueError("Multiwfn runtime alias manifest is missing or empty")
+    result = dict(runtime)
+    result.update(
+        {
+            "alias_manifest_path": str(manifest),
+            "alias_manifest_sha256": file_hash(manifest),
+            "alias_manifest_size_bytes": manifest.stat().st_size,
+        }
+    )
+    return result
+
+
 def validate_output_specs(
     values: Sequence[MultiwfnOutputSpec],
 ) -> tuple[MultiwfnOutputSpec, ...]:
@@ -332,11 +445,15 @@ def discover_outputs(
 __all__ = [
     "MULTIWFN_ADAPTER_SCHEMA_VERSION",
     "MultiwfnAdapterError",
+    "MultiwfnAuxiliaryInputSpec",
     "MultiwfnCommandSpec",
     "MultiwfnOutputSpec",
     "build_command_spec",
     "discover_outputs",
+    "materialize_auxiliary_inputs",
+    "runtime_provenance_with_alias_manifest",
     "normalize_output_paths",
     "validate_command_spec",
+    "validate_auxiliary_input_specs",
     "validate_output_specs",
 ]

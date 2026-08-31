@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
 from cmw.core.execution_layout import ExecutionLayout
 from cmw.core.provenance import file_hash
+from cmw.molecular.multiwfn.adapter import runtime_provenance_with_alias_manifest
 from cmw.molecular.multiwfn.excited_states import (
     DeferredFragmentAnalysisError,
     Multiwfn38HoleElectronRenderer,
@@ -16,6 +19,7 @@ from cmw.molecular.multiwfn.excited_states import (
     Multiwfn2026NtoRenderer,
     MultiwfnSessionParseError,
     MultiwfnStateIdentityError,
+    ORCA_OUTPUT_LOCAL_PATH,
     UnsupportedMultiwfnFormatError,
     build_excited_state_command_spec,
     parse_multiwfn38_hole_electron_session,
@@ -34,6 +38,7 @@ from cmw.molecular.orca.excited_states import parse_orca_tda_excited_states_file
 FIXTURE_ROOT = Path(__file__).parents[2] / "fixtures"
 ORCA_ROOT = FIXTURE_ROOT / "orca" / "excited_states"
 MULTIWFN_ROOT = FIXTURE_ROOT / "multiwfn" / "excited_states"
+RUNTIME_SHELL = Path(__file__).resolve().parents[3] / "scripts/multiwfn/multiwfn_runtime.sh"
 
 
 class MultiwfnFixtureMixin:
@@ -178,7 +183,7 @@ class Multiwfn38RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
                 (
                     "18",
                     "6",
-                    str((ORCA_ROOT / "orca_6_1_1_tda_singlets.out").resolve()),
+                    ORCA_OUTPUT_LOCAL_PATH,
                     "1",
                     "3",
                     "S1_nto.mwfn",
@@ -229,7 +234,7 @@ class Multiwfn38RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
             (
                 "18",
                 "1",
-                str((ORCA_ROOT / "orca_6_1_1_tda_singlets.out").resolve()),
+                ORCA_OUTPUT_LOCAL_PATH,
                 "1",
                 "1",
                 "2",
@@ -283,6 +288,134 @@ class Multiwfn38RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
         self.assertEqual(command.argv[1], str(self.wavefunction.resolve()))
         self.assertEqual(command.stdin_path, str(stdin.resolve()))
         self.assertEqual(command.outputs, rendered.outputs)
+        alias = self.layout.working_directory / ORCA_OUTPUT_LOCAL_PATH
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(
+            alias.resolve(strict=True),
+            (ORCA_ROOT / "orca_6_1_1_tda_singlets.out").resolve(),
+        )
+        self.assertEqual(
+            rendered.auxiliary_inputs[0].source_identity,
+            rendered.orca_output_identity,
+        )
+        self.assertEqual(
+            rendered.to_dict()["auxiliary_inputs"][0]["local_path"],
+            ORCA_OUTPUT_LOCAL_PATH,
+        )
+
+    def test_auxiliary_input_alias_fails_closed_on_conflict(self) -> None:
+        rendered = Multiwfn38NtoRenderer().render(
+            self.s1,
+            orca_output_path=ORCA_ROOT / "orca_6_1_1_tda_singlets.out",
+            source_wavefunction_path=self.wavefunction,
+            scientific_protocol_hash="protocol-hash",
+            source_geometry_hash="b" * 64,
+            execution_layout=self.layout.to_dict(),
+            execution_attempt=self.attempt,
+        )
+        executable = self.root / "Multiwfn"
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+        settings = self.root / "settings.ini"
+        settings.write_text("nthreads= 4\n", encoding="utf-8")
+        stdin = self.layout.working_directory / "multiwfn.in"
+        stdin.write_text(rendered.stdin_text, encoding="utf-8")
+        (self.layout.working_directory / ORCA_OUTPUT_LOCAL_PATH).write_text(
+            "conflict\n", encoding="utf-8"
+        )
+        runtime = {
+            "executable": str(executable),
+            "executable_sha256": file_hash(executable),
+            "version": "3.8",
+            "menu_contract": MENU_CONTRACT,
+            "requested_nthreads": 4,
+            "settings_path": str(settings),
+            "settings_sha256": file_hash(settings),
+        }
+        with self.assertRaisesRegex(ValueError, "alias already exists"):
+            build_excited_state_command_spec(
+                rendered,
+                runtime=runtime,
+                attempt_directory=self.layout.working_directory,
+                stdin_path=stdin,
+            )
+
+    def test_short_auxiliary_alias_is_readable_by_launched_multiwfn(self) -> None:
+        rendered = Multiwfn38NtoRenderer().render(
+            self.s1,
+            orca_output_path=ORCA_ROOT / "orca_6_1_1_tda_singlets.out",
+            source_wavefunction_path=self.wavefunction,
+            scientific_protocol_hash="protocol-hash",
+            source_geometry_hash="b" * 64,
+            execution_layout=self.layout.to_dict(),
+            execution_attempt=self.attempt,
+        )
+        executable = self.root / "fake Multiwfn"
+        executable.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "lines = sys.stdin.read().splitlines()\n"
+            "print('AUX=' + lines[2])\n"
+            "print('AUX_EXISTS=' + str(pathlib.Path(lines[2]).is_file()))\n"
+            "print('SOURCE=' + sys.argv[1])\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+        settings_directory = self.root / "runtime settings"
+        settings_directory.mkdir()
+        settings = settings_directory / "settings.ini"
+        settings.write_text("nthreads= 4\n", encoding="utf-8")
+        stdin = self.layout.working_directory / "multiwfn.in"
+        stdin.write_text(rendered.stdin_text, encoding="utf-8")
+        runtime = {
+            "executable": str(executable),
+            "executable_sha256": file_hash(executable),
+            "version": "3.8",
+            "menu_contract": MENU_CONTRACT,
+            "requested_nthreads": 4,
+            "settings_path": str(settings),
+            "settings_sha256": file_hash(settings),
+        }
+        build_excited_state_command_spec(
+            rendered,
+            runtime=runtime,
+            attempt_directory=self.layout.working_directory,
+            stdin_path=stdin,
+        )
+        completed = subprocess.run(
+            (
+                "bash",
+                "-c",
+                'set -euo pipefail; source "$1"; MULTIWFN_EXE="$2"; '
+                'MULTIWFN_NTHREADS=4; MULTIWFN_RUN_SETTINGS_PATH="$3"; '
+                'MULTIWFN_RUN_SETTINGS_DIRECTORY=${MULTIWFN_RUN_SETTINGS_PATH%/settings.ini}; '
+                'cd "$4"; multiwfn_runtime_launch "$5" < "$6"',
+                "_",
+                str(RUNTIME_SHELL),
+                str(executable),
+                str(settings),
+                str(self.layout.working_directory),
+                str(self.wavefunction),
+                str(stdin),
+            ),
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        values = dict(
+            line.split("=", 1) for line in completed.stdout.splitlines()
+        )
+        self.assertEqual(values["AUX"], ORCA_OUTPUT_LOCAL_PATH)
+        self.assertEqual(values["AUX_EXISTS"], "True")
+        self.assertLess(len(values["SOURCE"]), 160)
+        self.assertNotIn(" ", values["SOURCE"])
+        provenance = runtime_provenance_with_alias_manifest(
+            runtime, self.layout.working_directory
+        )
+        manifest = self.layout.working_directory / "multiwfn-runtime-alias.txt"
+        self.assertEqual(provenance["alias_manifest_path"], str(manifest.resolve()))
+        self.assertEqual(provenance["alias_manifest_sha256"], file_hash(manifest))
 
     def test_fragment_request_is_explicitly_deferred(self) -> None:
         with self.assertRaises(DeferredFragmentAnalysisError) as raised:
@@ -493,7 +626,7 @@ class Multiwfn2026RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
         self.assertEqual(
             s1.menu_sequence,
             (
-                "18", "6", str((ORCA_ROOT / "orca_6_1_1_tda_singlets.out").resolve()),
+                "18", "6", ORCA_OUTPUT_LOCAL_PATH,
                 "1", "3", "S1_nto.mwfn", "0", "0", "q",
             ),
         )

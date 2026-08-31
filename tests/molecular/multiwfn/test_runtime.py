@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -340,6 +341,74 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(Path(settings_target, "settings.ini").is_file())
             self.assertIn("source=", alias_record)
             self.assertIn(f"source_target={source.resolve()}", alias_record)
+
+    def test_shell_forwards_termination_and_cleans_aliases(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cmw shell signal ") as temporary:
+            root = Path(temporary)
+            executable = root / "fake Multiwfn"
+            executable.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ ${1:-} == --version ]]; then "
+                "printf 'Multiwfn -- synthetic\\nVersion 3.8\\n'; exit 0; fi\n"
+                "printf '%s\\n' $$ > \"$CMW_FAKE_PID_FILE\"\n"
+                "exec sleep 30\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+            settings = root / "settings.ini"
+            settings.write_text("nthreads= 2\n", encoding="utf-8")
+            attempt = root / "attempt"
+            attempt.mkdir()
+            pid_file = root / "child.pid"
+            process = subprocess.Popen(
+                (
+                    "bash",
+                    "-c",
+                    'set -euo pipefail; source "$1"; MULTIWFN_EXE="$2"; '
+                    'MULTIWFN_NTHREADS=4; MULTIWFN_RUN_SETTINGS_PATH="$4"; '
+                    'MULTIWFN_RUN_SETTINGS_DIRECTORY=${MULTIWFN_RUN_SETTINGS_PATH%/settings.ini}; '
+                    'cd "$3"; multiwfn_runtime_launch',
+                    "_",
+                    str(SHELL),
+                    str(executable),
+                    str(attempt),
+                    str(settings),
+                ),
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "CMW_FAKE_PID_FILE": str(pid_file),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(100):
+                if pid_file.is_file():
+                    break
+                time.sleep(0.02)
+            self.assertTrue(pid_file.is_file())
+            child_pid = int(pid_file.read_text(encoding="utf-8"))
+            process.terminate()
+            process.wait(timeout=5)
+            process.communicate(timeout=1)
+            child_gone = False
+            for _ in range(100):
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    child_gone = True
+                    break
+                time.sleep(0.02)
+            self.assertTrue(child_gone)
+            aliases = dict(
+                line.split("=", 1)
+                for line in (attempt / "multiwfn-runtime-alias.txt")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            )
+            self.assertFalse(Path(aliases["settings"]).exists())
 
 
 if __name__ == "__main__":
