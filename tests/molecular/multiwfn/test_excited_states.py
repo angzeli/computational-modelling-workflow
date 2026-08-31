@@ -252,9 +252,10 @@ class Multiwfn38RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
         self.assertEqual(t2.settings_metadata["grid_quality"], "medium")
 
     def test_command_uses_wavefunction_argument_and_materialized_menu(self) -> None:
+        orca_output = ORCA_ROOT / "orca_6_1_1_tda_singlets.out"
         rendered = Multiwfn38NtoRenderer().render(
             self.s1,
-            orca_output_path=ORCA_ROOT / "orca_6_1_1_tda_singlets.out",
+            orca_output_path=orca_output,
             source_wavefunction_path=self.wavefunction,
             scientific_protocol_hash="protocol-hash",
             source_geometry_hash="b" * 64,
@@ -302,6 +303,12 @@ class Multiwfn38RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
             rendered.to_dict()["auxiliary_inputs"][0]["local_path"],
             ORCA_OUTPUT_LOCAL_PATH,
         )
+        self.assertIn(ORCA_OUTPUT_LOCAL_PATH, rendered.stdin_text)
+        self.assertNotIn(str(orca_output.resolve()), rendered.stdin_text)
+        self.assertNotIn(str(self.wavefunction.resolve()), rendered.stdin_text)
+        auxiliary_identity = rendered.auxiliary_inputs[0].source_identity
+        self.assertEqual(auxiliary_identity["path"], str(orca_output.resolve()))
+        self.assertEqual(auxiliary_identity["sha256"], file_hash(orca_output))
 
     def test_auxiliary_input_alias_fails_closed_on_conflict(self) -> None:
         rendered = Multiwfn38NtoRenderer().render(
@@ -416,6 +423,16 @@ class Multiwfn38RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
         manifest = self.layout.working_directory / "multiwfn-runtime-alias.txt"
         self.assertEqual(provenance["alias_manifest_path"], str(manifest.resolve()))
         self.assertEqual(provenance["alias_manifest_sha256"], file_hash(manifest))
+        manifest_text = manifest.read_text(encoding="utf-8")
+        self.assertIn(f"source_target={self.wavefunction.resolve()}", manifest_text)
+        self.assertEqual(
+            rendered.source_wavefunction_identity["sha256"],
+            file_hash(self.wavefunction),
+        )
+        self.assertNotIn(
+            str((ORCA_ROOT / "orca_6_1_1_tda_singlets.out").resolve()),
+            rendered.stdin_text,
+        )
 
     def test_fragment_request_is_explicitly_deferred(self) -> None:
         with self.assertRaises(DeferredFragmentAnalysisError) as raised:

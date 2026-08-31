@@ -18,7 +18,12 @@ from cmw.core.artifacts import (
     validate_artifact_compatibility,
 )
 from cmw.core.provenance import file_hash
-from cmw.molecular.excited_states import ExcitedStateIdentity, ExcitedStateRecord
+from cmw.molecular.excited_states import (
+    ExcitedStateIdentity,
+    ExcitedStateRecord,
+    ExcitedStateSelectionContractError,
+    validate_excited_state_selection_contract,
+)
 
 from .adapter import (
     MultiwfnAuxiliaryInputSpec,
@@ -1559,35 +1564,10 @@ def _excited_state_parent_check(
     excited_state: ExcitedStateArtifact,
     selected_state: ExcitedStateRecord,
 ) -> None:
-    if not excited_state.validation.passed:
-        raise MultiwfnFinalizationError("parent ExcitedStateArtifact is not validated")
-    raw_states = excited_state.metadata.get("excited_states")
-    if not isinstance(raw_states, Sequence) or isinstance(raw_states, (str, bytes)):
-        raise MultiwfnFinalizationError(
-            "parent artifact lacks quantitative excited-state records"
-        )
-    records = tuple(
-        ExcitedStateRecord.from_mapping(item)
-        for item in raw_states
-        if isinstance(item, Mapping)
-    )
-    matches = [item for item in records if item.canonical_key == selected_state.canonical_key]
-    if len(matches) != 1 or matches[0].to_dict() != selected_state.to_dict():
-        raise MultiwfnFinalizationError(
-            "selected state does not uniquely match the parent artifact"
-        )
-    selected = excited_state.metadata.get("selected_state_identities")
-    if not isinstance(selected, Sequence) or isinstance(selected, (str, bytes)):
-        raise MultiwfnFinalizationError("parent artifact lacks canonical selections")
-    keys = {
-        (str(item.get("spin_manifold", "")).casefold(), item.get("local_state_index"))
-        for item in selected
-        if isinstance(item, Mapping)
-    }
-    if selected_state.canonical_key not in keys:
-        raise MultiwfnFinalizationError(
-            "requested Multiwfn state was not selected in the parent artifact"
-        )
+    try:
+        validate_excited_state_selection_contract(excited_state, selected_state)
+    except ExcitedStateSelectionContractError as exc:
+        raise MultiwfnFinalizationError(str(exc)) from exc
 
 
 def _alias_manifest(

@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import unittest
 
+from cmw.core.artifacts import (
+    ArtifactValidation,
+    ExcitedStateArtifact,
+    ValidationStatus,
+)
 from cmw.molecular.excited_states import (
     ExcitedStateIdentity,
     ExcitedStateRecord,
+    ExcitedStateSelectionContractError,
     StateSelectionRequest,
     StateSelectionResult,
     StateSelectionStatus,
+    attach_selected_state_identities,
     resolve_excited_state,
+    validate_excited_state_selection_contract,
 )
 from cmw.molecular.orca.excited_states import parse_orca_tda_excited_states_file
 
@@ -153,6 +162,91 @@ class StateResolverTests(unittest.TestCase):
         )
         self.assertEqual(legacy.identity, ExcitedStateIdentity("singlet", 2))
         self.assertIsNone(legacy.orca_global_state_index)
+
+
+class ExcitedStateSelectionContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.records = (
+            ExcitedStateRecord(1, 2.5, 0.1, "singlet"),
+            ExcitedStateRecord(2, 3.0, 0.2, "singlet"),
+        )
+        self.artifact = ExcitedStateArtifact(
+            producing_calculation="tda-target",
+            method="wB97X-D4",
+            basis="def2-TZVPP",
+            protocol={"task": "excited_state"},
+            validation=ArtifactValidation(
+                ValidationStatus.PASSED,
+                {"fixture": True},
+                "VALID_EXCITED_STATE_ARTIFACT",
+                "fixture parent is valid",
+            ),
+            metadata={
+                "excited_states": [item.to_dict() for item in self.records],
+                "source_geometry_hash": "a" * 64,
+            },
+        )
+        self.result = StateSelectionResult(
+            StateSelectionStatus.SELECTED,
+            self.records[0].identity,
+            "explicit_state",
+            {"state": "S1"},
+            "explicit fixture selection",
+            1,
+            "explicit identity; no tie",
+        )
+
+    def test_attachment_is_canonical_deterministic_and_preserves_legacy_alias(self) -> None:
+        selected = attach_selected_state_identities(
+            self.artifact, (self.records[0],), (self.result,)
+        )
+        repeated = attach_selected_state_identities(
+            selected, (self.records[0],), (self.result,)
+        )
+
+        self.assertNotEqual(selected.artifact_id, self.artifact.artifact_id)
+        self.assertEqual(repeated.artifact_id, selected.artifact_id)
+        self.assertEqual(
+            selected.metadata["selected_state_identities"],
+            selected.metadata["selected_states"],
+        )
+        self.assertEqual(
+            validate_excited_state_selection_contract(selected, self.records[0]),
+            (self.records[0],),
+        )
+
+    def test_conflicting_legacy_alias_fails_closed(self) -> None:
+        conflicting = replace(
+            self.artifact,
+            metadata={
+                **self.artifact.metadata,
+                "selected_states": [self.records[1].to_dict()],
+            },
+        )
+        with self.assertRaisesRegex(
+            ExcitedStateSelectionContractError, "aliases conflict"
+        ):
+            attach_selected_state_identities(
+                conflicting, (self.records[0],), (self.result,)
+            )
+
+    def test_missing_canonical_selection_blocks_requested_state(self) -> None:
+        with self.assertRaisesRegex(
+            ExcitedStateSelectionContractError, "selected_state_identities"
+        ):
+            validate_excited_state_selection_contract(
+                self.artifact, self.records[0]
+            )
+
+    def test_requested_state_must_match_quantitative_parent_exactly(self) -> None:
+        selected = attach_selected_state_identities(
+            self.artifact, (self.records[0],), (self.result,)
+        )
+        changed = replace(self.records[0], excitation_energy_ev=2.6)
+        with self.assertRaisesRegex(
+            ExcitedStateSelectionContractError, "uniquely match"
+        ):
+            validate_excited_state_selection_contract(selected, changed)
 
 
 if __name__ == "__main__":
