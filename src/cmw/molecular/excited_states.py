@@ -684,7 +684,9 @@ def attach_selected_state_identities(
 
     selected_payload = [record.to_dict() for record in requested]
     selected_keys = tuple(record.canonical_key for record in requested)
-    _reject_conflicting_selection_aliases(artifact.metadata, selected_keys)
+    _reject_conflicting_selection_aliases(
+        artifact.metadata, selected_keys, allow_empty=True
+    )
 
     results: list[StateSelectionResult] = []
     for item in selection_results:
@@ -868,6 +870,8 @@ def _selected_parent_record(
 def _reject_conflicting_selection_aliases(
     metadata: Mapping[str, object],
     expected_keys: Sequence[tuple[str, int]],
+    *,
+    allow_empty: bool = False,
 ) -> None:
     for key in ("selected_state_identities", "selected_states"):
         raw = metadata.get(key)
@@ -877,6 +881,8 @@ def _reject_conflicting_selection_aliases(
             raise ExcitedStateSelectionContractError(
                 f"{key} must be a sequence of mappings"
             )
+        if allow_empty and not raw:
+            continue
         observed: list[tuple[str, int]] = []
         for item in raw:
             try:

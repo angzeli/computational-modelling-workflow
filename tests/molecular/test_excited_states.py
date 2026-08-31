@@ -183,6 +183,8 @@ class ExcitedStateSelectionContractTests(unittest.TestCase):
             ),
             metadata={
                 "excited_states": [item.to_dict() for item in self.records],
+                "selected_state_identities": [],
+                "selected_states": [],
                 "source_geometry_hash": "a" * 64,
             },
         )
