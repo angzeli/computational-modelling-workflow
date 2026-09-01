@@ -47,6 +47,9 @@ completion. ORCA execution and scientific status remain separate. Target
 identity represents scientific intent; attempt identity represents the
 resources and executable used for one realization. Reuse fails closed unless
 target identity, scientific validity, and artifact integrity all agree.
+Provably superseded attempts can be compacted or purged through the
+[crash-safe attempt cleanup contract](attempt-cleanup.md); cleanup is an
+operational overlay and never changes scientific identity.
 Optional named runtime allocations follow the separate
 [execution resource profile contract](execution-resource-profiles.md); profile
 changes are execution provenance and do not alter scientific or artifact

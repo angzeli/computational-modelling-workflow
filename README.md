@@ -18,6 +18,9 @@ This repository currently contains:
 - factual ORCA output parsing with separate OPT/FREQ/SP/TDDFT validation;
 - versioned targets, attempts, artifacts, lineage, local locks, and fail-closed
   reuse;
+- deterministic, dry-run-first cleanup of provably superseded attempts with
+  bounded provenance tombstones, explicit purge confirmation, and crash-safe
+  recovery;
 - a system-agnostic calculation/aggregation/derived-result workflow graph with
   typed scientific artifact contracts;
 - optional method-aware ORCA protocol validation for method, basis, PNO, LED,
@@ -66,6 +69,9 @@ The reusable stacking contracts and artifact lineage are documented in
 [`docs/architecture/vertical-stacking-workflow.md`](docs/architecture/vertical-stacking-workflow.md).
 The HOF YAML mapping, validators, CP/LED graph, and non-executing ORCA input
 plans are documented in [`docs/adapters/hof.md`](docs/adapters/hof.md).
+The generic cleanup eligibility, plan-hash, transaction, registry, and purge
+contracts are documented in
+[`docs/architecture/attempt-cleanup.md`](docs/architecture/attempt-cleanup.md).
 
 ## Repository layout
 

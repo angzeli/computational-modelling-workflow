@@ -23,6 +23,9 @@ classifiers = [
 ]
 dependencies = ["ase>=3.23", "PyYAML>=6.0"]
 
+[project.scripts]
+cmw = "cmw.cli:main"
+
 [project.urls]
 Repository = "https://github.com/angzeli/computational-modelling-workflow"
 
