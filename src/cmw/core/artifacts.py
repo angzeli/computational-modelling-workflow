@@ -13,7 +13,12 @@ from .execution_contract import (
     ExecutionIntent,
     canonical_stage_type,
 )
-from .execution_layout import ExecutionLayout, ExecutionLayoutError
+from .execution_layout import (
+    ExecutionLayout,
+    ExecutionLayoutError,
+    resolve_internal_path,
+    resolve_recorded_layout,
+)
 from .provenance import stable_hash
 
 
@@ -939,7 +944,9 @@ def _method_metadata(calculation: Mapping[str, Any]) -> tuple[str | None, str | 
     )
 
 
-def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
+def artifact_from_result(
+    record: Mapping[str, Any], *, metadata_path: Path | str | None = None
+) -> Artifact:
     """Map a legacy ORCA or Multiwfn result to the typed artifact model."""
 
     target = record.get("target")
@@ -995,7 +1002,12 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
             raise ExecutionLayoutError(
                 f"{ExecutionLayoutError.code}: result execution layout is invalid"
             )
-        layout = ExecutionLayout.from_mapping(layout_record)
+        if metadata_path is None:
+            layout = ExecutionLayout.from_mapping(layout_record)
+        else:
+            layout = resolve_recorded_layout(
+                layout_record, metadata_path=metadata_path
+            )
         attempt_record = record.get("attempt")
         if not isinstance(attempt_record, Mapping):
             raise ExecutionLayoutError(
@@ -1009,8 +1021,12 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
             if not isinstance(item, Mapping):
                 continue
             path = Path(str(item.get("path", "")))
-            if layout is not None and not path.is_absolute():
-                path = layout.working_directory / path
+            if layout is not None and isinstance(layout_record, Mapping):
+                path = resolve_internal_path(
+                    path,
+                    layout_record=layout_record,
+                    resolved_layout=layout,
+                )
             files[str(role)] = str(path.resolve()) if layout is not None else str(path)
     parents = [str(item) for item in record.get("parent_artifacts", ())]
     source = record.get("source")

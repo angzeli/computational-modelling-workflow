@@ -19,7 +19,7 @@ import subprocess
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
-from .execution_layout import ATTEMPT_PATTERN, ExecutionLayout
+from .execution_layout import ATTEMPT_PATTERN, ExecutionLayout, resolve_recorded_layout
 from .locks import LockState, acquire_lock, inspect_lock, release_lock
 from .provenance import atomic_write_json, canonical_json_bytes, file_hash, read_json, stable_hash
 
@@ -375,13 +375,15 @@ def _target_id(metadata: Mapping[str, object], target: Mapping[str, object], dir
         _nested(metadata, "target", "target_id"),
         _nested(metadata, "attempt", "target_id"),
         metadata.get("target_id"),
+        target.get("full_target_id"),
         target.get("target_id"),
-        directory.parent.parent.name,
     )
     for value in values:
         if isinstance(value, str) and value:
             return value
-    return directory.parent.parent.name
+    raise InvalidCleanupPath(
+        f"attempt has no authoritative full target identity: {directory}"
+    )
 
 
 _TERMINAL = {
@@ -510,8 +512,10 @@ def _discover_attempts(root: Path, campaign_id: str, registry: Mapping[str, obje
     registered_attempts = registered_attempts if isinstance(registered_attempts, Mapping) else {}
     calculation = root / "calculation"
     if calculation.is_dir():
-        for directory in sorted(calculation.glob("*/*/*/attempts/attempt_*")):
+        for directory in sorted(root.rglob("attempt_*")):
             if not directory.is_dir() or ATTEMPT_PATTERN.fullmatch(directory.name) is None:
+                continue
+            if directory.parent.name != "attempts" or ".cmw" in directory.relative_to(root).parts:
                 continue
             try:
                 resolved = directory.resolve(strict=True)
@@ -522,13 +526,17 @@ def _discover_attempts(root: Path, campaign_id: str, registry: Mapping[str, obje
                 raise InvalidCleanupPath(f"attempt directory traverses a symlink: {directory}")
             target_directory = directory.parent.parent
             target_record = _json_if_mapping(target_directory / "target.json") or {}
+            target_manifest = (
+                _json_if_mapping(target_directory / "target-manifest.json") or {}
+            )
+            identity_record = {**target_record, **target_manifest}
             metadata_path = _metadata_path(directory)
             metadata = _json_if_mapping(metadata_path) if metadata_path else {}
             metadata = metadata or {}
             attempt_id = _attempt_id(metadata, directory)
             if attempt_id != directory.name:
                 raise InvalidCleanupPath(f"attempt identity conflicts with directory: {directory}")
-            target_id = _target_id(metadata, target_record, directory)
+            target_id = _target_id(metadata, identity_record, directory)
             registered = registered_attempts.get(f"{target_id}/{attempt_id}")
             cleaned_status = (
                 str(registered.get("status"))
@@ -539,7 +547,10 @@ def _discover_attempts(root: Path, campaign_id: str, registry: Mapping[str, obje
             layout_path = directory / "execution-layout.json"
             if layout_path.is_file():
                 try:
-                    layout = ExecutionLayout.from_mapping(read_json(layout_path))
+                    stored_layout = read_json(layout_path)
+                    layout = resolve_recorded_layout(
+                        stored_layout, metadata_path=layout_path
+                    )
                     layout.validate_attempt_identity(attempt_id)
                     if layout.working_directory != directory:
                         raise ValueError("layout path differs")
@@ -560,7 +571,7 @@ def _discover_attempts(root: Path, campaign_id: str, registry: Mapping[str, obje
                     target_directory,
                     attempt_id,
                     directory,
-                    target_record,
+                    identity_record,
                     metadata_path,
                     metadata,
                     _terminal(metadata),
@@ -686,14 +697,17 @@ def _reference_graph(root: Path) -> tuple[ReferenceEvidence, ...]:
     return tuple(evidence)
 
 
-def _references_for(attempt: _Attempt, graph: Sequence[ReferenceEvidence]) -> tuple[ReferenceEvidence, ...]:
+def _references_for(
+    attempt: _Attempt,
+    graph: Sequence[ReferenceEvidence],
+    campaign_root: Path,
+) -> tuple[ReferenceEvidence, ...]:
     result: list[ReferenceEvidence] = []
-    campaign_root = attempt.directory.parents[5]
     artifact_id = _nested(attempt.metadata, "scientific_artifact", "artifact_id")
     for evidence in graph:
         source_path = Path(evidence.source)
         if not source_path.is_absolute():
-            source_path = attempt.directory.parents[5] / source_path
+            source_path = campaign_root / source_path
         try:
             source_path.relative_to(attempt.directory)
         except ValueError:
@@ -1201,7 +1215,7 @@ def build_cleanup_plan(
             continue
         reasons: list[str] = []
         canonical_id = canonical.get(attempt.target_id)
-        references = _references_for(attempt, graph)
+        references = _references_for(attempt, graph, root)
         payload_refs = tuple(reference for reference in references if reference.requires_payload)
         if global_blockers:
             reasons.append("campaign is actively mutating or ownership is uncertain")

@@ -7,7 +7,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from cmw.core.artifacts import artifact_from_dict, artifact_from_result
-from cmw.core.execution_layout import ExecutionLayout, ExecutionLayoutError
+from cmw.core.execution_layout import (
+    ExecutionLayout,
+    ExecutionLayoutError,
+    resolve_internal_path,
+    resolve_recorded_layout,
+)
 from cmw.core.job import ExecutionAttempt, GeometryLineage, JobTarget
 from cmw.core.structure_artifacts import structure_artifact_path
 from cmw.core.provenance import (
@@ -375,7 +380,7 @@ def revalidate_attempt(
     if layout_record is not None:
         if not isinstance(layout_record, Mapping):
             raise ValueError("execution layout must be a mapping")
-        layout = ExecutionLayout.from_mapping(layout_record)
+        layout = resolve_recorded_layout(layout_record, metadata_path=metadata_path)
         layout.validate(require_existing=True)
 
     artifacts_record = prior.get("artifacts")
@@ -388,10 +393,12 @@ def revalidate_attempt(
             raise ValueError(f"artifact manifest entry is invalid: {role}")
         stored = Path(str(artifact.get("path", "")))
         path = (
-            stored
-            if stored.is_absolute()
-            else layout.working_directory / stored
-            if layout is not None
+            resolve_internal_path(
+                stored,
+                layout_record=layout_record,
+                resolved_layout=layout,
+            )
+            if layout is not None and isinstance(layout_record, Mapping)
             else metadata_path.parent / stored
         )
         if not path.is_file():
@@ -511,7 +518,7 @@ def check_reuse(target_path: Path, metadata_path: Path) -> dict[str, Any]:
         try:
             if not isinstance(layout_record, Mapping):
                 raise ExecutionLayoutError("execution layout must be a mapping")
-            layout = ExecutionLayout.from_mapping(layout_record)
+            layout = resolve_recorded_layout(layout_record, metadata_path=metadata_path)
             layout.validate(require_existing=True)
             layout.validate_attempt_identity(
                 str(record.get("attempt", {}).get("attempt_id", ""))
@@ -555,10 +562,12 @@ def check_reuse(target_path: Path, metadata_path: Path) -> dict[str, Any]:
             return {"reuse": False, "code": "ARTIFACT_MISSING", "reason": f"required artifact is absent: {role}"}
         stored_path = Path(str(artifact.get("path", "")))
         path = (
-            stored_path
-            if stored_path.is_absolute()
-            else (layout.working_directory / stored_path)
-            if layout is not None
+            resolve_internal_path(
+                stored_path,
+                layout_record=layout_record,
+                resolved_layout=layout,
+            )
+            if layout is not None and isinstance(layout_record, Mapping)
             else _artifact_path(metadata_path, str(stored_path))
         )
         if not path.is_file():

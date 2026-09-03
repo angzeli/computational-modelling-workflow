@@ -288,6 +288,14 @@ class IntermolecularLEDPlanTests(unittest.TestCase):
             plan.execution_plan.node_map["led_dimer"], (small,)
         )
         self.assertEqual(dimer.target_id, expected_target.target_id)
+        self.assertEqual(dimer.layout.version.value, "v2")
+        self.assertTrue(dimer.layout.target_directory.name.startswith("target-"))
+        self.assertNotIn("calculation", dimer.layout.target_directory.parts)
+        self.assertEqual(reference.layout.version.value, "v2")
+        reference_manifest = json.loads(
+            (reference.layout.target_directory / "target-manifest.json").read_text()
+        )
+        self.assertEqual(reference_manifest["full_target_id"], reference.target_id)
         self.assertIn(
             "! DLPNO-CCSD(T) def2-TZVPP",
             Path(dimer.input_files["primary"]).read_text(encoding="utf-8"),

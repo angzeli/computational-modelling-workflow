@@ -18,8 +18,14 @@ from cmw.core.job import ExecutionAttempt, JobTarget
 from cmw.core.execution_layout import (
     ExecutionLayout,
     ExecutionLayoutError,
-    execution_target_directory,
+    ExecutionLayoutVersion,
+    TARGET_MANIFEST_FILENAME,
+    build_target_manifest,
+    execution_target_directory_v2,
     next_attempt_identifier,
+    resolve_internal_path,
+    resolve_recorded_layout,
+    write_target_manifest,
 )
 from cmw.core.provenance import (
     ArtifactRecord,
@@ -207,10 +213,8 @@ def target_directory(
 ) -> Path:
     if system_identifier is None:
         return output_root.resolve() / operation.value.lower() / target_id
-    return execution_target_directory(
+    return execution_target_directory_v2(
         output_root,
-        system_identifier=system_identifier,
-        workflow_node_identifier=operation.value.lower(),
         target_identifier=target_id,
     )
 
@@ -302,7 +306,9 @@ def check_reuse(
         try:
             if not isinstance(layout_record, Mapping):
                 raise ExecutionLayoutError("execution layout must be a mapping")
-            layout = ExecutionLayout.from_mapping(layout_record)
+            layout = resolve_recorded_layout(
+                layout_record, metadata_path=result_path
+            )
             layout.validate(require_existing=True)
             layout.validate_attempt_identity(
                 str(record.get("attempt", {}).get("attempt_id", ""))
@@ -329,10 +335,12 @@ def check_reuse(
             }
         stored_path = Path(str(artifact.get("path", "")))
         path = (
-            stored_path
-            if stored_path.is_absolute()
-            else (layout.working_directory / stored_path)
-            if layout is not None
+            resolve_internal_path(
+                stored_path,
+                layout_record=layout_record,
+                resolved_layout=layout,
+            )
+            if layout is not None and isinstance(layout_record, Mapping)
             else _artifact_path(result_path, str(stored_path))
         )
         if not path.is_file() or path.stat().st_size != artifact.get("size_bytes"):
@@ -488,11 +496,30 @@ def prepare_analysis(plan: Mapping[str, Any]) -> dict[str, object]:
         workflow_node_identifier=str(plan["operation"]).lower(),
         target_identifier=str(plan["target_id"]),
         attempt_identifier=attempt_id,
+        version=ExecutionLayoutVersion.V2,
     )
     if layout.target_directory != target_path.parent.resolve():
         raise ExecutionLayoutError(
             f"{ExecutionLayoutError.code}: planned target path conflicts with layout"
         )
+    source = dict(plan["source"])
+    write_target_manifest(
+        layout.target_directory / TARGET_MANIFEST_FILENAME,
+        build_target_manifest(
+            layout,
+            target=dict(target_record["target"]),
+            source_artifact_ids=tuple(
+                str(item)
+                for item in (source.get("upstream_artifact_id"),)
+                if item is not None
+            ),
+            execution_intent={"operation": str(plan["operation"])},
+            provenance={
+                "source_target_id": source.get("target_id"),
+                "source_result": source.get("result_path"),
+            },
+        ),
+    )
     layout.create_working_directory()
     attempt_directory = layout.working_directory
     atomic_write_json(layout.layout_path, layout.to_dict())
@@ -574,7 +601,7 @@ def _scientific_artifact(
     *,
     metadata_path: Path,
 ) -> Artifact:
-    artifact = artifact_from_result(record)
+    artifact = artifact_from_result(record, metadata_path=metadata_path)
     if not isinstance(artifact, IGMHArtifact):
         return artifact
     if density is None:
@@ -648,7 +675,9 @@ def finalize_analysis(
     repository: Path | None = None,
 ) -> dict[str, object]:
     layout_record = read_json(attempt_directory / "execution-layout.json")
-    layout = ExecutionLayout.from_mapping(layout_record)
+    layout = resolve_recorded_layout(
+        layout_record, metadata_path=attempt_directory / "execution-layout.json"
+    )
     if attempt_directory.resolve() != layout.working_directory:
         raise ExecutionLayoutError(
             f"{ExecutionLayoutError.code}: supplied working directory conflicts "

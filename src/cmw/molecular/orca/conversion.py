@@ -14,7 +14,16 @@ from cmw.core.artifacts import (
     ValidationStatus,
     WavefunctionArtifact,
 )
-from cmw.core.execution_layout import ExecutionLayout, next_attempt_identifier
+from cmw.core.execution_layout import (
+    ExecutionLayout,
+    ExecutionLayoutVersion,
+    TARGET_MANIFEST_FILENAME,
+    build_target_manifest,
+    next_attempt_identifier,
+    resolve_internal_path,
+    resolve_recorded_layout,
+    write_target_manifest,
+)
 from cmw.core.job import JobTarget
 from cmw.core.provenance import (
     ArtifactRecord,
@@ -54,12 +63,23 @@ def _artifact_path(result_path: Path, artifact: Mapping[str, Any]) -> Path:
 
 
 def _validated_source_artifact(
-    result_path: Path, artifacts: Mapping[str, Any], role: str
+    result_path: Path,
+    artifacts: Mapping[str, Any],
+    role: str,
+    record: Mapping[str, Any],
 ) -> Path:
     value = artifacts.get(role)
     if not isinstance(value, Mapping):
         raise _failure(f"source result lacks required artifact role: {role}")
-    path = _artifact_path(result_path, value).resolve()
+    stored = Path(str(value.get("path", "")))
+    layout_record = record.get("execution_layout")
+    if isinstance(layout_record, Mapping):
+        layout = resolve_recorded_layout(layout_record, metadata_path=result_path)
+        path = resolve_internal_path(
+            stored, layout_record=layout_record, resolved_layout=layout
+        ).resolve()
+    else:
+        path = _artifact_path(result_path, value).resolve()
     if not path.is_file():
         raise _failure(f"source artifact is missing: {role}: {path}")
     if (
@@ -155,14 +175,14 @@ def _source_contract(
     )
     if target.target_id != raw_target.get("target_id"):
         raise _failure("source target identity does not match its content")
-    wavefunction = _validated_source_artifact(result_path, artifacts, "wavefunction")
+    wavefunction = _validated_source_artifact(result_path, artifacts, "wavefunction", record)
     if wavefunction.suffix.casefold() != ".gbw":
         raise _failure("source wavefunction must be an ORCA GBW file")
     geometry_role = "input_geometry" if "input_geometry" in artifacts else "geometry"
-    geometry = _validated_source_artifact(result_path, artifacts, geometry_role)
+    geometry = _validated_source_artifact(result_path, artifacts, geometry_role, record)
     if geometry_hash(read_xyz(geometry)) != target.geometry_sha256:
         raise _failure("source geometry differs from the scientific target")
-    output = _validated_source_artifact(result_path, artifacts, "output")
+    output = _validated_source_artifact(result_path, artifacts, "output", record)
     return record, target, wavefunction, geometry, output
 
 
@@ -224,8 +244,8 @@ def _result_reuse(
         artifacts = record.get("artifacts")
         if not isinstance(artifacts, Mapping):
             raise _failure("conversion artifact manifest is invalid")
-        _validated_source_artifact(result_path, artifacts, "wavefunction")
-        _validated_source_artifact(result_path, artifacts, "geometry")
+        _validated_source_artifact(result_path, artifacts, "wavefunction", record)
+        _validated_source_artifact(result_path, artifacts, "geometry", record)
         semantics = record.get("wavefunction_semantics")
         if (
             not isinstance(semantics, Mapping)
@@ -291,6 +311,8 @@ def plan_molden_conversion(
         workflow_node_identifier="orca_to_molden",
         target_identifier=target.target_id,
         attempt_identifier="attempt_001",
+        version=ExecutionLayoutVersion.V2,
+        operational_stage="orca_to_molden",
     )
     target_path = layout.target_directory / "target.json"
     result_path = layout.target_directory / "result.json"
@@ -302,6 +324,28 @@ def plan_molden_conversion(
         source_wavefunction_sha256=wavefunction_sha,
         converter_sha256=converter_sha,
     )
+    if not reusable:
+        legacy_layout = ExecutionLayout(
+            project_root=root,
+            system_identifier=source_target.geometry_sha256,
+            workflow_node_identifier="orca_to_molden",
+            target_identifier=target.target_id,
+            attempt_identifier="attempt_001",
+            version=ExecutionLayoutVersion.V1,
+        )
+        legacy_result = legacy_layout.target_directory / "result.json"
+        legacy_reusable, legacy_reason = _result_reuse(
+            legacy_result,
+            target=target,
+            source_result_sha256=source_result_sha,
+            source_output_sha256=output_sha,
+            source_wavefunction_sha256=wavefunction_sha,
+            converter_sha256=converter_sha,
+        )
+        if legacy_reusable:
+            target_path = legacy_layout.target_directory / "target.json"
+            result_path = legacy_result
+            reusable, reason = legacy_reusable, legacy_reason
     return MoldenConversionPlan(
         source_result=source_result_path,
         source_result_sha256=source_result_sha,
@@ -352,6 +396,25 @@ def prepare_molden_conversion(plan: MoldenConversionPlan) -> dict[str, object]:
         workflow_node_identifier="orca_to_molden",
         target_identifier=plan.target.target_id,
         attempt_identifier=attempt_id,
+        version=ExecutionLayoutVersion.V2,
+        operational_stage="orca_to_molden",
+    )
+    write_target_manifest(
+        layout.target_directory / TARGET_MANIFEST_FILENAME,
+        build_target_manifest(
+            layout,
+            target=plan.target.to_dict(),
+            source_artifact_ids=tuple(
+                item
+                for item in (plan.source_scientific_artifact_id,)
+                if item is not None
+            ),
+            execution_intent={"operation": "ORCA_TO_MOLDEN"},
+            provenance={
+                "source_result_sha256": plan.source_result_sha256,
+                "source_attempt_id": plan.source_attempt_id,
+            },
+        ),
     )
     layout.create_working_directory()
     atomic_write_json(layout.layout_path, layout.to_dict())

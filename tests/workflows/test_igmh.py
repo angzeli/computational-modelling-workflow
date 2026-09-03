@@ -170,7 +170,7 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
 
         result = json.loads(self.run_igmh().stdout)
         attempt = next(
-            (self.output / "calculation").glob("*/igmh/*/attempts/*")
+            self.output.glob("target-*/attempts/*")
         )
         self.assertTrue((attempt / "cubes/interaction-field.cube").is_file())
         self.assertTrue((attempt / "cubes/signed-density.cube").is_file())
@@ -230,7 +230,7 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
         self.assertEqual(first["attempt_id"], "attempt_001")
         self.assertEqual(retry["attempt_id"], "attempt_002")
         attempts = sorted(
-            (self.output / "calculation").glob("*/igmh/*/attempts/attempt_*")
+            self.output.glob("target-*/attempts/attempt_*")
         )
         self.assertEqual([path.name for path in attempts], ["attempt_001", "attempt_002"])
 
@@ -267,7 +267,7 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
         result = json.loads(self.run_igmh(env=env).stdout)
         self.assertEqual(result["runtime"]["requested_nthreads"], 4)
         attempt = next(
-            (self.output / "calculation").glob("*/igmh/*/attempts/*")
+            self.output.glob("target-*/attempts/*")
         )
         health = json.loads((attempt / "health-latest.json").read_text())
         self.assertTrue(health["diagnostic_only"])

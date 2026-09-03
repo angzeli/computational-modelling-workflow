@@ -10,8 +10,12 @@ from typing import Any, Mapping
 
 from cmw.core.execution_layout import (
     ExecutionLayout,
-    execution_target_directory,
+    ExecutionLayoutVersion,
+    TARGET_MANIFEST_FILENAME,
+    build_target_manifest,
+    execution_target_directory_v2,
     next_attempt_identifier,
+    write_target_manifest,
 )
 from cmw.core.job import GeometryLineage
 from cmw.core.provenance import atomic_write_json, read_json, stable_hash
@@ -348,6 +352,7 @@ def build_state(
         "workflow": "opt_freq_sp",
         "mode": selected_mode,
         "workflow_target_id": workflow_target_id,
+        "execution_layout": {"version": "v2", "short_target_id_width": 12},
         "system_identifier": system_identifier,
         "input_structure": {
             "path": str(structure_path.resolve()),
@@ -545,15 +550,30 @@ def next_action(state_path: Path) -> tuple[str, dict[str, Any]]:
             _write_state(state_path, state)
             return "FAILED", {"failure_point": stage.value, "reason": stage_record["reason"]}
         target = _make_stage_target(config, stage, geometry)
-        target_dir = execution_target_directory(
+        target_dir = execution_target_directory_v2(
             Path(state["output_root"]),
-            system_identifier=_state_system_identifier(state),
-            workflow_node_identifier=stage.value.lower(),
             target_identifier=target.target_id,
         )
         target_path = target_dir / "target.json"
         if not target_path.exists():
             write_target(target_path, target, lineage)
+        manifest_layout = ExecutionLayout(
+            project_root=Path(state["output_root"]),
+            system_identifier=_state_system_identifier(state),
+            workflow_node_identifier=stage.value.lower(),
+            target_identifier=target.target_id,
+            attempt_identifier="attempt_001",
+            version=ExecutionLayoutVersion.V2,
+        )
+        write_target_manifest(
+            target_dir / TARGET_MANIFEST_FILENAME,
+            build_target_manifest(
+                manifest_layout,
+                target=target.to_dict(),
+                execution_intent=config.stages[stage].execution_intent.to_dict(),
+                provenance={"workflow_target_id": state["workflow_target_id"]},
+            ),
+        )
         reusable = _find_reusable(target_path)
         if reusable is None:
             legacy_target_path = (
@@ -587,6 +607,7 @@ def next_action(state_path: Path) -> tuple[str, dict[str, Any]]:
             workflow_node_identifier=stage.value.lower(),
             target_identifier=target.target_id,
             attempt_identifier=attempt_id,
+            version=ExecutionLayoutVersion.V2,
         )
         layout.create_working_directory()
         attempt_dir = layout.working_directory
@@ -731,10 +752,8 @@ def plan_summary(state: dict[str, Any]) -> dict[str, Any]:
             prerequisite_ready = False
             continue
         target = _make_stage_target(config, stage, geometry)
-        target_path = execution_target_directory(
+        target_path = execution_target_directory_v2(
             Path(planned["output_root"]),
-            system_identifier=_state_system_identifier(planned),
-            workflow_node_identifier=stage.value.lower(),
             target_identifier=target.target_id,
         ) / "target.json"
         legacy_target_path = (

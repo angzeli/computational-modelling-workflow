@@ -19,8 +19,13 @@ from cmw.core.artifacts import (
 )
 from cmw.core.execution_layout import (
     ExecutionLayout,
-    execution_target_directory,
+    ExecutionLayoutVersion,
+    TARGET_MANIFEST_FILENAME,
+    build_target_manifest,
+    execution_target_directory_v2,
     next_attempt_identifier,
+    resolve_recorded_layout,
+    write_target_manifest,
 )
 from cmw.core.job import GeometryLineage
 from cmw.core.provenance import atomic_write_json, canonical_json_bytes, read_json
@@ -47,7 +52,10 @@ def _validated_relaxation_result(
     layout = record.get("execution_layout")
     if not isinstance(layout, dict):
         raise ValueError("fragment relaxation result lacks an execution layout")
-    target_path = Path(str(layout["target_directory"])) / "target.json"
+    target_path = (
+        resolve_recorded_layout(layout, metadata_path=metadata_path).target_directory
+        / "target.json"
+    )
     decision = check_reuse(target_path, metadata_path)
     if not decision["reuse"]:
         raise ValueError(
@@ -261,13 +269,16 @@ def _find_pristine_prepared_attempt(
         ):
             continue
         layout = read_json(attempt / "execution-layout.json")
-        if layout.get("target_directory") != str(target_directory):
+        resolved_layout = resolve_recorded_layout(
+            layout, metadata_path=attempt / "execution-layout.json"
+        )
+        if resolved_layout.target_directory != target_directory:
             raise ValueError("prepared attempt has a conflicting target directory")
         return {
             "status": "PREPARED",
-            "node_id": str(layout["workflow_node_identifier"]),
-            "target_id": str(layout["target_identifier"]),
-            "attempt_id": str(layout["attempt_identifier"]),
+            "node_id": resolved_layout.workflow_node_identifier,
+            "target_id": resolved_layout.target_identifier,
+            "attempt_id": resolved_layout.attempt_identifier,
             "target_directory": str(target_directory),
             "attempt_directory": str(attempt),
             "result_path": str(attempt / "job.json"),
@@ -358,10 +369,8 @@ def _materialize_calculation(
             geometry_path=Path(temporary) / "input.xyz",
         )
         target = make_target_from_geometry_input(temporary_input, spec=calculation.spec)
-    target_directory = execution_target_directory(
+    target_directory = execution_target_directory_v2(
         project_root,
-        system_identifier=configuration.system.system_id,
-        workflow_node_identifier=calculation.node_id,
         target_identifier=target.target_id,
     )
     reusable = _find_reusable_result(target_directory)
@@ -380,6 +389,7 @@ def _materialize_calculation(
         workflow_node_identifier=calculation.node_id,
         target_identifier=target.target_id,
         attempt_identifier=next_attempt_identifier(target_directory),
+        version=ExecutionLayoutVersion.V2,
     )
     layout.create_working_directory()
     geometry_input = prepare_hof_orca_geometry_input(
@@ -408,6 +418,15 @@ def _materialize_calculation(
             raise FileExistsError("stored HOF target conflicts")
     else:
         write_target(target_path, target, lineage)
+    write_target_manifest(
+        target_directory / TARGET_MANIFEST_FILENAME,
+        build_target_manifest(
+            layout,
+            target=target.to_dict(),
+            execution_intent=calculation.spec.execution_intent.to_dict(),
+            provenance={"source": source},
+        ),
+    )
     atomic_write_json(layout.layout_path, layout.to_dict())
     geometry_contract = layout.metadata_path("geometry-input.json")
     atomic_write_json(geometry_contract, geometry_input.to_dict())
@@ -603,10 +622,8 @@ def materialize_relaxed_fragment_energy(
         target = make_target_from_geometry_input(
             temporary_input, spec=calculation.spec
         )
-    target_directory = execution_target_directory(
+    target_directory = execution_target_directory_v2(
         project_root,
-        system_identifier=system_id,
-        workflow_node_identifier=node_id,
         target_identifier=target.target_id,
     )
     reusable = _find_reusable_result(target_directory)
@@ -621,6 +638,7 @@ def materialize_relaxed_fragment_energy(
         workflow_node_identifier=node_id,
         target_identifier=target.target_id,
         attempt_identifier=attempt_id,
+        version=ExecutionLayoutVersion.V2,
     )
     layout.create_working_directory()
     geometry_input = prepare_hof_orca_geometry_input(
@@ -647,6 +665,15 @@ def materialize_relaxed_fragment_energy(
             raise FileExistsError("stored relaxed-fragment target conflicts")
     else:
         write_target(target_path, target, lineage)
+    write_target_manifest(
+        target_directory / TARGET_MANIFEST_FILENAME,
+        build_target_manifest(
+            layout,
+            target=target.to_dict(),
+            execution_intent=calculation.spec.execution_intent.to_dict(),
+            provenance={"source": "validated_isolated_fragment_optimization"},
+        ),
+    )
     atomic_write_json(layout.layout_path, layout.to_dict())
     geometry_contract = layout.metadata_path("geometry-input.json")
     atomic_write_json(geometry_contract, geometry_input.to_dict())
