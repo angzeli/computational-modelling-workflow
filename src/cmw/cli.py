@@ -28,6 +28,7 @@ from cmw.core.execution_layout import (
 from cmw.core.execution_layout_migration import (
     LayoutMigrationError,
     apply_migration_plan,
+    audit_migration,
     build_migration_plan,
     format_migration_plan,
     resume_migration,
@@ -74,32 +75,37 @@ def _cleanup_attempts(args: argparse.Namespace) -> int:
 
 
 def _migrate_execution_layout(args: argparse.Namespace) -> int:
-    if args.resume or args.rollback:
+    if args.resume or args.rollback or args.audit:
         if not args.transaction:
             raise LayoutMigrationError(
                 "TRANSACTION_REQUIRED",
-                "--resume/--rollback requires --transaction",
+                "--resume/--rollback/--audit requires --transaction",
                 2,
             )
-        if args.evidence_dir is None:
+        if not args.audit and args.evidence_dir is None:
             raise LayoutMigrationError(
                 "EVIDENCE_DIRECTORY_REQUIRED",
                 "recovery requires --evidence-dir",
                 2,
             )
-        result = (
-            resume_migration(
-                args.campaign,
-                transaction_id=args.transaction,
-                evidence_directory=args.evidence_dir,
+        if args.audit:
+            result = audit_migration(
+                args.campaign, transaction_id=args.transaction
             )
-            if args.resume
-            else rollback_migration(
-                args.campaign,
-                transaction_id=args.transaction,
-                evidence_directory=args.evidence_dir,
+        else:
+            result = (
+                resume_migration(
+                    args.campaign,
+                    transaction_id=args.transaction,
+                    evidence_directory=args.evidence_dir,
+                )
+                if args.resume
+                else rollback_migration(
+                    args.campaign,
+                    transaction_id=args.transaction,
+                    evidence_directory=args.evidence_dir,
+                )
             )
-        )
         print(json.dumps(result, indent=2, sort_keys=True) if args.json else f"migration: {result['status']}")
         return 0
     plan = build_migration_plan(
@@ -245,6 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
     recovery = migration.add_mutually_exclusive_group()
     recovery.add_argument("--resume", action="store_true")
     recovery.add_argument("--rollback", action="store_true")
+    recovery.add_argument("--audit", action="store_true")
     migration.add_argument("--transaction")
     migration.add_argument("--json", action="store_true")
     migration.set_defaults(handler=_migrate_execution_layout)

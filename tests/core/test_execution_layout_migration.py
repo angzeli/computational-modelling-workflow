@@ -13,6 +13,7 @@ from cmw.core.execution_layout_migration import (
     MigrationState,
     StaleMigrationPlan,
     apply_migration_plan,
+    audit_migration,
     build_migration_plan,
     inventory_tree,
     resolve_attempt,
@@ -159,6 +160,11 @@ class ExecutionLayoutMigrationTests(unittest.TestCase):
             ),
             destination / "attempts" / "attempt_002",
         )
+        audit = audit_migration(
+            self.campaign, transaction_id=plan.plan_sha256[:20]
+        )
+        self.assertEqual(audit["status"], "VALIDATED")
+        self.assertEqual(audit["registry_entry_count"], 3)
 
     def test_stale_plan_and_prefix_collision_fail_closed(self) -> None:
         plan = build_migration_plan(self.campaign)

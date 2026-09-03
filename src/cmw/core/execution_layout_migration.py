@@ -1100,6 +1100,74 @@ def rollback_migration(
     return {"status": MigrationState.ROLLED_BACK.value, "transaction_id": transaction_id}
 
 
+def audit_migration(
+    campaign: Path | str, *, transaction_id: str
+) -> Mapping[str, object]:
+    """Revalidate a committed transaction without mutating campaign state."""
+
+    root, _ = _campaign_paths(campaign)
+    journal_path = _journal_path(root, transaction_id)
+    record = read_json(journal_path)
+    if MigrationState(str(record.get("state"))) is not MigrationState.COMMITTED:
+        raise LayoutMigrationError(
+            "TRANSACTION_NOT_COMMITTED",
+            str(record.get("state")),
+            MigrationExitCode.BLOCKED,
+        )
+    plan = migration_plan_from_mapping(dict(record["plan"]))
+    for target in plan.targets:
+        _validate_destination(target)
+    registry = load_migration_registry(root)
+    paths = registry.get("paths", {})
+    expected_registry_entries = len(plan.targets) + plan.attempt_count
+    matching_entries = sum(
+        isinstance(item, Mapping) and item.get("transaction_id") == transaction_id
+        for item in paths.values()
+    )
+    if matching_entries != expected_registry_entries:
+        raise LayoutMigrationError(
+            "MIGRATION_VALIDATION_FAILED",
+            "migration registry is incomplete",
+            MigrationExitCode.BLOCKED,
+        )
+    replacements = _replacement_map(plan)
+    stale_mutable: list[str] = []
+    for reference in plan.mutable_references:
+        path = Path(reference.path)
+        if reference.update_mode == "stream_text":
+            count = _stream_reference_count(path, replacements)
+        else:
+            count = _replacement_count(read_json(path), replacements)
+        if count:
+            stale_mutable.append(str(path))
+    if stale_mutable:
+        raise LayoutMigrationError(
+            "MIGRATION_VALIDATION_FAILED",
+            "stale mutable paths remain: " + ", ".join(stale_mutable),
+            MigrationExitCode.BLOCKED,
+        )
+    return {
+        "status": "VALIDATED",
+        "transaction_id": transaction_id,
+        "plan_sha256": plan.plan_sha256,
+        "target_count": len(plan.targets),
+        "attempt_count": plan.attempt_count,
+        "file_entry_count": plan.file_entry_count,
+        "symlink_count": plan.symlink_count,
+        "logical_bytes": plan.logical_bytes,
+        "physical_bytes": plan.physical_bytes,
+        "scientific_hash_count": sum(
+            entry.scientific_sha256 is not None
+            for target in plan.targets
+            for entry in target.entries
+        ),
+        "registry_path": str(migration_registry_path(root)),
+        "registry_entry_count": matching_entries,
+        "stale_mutable_reference_count": 0,
+        "historical_v1_target_count": len(plan.excluded_targets),
+    }
+
+
 def migration_plan_from_mapping(value: Mapping[str, Any]) -> MigrationPlan:
     targets = tuple(
         TargetMigration(
@@ -1263,6 +1331,7 @@ __all__ = [
     "StaleMigrationPlan",
     "TargetMigration",
     "apply_migration_plan",
+    "audit_migration",
     "build_migration_plan",
     "format_migration_plan",
     "inventory_tree",

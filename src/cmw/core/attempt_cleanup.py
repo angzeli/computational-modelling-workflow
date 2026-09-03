@@ -28,6 +28,7 @@ CLEANUP_SCHEMA_VERSION = 1
 CLEANUP_TOOL_VERSION = "cmw-attempt-cleanup/1"
 DEFAULT_TOMBSTONE_MAX_BYTES = 256 * 1024
 DEFAULT_DIAGNOSTIC_TAIL_BYTES = 16 * 1024
+MAX_IN_MEMORY_REFERENCE_JSON_BYTES = 64 * 1024 * 1024
 
 
 class CleanupMode(str, Enum):
@@ -688,13 +689,19 @@ def _walk_references(value: object, *, source: str, field: str = "") -> Iterable
             yield from _walk_references(item, source=source, field=field)
 
 
-def _reference_graph(root: Path) -> tuple[ReferenceEvidence, ...]:
+def _reference_graph(
+    root: Path,
+) -> tuple[tuple[ReferenceEvidence, ...], tuple[str, ...]]:
     evidence: list[ReferenceEvidence] = []
+    oversized: list[str] = []
     for path in _authoritative_json_files(root):
+        if path.stat().st_size > MAX_IN_MEMORY_REFERENCE_JSON_BYTES:
+            oversized.append(str(path.relative_to(root)))
+            continue
         record = _json_if_mapping(path)
         if record is not None:
             evidence.extend(_walk_references(record, source=str(path.relative_to(root))))
-    return tuple(evidence)
+    return tuple(evidence), tuple(oversized)
 
 
 def _references_for(
@@ -1182,8 +1189,14 @@ def build_cleanup_plan(
     registry = load_cleanup_registry(root)
     attempts = _discover_attempts(root, campaign_id, registry)
     canonical, ambiguous = _canonical_by_target(attempts, descriptor)
-    graph = _reference_graph(root)
+    graph, oversized_reference_records = _reference_graph(root)
     lock_evidence, global_blockers = _process_lock_evidence(root, attempts, descriptor)
+    if oversized_reference_records:
+        global_blockers = (
+            *global_blockers,
+            "REFERENCE_GRAPH_OVERSIZED: fail-closed cleanup requires streaming "
+            "reference support for " + ", ".join(oversized_reference_records),
+        )
     probe = open_writer_probe or _default_open_writer_probe
     candidates: list[AttemptDecision] = []
     ineligible: list[AttemptDecision] = []
