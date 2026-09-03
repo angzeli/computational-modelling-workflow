@@ -72,7 +72,10 @@ Interrupted transactions enter `RESUME_PENDING` and can be continued with
 `--resume --transaction ID` or reversed with `--rollback --transaction ID`.
 Scientific payload is moved with same-filesystem atomic rename. Cross-filesystem
 migration fails closed. Only mutable metadata is copied to the external
-evidence backup; large scientific payload is not duplicated.
+evidence backup; large scientific payload is not duplicated. After destination
+validation, the transaction removes empty v1 display-only parent directories
+below each scientific leaf. It never removes a non-empty directory, and
+rollback recreates the required v1 parents.
 
 Inventory uses `lstat` semantics. Symbolic links are never dereferenced,
 hashed, copied, or rewritten; the link entry and exact stored link text are

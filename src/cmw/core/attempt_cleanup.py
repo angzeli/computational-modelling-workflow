@@ -513,8 +513,7 @@ def _discover_attempts(root: Path, campaign_id: str, registry: Mapping[str, obje
     attempts: list[_Attempt] = []
     registered_attempts = registry.get("attempts", {})
     registered_attempts = registered_attempts if isinstance(registered_attempts, Mapping) else {}
-    calculation = root / "calculation"
-    if calculation.is_dir():
+    if root.is_dir():
         for directory in sorted(root.rglob("attempt_*")):
             if not directory.is_dir() or ATTEMPT_PATTERN.fullmatch(directory.name) is None:
                 continue

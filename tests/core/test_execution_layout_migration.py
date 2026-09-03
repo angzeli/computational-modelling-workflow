@@ -125,6 +125,7 @@ class ExecutionLayoutMigrationTests(unittest.TestCase):
         attempt = destination / "attempts" / "attempt_001"
         self.assertEqual(result["status"], "COMMITTED")
         self.assertFalse(self.target.exists())
+        self.assertFalse((self.leaf / "calculation").exists())
         self.assertEqual(file_hash(attempt / "execution-layout.json"), old_layout_hash)
         self.assertEqual(file_hash(attempt / "stage.out"), output_hash)
         self.assertTrue((attempt / "external-link").is_symlink())
@@ -226,6 +227,7 @@ class ExecutionLayoutMigrationTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "ROLLED_BACK")
         self.assertTrue(self.target.is_dir())
+        self.assertTrue((self.leaf / "calculation").is_dir())
         self.assertEqual(
             json.loads(self.current.read_text())["attempt_path"],
             str(self.target / "attempts" / "attempt_001"),

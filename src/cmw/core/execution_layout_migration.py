@@ -937,6 +937,30 @@ def _validate_destination(target: TargetMigration) -> None:
         )
 
 
+def _prune_empty_legacy_parents(plan: MigrationPlan) -> None:
+    """Remove only empty v1 display scaffolding below each scientific leaf."""
+
+    for target in plan.targets:
+        scientific_leaf = Path(target.scientific_leaf)
+        current = Path(target.source_path).parent
+        while current != scientific_leaf:
+            try:
+                current.relative_to(scientific_leaf)
+            except ValueError as exc:
+                raise LayoutMigrationError(
+                    "INVALID_SOURCE_HIERARCHY",
+                    f"legacy source is outside its scientific leaf: {current}",
+                    MigrationExitCode.TRANSACTION_FAILED,
+                ) from exc
+            try:
+                current.rmdir()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                break
+            current = current.parent
+
+
 FaultHook = Callable[[MigrationState, str | None], None]
 
 
@@ -1018,6 +1042,7 @@ def apply_migration_plan(
         transition(MigrationState.VALIDATING)
         for target in plan.targets:
             _validate_destination(target)
+        _prune_empty_legacy_parents(plan)
         atomic_write_json(
             migration_registry_path(root), _registry_record(plan, transaction_id)
         )
@@ -1291,6 +1316,7 @@ def _resume_journaled_plan(
         _write_journal(journal, state=MigrationState.VALIDATING, plan=plan, moved=moved)
         for target in plan.targets:
             _validate_destination(target)
+        _prune_empty_legacy_parents(plan)
         atomic_write_json(migration_registry_path(root), _registry_record(plan, transaction_id))
         _write_journal(journal, state=MigrationState.COMMITTED, plan=plan, moved=moved)
     except Exception as exc:
