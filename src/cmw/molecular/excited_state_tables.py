@@ -293,20 +293,25 @@ def resolve_selection_roles(
 def _frontier_label(raw: str, homo_index_one_based: int | None) -> str:
     match = _ORBITAL_LABEL.fullmatch(raw)
     if match is None:
-        return f"MO[{raw}]"
+        return f"ORCA0:[{raw}]"
     index = int(match.group(1))
     spin = match.group(2).casefold()
-    fallback = f"MO{index}{spin}"
+    raw_label = f"ORCA0:{index}{spin}"
     if homo_index_one_based is None or spin != "a":
-        return fallback
+        return raw_label
     homo = int(homo_index_one_based)
     if homo < 1:
         raise ExcitedStateTableError("frontier HOMO index must be one-based and positive")
-    if index <= homo:
-        delta = homo - index
-        return "HOMO" if delta == 0 else f"HOMO-{delta}"
-    delta = index - (homo + 1)
-    return "LUMO" if delta == 0 else f"LUMO+{delta}"
+    # ORCA transition blocks use zero-based MO indices, whereas the optional
+    # frontier contract is one-based.  Retain the native index in every label.
+    index_one_based = index + 1
+    if index_one_based <= homo:
+        delta = homo - index_one_based
+        frontier = "HOMO" if delta == 0 else f"HOMO-{delta}"
+    else:
+        delta = index_one_based - (homo + 1)
+        frontier = "LUMO" if delta == 0 else f"LUMO+{delta}"
+    return f"{frontier} [{raw_label}]"
 
 
 def _leading_transitions(

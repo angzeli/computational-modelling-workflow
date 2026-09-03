@@ -238,17 +238,25 @@ class ExcitedStateTableNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized.rows[1]["selection_roles"], "lowest_bright")
         self.assertEqual(normalized.selected_keys, (("AA", "singlet", 1), ("AA", "singlet", 2)))
 
-    def test_top_five_rank_by_weight_with_frontier_and_fallback_labels(self) -> None:
+    def test_top_five_rank_by_weight_with_frontier_and_explicit_orca0_labels(self) -> None:
         frontier = _manifold(2, frontier=10).rows[0]
         self.assertEqual(frontier["transition_count_parsed"], 6)
         self.assertEqual(frontier["leading_transition_weight_sum"], 1.05)
         self.assertEqual(
             frontier["leading_transitions"],
-            "HOMO-1->LUMO:0.4;HOMO->LUMO+1:0.3;HOMO->LUMO:0.2;"
-            "HOMO-2->LUMO+2:0.1;HOMO-3->LUMO+3:0.05",
+            "HOMO [ORCA0:9a]->LUMO+1 [ORCA0:11a]:0.4;"
+            "LUMO [ORCA0:10a]->LUMO+2 [ORCA0:12a]:0.3;"
+            "LUMO [ORCA0:10a]->LUMO+1 [ORCA0:11a]:0.2;"
+            "HOMO-1 [ORCA0:8a]->LUMO+3 [ORCA0:13a]:0.1;"
+            "HOMO-2 [ORCA0:7a]->LUMO+4 [ORCA0:14a]:0.05",
         )
         fallback = _manifold(2).rows[0]["leading_transitions"]
-        self.assertTrue(str(fallback).startswith("MO9a->MO11a:0.4"))
+        self.assertEqual(
+            fallback,
+            "ORCA0:9a->ORCA0:11a:0.4;ORCA0:10a->ORCA0:12a:0.3;"
+            "ORCA0:10a->ORCA0:11a:0.2;ORCA0:8a->ORCA0:13a:0.1;"
+            "ORCA0:7a->ORCA0:14a:0.05",
+        )
 
     def test_configurable_threshold_and_deduplication(self) -> None:
         parsed = ParsedOrcaExcitedStates(
@@ -392,10 +400,12 @@ class ExcitedStateCsvTests(unittest.TestCase):
         self.assertEqual(tuple(bundle.hea_state[0]), HEA_COLUMNS)
         self.assertEqual([row["state_index"] for row in bundle.tda_matrix], [1, 2])
         row = {column: "" for column in TDA_MATRIX_COLUMNS}
-        row.update({"system": "A,A", "leading_transitions": 'MO1a->MO2a:0.5;"phase"'})
+        row.update(
+            {"system": "A,A", "leading_transitions": 'ORCA0:1a->ORCA0:2a:0.5;"phase"'}
+        )
         rendered = serialize_csv_rows((row,), TDA_MATRIX_COLUMNS)
         self.assertIn('"A,A"', rendered)
-        self.assertIn('"MO1a->MO2a:0.5;""phase"""', rendered)
+        self.assertIn('"ORCA0:1a->ORCA0:2a:0.5;""phase"""', rendered)
         self.assertNotIn("None", rendered)
         self.assertNotIn("null", rendered)
 
