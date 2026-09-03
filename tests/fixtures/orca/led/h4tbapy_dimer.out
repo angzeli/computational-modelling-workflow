@@ -1,0 +1,52 @@
+                         Program Version 6.1.1  -  RELEASE   -
+
+Triples Correction (T)                     ...     -0.166984056
+
+ ===========================================================
+         LOCAL ENERGY DECOMPOSITION FOR DLPNO-CC METHODS
+ ===========================================================
+
+Number of fragments = 2
+Fragment  1:  0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17
+Fragment  2:  18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35
+
+-------------------------------------------
+INTRA-FRAGMENT REF. ENERGY FOR FRAGMENT   1
+-------------------------------------------
+Total energy          =      -457.419590793190
+
+-------------------------------------------
+INTRA-FRAGMENT REF. ENERGY FOR FRAGMENT   2
+-------------------------------------------
+Total energy          =      -457.419561425781
+
+--------------------------------------------------
+INTER- vs INTRA-FRAGMENT CORRELATION ENERGIES (Eh)
+--------------------------------------------------
+Inter strong pairs               -0.017547336552 (  -11.011 kcal/mol)
+Inter triples                    -0.003087256102 (   -1.937 kcal/mol)
+Inter weak pairs                 -0.001188750526 (   -0.746 kcal/mol)
+Sum of INTRA-fragment correlation energies  =        -3.667985893431
+
+--------------------------------------------
+INTER- vs INTRA-FRAGMENT TOTAL ENERGIES (Eh)
+--------------------------------------------
+Interfragment reference          -0.255407257167 ( -160.270 kcal/mol)
+Interfragment correlation        -0.021823343181 (  -13.694 kcal/mol)
+Total interaction                -0.277230600348 ( -173.964 kcal/mol)
+Sum of INTRA-fragment total energies        =      -918.507138112402
+
+-------------------------------------------------
+FINAL SUMMARY DLPNO-CCSD ENERGY DECOMPOSITION (Eh)
+-------------------------------------------------
+Electrostatics (REF.)                  -0.223630311
+Exchange (REF.)                        -0.031776946
+Dispersion (strong pairs)              -0.008097261
+Dispersion (weak pairs)                -0.001188751
+Non dispersion (strong pairs)          -3.508989158
+Non dispersion (weak pairs)            -0.004550012
+
+#Time for LED analysis ..     113.9 (sec)
+
+FINAL SINGLE POINT ENERGY      -918.784369007656
+                             ****ORCA TERMINATED NORMALLY****
