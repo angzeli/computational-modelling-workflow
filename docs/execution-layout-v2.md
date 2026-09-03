@@ -71,11 +71,44 @@ The plan is recomputed before mutation; changed state fails with
 Interrupted transactions enter `RESUME_PENDING` and can be continued with
 `--resume --transaction ID` or reversed with `--rollback --transaction ID`.
 Scientific payload is moved with same-filesystem atomic rename. Cross-filesystem
-migration fails closed. Only mutable metadata is copied to the external
-evidence backup; large scientific payload is not duplicated. After destination
-validation, the transaction removes empty v1 display-only parent directories
-below each scientific leaf. It never removes a non-empty directory, and
-rollback recreates the required v1 parents.
+migration fails closed. Mutable-record recovery uses an explicit strategy; a
+JSON filename or a location under `results/` does not by itself make a document
+control-plane metadata:
+
+- `FULL_COPY` preserves exact bytes for records at or below the configurable
+  `full_copy_max_bytes` limit (1 MiB by default). This is conservatively above
+  the observed normal control records (the largest in the motivating migration
+  was about 248 kB) while far below payload-bearing watcher state.
+- `STRUCTURED_INVERSE_PATCH` handles supported, versioned JSON above that limit.
+  Bounded streaming planning records exact JSON pointers for ordinary records,
+  or hash-scoped byte/token locators with the field name for enormous indented
+  records, plus old/new values, record schema, implementation and patch
+  identities, and pre/post hashes. Forward application requires the preimage
+  hash; inverse application requires the postimage hash. Both are atomic and
+  preserve every unrelated byte; neither is a fuzzy text patch.
+- `MIGRATION_OVERLAY_ONLY` is an explicit opt-in for immutable records whose
+  consumers already resolve legacy paths through the migration registry. The
+  source stays byte-identical and rollback removes the transaction's registry
+  entries.
+- `BLOCK_UNSAFE_LARGE_RECORD` fails planning before mutation if a large record
+  has unsupported structure/schema, ambiguous keys, too many changed fields,
+  or when large-record patching is disabled.
+
+The plan hash includes the policy and selected strategies. The journal records
+each record's forward/inverse mutation, hashes, backup location or overlay, and
+apply/rollback status. Recovery therefore accepts only a proven preimage or
+postimage. The limits are operational safety policy, not scientific invariants;
+the CLI exposes `--full-copy-max-bytes`,
+`--structured-patch-max-changed-fields`,
+`--structured-patch-max-line-bytes`,
+`--structured-patch-max-backup-bytes`, and `--large-record-policy`.
+`--overlay-only-record` requires prior proof that all relevant readers honor the
+existing resolver. Compressing a multi-gigabyte payload-bearing document is not
+a substitute for this boundary.
+
+After destination validation, the transaction removes empty v1 display-only
+parent directories below each scientific leaf. It never removes a non-empty
+directory, and rollback recreates the required v1 parents.
 
 Inventory uses `lstat` semantics. Symbolic links are never dereferenced,
 hashed, copied, or rewritten; the link entry and exact stored link text are
@@ -87,6 +120,22 @@ Immutable historical v1 records are not rewritten. Mutable current pointers
 are updated transactionally, while old immutable paths resolve through the
 migration registry. Scientific output hashes, geometry hashes, target IDs,
 attempt IDs, and artifact IDs must remain unchanged.
+
+## Payload-boundary finding
+
+A completed molecular-stacking migration exposed the failure mode behind this
+contract. Two roughly 4.99-GB watcher/summary JSON documents were copied in full
+even though only 547 path-valued fields in each changed. Their top-level
+`systems` values embed parsed and selected excited states, artifact snapshots,
+analyses, and execution history: scientific, derived, and execution payload
+mixed with a small amount of control state. The summary also duplicated the
+watcher's multi-gigabyte `systems` value. Under this policy these direct-reader
+records use structured inverse patches; the mere existence of a registry does
+not make them overlay-safe.
+
+Repeated full-state embedding and whole-document rewrites remain a separate
+watcher-storage concern. Migration is now bounded in the presence of that
+smell; this change deliberately does not redesign project-specific persistence.
 
 ## Cleanup and LED compatibility
 
@@ -109,6 +158,7 @@ refinalization contracts are unchanged.
 
 ```bash
 cmw migrate-execution-layout --campaign /path/to/campaign --from v1 --to v2 --json
+cmw migrate-execution-layout --campaign /path/to/campaign --from v1 --to v2 --full-copy-max-bytes 1048576 --json
 cmw migrate-execution-layout --campaign /path/to/campaign --from v1 --to v2 --apply --confirm-plan SHA256 --evidence-dir /external/evidence
 cmw migrate-execution-layout --campaign /path/to/campaign --resume --transaction TRANSACTION_ID --evidence-dir /external/evidence
 cmw migrate-execution-layout --campaign /path/to/campaign --rollback --transaction TRANSACTION_ID --evidence-dir /external/evidence
