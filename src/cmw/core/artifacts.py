@@ -11,6 +11,7 @@ from .execution_contract import (
     ComputationalTask,
     ExecutionContractError,
     ExecutionIntent,
+    canonical_stage_type,
 )
 from .execution_layout import ExecutionLayout, ExecutionLayoutError
 from .provenance import stable_hash
@@ -849,7 +850,7 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
     target_id = str(target.get("target_id", ""))
     if not target_id:
         raise ValueError("result target lacks target_id")
-    stage_type = str(target.get("stage_type", ""))
+    stage_type = canonical_stage_type(target.get("stage_type", ""))
     calculation = dict(target.get("calculation", {}))
     method, basis, protocol = _method_metadata(calculation)
 

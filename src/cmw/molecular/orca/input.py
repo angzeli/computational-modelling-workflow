@@ -12,6 +12,7 @@ from cmw.core.execution_contract import (
     ComputationalTask,
     ExecutionContractError,
     ExecutionIntent,
+    canonical_stage_type,
 )
 from cmw.core.execution_profiles import ExecutionProfile
 from cmw.core.job import JobTarget
@@ -179,6 +180,9 @@ class OrcaStageSpec:
     task: ComputationalTask | str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "stage_type", StageType(canonical_stage_type(self.stage_type))
+        )
         if not self.keywords.strip():
             raise ValueError("ORCA stage keywords must not be empty")
         if "\n" in self.keywords or "\r" in self.keywords:
