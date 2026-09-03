@@ -113,3 +113,28 @@ cmw migrate-execution-layout --campaign /path/to/campaign --rollback --transacti
 
 Run migration only after project-specific process, lock, watcher, queue, and
 terminal-state preflight proves a safe boundary.
+
+For the completed HOF stacking migration, representative path changes were:
+
+```text
+excited_state/tda/aa/calculation/aa/aa_stack__tda/<full-target-id>/
+  -> excited_state/tda/aa/target-800e066a84bb/
+
+excited_state/tda/aa/calculation/<geometry-hash>/orca_to_molden/<full-target-id>/
+  -> excited_state/tda/aa/orca_to_molden/target-ece06e04d198/
+
+ground_state/sp/aa/calculation/aa/aa_stack__ground_state_sp/<full-target-id>/
+  -> ground_state/sp/aa/target-b466171aa92c/
+```
+
+The full identities represented by the abbreviated source placeholders remain
+in manifests and the migration registry; those placeholders are explanatory
+only and are not accepted by the migration command. A committed transaction
+can be inspected without mutation with:
+
+```bash
+cmw migrate-execution-layout --campaign /path/to/campaign --audit --transaction TRANSACTION_ID --json
+cmw execution-layout-status --layout /path/to/execution-layout.json
+cmw execution-layout-status --layout /path/to/execution-layout.json --verbose
+cmw cleanup-attempts --campaign /path/to/campaign --superseded-only --json
+```
