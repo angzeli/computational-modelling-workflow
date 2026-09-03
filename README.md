@@ -18,6 +18,9 @@ This repository currently contains:
 - factual ORCA output parsing with separate OPT/FREQ/SP/TDDFT validation;
 - versioned targets, attempts, artifacts, lineage, local locks, and fail-closed
   reuse;
+- [ExecutionLayout v2](docs/execution-layout-v2.md), which keeps full scientific
+  identities in authoritative manifests while paths use one short opaque target
+  display layer, with transactional v1 migration and registry-backed resolution;
 - deterministic, dry-run-first cleanup of provably superseded attempts with
   bounded provenance tombstones, explicit purge confirmation, and crash-safe
   recovery;

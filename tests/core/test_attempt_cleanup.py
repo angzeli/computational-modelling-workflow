@@ -25,6 +25,7 @@ from cmw.core.attempt_cleanup import (
     resolve_canonical_attempts,
 )
 from cmw.core.execution_layout import ExecutionLayout, next_attempt_identifier
+from cmw.core.execution_layout_migration import apply_migration_plan, build_migration_plan
 from cmw.core.locks import acquire_lock, release_lock
 from cmw.core.provenance import atomic_write_json, file_hash, read_json
 
@@ -143,6 +144,22 @@ class SyntheticCampaign:
 
 
 class EligibilityTests(unittest.TestCase):
+    def test_00_migrated_v2_attempts_use_full_identity_for_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = SyntheticCampaign(root)
+            migration = build_migration_plan(fixture.root)
+            apply_migration_plan(
+                migration,
+                confirm_plan=migration.plan_sha256,
+                evidence_directory=root / "evidence",
+            )
+            plan = fixture.plan()
+            self.assertEqual(
+                [item.attempt_id for item in plan.candidates], ["attempt_001"]
+            )
+            self.assertEqual(plan.candidates[0].target_id, fixture.target_id)
+
     def test_01_failed_attempt_with_later_finalized_attempt_is_eligible(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = SyntheticCampaign(Path(temporary))
