@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
@@ -64,6 +65,28 @@ def next_attempt_identifier(target_directory: Path | str) -> str:
             match = ATTEMPT_PATTERN.fullmatch(item.name)
             if match and item.is_dir():
                 indices.append(int(match.group(1)))
+    # Purged attempts intentionally have no attempt-local tombstone.  The
+    # campaign cleanup overlay therefore participates in allocation so a
+    # historical scientific attempt number is never reused.
+    try:
+        project_root = target.parents[3]
+        if target.parents[2].name == "calculation":
+            registry_path = project_root / ".cmw" / "cleanup" / "registry.json"
+            if registry_path.is_file():
+                registry = json.loads(registry_path.read_text(encoding="utf-8"))
+                entries = registry.get("attempts", {})
+                if isinstance(entries, dict):
+                    prefix = target.name + "/"
+                    for key in entries:
+                        if not str(key).startswith(prefix):
+                            continue
+                        match = ATTEMPT_PATTERN.fullmatch(str(key)[len(prefix) :])
+                        if match:
+                            indices.append(int(match.group(1)))
+    except (IndexError, OSError, UnicodeError, ValueError, TypeError):
+        # Registry validity is enforced by cleanup/campaign loading.  Attempt
+        # allocation remains backward compatible when no overlay is present.
+        pass
     return f"attempt_{max(indices, default=0) + 1:03d}"
 
 
