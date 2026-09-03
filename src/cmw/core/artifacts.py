@@ -228,6 +228,12 @@ class FragmentEnergyArtifact(EnergyArtifact):
     TYPE = "FragmentEnergyArtifact"
 
 
+class LEDFragmentReferenceArtifact(FragmentEnergyArtifact):
+    """Frozen fragment evaluated with partner basis functions for LED assembly."""
+
+    TYPE = "LEDFragmentReferenceArtifact"
+
+
 class InteractionEnergyArtifact(EnergyArtifact):
     TYPE = "InteractionEnergyArtifact"
 
@@ -242,8 +248,40 @@ class DeformationEnergyArtifact(EnergyArtifact):
     TYPE = "DeformationEnergyArtifact"
 
 
+@dataclass(frozen=True)
 class LEDArtifact(AnalysisArtifact):
-    TYPE = "LEDArtifact"
+    """Validated numerical local-energy decomposition."""
+
+    TYPE: ClassVar[str] = "LEDArtifact"
+
+    led_result: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        object.__setattr__(self, "led_result", dict(self.led_result))
+
+    def _identity_payload(self) -> dict[str, object]:
+        payload = super()._identity_payload()
+
+        def without_paths(value: object) -> object:
+            if isinstance(value, Mapping):
+                return {
+                    str(key): without_paths(item)
+                    for key, item in value.items()
+                    if key != "source_path"
+                }
+            if isinstance(value, (list, tuple)):
+                return [without_paths(item) for item in value]
+            return value
+
+        if self.led_result:
+            payload["led_result"] = without_paths(self.led_result)
+        return payload
+
+    def to_dict(self) -> dict[str, object]:
+        value = super().to_dict()
+        value["led_result"] = dict(self.led_result)
+        return value
 
 
 class DensityArtifact(AnalysisArtifact):
@@ -305,6 +343,7 @@ ARTIFACT_TYPES: dict[str, type[Artifact]] = {
         SinglePointArtifact,
         DimerEnergyArtifact,
         FragmentEnergyArtifact,
+        LEDFragmentReferenceArtifact,
         InteractionEnergyArtifact,
         CPInteractionArtifact,
         DeformationEnergyArtifact,
@@ -374,6 +413,8 @@ def artifact_from_dict(value: Mapping[str, Any]) -> Artifact:
                 "geometry_hash": str(value.get("geometry_hash", "")),
             }
         )
+    if issubclass(cls, LEDArtifact):
+        arguments["led_result"] = dict(value.get("led_result", {}))
     artifact = cls(
         **arguments,
     )
@@ -534,17 +575,74 @@ def validate_artifact_compatibility(
         _validate_deformation_parents(selected)
 
     if isinstance(artifact, LEDArtifact):
-        compatible = [
-            parent
-            for parent in selected
-            if isinstance(parent, CalculationArtifact)
-            and "dlpno" in _normal(parent.method)
-            and parent.protocol.get("led") is True
-        ]
-        if not compatible:
-            raise ArtifactCompatibilityError(
-                "LEDArtifact requires a validated DLPNO calculation with LED enabled"
-            )
+        if artifact.protocol.get("led_contract") == "intermolecular_six_component_v1":
+            dimers = [
+                parent
+                for parent in selected
+                if isinstance(parent, DimerEnergyArtifact)
+                and parent.protocol.get("led_role") == "dimer"
+                and parent.protocol.get("led") is True
+                and "dlpno" in _normal(parent.method)
+            ]
+            references = [
+                parent
+                for parent in selected
+                if isinstance(parent, LEDFragmentReferenceArtifact)
+                and parent.protocol.get("led_role") == "fragment_reference"
+            ]
+            if len(selected) != 3 or len(dimers) != 1 or len(references) != 2:
+                raise ArtifactCompatibilityError(
+                    "six-component LEDArtifact requires one dimer LED result and "
+                    "two LED fragment-reference results"
+                )
+            if any(
+                parent.protocol.get("reference_semantics")
+                != "FROZEN_FRAGMENT_IN_DIMER_BASIS"
+                for parent in references
+            ):
+                raise ArtifactCompatibilityError(
+                    "LED fragment references require FROZEN_FRAGMENT_IN_DIMER_BASIS semantics"
+                )
+            method_contracts = {
+                parent.protocol.get("led_method_contract_hash")
+                for parent in selected
+            }
+            geometry_hashes = {
+                parent.protocol.get("full_dimer_geometry_hash")
+                for parent in selected
+            }
+            partitions = {
+                parent.protocol.get("fragment_partition_hash")
+                for parent in selected
+            }
+            if None in method_contracts or len(method_contracts) != 1:
+                raise ArtifactCompatibilityError(
+                    "LED parent calculations use incompatible scientific inputs"
+                )
+            if None in geometry_hashes or len(geometry_hashes) != 1:
+                raise ArtifactCompatibilityError(
+                    "LED parent calculations use different dimer geometries"
+                )
+            if None in partitions or len(partitions) != 1:
+                raise ArtifactCompatibilityError(
+                    "LED parent calculations use different fragment partitions"
+                )
+            if not artifact.led_result:
+                raise ArtifactCompatibilityError(
+                    "six-component LEDArtifact requires validated numerical results"
+                )
+        else:
+            compatible = [
+                parent
+                for parent in selected
+                if isinstance(parent, CalculationArtifact)
+                and "dlpno" in _normal(parent.method)
+                and parent.protocol.get("led") is True
+            ]
+            if not compatible:
+                raise ArtifactCompatibilityError(
+                    "LEDArtifact requires a validated DLPNO calculation with LED enabled"
+                )
 
     if isinstance(artifact, IGMHArtifact):
         if not any(isinstance(parent, DensityArtifact) for parent in selected):
@@ -951,7 +1049,16 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
                     f"{ExecutionContractError.code}: result execution intent "
                     f"does not match stage {stage_type}"
                 )
-        cls = task_artifacts[task]
+        if task is ComputationalTask.SINGLE_POINT and protocol.get(
+            "led_role"
+        ) == "fragment_reference":
+            cls = LEDFragmentReferenceArtifact
+        elif task is ComputationalTask.SINGLE_POINT and protocol.get(
+            "led_role"
+        ) == "dimer":
+            cls = DimerEnergyArtifact
+        else:
+            cls = task_artifacts[task]
     elif stage_type == "MULTIWFN_ESP":
         cls = DensityArtifact
     elif stage_type == "MULTIWFN_IGMH":
@@ -1026,6 +1133,7 @@ __all__ = [
     "HoleElectronArtifact",
     "InteractionEnergyArtifact",
     "LEDArtifact",
+    "LEDFragmentReferenceArtifact",
     "NTOArtifact",
     "OptimizationArtifact",
     "SinglePointArtifact",
