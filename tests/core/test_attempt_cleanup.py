@@ -324,6 +324,22 @@ class EligibilityTests(unittest.TestCase):
             plan = fixture.plan()
             self.assertFalse(plan.candidates)
 
+    def test_15b_malformed_historical_layout_is_attempt_local_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = SyntheticCampaign(Path(temporary))
+            layout = read_json(fixture.old / "execution-layout.json")
+            layout["working_directory"] = str(fixture.root / "wrong-attempt")
+            atomic_write_json(fixture.old / "execution-layout.json", layout)
+
+            plan = fixture.plan()
+
+            blocked = next(
+                item for item in plan.ineligible if item.attempt_id == "attempt_001"
+            )
+            self.assertFalse(plan.global_blockers)
+            self.assertIn("invalid historical execution layout", blocked.reasons[0])
+            self.assertTrue(any(item.attempt_id == "attempt_002" for item in plan.ineligible))
+
 
 class PathAndPlanTests(unittest.TestCase):
     def test_16_shared_hardlink_is_accounted_without_deleting_shared_content(self) -> None:

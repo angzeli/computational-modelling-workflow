@@ -248,6 +248,8 @@ class _Attempt:
     recorded_pid: int | None
     pid_state: str
     already_cleaned: str | None = None
+    layout_valid: bool = True
+    layout_error: str | None = None
 
 
 def _now() -> str:
@@ -546,6 +548,8 @@ def _discover_attempts(root: Path, campaign_id: str, registry: Mapping[str, obje
                 else None
             )
             layout_path = directory / "execution-layout.json"
+            layout_valid = True
+            layout_error = None
             if layout_path.is_file():
                 try:
                     stored_layout = read_json(layout_path)
@@ -558,7 +562,8 @@ def _discover_attempts(root: Path, campaign_id: str, registry: Mapping[str, obje
                     if layout.target_identifier != target_id:
                         raise ValueError("layout target differs")
                 except (OSError, KeyError, TypeError, ValueError) as exc:
-                    raise InvalidCleanupPath(f"invalid execution layout for {directory}: {exc}") from exc
+                    layout_valid = False
+                    layout_error = str(exc)
             statuses = _status_values(metadata)
             recoverable = (
                 any(value in {"SUCCESS", "COMPLETED"} for value in statuses)
@@ -582,6 +587,8 @@ def _discover_attempts(root: Path, campaign_id: str, registry: Mapping[str, obje
                     _recorded_pid(metadata),
                     _pid_state(_recorded_pid(metadata)),
                     cleaned_status,
+                    layout_valid,
+                    layout_error,
                 )
             )
     registered = registry.get("attempts", {})
@@ -1232,6 +1239,11 @@ def build_cleanup_plan(
         payload_refs = tuple(reference for reference in references if reference.requires_payload)
         if global_blockers:
             reasons.append("campaign is actively mutating or ownership is uncertain")
+        if not attempt.layout_valid:
+            reasons.append(
+                "invalid historical execution layout: "
+                + str(attempt.layout_error or "unknown layout error")
+            )
         if not attempt.terminal:
             reasons.append("attempt is nonterminal")
         if attempt.pid_state in {"ACTIVE", "UNCERTAIN"}:

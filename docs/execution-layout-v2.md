@@ -90,7 +90,12 @@ attempt IDs, and artifact IDs must remain unchanged.
 Attempt cleanup discovers v1 and v2 attempts recursively but derives target
 identity only from authoritative metadata. Its eligibility, canonical,
 reference, and recovery rules continue to use full IDs. Migration does not run
-cleanup; a cleanup dry run is a separate acceptance check.
+cleanup; a cleanup dry run is a separate acceptance check. Historical attempts
+whose stored layout conflicts with their authoritative identity are blocked
+individually rather than aborting discovery of the rest of the campaign. A
+reference record above the cleanup subsystem's bounded in-memory scan limit
+blocks the whole cleanup plan until streaming reference support is available;
+it is never skipped as if it contained no references.
 
 Intermolecular LED dimer and frozen-fragment-reference targets use the same v2
 materializer path contract. Layout display choices are excluded from execution
