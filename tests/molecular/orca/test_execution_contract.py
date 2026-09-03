@@ -14,6 +14,7 @@ from cmw.core.execution_contract import (
     ComputationalTask,
     ExecutionContractError,
 )
+from cmw.core.job import JobTarget
 from cmw.molecular.orca.input import (
     OrcaResources,
     OrcaStageSpec,
@@ -52,6 +53,36 @@ class OrcaExecutionContractTests(unittest.TestCase):
                 rendered = self.render(spec)
                 self.assertEqual(spec.execution_intent.task, task)
                 self.assertEqual(rendered.splitlines()[0].split()[-1], operation)
+
+    def test_sp_stage_forms_share_one_canonical_target_and_artifact_identity(self) -> None:
+        calculation = {"keywords": "HF STO-3G"}
+        targets = tuple(
+            JobTarget(stage, "a" * 64, 0, 1, calculation)
+            for stage in (StageType.SP, "SP", "sp", "StageType.SP")
+        )
+
+        self.assertEqual({target.stage_type for target in targets}, {"SP"})
+        self.assertEqual(len({target.target_id for target in targets}), 1)
+        for stage in (StageType.SP, "SP", "sp", "StageType.SP"):
+            self.assertEqual(OrcaStageSpec(stage, "HF STO-3G").stage_type, StageType.SP)
+
+        record = {
+            "target": {
+                **targets[0].to_dict(),
+                "stage_type": "StageType.SP",
+            },
+            "execution_intent": {
+                "stage_type": "sp",
+                "task": "single_point",
+                "required_behavior": "SP",
+            },
+            "execution": {"status": "SUCCESS"},
+            "scientific": {"status": "VALID", "reason": "valid"},
+            "reusable": True,
+        }
+        artifact = artifact_from_result(record)
+        self.assertIsInstance(artifact, SinglePointArtifact)
+        self.assertEqual(artifact.producing_calculation, targets[0].target_id)
 
     def test_intentional_stage_task_mismatch_fails_closed(self) -> None:
         mismatched = OrcaStageSpec(

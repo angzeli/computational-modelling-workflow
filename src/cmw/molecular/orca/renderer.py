@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from cmw.core.artifacts import Artifact, StructureArtifact
-from cmw.core.execution_contract import ComputationalTask, ExecutionContractError
+from cmw.core.execution_contract import (
+    ComputationalTask,
+    ExecutionContractError,
+    canonical_stage_type,
+)
 from cmw.core.execution_layout import ExecutionLayout
 from cmw.core.execution_profiles import ExecutionProfile
 from cmw.core.job import GeometryLineage, JobTarget
@@ -99,7 +103,7 @@ class OrcaExecutionRenderer:
             )
         try:
             spec = OrcaStageSpec(
-                StageType(str(raw["stage_type"])),
+                StageType(canonical_stage_type(raw["stage_type"])),
                 str(raw["keywords"]),
                 tuple(str(item) for item in raw.get("blocks", ())),
                 protocol=dict(raw.get("protocol", {})),

@@ -25,6 +25,9 @@ This repository currently contains:
   typed scientific artifact contracts;
 - optional method-aware ORCA protocol validation for method, basis, PNO, LED,
   fragment, SCF, optimization, and frequency evidence;
+- ORCA 6.1.1 fixed-geometry intermolecular LED with exact ghost-basis fragment
+  references, six-component numerical reconstruction, typed finalization, and
+  hash-validated reuse;
 - a HOF domain adapter that validates two-fragment hydrogen-bonded systems and
   translates their YAML configuration into generic CP/LED workflow contracts;
 - shell-owned ORCA execution;
@@ -136,6 +139,10 @@ geometry lineage, and resume behavior are documented in
 [`docs/molecular/orca-opt-freq-sp.md`](docs/molecular/orca-opt-freq-sp.md).
 Shell owns operational orchestration; Python owns scientific semantics and
 structured state.
+
+The generic three-calculation intermolecular LED contract, numerical equations,
+ORCA 6.1.1 grammar boundary, and refinalization/reuse behavior are documented in
+[`docs/molecular/orca-intermolecular-led.md`](docs/molecular/orca-intermolecular-led.md).
 
 Molecular XYZ files can be converted to centered orthorhombic or cubic VASP
 POSCAR cells with charge-aware automatic cell selection, per-face vacuum,
