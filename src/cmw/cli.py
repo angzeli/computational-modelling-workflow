@@ -34,6 +34,14 @@ from cmw.core.execution_layout_migration import (
     resume_migration,
     rollback_migration,
 )
+from cmw.core.mutable_metadata import (
+    DEFAULT_FULL_COPY_MAX_BYTES,
+    DEFAULT_STRUCTURED_PATCH_MAX_BACKUP_BYTES,
+    DEFAULT_STRUCTURED_PATCH_MAX_CHANGED_FIELDS,
+    DEFAULT_STRUCTURED_PATCH_MAX_LINE_BYTES,
+    MutableBackupPolicy,
+    MutableBackupStrategy,
+)
 from cmw.core.provenance import atomic_write_json
 
 
@@ -114,6 +122,16 @@ def _migrate_execution_layout(args: argparse.Namespace) -> int:
         destination_version=ExecutionLayoutVersion(args.destination_version),
         short_id_width=args.short_id_width,
         include_roots=args.include_root,
+        mutable_backup_policy=MutableBackupPolicy(
+            full_copy_max_bytes=args.full_copy_max_bytes,
+            structured_patch_max_changed_fields=args.structured_patch_max_changed_fields,
+            structured_patch_max_line_bytes=args.structured_patch_max_line_bytes,
+            structured_patch_max_backup_bytes=args.structured_patch_max_backup_bytes,
+            large_record_policy=args.large_record_policy,
+            overlay_only_records=tuple(
+                str(path.expanduser().resolve()) for path in args.overlay_only_record
+            ),
+        ),
     )
     if args.plan_output is not None:
         atomic_write_json(args.plan_output.expanduser().resolve(), plan.to_dict())
@@ -248,6 +266,42 @@ def build_parser() -> argparse.ArgumentParser:
     migration.add_argument("--confirm-plan")
     migration.add_argument("--evidence-dir", type=Path)
     migration.add_argument("--plan-output", type=Path)
+    migration.add_argument(
+        "--full-copy-max-bytes",
+        type=int,
+        default=DEFAULT_FULL_COPY_MAX_BYTES,
+        help="maximum mutable-record size eligible for an exact full-copy backup",
+    )
+    migration.add_argument(
+        "--structured-patch-max-changed-fields",
+        type=int,
+        default=DEFAULT_STRUCTURED_PATCH_MAX_CHANGED_FIELDS,
+    )
+    migration.add_argument(
+        "--structured-patch-max-line-bytes",
+        type=int,
+        default=DEFAULT_STRUCTURED_PATCH_MAX_LINE_BYTES,
+    )
+    migration.add_argument(
+        "--structured-patch-max-backup-bytes",
+        type=int,
+        default=DEFAULT_STRUCTURED_PATCH_MAX_BACKUP_BYTES,
+    )
+    migration.add_argument(
+        "--large-record-policy",
+        choices=(
+            MutableBackupStrategy.STRUCTURED_INVERSE_PATCH.value,
+            MutableBackupStrategy.BLOCK_UNSAFE_LARGE_RECORD.value,
+        ),
+        default=MutableBackupStrategy.STRUCTURED_INVERSE_PATCH.value,
+    )
+    migration.add_argument(
+        "--overlay-only-record",
+        type=Path,
+        action="append",
+        default=[],
+        help="leave this resolver-backed record byte-identical and use the migration registry",
+    )
     recovery = migration.add_mutually_exclusive_group()
     recovery.add_argument("--resume", action="store_true")
     recovery.add_argument("--rollback", action="store_true")

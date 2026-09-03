@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum, IntEnum
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -28,11 +29,24 @@ from .execution_layout import (
     execution_target_directory_v2,
     write_target_manifest,
 )
+from .mutable_metadata import (
+    DEFAULT_FULL_COPY_MAX_BYTES,
+    DEFAULT_STRUCTURED_PATCH_MAX_BACKUP_BYTES,
+    DEFAULT_STRUCTURED_PATCH_MAX_CHANGED_FIELDS,
+    DEFAULT_STRUCTURED_PATCH_MAX_LINE_BYTES,
+    MutableBackupPolicy,
+    MutableBackupStrategy,
+    MutableRecordError,
+    StructuredFieldPatch,
+    apply_structured_json_patch,
+    plan_structured_json_patch,
+)
 from .provenance import atomic_write_json, file_hash, read_json, stable_hash
 
 
-MIGRATION_SCHEMA_VERSION = 1
-MIGRATION_TOOL_VERSION = "cmw-execution-layout-migration/1"
+MIGRATION_SCHEMA_VERSION = 2
+MIGRATION_REGISTRY_SCHEMA_VERSION = 1
+MIGRATION_TOOL_VERSION = "cmw-execution-layout-migration/2"
 SCIENTIFIC_HASH_SUFFIXES = {
     ".out",
     ".xyz",
@@ -42,9 +56,6 @@ SCIENTIFIC_HASH_SUFFIXES = {
     ".molden",
     ".input",
 }
-STREAMING_METADATA_THRESHOLD_BYTES = 32 * 1024 * 1024
-
-
 class MigrationState(str, Enum):
     PLANNED = "PLANNED"
     STAGING = "STAGING"
@@ -133,9 +144,41 @@ class MutableReference:
     sha256: str
     replacements: int
     update_mode: str = "json"
+    backup_strategy: str = MutableBackupStrategy.FULL_COPY.value
+    size_bytes: int = 0
+    record_schema_version: int | None = None
+    mutation_implementation: str | None = None
+    postimage_sha256: str | None = None
+    patch_sha256: str | None = None
+    changes: tuple[StructuredFieldPatch, ...] = ()
+    projected_backup_bytes: int = 0
+    unsafe_reason: str | None = None
+    contract_version: int = 2
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        if self.contract_version == 1:
+            return {
+                "path": self.path,
+                "sha256": self.sha256,
+                "replacements": self.replacements,
+                "update_mode": self.update_mode,
+            }
+        return {
+            "path": self.path,
+            "sha256": self.sha256,
+            "replacements": self.replacements,
+            "update_mode": self.update_mode,
+            "backup_strategy": self.backup_strategy,
+            "size_bytes": self.size_bytes,
+            "record_schema_version": self.record_schema_version,
+            "mutation_implementation": self.mutation_implementation,
+            "postimage_sha256": self.postimage_sha256,
+            "patch_sha256": self.patch_sha256,
+            "changes": [item.to_dict() for item in self.changes],
+            "projected_backup_bytes": self.projected_backup_bytes,
+            "unsafe_reason": self.unsafe_reason,
+            "contract_version": self.contract_version,
+        }
 
 
 @dataclass(frozen=True)
@@ -152,6 +195,9 @@ class MigrationPlan:
     mutable_references: tuple[MutableReference, ...]
     immutable_records_left_untouched: tuple[str, ...]
     blockers: tuple[str, ...]
+    mutable_backup_policy: Mapping[str, object] = field(
+        default_factory=lambda: MutableBackupPolicy().to_dict()
+    )
     tool_version: str = MIGRATION_TOOL_VERSION
     schema_version: int = MIGRATION_SCHEMA_VERSION
     plan_sha256: str = field(init=False)
@@ -180,7 +226,7 @@ class MigrationPlan:
         return sum(item.physical_bytes for item in self.targets)
 
     def identity_payload(self) -> dict[str, object]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "tool_version": self.tool_version,
             "campaign_id": self.campaign_id,
@@ -198,6 +244,9 @@ class MigrationPlan:
             ),
             "blockers": list(self.blockers),
         }
+        if self.schema_version >= 2:
+            payload["mutable_backup_policy"] = dict(self.mutable_backup_policy)
+        return payload
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -381,12 +430,70 @@ def _replacement_count(value: object, replacements: Mapping[str, str]) -> int:
     return 0
 
 
+def _json_pointer(parts: Sequence[str | int]) -> str:
+    if not parts:
+        return ""
+    return "/" + "/".join(
+        str(item).replace("~", "~0").replace("/", "~1") for item in parts
+    )
+
+
+def _in_memory_changes(
+    value: object,
+    replacements: Mapping[str, str],
+    path: tuple[str | int, ...] = (),
+) -> tuple[StructuredFieldPatch, ...]:
+    changes: list[StructuredFieldPatch] = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            changes.extend(_in_memory_changes(item, replacements, path + (str(key),)))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            changes.extend(_in_memory_changes(item, replacements, path + (index,)))
+    elif isinstance(value, str):
+        updated = _replace_paths(value, replacements)
+        if updated != value:
+            changes.append(
+                StructuredFieldPatch(
+                    pointer=_json_pointer(path),
+                    preimage_start=-1,
+                    preimage_end=-1,
+                    postimage_start=-1,
+                    postimage_end=-1,
+                    old_json=json.dumps(value, ensure_ascii=True),
+                    new_json=json.dumps(updated, ensure_ascii=True),
+                    old_value=value,
+                    new_value=str(updated),
+                )
+            )
+    return tuple(changes)
+
+
+def _atomic_json_hash(value: object) -> str:
+    serialized = (
+        json.dumps(
+            value,
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
 def _mutable_references(
     campaign_root: Path,
     source_roots: Sequence[Path],
     replacements: Mapping[str, str],
-) -> tuple[MutableReference, ...]:
+    policy: MutableBackupPolicy,
+) -> tuple[tuple[MutableReference, ...], tuple[str, ...]]:
     references: list[MutableReference] = []
+    blockers: list[str] = []
+    overlay_records = {
+        str(Path(item).expanduser().resolve()) for item in policy.overlay_only_records
+    }
     for path in sorted(campaign_root.rglob("*.json")):
         if path.is_symlink() or not path.is_file() or _is_within_any(path, source_roots):
             continue
@@ -394,7 +501,8 @@ def _mutable_references(
             continue
         if ".failed_" in path.name or ".backup" in path.name:
             continue
-        if path.stat().st_size > STREAMING_METADATA_THRESHOLD_BYTES:
+        size_bytes = path.stat().st_size
+        if str(path.resolve()) in overlay_records:
             count = _stream_reference_count(path, replacements)
             if count:
                 references.append(
@@ -402,9 +510,67 @@ def _mutable_references(
                         path=str(path),
                         sha256=file_hash(path),
                         replacements=count,
-                        update_mode="stream_text",
+                        update_mode="overlay",
+                        backup_strategy=MutableBackupStrategy.MIGRATION_OVERLAY_ONLY.value,
+                        size_bytes=size_bytes,
+                        postimage_sha256=file_hash(path),
                     )
                 )
+            continue
+        if size_bytes > policy.full_copy_max_bytes:
+            count = _stream_reference_count(path, replacements)
+            if not count:
+                continue
+            if policy.large_record_policy == MutableBackupStrategy.BLOCK_UNSAFE_LARGE_RECORD.value:
+                reason = f"full-copy policy exceeded and large-record patching disabled: {path}"
+                blockers.append(f"BLOCK_UNSAFE_LARGE_RECORD: {reason}")
+                references.append(
+                    MutableReference(
+                        path=str(path),
+                        sha256=file_hash(path),
+                        replacements=count,
+                        update_mode="blocked",
+                        backup_strategy=MutableBackupStrategy.BLOCK_UNSAFE_LARGE_RECORD.value,
+                        size_bytes=size_bytes,
+                        unsafe_reason=reason,
+                    )
+                )
+                continue
+            try:
+                patch = plan_structured_json_patch(
+                    path, replacements, policy=policy
+                )
+            except MutableRecordError as exc:
+                reason = f"{exc.code}: {exc}"
+                blockers.append(f"BLOCK_UNSAFE_LARGE_RECORD: {path}: {reason}")
+                references.append(
+                    MutableReference(
+                        path=str(path),
+                        sha256=file_hash(path),
+                        replacements=count,
+                        update_mode="blocked",
+                        backup_strategy=MutableBackupStrategy.BLOCK_UNSAFE_LARGE_RECORD.value,
+                        size_bytes=size_bytes,
+                        unsafe_reason=reason,
+                    )
+                )
+                continue
+            references.append(
+                MutableReference(
+                    path=str(path),
+                    sha256=patch.preimage_sha256,
+                    replacements=len(patch.patches),
+                    update_mode="structured_patch",
+                    backup_strategy=MutableBackupStrategy.STRUCTURED_INVERSE_PATCH.value,
+                    size_bytes=patch.source_size_bytes,
+                    record_schema_version=patch.record_schema_version,
+                    mutation_implementation=patch.mutation_implementation,
+                    postimage_sha256=patch.postimage_sha256,
+                    patch_sha256=patch.patch_sha256,
+                    changes=patch.patches,
+                    projected_backup_bytes=patch.projected_backup_bytes,
+                )
+            )
             continue
         try:
             value = read_json(path)
@@ -412,21 +578,51 @@ def _mutable_references(
             continue
         count = _replacement_count(value, replacements)
         if count:
+            updated = _replace_paths(value, replacements)
+            changes = _in_memory_changes(value, replacements)
             references.append(
                 MutableReference(
-                    path=str(path), sha256=file_hash(path), replacements=count
+                    path=str(path),
+                    sha256=file_hash(path),
+                    replacements=len(changes),
+                    backup_strategy=MutableBackupStrategy.FULL_COPY.value,
+                    size_bytes=size_bytes,
+                    record_schema_version=(
+                        int(value["schema_version"])
+                        if isinstance(value.get("schema_version"), int)
+                        else None
+                    ),
+                    mutation_implementation="cmw-atomic-json-rewrite/1",
+                    postimage_sha256=_atomic_json_hash(updated),
+                    patch_sha256=stable_hash(
+                        {"changes": [item.to_dict() for item in changes]}
+                    ),
+                    changes=changes,
+                    projected_backup_bytes=size_bytes,
                 )
             )
-    return tuple(references)
+    return tuple(references), tuple(blockers)
 
 
 def _stream_reference_count(path: Path, replacements: Mapping[str, str]) -> int:
     encoded = _encoded_replacements(replacements)
     pattern = _replacement_pattern(encoded)
     count = 0
+    overlap = max((len(item) for item in encoded), default=1) - 1
+    carry = b""
+    absolute = 0
+    last_counted_start = -1
     with path.open("rb") as handle:
-        for line in handle:
-            count += sum(1 for _ in pattern.finditer(line))
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            data = carry + chunk
+            base = absolute - len(carry)
+            for match in pattern.finditer(data):
+                start = base + match.start()
+                if start > last_counted_start:
+                    count += 1
+                    last_counted_start = start
+            carry = data[-overlap:] if overlap else b""
+            absolute += len(chunk)
     return count
 
 
@@ -469,11 +665,17 @@ def build_migration_plan(
     destination_version: ExecutionLayoutVersion | str = ExecutionLayoutVersion.V2,
     short_id_width: int = DEFAULT_SHORT_TARGET_ID_WIDTH,
     include_roots: Sequence[Path | str] = (),
+    mutable_backup_policy: MutableBackupPolicy | Mapping[str, object] | None = None,
 ) -> MigrationPlan:
     """Build a deterministic read-only v1-to-v2 migration plan."""
 
     source_version = ExecutionLayoutVersion(source_version)
     destination_version = ExecutionLayoutVersion(destination_version)
+    backup_policy = (
+        mutable_backup_policy
+        if isinstance(mutable_backup_policy, MutableBackupPolicy)
+        else MutableBackupPolicy.from_mapping(mutable_backup_policy)
+    )
     if (source_version, destination_version) != (
         ExecutionLayoutVersion.V1,
         ExecutionLayoutVersion.V2,
@@ -657,11 +859,13 @@ def build_migration_plan(
     replacements: dict[str, str] = {}
     for item in targets:
         replacements[item.source_path] = item.destination_path
-    mutable = _mutable_references(
+    mutable, mutable_blockers = _mutable_references(
         campaign_root,
         tuple(sorted(all_v1_target_roots)),
         replacements,
+        backup_policy,
     )
+    blockers.extend(mutable_blockers)
     immutable_records = {
         str(Path(target.source_path) / entry.path)
         for target in targets
@@ -689,6 +893,7 @@ def build_migration_plan(
         mutable_references=mutable,
         immutable_records_left_untouched=tuple(sorted(immutable_records)),
         blockers=tuple(sorted(set(blockers))),
+        mutable_backup_policy=backup_policy.to_dict(),
     )
 
 
@@ -699,9 +904,9 @@ def migration_registry_path(campaign_root: Path | str) -> Path:
 def load_migration_registry(campaign_root: Path | str) -> dict[str, Any]:
     path = migration_registry_path(campaign_root)
     if not path.is_file():
-        return {"schema_version": MIGRATION_SCHEMA_VERSION, "migrations": [], "paths": {}}
+        return {"schema_version": MIGRATION_REGISTRY_SCHEMA_VERSION, "migrations": [], "paths": {}}
     value = read_json(path)
-    if value.get("schema_version") != MIGRATION_SCHEMA_VERSION or not isinstance(value.get("paths"), Mapping):
+    if value.get("schema_version") != MIGRATION_REGISTRY_SCHEMA_VERSION or not isinstance(value.get("paths"), Mapping):
         raise LayoutMigrationError(
             "INVALID_MIGRATION_REGISTRY",
             str(path),
@@ -800,7 +1005,17 @@ def _write_journal(
     plan: MigrationPlan,
     moved: Sequence[str],
     error: str | None = None,
+    mutable_records: Sequence[Mapping[str, object]] | None = None,
 ) -> None:
+    if mutable_records is None and path.is_file():
+        try:
+            existing = read_json(path).get("mutable_records")
+        except (OSError, ValueError, TypeError):
+            existing = None
+        if isinstance(existing, list):
+            mutable_records = [dict(item) for item in existing if isinstance(item, Mapping)]
+    if mutable_records is None:
+        mutable_records = _initial_mutable_record_states(plan)
     atomic_write_json(
         path,
         {
@@ -811,38 +1026,182 @@ def _write_journal(
             "campaign_root": plan.campaign_root,
             "moved_target_ids": list(moved),
             "error": error,
+            "mutable_records": [dict(item) for item in mutable_records],
             "plan": plan.to_dict(),
         },
     )
 
 
+def _initial_mutable_record_states(plan: MigrationPlan) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for reference in plan.mutable_references:
+        records.append(
+            {
+                "path": reference.path,
+                "backup_strategy": reference.backup_strategy,
+                "preimage_sha256": reference.sha256,
+                "postimage_sha256": reference.postimage_sha256,
+                "forward_mutation": [item.to_dict() for item in reference.changes],
+                "inverse_mutation": [item.to_dict() for item in reversed(reference.changes)],
+                "patch_sha256": reference.patch_sha256,
+                "mutation_implementation": reference.mutation_implementation,
+                "backup_location": None,
+                "overlay_record": (
+                    {
+                        "resolver": "execution-layout-migration-registry/1",
+                        "mapping_count": len(plan.targets) + plan.attempt_count,
+                    }
+                    if reference.backup_strategy
+                    == MutableBackupStrategy.MIGRATION_OVERLAY_ONLY.value
+                    else None
+                ),
+                "apply_status": "PENDING",
+                "rollback_status": "NOT_STARTED",
+            }
+        )
+    return records
+
+
+def _mutable_states_from_journal(
+    record: Mapping[str, object], plan: MigrationPlan
+) -> list[dict[str, object]]:
+    stored = record.get("mutable_records")
+    if isinstance(stored, list) and len(stored) == len(plan.mutable_references):
+        return [dict(item) for item in stored if isinstance(item, Mapping)]
+    return _initial_mutable_record_states(plan)
+
+
 def _backup_metadata(
-    plan: MigrationPlan, evidence_directory: Path, transaction_id: str
+    plan: MigrationPlan,
+    evidence_directory: Path,
+    transaction_id: str,
+    mutable_records: list[dict[str, object]],
 ) -> None:
     root = Path(plan.campaign_root)
     backup_root = evidence_directory / "metadata-backup" / transaction_id
-    for reference in plan.mutable_references:
+    manifest_records: list[dict[str, object]] = []
+    for reference, state in zip(plan.mutable_references, mutable_records, strict=True):
         source = Path(reference.path)
-        relative = source.relative_to(root)
-        destination = backup_root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination, follow_symlinks=False)
+        strategy = MutableBackupStrategy(reference.backup_strategy)
+        if strategy is MutableBackupStrategy.FULL_COPY:
+            relative = source.relative_to(root)
+            destination = backup_root / relative
+            if destination.is_file():
+                backup_sha256 = file_hash(destination)
+            else:
+                if file_hash(source) != reference.sha256:
+                    raise LayoutMigrationError(
+                        "MUTABLE_RECORD_PREIMAGE_MISMATCH",
+                        str(source),
+                        MigrationExitCode.STALE_PLAN,
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination, follow_symlinks=False)
+                backup_sha256 = file_hash(destination)
+            if backup_sha256 != reference.sha256:
+                raise LayoutMigrationError(
+                    "MUTABLE_RECORD_BACKUP_MISMATCH",
+                    str(source),
+                    MigrationExitCode.TRANSACTION_FAILED,
+                )
+            state["backup_location"] = str(destination)
+            state["apply_status"] = "BACKED_UP"
+        elif strategy is MutableBackupStrategy.STRUCTURED_INVERSE_PATCH:
+            state["apply_status"] = "PATCH_JOURNALED"
+        elif strategy is MutableBackupStrategy.MIGRATION_OVERLAY_ONLY:
+            state["apply_status"] = "OVERLAY_JOURNALED"
+        else:
+            raise LayoutMigrationError(
+                "BLOCK_UNSAFE_LARGE_RECORD",
+                reference.unsafe_reason or reference.path,
+                MigrationExitCode.BLOCKED,
+            )
+        manifest_records.append(
+            {
+                "path": reference.path,
+                "strategy": strategy.value,
+                "source_size_bytes": reference.size_bytes,
+                "projected_backup_bytes": reference.projected_backup_bytes,
+                "backup_location": state["backup_location"],
+                "preimage_sha256": reference.sha256,
+                "postimage_sha256": reference.postimage_sha256,
+                "patch_sha256": reference.patch_sha256,
+            }
+        )
+    atomic_write_json(
+        backup_root / "manifest.json",
+        {
+            "schema_version": 1,
+            "transaction_id": transaction_id,
+            "records": manifest_records,
+        },
+    )
 
 
 def _replacement_map(plan: MigrationPlan) -> dict[str, str]:
     return {item.source_path: item.destination_path for item in plan.targets}
 
 
-def _update_mutable_metadata(plan: MigrationPlan) -> None:
+def _update_mutable_metadata(
+    plan: MigrationPlan,
+    mutable_records: list[dict[str, object]],
+    *,
+    on_record: Callable[[MutableReference], None] | None = None,
+) -> None:
     replacements = _replacement_map(plan)
-    for reference in plan.mutable_references:
+    for reference, state in zip(plan.mutable_references, mutable_records, strict=True):
         path = Path(reference.path)
-        if file_hash(path) != reference.sha256:
-            raise StaleMigrationPlan(f"mutable metadata changed: {path}")
-        if reference.update_mode == "stream_text":
-            _stream_replace_paths(path, replacements)
-        else:
+        current_sha256 = file_hash(path)
+        strategy = MutableBackupStrategy(reference.backup_strategy)
+        if reference.contract_version == 1:
+            if current_sha256 == reference.sha256:
+                if reference.update_mode == "stream_text":
+                    _stream_replace_paths(path, replacements)
+                else:
+                    atomic_write_json(path, _replace_paths(read_json(path), replacements))
+            state["postimage_sha256"] = file_hash(path)
+            state["apply_status"] = "APPLIED"
+        elif current_sha256 == reference.postimage_sha256:
+            state["apply_status"] = "APPLIED"
+        elif current_sha256 != reference.sha256:
+            raise LayoutMigrationError(
+                "MUTABLE_RECORD_PREIMAGE_MISMATCH",
+                f"mutable metadata changed: {path}",
+                MigrationExitCode.STALE_PLAN,
+            )
+        elif strategy is MutableBackupStrategy.FULL_COPY:
             atomic_write_json(path, _replace_paths(read_json(path), replacements))
+            if file_hash(path) != reference.postimage_sha256:
+                raise LayoutMigrationError(
+                    "STRUCTURED_PATCH_RESULT_MISMATCH",
+                    str(path),
+                    MigrationExitCode.ROLLBACK_REQUIRED,
+                )
+            state["apply_status"] = "APPLIED"
+        elif strategy is MutableBackupStrategy.STRUCTURED_INVERSE_PATCH:
+            try:
+                apply_structured_json_patch(
+                    path,
+                    reference.changes,
+                    expected_source_sha256=reference.sha256,
+                    expected_result_sha256=str(reference.postimage_sha256),
+                )
+            except MutableRecordError as exc:
+                raise LayoutMigrationError(
+                    exc.code, str(exc), MigrationExitCode.ROLLBACK_REQUIRED
+                ) from exc
+            state["apply_status"] = "APPLIED"
+        elif strategy is MutableBackupStrategy.MIGRATION_OVERLAY_ONLY:
+            state["apply_status"] = "OVERLAY_ONLY"
+        else:
+            raise LayoutMigrationError(
+                "BLOCK_UNSAFE_LARGE_RECORD",
+                reference.unsafe_reason or reference.path,
+                MigrationExitCode.BLOCKED,
+            )
+        state["postimage_sha256"] = reference.postimage_sha256 or file_hash(path)
+        if on_record is not None:
+            on_record(reference)
 
 
 def _stream_replace_paths(path: Path, replacements: Mapping[str, str]) -> None:
@@ -908,7 +1267,7 @@ def _registry_record(plan: MigrationPlan, transaction_id: str) -> dict[str, Any]
             "target_count": len(plan.targets),
         }
     )
-    return {"schema_version": MIGRATION_SCHEMA_VERSION, "migrations": migrations, "paths": paths}
+    return {"schema_version": MIGRATION_REGISTRY_SCHEMA_VERSION, "migrations": migrations, "paths": paths}
 
 
 def _validate_destination(target: TargetMigration) -> None:
@@ -983,6 +1342,7 @@ def apply_migration_plan(
         plan.campaign_root,
         short_id_width=plan.short_id_width,
         include_roots=plan.scope_roots,
+        mutable_backup_policy=plan.mutable_backup_policy,
     )
     if fresh.plan_sha256 != plan.plan_sha256:
         raise StaleMigrationPlan()
@@ -1002,15 +1362,22 @@ def apply_migration_plan(
     transaction_id = plan.plan_sha256[:20]
     journal = _journal_path(root, transaction_id)
     moved: list[str] = []
+    mutable_records = _initial_mutable_record_states(plan)
 
     def transition(state: MigrationState, target_id: str | None = None) -> None:
-        _write_journal(journal, state=state, plan=plan, moved=moved)
+        _write_journal(
+            journal,
+            state=state,
+            plan=plan,
+            moved=moved,
+            mutable_records=mutable_records,
+        )
         if _fault_hook is not None:
             _fault_hook(state, target_id)
 
     try:
         transition(MigrationState.PLANNED)
-        _backup_metadata(plan, evidence, transaction_id)
+        _backup_metadata(plan, evidence, transaction_id, mutable_records)
         transition(MigrationState.STAGING)
         for target in plan.targets:
             Path(target.destination_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1029,7 +1396,13 @@ def apply_migration_plan(
                     MigrationExitCode.ROLLBACK_REQUIRED,
                 )
             moved.append(target.full_target_id)
-            _write_journal(journal, state=MigrationState.MOVING, plan=plan, moved=moved)
+            _write_journal(
+                journal,
+                state=MigrationState.MOVING,
+                plan=plan,
+                moved=moved,
+                mutable_records=mutable_records,
+            )
             if _fault_hook is not None:
                 _fault_hook(MigrationState.MOVING, target.full_target_id)
         transition(MigrationState.METADATA_UPDATING)
@@ -1038,7 +1411,20 @@ def apply_migration_plan(
                 Path(target.destination_path) / TARGET_MANIFEST_FILENAME,
                 target.target_manifest,
             )
-        _update_mutable_metadata(plan)
+        def mutable_updated(reference: MutableReference) -> None:
+            _write_journal(
+                journal,
+                state=MigrationState.METADATA_UPDATING,
+                plan=plan,
+                moved=moved,
+                mutable_records=mutable_records,
+            )
+            if _fault_hook is not None:
+                _fault_hook(MigrationState.METADATA_UPDATING, reference.path)
+
+        _update_mutable_metadata(
+            plan, mutable_records, on_record=mutable_updated
+        )
         transition(MigrationState.VALIDATING)
         for target in plan.targets:
             _validate_destination(target)
@@ -1054,6 +1440,7 @@ def apply_migration_plan(
             plan=plan,
             moved=moved,
             error=str(exc),
+            mutable_records=mutable_records,
         )
         if isinstance(exc, LayoutMigrationError):
             raise
@@ -1081,7 +1468,83 @@ def rollback_migration(
     journal_path = _journal_path(root, transaction_id)
     record = read_json(journal_path)
     plan = migration_plan_from_mapping(dict(record["plan"]))
-    _write_journal(journal_path, state=MigrationState.ROLLING_BACK, plan=plan, moved=())
+    mutable_records = _mutable_states_from_journal(record, plan)
+    _write_journal(
+        journal_path,
+        state=MigrationState.ROLLING_BACK,
+        plan=plan,
+        moved=(),
+        mutable_records=mutable_records,
+    )
+    backup_root = Path(evidence_directory).resolve() / "metadata-backup" / transaction_id
+    for reference, mutable_state in reversed(
+        list(zip(plan.mutable_references, mutable_records, strict=True))
+    ):
+        destination = Path(reference.path)
+        current_sha256 = file_hash(destination)
+        strategy = MutableBackupStrategy(reference.backup_strategy)
+        if reference.contract_version == 1:
+            backup = backup_root / destination.relative_to(root)
+            if not backup.is_file() or file_hash(backup) != reference.sha256:
+                raise LayoutMigrationError(
+                    "MUTABLE_RECORD_BACKUP_MISMATCH",
+                    str(destination),
+                    MigrationExitCode.ROLLBACK_REQUIRED,
+                )
+            shutil.copy2(backup, destination, follow_symlinks=False)
+        elif current_sha256 == reference.sha256:
+            pass
+        elif current_sha256 != reference.postimage_sha256:
+            raise LayoutMigrationError(
+                "MUTABLE_RECORD_POSTIMAGE_MISMATCH",
+                str(destination),
+                MigrationExitCode.ROLLBACK_REQUIRED,
+            )
+        elif strategy is MutableBackupStrategy.FULL_COPY:
+            location = mutable_state.get("backup_location")
+            backup = Path(str(location)) if location else backup_root / destination.relative_to(root)
+            if not backup.is_file() or file_hash(backup) != reference.sha256:
+                raise LayoutMigrationError(
+                    "MUTABLE_RECORD_BACKUP_MISMATCH",
+                    str(destination),
+                    MigrationExitCode.ROLLBACK_REQUIRED,
+                )
+            shutil.copy2(backup, destination, follow_symlinks=False)
+        elif strategy is MutableBackupStrategy.STRUCTURED_INVERSE_PATCH:
+            try:
+                apply_structured_json_patch(
+                    destination,
+                    reference.changes,
+                    reverse=True,
+                    expected_source_sha256=str(reference.postimage_sha256),
+                    expected_result_sha256=reference.sha256,
+                )
+            except MutableRecordError as exc:
+                raise LayoutMigrationError(
+                    exc.code, str(exc), MigrationExitCode.ROLLBACK_REQUIRED
+                ) from exc
+        elif strategy is MutableBackupStrategy.MIGRATION_OVERLAY_ONLY:
+            pass
+        else:
+            raise LayoutMigrationError(
+                "BLOCK_UNSAFE_LARGE_RECORD",
+                reference.unsafe_reason or reference.path,
+                MigrationExitCode.ROLLBACK_REQUIRED,
+            )
+        if file_hash(destination) != reference.sha256:
+            raise LayoutMigrationError(
+                "MUTABLE_RECORD_ROLLBACK_MISMATCH",
+                str(destination),
+                MigrationExitCode.ROLLBACK_REQUIRED,
+            )
+        mutable_state["rollback_status"] = "RESTORED"
+        _write_journal(
+            journal_path,
+            state=MigrationState.ROLLING_BACK,
+            plan=plan,
+            moved=(),
+            mutable_records=mutable_records,
+        )
     for target in reversed(plan.targets):
         source = Path(target.source_path)
         destination = Path(target.destination_path)
@@ -1099,12 +1562,6 @@ def rollback_migration(
                 f"cannot rollback {destination} -> {source}",
                 MigrationExitCode.ROLLBACK_REQUIRED,
             )
-    backup_root = Path(evidence_directory).resolve() / "metadata-backup" / transaction_id
-    for reference in plan.mutable_references:
-        destination = Path(reference.path)
-        backup = backup_root / destination.relative_to(root)
-        if backup.is_file():
-            shutil.copy2(backup, destination, follow_symlinks=False)
     registry = load_migration_registry(root)
     if migration_registry_path(root).is_file():
         paths = {
@@ -1119,9 +1576,15 @@ def rollback_migration(
         ]
         atomic_write_json(
             migration_registry_path(root),
-            {"schema_version": MIGRATION_SCHEMA_VERSION, "migrations": migrations, "paths": paths},
+            {"schema_version": MIGRATION_REGISTRY_SCHEMA_VERSION, "migrations": migrations, "paths": paths},
         )
-    _write_journal(journal_path, state=MigrationState.ROLLED_BACK, plan=plan, moved=())
+    _write_journal(
+        journal_path,
+        state=MigrationState.ROLLED_BACK,
+        plan=plan,
+        moved=(),
+        mutable_records=mutable_records,
+    )
     return {"status": MigrationState.ROLLED_BACK.value, "transaction_id": transaction_id}
 
 
@@ -1159,7 +1622,11 @@ def audit_migration(
     stale_mutable: list[str] = []
     for reference in plan.mutable_references:
         path = Path(reference.path)
-        if reference.update_mode == "stream_text":
+        if reference.backup_strategy == MutableBackupStrategy.MIGRATION_OVERLAY_ONLY.value:
+            if file_hash(path) != reference.sha256:
+                stale_mutable.append(str(path))
+            continue
+        if reference.update_mode in {"stream_text", "structured_patch"}:
             count = _stream_reference_count(path, replacements)
         else:
             count = _replacement_count(read_json(path), replacements)
@@ -1215,6 +1682,63 @@ def migration_plan_from_mapping(value: Mapping[str, Any]) -> MigrationPlan:
         )
         for item in value.get("targets", ())
     )
+    plan_schema_version = int(value.get("schema_version", 1))
+    mutable_references: list[MutableReference] = []
+    for item in value.get("mutable_references", ()):
+        if not isinstance(item, Mapping):
+            raise StaleMigrationPlan("invalid mutable-reference record")
+        if "backup_strategy" not in item:
+            mutable_references.append(
+                MutableReference(
+                    path=str(item["path"]),
+                    sha256=str(item["sha256"]),
+                    replacements=int(item["replacements"]),
+                    update_mode=str(item.get("update_mode", "json")),
+                    contract_version=1,
+                )
+            )
+            continue
+        mutable_references.append(
+            MutableReference(
+                path=str(item["path"]),
+                sha256=str(item["sha256"]),
+                replacements=int(item["replacements"]),
+                update_mode=str(item.get("update_mode", "json")),
+                backup_strategy=str(item["backup_strategy"]),
+                size_bytes=int(item.get("size_bytes", 0)),
+                record_schema_version=(
+                    int(item["record_schema_version"])
+                    if item.get("record_schema_version") is not None
+                    else None
+                ),
+                mutation_implementation=(
+                    str(item["mutation_implementation"])
+                    if item.get("mutation_implementation") is not None
+                    else None
+                ),
+                postimage_sha256=(
+                    str(item["postimage_sha256"])
+                    if item.get("postimage_sha256") is not None
+                    else None
+                ),
+                patch_sha256=(
+                    str(item["patch_sha256"])
+                    if item.get("patch_sha256") is not None
+                    else None
+                ),
+                changes=tuple(
+                    StructuredFieldPatch.from_mapping(change)
+                    for change in item.get("changes", ())
+                ),
+                projected_backup_bytes=int(item.get("projected_backup_bytes", 0)),
+                unsafe_reason=(
+                    str(item["unsafe_reason"])
+                    if item.get("unsafe_reason") is not None
+                    else None
+                ),
+                contract_version=int(item.get("contract_version", 2)),
+            )
+        )
     plan = MigrationPlan(
         campaign_id=str(value["campaign_id"]),
         campaign_root=str(value["campaign_root"]),
@@ -1227,13 +1751,16 @@ def migration_plan_from_mapping(value: Mapping[str, Any]) -> MigrationPlan:
         excluded_targets=tuple(
             dict(item) for item in value.get("excluded_targets", ())
         ),
-        mutable_references=tuple(
-            MutableReference(**item) for item in value.get("mutable_references", ())
-        ),
+        mutable_references=tuple(mutable_references),
         immutable_records_left_untouched=tuple(
             str(item) for item in value.get("immutable_records_left_untouched", ())
         ),
         blockers=tuple(str(item) for item in value.get("blockers", ())),
+        mutable_backup_policy=dict(
+            value.get("mutable_backup_policy", MutableBackupPolicy().to_dict())
+        ),
+        tool_version=str(value.get("tool_version", "cmw-execution-layout-migration/1")),
+        schema_version=plan_schema_version,
     )
     stored = value.get("plan_sha256")
     if stored not in (None, plan.plan_sha256):
@@ -1268,6 +1795,7 @@ def resume_migration(
         plan,
         evidence_directory=Path(evidence_directory),
         fault_hook=_fault_hook,
+        mutable_records=_mutable_states_from_journal(record, plan),
     )
 
 
@@ -1276,6 +1804,7 @@ def _resume_journaled_plan(
     *,
     evidence_directory: Path,
     fault_hook: FaultHook | None,
+    mutable_records: list[dict[str, object]],
 ) -> Mapping[str, object]:
     # Verify every target is in exactly one of the source or destination states.
     for target in plan.targets:
@@ -1292,6 +1821,7 @@ def _resume_journaled_plan(
     journal = _journal_path(root, transaction_id)
     moved: list[str] = []
     try:
+        _backup_metadata(plan, evidence_directory, transaction_id, mutable_records)
         for target in plan.targets:
             source = Path(target.source_path)
             destination = Path(target.destination_path)
@@ -1299,28 +1829,63 @@ def _resume_journaled_plan(
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(source, destination)
             moved.append(target.full_target_id)
-            _write_journal(journal, state=MigrationState.MOVING, plan=plan, moved=moved)
+            _write_journal(
+                journal,
+                state=MigrationState.MOVING,
+                plan=plan,
+                moved=moved,
+                mutable_records=mutable_records,
+            )
             if fault_hook:
                 fault_hook(MigrationState.MOVING, target.full_target_id)
-        _write_journal(journal, state=MigrationState.METADATA_UPDATING, plan=plan, moved=moved)
+        _write_journal(
+            journal,
+            state=MigrationState.METADATA_UPDATING,
+            plan=plan,
+            moved=moved,
+            mutable_records=mutable_records,
+        )
         for target in plan.targets:
             write_target_manifest(Path(target.destination_path) / TARGET_MANIFEST_FILENAME, target.target_manifest)
-        # Metadata may already be updated.  Apply only while its pre-image hash matches.
-        for reference in plan.mutable_references:
-            path = Path(reference.path)
-            if file_hash(path) == reference.sha256:
-                if reference.update_mode == "stream_text":
-                    _stream_replace_paths(path, _replacement_map(plan))
-                else:
-                    atomic_write_json(path, _replace_paths(read_json(path), _replacement_map(plan)))
-        _write_journal(journal, state=MigrationState.VALIDATING, plan=plan, moved=moved)
+        def mutable_updated(reference: MutableReference) -> None:
+            _write_journal(
+                journal,
+                state=MigrationState.METADATA_UPDATING,
+                plan=plan,
+                moved=moved,
+                mutable_records=mutable_records,
+            )
+            if fault_hook:
+                fault_hook(MigrationState.METADATA_UPDATING, reference.path)
+
+        _update_mutable_metadata(plan, mutable_records, on_record=mutable_updated)
+        _write_journal(
+            journal,
+            state=MigrationState.VALIDATING,
+            plan=plan,
+            moved=moved,
+            mutable_records=mutable_records,
+        )
         for target in plan.targets:
             _validate_destination(target)
         _prune_empty_legacy_parents(plan)
         atomic_write_json(migration_registry_path(root), _registry_record(plan, transaction_id))
-        _write_journal(journal, state=MigrationState.COMMITTED, plan=plan, moved=moved)
+        _write_journal(
+            journal,
+            state=MigrationState.COMMITTED,
+            plan=plan,
+            moved=moved,
+            mutable_records=mutable_records,
+        )
     except Exception as exc:
-        _write_journal(journal, state=MigrationState.RESUME_PENDING, plan=plan, moved=moved, error=str(exc))
+        _write_journal(
+            journal,
+            state=MigrationState.RESUME_PENDING,
+            plan=plan,
+            moved=moved,
+            error=str(exc),
+            mutable_records=mutable_records,
+        )
         if isinstance(exc, LayoutMigrationError):
             raise
         raise LayoutMigrationError("MIGRATION_INTERRUPTED", str(exc), MigrationExitCode.ROLLBACK_REQUIRED) from exc
@@ -1348,11 +1913,17 @@ def format_migration_plan(plan: MigrationPlan) -> str:
 
 
 __all__ = [
+    "DEFAULT_FULL_COPY_MAX_BYTES",
+    "DEFAULT_STRUCTURED_PATCH_MAX_BACKUP_BYTES",
+    "DEFAULT_STRUCTURED_PATCH_MAX_CHANGED_FIELDS",
+    "DEFAULT_STRUCTURED_PATCH_MAX_LINE_BYTES",
     "FilesystemEntry",
     "LayoutMigrationError",
     "MigrationExitCode",
     "MigrationPlan",
     "MigrationState",
+    "MutableBackupPolicy",
+    "MutableBackupStrategy",
     "MutableReference",
     "StaleMigrationPlan",
     "TargetMigration",
