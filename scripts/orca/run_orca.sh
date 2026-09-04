@@ -209,10 +209,11 @@ if [[ -n "$runtime_contract" ]]; then
     'import json,sys; print(json.load(sys.stdin)["environment"]["library_path_variable"])')
   runtime_library_prefix=$(printf '%s' "$runtime_json" | "$PYTHON_BIN" -c \
     'import json,sys; print(":".join(json.load(sys.stdin)["environment"]["library_path_prepend"]))')
+  runtime_assignments=$(printf '%s' "$runtime_json" | "$PYTHON_BIN" -c \
+    'import json,sys; value=json.load(sys.stdin)["environment"].get("variables", {}); [print(f"{name}={value[name]}") for name in sorted(value)]')
   while IFS= read -r runtime_assignment; do
     [[ -z "$runtime_assignment" ]] || export "$runtime_assignment"
-  done < <(printf '%s' "$runtime_json" | "$PYTHON_BIN" -c \
-    'import json,sys; value=json.load(sys.stdin)["environment"].get("variables", {}); [print(f"{name}={value[name]}") for name in sorted(value)]')
+  done <<<"$runtime_assignments"
   export PATH="$runtime_path_prefix${PATH:+:$PATH}"
   case "$runtime_library_variable" in
     DYLD_LIBRARY_PATH)
@@ -328,11 +329,12 @@ if ((external_configured == 1)); then
     'import json,sys; d=json.load(open(sys.argv[1])); print(next(x["execution_path"] for x in d["outputs"] if x["role"] == "stderr"))' \
     "$external_scratch_record")
   external_execution_directory="$run_directory"
-  while IFS= read -r scratch_assignment; do
-    [[ -z "$scratch_assignment" ]] || export "$scratch_assignment"
-  done < <("$PYTHON_BIN" -c \
+  scratch_assignments=$("$PYTHON_BIN" -c \
     'import json,sys; value=json.load(open(sys.argv[1])).get("process_environment", {}); [print(f"{name}={value[name]}") for name in sorted(value)]' \
     "$external_scratch_record")
+  while IFS= read -r scratch_assignment; do
+    [[ -z "$scratch_assignment" ]] || export "$scratch_assignment"
+  done <<<"$scratch_assignments"
 fi
 
 if [[ -n "$runtime_contract" ]]; then
