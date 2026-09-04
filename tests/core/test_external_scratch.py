@@ -170,13 +170,22 @@ class ExternalScratchTests(unittest.TestCase):
             {"OMPI_MCA_osc": "pt2pt"},
         )
         self.assertNotEqual(first["execution_directory"], second["execution_directory"])
+        primary = next(item for item in first["inputs"] if item["role"] == "primary")
+        self.assertEqual(
+            Path(str(primary["execution_path"])).name,
+            f"{first['execution_stem']}.inp",
+        )
+        self.assertEqual(
+            self._output(first, "output").name,
+            f"{first['execution_stem']}.out",
+        )
         self.assertTrue(first_path.is_file())
         self.assertTrue(second_path.is_file())
 
     def test_allowlisted_copyback_excludes_runtime_scratch_and_cleanup_is_exact(self) -> None:
         record_path, record = self._prepare()
         execution = Path(str(record["execution_directory"]))
-        disposable = execution / "stage.PAO_V12.tmp.proc0"
+        disposable = execution / f"{record['execution_stem']}.PAO_V12.tmp.proc0"
         disposable.write_bytes(b"large disposable fixture")
         copied = self._finish_copyback(record_path, record)
 

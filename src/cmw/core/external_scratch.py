@@ -212,6 +212,7 @@ def prepare_external_scratch(
     token = uuid4().hex
     prefix_target = re.sub(r"[^A-Za-z0-9]", "", str(target_id))[:12] or "target"
     prefix_attempt = re.sub(r"[^A-Za-z0-9_-]", "", str(attempt_id)) or "attempt"
+    execution_stem = f"cmw-{prefix_target}-{prefix_attempt}"
     execution = Path(
         tempfile.mkdtemp(
             prefix=f"cmw-orca-{prefix_target}-{prefix_attempt}-", dir=root
@@ -235,16 +236,21 @@ def prepare_external_scratch(
         inputs: list[dict[str, object]] = []
         outputs: list[dict[str, object]] = []
         used_names: set[str] = {OWNER_RECORD}
+        primary_stem = ""
         for raw_role, raw_path in input_files.items():
             role = _role(raw_role)
             source = _direct_existing_path(raw_path, name=f"input {role}")
             _strict_child(source, attempt, name=f"input {role}")
             if not source.is_file():
                 raise ExternalScratchError(f"input {role} is missing or indirect")
-            if source.name in used_names:
+            execution_name = source.name
+            if role == "primary":
+                primary_stem = source.stem
+                execution_name = f"{execution_stem}{source.suffix}"
+            if execution_name in used_names:
                 raise ExternalScratchError("execution filenames must be unique")
-            used_names.add(source.name)
-            destination = execution / source.name
+            used_names.add(execution_name)
+            destination = execution / execution_name
             identity = _verified_copy(source, destination)
             inputs.append(
                 {
@@ -254,19 +260,26 @@ def prepare_external_scratch(
                     **identity,
                 }
             )
+        if not primary_stem:
+            raise ExternalScratchError("scratch execution requires a primary input")
         empty_roles = {_role(item) for item in allow_empty_output_roles}
         for raw_role, raw_path in output_files.items():
             role = _role(raw_role)
             destination = _absolute(raw_path, name=f"output {role}")
             _strict_child(destination, attempt, name=f"output {role}")
-            if destination.name in used_names:
+            execution_name = destination.name
+            if execution_name == primary_stem or execution_name.startswith(
+                f"{primary_stem}."
+            ):
+                execution_name = f"{execution_stem}{execution_name[len(primary_stem):]}"
+            if execution_name in used_names:
                 raise ExternalScratchError("execution filenames must be unique")
-            used_names.add(destination.name)
+            used_names.add(execution_name)
             outputs.append(
                 {
                     "role": role,
                     "canonical_path": str(destination),
-                    "execution_path": str(execution / destination.name),
+                    "execution_path": str(execution / execution_name),
                     "allow_empty": role in empty_roles,
                 }
             )
@@ -302,6 +315,7 @@ def prepare_external_scratch(
             "mount_path": str(mount),
             "scratch_root": str(root),
             "execution_directory": str(execution),
+            "execution_stem": execution_stem,
             "canonical_attempt_directory": str(attempt),
             "inputs": inputs,
             "outputs": outputs,

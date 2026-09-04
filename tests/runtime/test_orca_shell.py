@@ -45,14 +45,15 @@ class OrcaShellTests(unittest.TestCase):
                         print("synthetic ORCA 1.0")
                         raise SystemExit(0)
                     cwd = pathlib.Path.cwd()
+                    stem = pathlib.Path(sys.argv[1]).stem
                     pathlib.Path({str(invocation)!r}).write_text(json.dumps({{
                         "arguments": sys.argv[1:],
                         "working_directory": str(cwd),
                         "tmpdir": os.environ.get("TMPDIR", ""),
                         "ompi_osc": os.environ.get("OMPI_MCA_osc", ""),
                     }}))
-                    (cwd / "stage.PAO_V12.tmp.proc0").write_text("disposable")
-                    (cwd / "stage.gbw").write_text("not declared persistent")
+                    (cwd / f"{{stem}}.PAO_V12.tmp.proc0").write_text("disposable")
+                    (cwd / f"{{stem}}.gbw").write_text("not declared persistent")
                     print("Program Version 1.0.0")
                     print("SCF CONVERGED AFTER 3 CYCLES")
                     print("FINAL SINGLE POINT ENERGY -4.000000000")
@@ -199,7 +200,7 @@ class OrcaShellTests(unittest.TestCase):
             )
             self.assertEqual(scratch_record["status"], "CLEANED")
             self.assertIn(
-                "stage.PAO_V12.tmp.proc0",
+                f"{scratch_record['execution_stem']}.PAO_V12.tmp.proc0",
                 scratch_record["copyback"]["unlisted_entry_sample"],
             )
             self.assertTrue(json.loads((attempt / "job.json").read_text())["reusable"])
