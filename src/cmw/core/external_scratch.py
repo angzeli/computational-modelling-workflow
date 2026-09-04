@@ -212,7 +212,7 @@ def prepare_external_scratch(
     token = uuid4().hex
     prefix_target = re.sub(r"[^A-Za-z0-9]", "", str(target_id))[:12] or "target"
     prefix_attempt = re.sub(r"[^A-Za-z0-9_-]", "", str(attempt_id)) or "attempt"
-    execution_stem = f"cmw-{prefix_target}-{prefix_attempt}"
+    execution_stem = f"c{token[:12]}"
     execution = Path(
         tempfile.mkdtemp(
             prefix=f"cmw-orca-{prefix_target}-{prefix_attempt}-", dir=root
