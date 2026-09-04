@@ -65,7 +65,7 @@ class ExternalScratchTests(unittest.TestCase):
                 "stderr": selected_attempt / "stage.err",
             },
             process_environment={
-                "OMPI_MCA_osc": "pt2pt",
+                "OMPI_MCA_osc_sm_backing_directory": "{execution_directory}",
             },
             minimum_free_gib=800,
             mount_checker=mount_checker or (lambda path: path == self.mount),
@@ -167,7 +167,9 @@ class ExternalScratchTests(unittest.TestCase):
         self.assertEqual(second["target_id"], self.target.target_id)
         self.assertEqual(
             first["process_environment"],
-            {"OMPI_MCA_osc": "pt2pt"},
+            {
+                "OMPI_MCA_osc_sm_backing_directory": first["execution_directory"]
+            },
         )
         self.assertNotEqual(first["execution_directory"], second["execution_directory"])
         primary = next(item for item in first["inputs"] if item["role"] == "primary")

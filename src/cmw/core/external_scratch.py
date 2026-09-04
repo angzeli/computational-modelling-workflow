@@ -296,6 +296,8 @@ def prepare_external_scratch(
         for raw_name, raw_value in (process_environment or {}).items():
             name = str(raw_name)
             value = str(raw_value)
+            if value == "{execution_directory}":
+                value = str(execution)
             if (
                 ENVIRONMENT_NAME_PATTERN.fullmatch(name) is None
                 or "\x00" in value

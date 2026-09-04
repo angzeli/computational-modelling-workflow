@@ -299,7 +299,7 @@ if ((external_configured == 1)); then
     --geometry-contract "$geometry_contract"
     --output "$output"
     --stderr "$stderr_path"
-    --process-environment OMPI_MCA_osc=pt2pt
+    --process-environment 'OMPI_MCA_osc_sm_backing_directory={execution_directory}'
   )
   if ((${#execution_inputs[@]} > 0)); then
     for item in "${execution_inputs[@]}"; do
@@ -358,8 +358,8 @@ if ((external_configured == 1)); then
     --record "$external_scratch_record" >/dev/null
 fi
 
-# ORCA file scratch follows cwd onto external storage. Keep TMPDIR on the local
-# POSIX filesystem because OpenMPI's shared-memory transport is not exFAT-safe.
+# ORCA file scratch and large OSC backing files follow the external execution
+# directory. Keep MPI session/transport files on the local POSIX filesystem.
 scratch_parent=${TMPDIR:-/tmp}
 mkdir -p "$scratch_parent"
 local_scratch_dir=$(mktemp -d "$scratch_parent/cmw-orca.XXXXXXXX")

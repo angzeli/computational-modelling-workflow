@@ -51,6 +51,9 @@ class OrcaShellTests(unittest.TestCase):
                         "working_directory": str(cwd),
                         "tmpdir": os.environ.get("TMPDIR", ""),
                         "ompi_osc": os.environ.get("OMPI_MCA_osc", ""),
+                        "ompi_osc_sm_backing": os.environ.get(
+                            "OMPI_MCA_osc_sm_backing_directory", ""
+                        ),
                     }}))
                     (cwd / f"{{stem}}.PAO_V12.tmp.proc0").write_text("disposable")
                     (cwd / f"{{stem}}.gbw").write_text("not declared persistent")
@@ -189,7 +192,10 @@ class OrcaShellTests(unittest.TestCase):
             self.assertNotEqual(local_tmpdir, execution_directory / "tmp")
             self.assertTrue(local_tmpdir.name.startswith("cmw-orca."))
             self.assertFalse(local_tmpdir.exists())
-            self.assertEqual(invocation_record["ompi_osc"], "pt2pt")
+            self.assertEqual(invocation_record["ompi_osc"], "")
+            self.assertEqual(
+                Path(invocation_record["ompi_osc_sm_backing"]), execution_directory
+            )
             self.assertFalse(execution_directory.exists())
             self.assertTrue((attempt / "stage.out").is_file())
             self.assertTrue((attempt / "stage.err").is_file())
