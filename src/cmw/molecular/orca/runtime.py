@@ -713,6 +713,8 @@ def materialize_orca_runtime_contract(
             else:
                 if effective_strategy == "working_directory_copy":
                     shutil.copyfile(source, destination)
+                    with destination.open("rb") as copied:
+                        os.fsync(copied.fileno())
                     if (
                         destination.stat().st_size
                         != int(raw_file.get("size_bytes", -1))
