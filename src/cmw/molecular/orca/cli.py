@@ -231,6 +231,7 @@ def _runtime_materialize(args: argparse.Namespace) -> int:
         value,
         orca_executable=Path(args.orca_exe),
         working_directory=Path(args.working_directory),
+        copy_working_directory_overlay=args.copy_working_directory_overlay,
     )
     atomic_write_json(Path(args.output), record)
     _print(record)
@@ -389,6 +390,9 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_materialize.add_argument("--runtime", required=True)
     runtime_materialize.add_argument("--orca-exe", required=True)
     runtime_materialize.add_argument("--working-directory", required=True)
+    runtime_materialize.add_argument(
+        "--copy-working-directory-overlay", action="store_true"
+    )
     runtime_materialize.add_argument("--output", required=True)
     runtime_materialize.set_defaults(handler=_runtime_materialize)
 

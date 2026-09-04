@@ -6,6 +6,7 @@ import os
 import platform
 from pathlib import Path
 import re
+import shutil
 import subprocess
 from typing import Any, Mapping, Sequence
 
@@ -657,6 +658,7 @@ def materialize_orca_runtime_contract(
     *,
     orca_executable: Path,
     working_directory: Path,
+    copy_working_directory_overlay: bool = False,
 ) -> dict[str, object]:
     """Materialize and probe the platform-specific launch-time runtime contract."""
 
@@ -676,6 +678,12 @@ def materialize_orca_runtime_contract(
     if not isinstance(raw_files, Sequence) or isinstance(raw_files, (str, bytes)):
         raise _failure("stored ORCA launch-overlay files are malformed")
 
+    effective_strategy = (
+        "working_directory_copy"
+        if copy_working_directory_overlay
+        and strategy == "working_directory_symlink"
+        else strategy
+    )
     materialized: list[dict[str, object]] = []
     created: list[Path] = []
     try:
@@ -703,7 +711,18 @@ def materialize_orca_runtime_contract(
                     f"ORCA launch-overlay path already exists: {destination}"
                 )
             else:
-                destination.symlink_to(source)
+                if effective_strategy == "working_directory_copy":
+                    shutil.copyfile(source, destination)
+                    if (
+                        destination.stat().st_size
+                        != int(raw_file.get("size_bytes", -1))
+                        or file_hash(destination) != raw_file.get("sha256")
+                    ):
+                        raise _failure(
+                            f"ORCA launch-overlay copy verification failed: {destination}"
+                        )
+                else:
+                    destination.symlink_to(source)
                 created.append(destination)
             materialized.append(
                 {
@@ -732,7 +751,7 @@ def materialize_orca_runtime_contract(
         "schema_version": 1,
         "runtime_id": record["runtime_id"],
         "working_directory": str(directory),
-        "strategy": strategy,
+        "strategy": effective_strategy,
         "files": materialized,
         "loader_probe": loader_probe,
     }
