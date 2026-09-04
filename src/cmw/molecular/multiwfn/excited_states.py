@@ -44,6 +44,7 @@ MULTIWFN38_HEA_GRAMMAR = "multiwfn_3_8_nonfragment_hea_v1"
 MULTIWFN2026_7_15_VERSION = "2026.7.15"
 MULTIWFN2026_NTO_GRAMMAR = "multiwfn_2026_7_15_nto_v1"
 MULTIWFN2026_HEA_GRAMMAR = "multiwfn_2026_7_15_nonfragment_hea_v1"
+MULTIWFN2026_IFCT_GRAMMAR = "multiwfn_2026_7_15_ifct_hirshfeld_v1"
 D_ROUNDING_POLICY = "decimal_rounding_interval_overlap_v1"
 ORCA_OUTPUT_LOCAL_PATH = "cmw-orca-excited-state.out"
 
@@ -130,6 +131,17 @@ def _version_fields(version: str) -> tuple[int, ...]:
 
 def _grammar_for_version(version: str, analysis: str) -> str:
     fields = _version_fields(version)
+    if analysis == "ifct":
+        if version == MULTIWFN2026_7_15_VERSION:
+            return MULTIWFN2026_IFCT_GRAMMAR
+        raise UnsupportedMultiwfnFormatError(
+            "fragment-resolved IFCT is fixture-tested only for exact "
+            f"Multiwfn {MULTIWFN2026_7_15_VERSION}; found {version}"
+        )
+    if analysis not in {"nto", "hole_electron"}:
+        raise UnsupportedMultiwfnFormatError(
+            f"unsupported Multiwfn excited-state analysis {analysis!r}"
+        )
     if fields[:2] == (3, 8):
         return (
             MULTIWFN38_NTO_GRAMMAR
@@ -241,7 +253,7 @@ class RenderedMultiwfnExcitedStateInput:
     renderer_version: str = MULTIWFN_EXCITED_STATE_RENDERER_VERSION
 
     def __post_init__(self) -> None:
-        if self.analysis not in {"nto", "hole_electron"}:
+        if self.analysis not in {"nto", "hole_electron", "ifct"}:
             raise MultiwfnExcitedStateError("unsupported excited-state analysis")
         if not self.menu_sequence or self.menu_sequence[-1] != "q":
             raise MultiwfnExcitedStateError(
@@ -521,6 +533,154 @@ class Multiwfn2026HoleElectronRenderer(Multiwfn38HoleElectronRenderer):
     exit_menu = ("0", "0", "0", "q")
 
 
+def _multiwfn_atom_selection(atom_indices: Sequence[int]) -> str:
+    values = tuple(atom_indices)
+    if (
+        not values
+        or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in values
+        )
+        or min(values) < 0
+        or len(set(values)) != len(values)
+    ):
+        raise MultiwfnExcitedStateError(
+            "fragment definitions require unique zero-based atom indices"
+        )
+    one_based = tuple(value + 1 for value in sorted(values))
+    ranges: list[str] = []
+    start = previous = one_based[0]
+    for value in one_based[1:]:
+        if value == previous + 1:
+            previous = value
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = value
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ",".join(ranges)
+
+
+def _ifct_fragment_contract(
+    fragment_definitions: Sequence[object], atom_count: int
+) -> tuple[dict[str, object], ...]:
+    if (
+        isinstance(atom_count, bool)
+        or not isinstance(atom_count, int)
+        or atom_count < 1
+    ):
+        raise MultiwfnExcitedStateError("IFCT source atom count must be positive")
+    fragments = tuple(fragment_definitions)
+    if len(fragments) != 2:
+        raise MultiwfnExcitedStateError(
+            "the validated IFCT contract requires exactly two fragments"
+        )
+    result: list[dict[str, object]] = []
+    labels: list[str] = []
+    covered: set[int] = set()
+    for fragment in fragments:
+        label = str(getattr(fragment, "fragment_id", "")).strip()
+        indices = tuple(getattr(fragment, "atom_indices", ()))
+        if not label:
+            raise MultiwfnExcitedStateError("IFCT fragment labels are required")
+        if label in labels:
+            raise MultiwfnExcitedStateError("IFCT fragment labels must be unique")
+        if covered.intersection(indices):
+            raise MultiwfnExcitedStateError("IFCT fragment atom mappings overlap")
+        selection = _multiwfn_atom_selection(indices)
+        covered.update(indices)
+        labels.append(label)
+        result.append(
+            {
+                "fragment_label": label,
+                "atom_indices_zero_based": list(indices),
+                "multiwfn_atom_selection_one_based": selection,
+            }
+        )
+    expected = set(range(atom_count))
+    if covered != expected:
+        missing = sorted(expected - covered)
+        invalid = sorted(covered - expected)
+        detail = f"missing={missing}" if missing else f"invalid={invalid}"
+        raise MultiwfnExcitedStateError(
+            "IFCT fragments must cover the source structure exactly: " + detail
+        )
+    return tuple(result)
+
+
+class Multiwfn2026IfctRenderer:
+    """Render exact-version, two-fragment Hirshfeld IFCT input."""
+
+    grammar_id = MULTIWFN2026_IFCT_GRAMMAR
+    exact_version = MULTIWFN2026_7_15_VERSION
+
+    def render(
+        self,
+        selected_state: ExcitedStateRecord,
+        *,
+        orca_output_path: Path,
+        source_wavefunction_path: Path,
+        fragment_definitions: Sequence[object],
+        atom_count: int,
+        scientific_protocol_hash: str,
+        source_geometry_hash: str,
+        execution_layout: Mapping[str, object],
+        execution_attempt: Mapping[str, object],
+        output_prefix: str | None = None,
+        settings_identity: Mapping[str, object] | None = None,
+    ) -> RenderedMultiwfnExcitedStateInput:
+        fragments = _ifct_fragment_contract(fragment_definitions, atom_count)
+        prefix = _safe_prefix(output_prefix or selected_state.identity.label)
+        orca = _file_identity(orca_output_path)
+        wavefunction = _file_identity(source_wavefunction_path)
+        menu = (
+            "18",
+            "8",
+            "2",
+            ORCA_OUTPUT_LOCAL_PATH,
+            str(selected_state.local_state_index),
+            str(len(fragments)),
+            *(str(item["multiwfn_atom_selection_one_based"]) for item in fragments),
+            "0",
+            "0",
+            "q",
+        )
+        outputs = (
+            MultiwfnOutputSpec(
+                "session_log",
+                "multiwfn.session.log",
+                f"logs/{prefix}_ifct.session.log",
+                media_type="text/plain",
+            ),
+        )
+        return RenderedMultiwfnExcitedStateInput(
+            "ifct",
+            self.grammar_id,
+            selected_state,
+            wavefunction,
+            orca,
+            menu,
+            outputs,
+            scientific_protocol_hash,
+            source_geometry_hash,
+            execution_layout,
+            execution_attempt,
+            {
+                "required_menu_contract": MENU_CONTRACT,
+                "exact_multiwfn_version": self.exact_version,
+                "population_scheme": "hirshfeld",
+                "fragment_resolved": True,
+                "atom_count": atom_count,
+                "fragment_definitions": list(fragments),
+                **_settings_identity(settings_identity, required=True),
+            },
+            auxiliary_inputs=(
+                MultiwfnAuxiliaryInputSpec(
+                    "orca_excited_state_output", orca, ORCA_OUTPUT_LOCAL_PATH
+                ),
+            ),
+        )
+
+
 def build_excited_state_command_spec(
     rendered: RenderedMultiwfnExcitedStateInput,
     *,
@@ -533,7 +693,7 @@ def build_excited_state_command_spec(
     version = runtime.get("version")
     if not isinstance(version, str):
         raise MultiwfnExcitedStateError("Multiwfn runtime version is required")
-    analysis = "nto" if rendered.analysis == "nto" else "hole_electron"
+    analysis = rendered.analysis
     _require_grammar(version, analysis, rendered.grammar_id)
     if runtime.get("menu_contract") != MENU_CONTRACT:
         raise MultiwfnExcitedStateError(
@@ -1560,6 +1720,315 @@ def parse_multiwfn2026_hole_electron_session_file(
     )
 
 
+@dataclass(frozen=True)
+class IfctFragmentPopulation:
+    fragment_index: int
+    fragment_label: str
+    hole_fraction: float
+    electron_fraction: float
+    population_variation: float
+    intrafragment_redistribution: float
+
+    @property
+    def delta_e_minus_h(self) -> float:
+        return self.electron_fraction - self.hole_fraction
+
+
+@dataclass(frozen=True)
+class IfctTransferRecord:
+    source_fragment_index: int
+    target_fragment_index: int
+    source_fragment_label: str
+    target_fragment_label: str
+    forward_electrons: float
+    reverse_electrons: float
+    net_source_to_target_electrons: float
+
+
+@dataclass(frozen=True)
+class ParsedMultiwfnIfct:
+    state_evidence: MultiwfnSessionStateEvidence
+    population_scheme: str
+    fragments: tuple[IfctFragmentPopulation, ...]
+    transfer: IfctTransferRecord
+    intrinsic_ct_fraction: float
+    intrinsic_le_fraction: float
+    apparent_ct_fraction: float
+    apparent_le_fraction: float
+    parser_complete: bool
+    source_provenance: Mapping[str, object]
+    parser_version: str = MULTIWFN_EXCITED_STATE_PARSER_VERSION
+    grammar_id: str = MULTIWFN2026_IFCT_GRAMMAR
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fragments", tuple(self.fragments))
+        object.__setattr__(self, "source_provenance", dict(self.source_provenance))
+
+
+IFCT_FRAGMENT_RE = re.compile(
+    rf"^\s*(\d+)\s+Hole:\s*({FLOAT})\s*%\s+Electron:\s*({FLOAT})\s*%\s*$",
+    re.I | re.M,
+)
+IFCT_VARIATION_RE = re.compile(
+    rf"^\s*Variation of population number of fragment\s+(\d+):\s*({FLOAT})\s*$",
+    re.I | re.M,
+)
+IFCT_INTRAFRAGMENT_RE = re.compile(
+    rf"^\s*Intrafragment electron redistribution of fragment\s+(\d+):\s*({FLOAT})\s*$",
+    re.I | re.M,
+)
+IFCT_TRANSFER_RE = re.compile(
+    rf"^\s*(\d+)\s*->\s*(\d+):\s*({FLOAT})\s+"
+    rf"\1\s*<-\s*\2:\s*({FLOAT})\s+Net\s+\1\s*->\s*\2:\s*({FLOAT})\s*$",
+    re.I | re.M,
+)
+
+
+def _indexed_ifct_values(
+    pattern: re.Pattern[str], text: str, *, label: str
+) -> dict[int, float]:
+    values: dict[int, float] = {}
+    for match in pattern.finditer(text):
+        index = int(match.group(1))
+        if index in values:
+            raise MultiwfnSessionParseError(
+                f"duplicate IFCT {label} for fragment {index}"
+            )
+        values[index] = _number(match.group(2))
+    return values
+
+
+def parse_multiwfn2026_ifct_session(
+    text: str,
+    *,
+    expected_state: ExcitedStateRecord,
+    fragment_labels: Sequence[str],
+    source_provenance: Mapping[str, object] | None = None,
+) -> ParsedMultiwfnIfct:
+    """Parse and validate the exact Multiwfn 2026.7.15 Hirshfeld IFCT grammar."""
+
+    labels = tuple(str(value).strip() for value in fragment_labels)
+    if len(labels) != 2 or any(not value for value in labels) or len(set(labels)) != 2:
+        raise MultiwfnSessionParseError(
+            "IFCT parsing requires exactly two unique fragment labels"
+        )
+    state = _parse_state_evidence(
+        text,
+        expected_state,
+        analysis="ifct",
+        grammar_id=MULTIWFN2026_IFCT_GRAMMAR,
+    )
+    if re.search(
+        r"Radial grids:\s*\d+\s+Angular grids:\s*\d+\s+Total:\s*\d+",
+        text,
+        re.I,
+    ) is None:
+        raise MultiwfnSessionParseError(
+            "Hirshfeld atomic-grid evidence is missing from IFCT output"
+        )
+    if (
+        "Construction of interfragment charger-transfer matrix has finished!"
+        not in text
+    ):
+        raise MultiwfnSessionParseError("IFCT matrix completion marker is missing")
+
+    population_matches = list(IFCT_FRAGMENT_RE.finditer(text))
+    if len(population_matches) != 2:
+        raise MultiwfnSessionParseError(
+            "expected two IFCT fragment-population rows; "
+            f"found {len(population_matches)}"
+        )
+    populations: dict[int, tuple[float, float]] = {}
+    for match in population_matches:
+        index = int(match.group(1))
+        if index in populations:
+            raise MultiwfnSessionParseError(
+                f"duplicate IFCT population for fragment {index}"
+            )
+        populations[index] = (
+            _number(match.group(2)) / 100.0,
+            _number(match.group(3)) / 100.0,
+        )
+    expected_indices = {1, 2}
+    if set(populations) != expected_indices:
+        raise MultiwfnSessionParseError(
+            "IFCT population fragment indices are incomplete"
+        )
+    if any(
+        not 0.0 <= value <= 1.0
+        for pair in populations.values()
+        for value in pair
+    ):
+        raise MultiwfnSessionParseError(
+            "IFCT fragment populations must be within [0, 1]"
+        )
+    printed_population_tolerance = 2 * 0.5e-4 + 1.0e-12
+    if (
+        abs(sum(value[0] for value in populations.values()) - 1.0)
+        > printed_population_tolerance
+        or abs(sum(value[1] for value in populations.values()) - 1.0)
+        > printed_population_tolerance
+    ):
+        raise MultiwfnSessionParseError(
+            "IFCT fragment hole/electron populations do not close to unity"
+        )
+
+    variations = _indexed_ifct_values(
+        IFCT_VARIATION_RE, text, label="population variation"
+    )
+    redistributions = _indexed_ifct_values(
+        IFCT_INTRAFRAGMENT_RE, text, label="intrafragment redistribution"
+    )
+    if set(variations) != expected_indices or set(redistributions) != expected_indices:
+        raise MultiwfnSessionParseError("IFCT per-fragment quantities are incomplete")
+    if any(not math.isfinite(value) for value in variations.values()) or any(
+        not math.isfinite(value) or value < 0.0
+        for value in redistributions.values()
+    ):
+        raise MultiwfnSessionParseError(
+            "IFCT per-fragment quantities are not finite physical values"
+        )
+
+    transfers = list(IFCT_TRANSFER_RE.finditer(text))
+    if len(transfers) != 1:
+        raise MultiwfnSessionParseError(
+            f"expected one two-fragment IFCT transfer row; found {len(transfers)}"
+        )
+    transfer_match = transfers[0]
+    source_index = int(transfer_match.group(1))
+    target_index = int(transfer_match.group(2))
+    if {source_index, target_index} != expected_indices:
+        raise MultiwfnSessionParseError("IFCT transfer indices do not match fragments")
+    forward = _number(transfer_match.group(3))
+    reverse = _number(transfer_match.group(4))
+    net = _number(transfer_match.group(5))
+    if any(not math.isfinite(value) or value < 0.0 for value in (forward, reverse)):
+        raise MultiwfnSessionParseError(
+            "IFCT directional transfers must be non-negative"
+        )
+    if not math.isclose(forward - reverse, net, abs_tol=1.5e-5):
+        raise MultiwfnSessionParseError(
+            "IFCT net transfer conflicts with directional terms"
+        )
+
+    fragments: list[IfctFragmentPopulation] = []
+    for index in (1, 2):
+        hole, electron = populations[index]
+        delta = electron - hole
+        if not math.isclose(delta, variations[index], abs_tol=1.1e-4):
+            raise MultiwfnSessionParseError(
+                f"IFCT population variation conflicts for fragment {index}"
+            )
+        if not math.isclose(
+            hole * electron,
+            redistributions[index],
+            abs_tol=1.2e-4,
+        ):
+            raise MultiwfnSessionParseError(
+                f"IFCT intrafragment redistribution conflicts for fragment {index}"
+            )
+        fragments.append(
+            IfctFragmentPopulation(
+                index,
+                labels[index - 1],
+                hole,
+                electron,
+                variations[index],
+                redistributions[index],
+            )
+        )
+    if not math.isclose(sum(variations.values()), 0.0, abs_tol=1.1e-5):
+        raise MultiwfnSessionParseError(
+            "IFCT population variations do not conserve charge"
+        )
+    source_consistent = math.isclose(
+        variations[source_index], -net, abs_tol=1.1e-5
+    )
+    target_consistent = math.isclose(
+        variations[target_index], net, abs_tol=1.1e-5
+    )
+    if not source_consistent or not target_consistent:
+        raise MultiwfnSessionParseError(
+            "IFCT fragment variations conflict with net directional transfer"
+        )
+
+    def percentage(name: str) -> float:
+        value, _ = _scalar(
+            rf"^\s*{name} percentage, (?:CT|LE)\(%\):\s*({FLOAT})\s*%",
+            text,
+            name,
+        )
+        fraction = value / 100.0
+        if not math.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
+            raise MultiwfnSessionParseError(
+                f"{name} fraction must be within [0, 1]"
+            )
+        return fraction
+
+    intrinsic_ct = percentage("Intrinsic charge transfer")
+    intrinsic_le = percentage("Intrinsic local excitation")
+    apparent_ct = percentage("Apparent charge transfer")
+    apparent_le = percentage("Apparent local excitation")
+    if not math.isclose(intrinsic_ct + intrinsic_le, 1.0, abs_tol=1.1e-5):
+        raise MultiwfnSessionParseError("intrinsic IFCT and LE fractions do not close")
+    if not math.isclose(apparent_ct + apparent_le, 1.0, abs_tol=1.1e-5):
+        raise MultiwfnSessionParseError("apparent IFCT and LE fractions do not close")
+    if not math.isclose(intrinsic_ct, forward + reverse, abs_tol=1.6e-5):
+        raise MultiwfnSessionParseError(
+            "intrinsic IFCT conflicts with directional terms"
+        )
+    if not math.isclose(apparent_ct, abs(net), abs_tol=1.1e-5):
+        raise MultiwfnSessionParseError("apparent IFCT conflicts with net transfer")
+
+    return ParsedMultiwfnIfct(
+        state,
+        "hirshfeld",
+        tuple(fragments),
+        IfctTransferRecord(
+            source_index,
+            target_index,
+            labels[source_index - 1],
+            labels[target_index - 1],
+            forward,
+            reverse,
+            net,
+        ),
+        intrinsic_ct,
+        intrinsic_le,
+        apparent_ct,
+        apparent_le,
+        True,
+        dict(source_provenance or {}),
+    )
+
+
+def parse_multiwfn2026_ifct_session_file(
+    path: Path,
+    *,
+    expected_state: ExcitedStateRecord,
+    fragment_labels: Sequence[str],
+) -> ParsedMultiwfnIfct:
+    source = path.expanduser().resolve(strict=True)
+    data = source.read_bytes()
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MultiwfnSessionParseError("IFCT session log is not UTF-8 text") from exc
+    return parse_multiwfn2026_ifct_session(
+        text,
+        expected_state=expected_state,
+        fragment_labels=fragment_labels,
+        source_provenance={
+            "session_log_path": str(source),
+            "session_log_sha256": hashlib.sha256(data).hexdigest(),
+            "session_log_size_bytes": len(data),
+            "parser_version": MULTIWFN_EXCITED_STATE_PARSER_VERSION,
+            "fixture_tested_grammar_version": MULTIWFN2026_IFCT_GRAMMAR,
+            "process_exit_code_recorded": False,
+        },
+    )
+
+
 def _excited_state_parent_check(
     excited_state: ExcitedStateArtifact,
     selected_state: ExcitedStateRecord,
@@ -1939,12 +2408,14 @@ __all__ = [
     "MULTIWFN38_NTO_GRAMMAR",
     "MULTIWFN2026_7_15_VERSION",
     "MULTIWFN2026_HEA_GRAMMAR",
+    "MULTIWFN2026_IFCT_GRAMMAR",
     "MULTIWFN2026_NTO_GRAMMAR",
     "MULTIWFN_EXCITED_STATE_PARSER_VERSION",
     "MULTIWFN_EXCITED_STATE_RENDERER_VERSION",
     "Multiwfn38HoleElectronRenderer",
     "Multiwfn38NtoRenderer",
     "Multiwfn2026HoleElectronRenderer",
+    "Multiwfn2026IfctRenderer",
     "Multiwfn2026NtoRenderer",
     "MultiwfnExcitedStateError",
     "MultiwfnFinalizationError",
@@ -1953,7 +2424,10 @@ __all__ = [
     "MultiwfnStateIdentityError",
     "NtoPairRecord",
     "NtoPairSelection",
+    "IfctFragmentPopulation",
+    "IfctTransferRecord",
     "ParsedMultiwfnHoleElectron",
+    "ParsedMultiwfnIfct",
     "ParsedMultiwfnNto",
     "RenderedMultiwfnExcitedStateInput",
     "UnsupportedMultiwfnFormatError",
@@ -1966,6 +2440,8 @@ __all__ = [
     "parse_multiwfn38_nto_session_file",
     "parse_multiwfn2026_hole_electron_session",
     "parse_multiwfn2026_hole_electron_session_file",
+    "parse_multiwfn2026_ifct_session",
+    "parse_multiwfn2026_ifct_session_file",
     "parse_multiwfn2026_nto_session",
     "parse_multiwfn2026_nto_session_file",
     "select_nto_pairs_for_cumulative_cutoff",
