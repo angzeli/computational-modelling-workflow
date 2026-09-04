@@ -35,6 +35,7 @@ class OrcaShellTests(unittest.TestCase):
                     f"""\
                     #!/usr/bin/env python3
                     import json
+                    import os
                     import pathlib
                     import sys
 
@@ -45,6 +46,7 @@ class OrcaShellTests(unittest.TestCase):
                     pathlib.Path({str(invocation)!r}).write_text(json.dumps({{
                         "arguments": sys.argv[1:],
                         "working_directory": str(cwd),
+                        "tmpdir": os.environ.get("TMPDIR", ""),
                     }}))
                     (cwd / "stage.PAO_V12.tmp.proc0").write_text("disposable")
                     (cwd / "stage.gbw").write_text("not declared persistent")
@@ -176,8 +178,12 @@ class OrcaShellTests(unittest.TestCase):
             self.assertEqual(first.returncode, 0, msg=first.stderr)
             invocation_record = json.loads(invocation.read_text(encoding="utf-8"))
             execution_directory = Path(invocation_record["working_directory"])
+            local_tmpdir = Path(invocation_record["tmpdir"])
             self.assertNotEqual(execution_directory, attempt)
             self.assertEqual(execution_directory.parent, scratch_root)
+            self.assertNotEqual(local_tmpdir, execution_directory / "tmp")
+            self.assertTrue(local_tmpdir.name.startswith("cmw-orca."))
+            self.assertFalse(local_tmpdir.exists())
             self.assertFalse(execution_directory.exists())
             self.assertTrue((attempt / "stage.out").is_file())
             self.assertTrue((attempt / "stage.err").is_file())

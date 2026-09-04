@@ -346,16 +346,16 @@ if [[ -n "$runtime_contract" ]]; then
 fi
 
 if ((external_configured == 1)); then
-  mkdir "$run_directory/tmp"
-  export TMPDIR="$run_directory/tmp"
   "$PYTHON_BIN" -m cmw.core.external_scratch_cli running \
     --record "$external_scratch_record" >/dev/null
-else
-  scratch_parent=${TMPDIR:-/tmp}
-  mkdir -p "$scratch_parent"
-  local_scratch_dir=$(mktemp -d "$scratch_parent/cmw-orca.XXXXXXXX")
-  export TMPDIR="$local_scratch_dir"
 fi
+
+# ORCA file scratch follows cwd onto external storage. Keep TMPDIR on the local
+# POSIX filesystem because OpenMPI's shared-memory transport is not exFAT-safe.
+scratch_parent=${TMPDIR:-/tmp}
+mkdir -p "$scratch_parent"
+local_scratch_dir=$(mktemp -d "$scratch_parent/cmw-orca.XXXXXXXX")
+export TMPDIR="$local_scratch_dir"
 
 orca_version=$(
   "$orca_command" --version 2>/dev/null | head -n 1 || true
