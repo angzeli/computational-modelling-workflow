@@ -64,6 +64,7 @@ from .external_scratch import (
     copy_back_external_scratch,
     mark_external_scratch_failed,
     mark_external_scratch_running,
+    mounted_filesystem_type,
     prepare_external_scratch,
 )
 from .plan_materialization import (
@@ -183,6 +184,7 @@ __all__ = [
     "load_cleanup_registry",
     "mark_external_scratch_failed",
     "mark_external_scratch_running",
+    "mounted_filesystem_type",
     "next_attempt_identifier",
     "prepare_external_scratch",
     "register_structure_format",

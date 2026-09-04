@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import tempfile
 from typing import Callable, Mapping, Sequence
 from uuid import uuid4
@@ -25,6 +26,7 @@ OWNER_RECORD = ".cmw-external-scratch-owner.json"
 COPYBACK_OWNER_RECORD = ".cmw-copyback-owner.json"
 ROLE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+FILESYSTEM_TYPE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
 
 
 class ExternalScratchError(RuntimeError):
@@ -98,6 +100,45 @@ def _identity(path: Path) -> dict[str, object]:
     }
 
 
+def mounted_filesystem_type(mount_path: Path | str) -> str:
+    """Return the filesystem type for an exact mounted path on macOS/Linux."""
+
+    mount = _absolute(mount_path, name="mount path")
+    if Path("/sbin/mount").is_file():
+        command = ("/sbin/mount",)
+    else:
+        command = ("mount",)
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ExternalScratchError(
+            "mounted-volume filesystem information is unavailable",
+            code="UNKNOWN_SCRATCH_FILESYSTEM",
+        ) from exc
+    for line in result.stdout.splitlines():
+        darwin_marker = f" on {mount} ("
+        linux_marker = f" on {mount} type "
+        if darwin_marker in line:
+            options = line.split(darwin_marker, 1)[1]
+            filesystem = options.split(",", 1)[0].split(")", 1)[0].strip()
+        elif linux_marker in line:
+            options = line.split(linux_marker, 1)[1]
+            filesystem = options.split(" ", 1)[0].strip()
+        else:
+            continue
+        if filesystem:
+            return filesystem.lower()
+    raise ExternalScratchError(
+        f"mounted-volume filesystem information is unavailable: {mount}",
+        code="UNKNOWN_SCRATCH_FILESYSTEM",
+    )
+
+
 def _verified_copy(source: Path, destination: Path) -> dict[str, object]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.parent / f".{destination.name}.{uuid4().hex}.copying"
@@ -168,9 +209,11 @@ def prepare_external_scratch(
     input_files: Mapping[str, Path | str],
     output_files: Mapping[str, Path | str],
     process_environment: Mapping[str, str] | None = None,
+    required_filesystem_types: Sequence[str] = (),
     allow_empty_output_roles: Sequence[str] = ("stderr",),
     minimum_free_gib: float,
     mount_checker: Callable[[Path], bool] = os.path.ismount,
+    filesystem_type_provider: Callable[[Path], str] = mounted_filesystem_type,
     usage_provider: Callable[[Path], DiskUsage] = shutil.disk_usage,
 ) -> dict[str, object]:
     """Create one unique execution directory after mounted-volume preflight."""
@@ -182,6 +225,25 @@ def prepare_external_scratch(
         raise ExternalScratchError(
             f"expected volume is not mounted: {mount}", code="MISSING_SCRATCH_VOLUME"
         )
+
+    required_filesystems: tuple[str, ...] = tuple(
+        str(item).strip().lower() for item in required_filesystem_types
+    )
+    if any(
+        not item or FILESYSTEM_TYPE_PATTERN.fullmatch(item) is None
+        for item in required_filesystems
+    ):
+        raise ExternalScratchError("required filesystem types are malformed")
+    filesystem_type = ""
+    if required_filesystems:
+        filesystem_type = str(filesystem_type_provider(mount)).strip().lower()
+        if filesystem_type not in required_filesystems:
+            raise ExternalScratchError(
+                f"filesystem {filesystem_type or 'unknown'} is not one of the "
+                f"required external scratch filesystems: "
+                + ", ".join(required_filesystems),
+                code="UNSUPPORTED_SCRATCH_FILESYSTEM",
+            )
 
     root = _absolute(scratch_root, name="scratch root")
     parent = root.parent.resolve(strict=True)
@@ -327,6 +389,8 @@ def prepare_external_scratch(
                 "mounted_volume": True,
                 "same_device_as_mount": True,
                 "writable_unique_directory": True,
+                "filesystem_type": filesystem_type or None,
+                "required_filesystem_types": list(required_filesystems),
             },
         }
         return _write_session(record_path, record)
@@ -622,5 +686,6 @@ __all__ = [
     "copy_back_external_scratch",
     "mark_external_scratch_failed",
     "mark_external_scratch_running",
+    "mounted_filesystem_type",
     "prepare_external_scratch",
 ]

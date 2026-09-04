@@ -94,6 +94,7 @@ def _prepare(args: argparse.Namespace) -> int:
         process_environment=_string_mapping(
             args.process_environment, name="process environment"
         ),
+        required_filesystem_types=tuple(args.required_filesystem),
         allow_empty_output_roles=("stderr",),
         minimum_free_gib=args.minimum_free_gib,
     )
@@ -152,6 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--stderr", required=True)
     prepare.add_argument("--artifact", action="append", default=[])
     prepare.add_argument("--process-environment", action="append", default=[])
+    prepare.add_argument("--required-filesystem", action="append", default=[])
     prepare.set_defaults(handler=_prepare)
 
     running = sub.add_parser("running")

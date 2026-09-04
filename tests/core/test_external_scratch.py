@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from cmw.core.external_scratch import (
     ExternalScratchError,
@@ -12,6 +12,7 @@ from cmw.core.external_scratch import (
     copy_back_external_scratch,
     mark_external_scratch_failed,
     mark_external_scratch_running,
+    mounted_filesystem_type,
     prepare_external_scratch,
 )
 from cmw.core.job import JobTarget
@@ -46,6 +47,8 @@ class ExternalScratchTests(unittest.TestCase):
         attempt: Path | None = None,
         scratch: Path | None = None,
         mount_checker=None,
+        required_filesystems: tuple[str, ...] = (),
+        filesystem_type: str = "apfs",
         free_gib: int = 1000,
     ) -> tuple[Path, dict[str, object]]:
         selected_attempt = attempt or self.attempt
@@ -68,7 +71,9 @@ class ExternalScratchTests(unittest.TestCase):
                 "OMPI_MCA_osc_sm_backing_directory": "{execution_directory}",
             },
             minimum_free_gib=800,
+            required_filesystem_types=required_filesystems,
             mount_checker=mount_checker or (lambda path: path == self.mount),
+            filesystem_type_provider=lambda _: filesystem_type,
             usage_provider=lambda _: DiskUsage(2000 * GIB, 1000 * GIB, free_gib * GIB),
         )
         return selected_attempt / "external-scratch.json", record
@@ -125,6 +130,34 @@ class ExternalScratchTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "FAILED_STORAGE_CAPACITY"):
             self._prepare(free_gib=799)
         self.assertFalse(any(self.scratch.glob("cmw-orca-*")))
+
+    def test_preflight_fails_closed_on_incompatible_filesystem(self) -> None:
+        with self.assertRaisesRegex(
+            ExternalScratchError, "UNSUPPORTED_SCRATCH_FILESYSTEM"
+        ):
+            self._prepare(required_filesystems=("apfs",), filesystem_type="exfat")
+        self.assertFalse(self.scratch.exists())
+
+        _, record = self._prepare(
+            required_filesystems=("apfs",), filesystem_type="APFS"
+        )
+        self.assertEqual(record["preflight"]["filesystem_type"], "apfs")
+        self.assertEqual(
+            record["preflight"]["required_filesystem_types"], ["apfs"]
+        )
+
+    def test_filesystem_type_probe_supports_macos_and_linux_mount_output(self) -> None:
+        macos = Mock(
+            stdout=f"/dev/disk9s1 on {self.mount} (apfs, local, nodev)\n"
+        )
+        with patch("cmw.core.external_scratch.subprocess.run", return_value=macos):
+            self.assertEqual(mounted_filesystem_type(self.mount), "apfs")
+
+        linux = Mock(
+            stdout=f"/dev/loop9 on {self.mount} type ext4 (rw,relatime)\n"
+        )
+        with patch("cmw.core.external_scratch.subprocess.run", return_value=linux):
+            self.assertEqual(mounted_filesystem_type(self.mount), "ext4")
 
     def test_preflight_fails_closed_when_unique_directory_cannot_be_created(self) -> None:
         with patch(

@@ -16,6 +16,7 @@ CMW_IMAGINARY_TOLERANCE_CM1=${CMW_IMAGINARY_TOLERANCE_CM1:-0.0}
 external_scratch_root=${CMW_EXTERNAL_SCRATCH_ROOT:-}
 external_scratch_mount=${CMW_EXTERNAL_SCRATCH_MOUNT:-}
 external_scratch_minimum_free_gib=${CMW_EXTERNAL_SCRATCH_MINIMUM_FREE_GIB:-}
+external_scratch_required_filesystem=${CMW_EXTERNAL_SCRATCH_REQUIRED_FILESYSTEM:-}
 
 input=""
 target=""
@@ -44,6 +45,7 @@ usage() {
     "                   [--minimum-free-disk-gb NUMBER --disk-check-path DIR]" \
     "                   [--external-scratch-root DIR --external-scratch-mount DIR]" \
     "                   [--external-scratch-minimum-free-gib NUMBER]" \
+    "                   [--external-scratch-required-filesystem TYPE]" \
     "                   [--execution-input ROLE=FILE]" \
     "                   [--replace-stale-lock]" >&2
 }
@@ -64,6 +66,7 @@ while (($#)); do
     --external-scratch-root) external_scratch_root=${2:?}; shift 2 ;;
     --external-scratch-mount) external_scratch_mount=${2:?}; shift 2 ;;
     --external-scratch-minimum-free-gib) external_scratch_minimum_free_gib=${2:?}; shift 2 ;;
+    --external-scratch-required-filesystem) external_scratch_required_filesystem=${2:?}; shift 2 ;;
     --execution-input) execution_inputs+=("${2:?}"); shift 2 ;;
     --artifact) artifacts+=("${2:?}"); shift 2 ;;
     --replace-stale-lock) replace_stale=1; shift ;;
@@ -128,7 +131,7 @@ fi
 
 external_scratch_record="$input_directory/external-scratch.json"
 external_configured=0
-if [[ -n "$external_scratch_root" || -n "$external_scratch_mount" || -n "$external_scratch_minimum_free_gib" ]]; then
+if [[ -n "$external_scratch_root" || -n "$external_scratch_mount" || -n "$external_scratch_minimum_free_gib" || -n "$external_scratch_required_filesystem" ]]; then
   if [[ -z "$external_scratch_root" || -z "$external_scratch_mount" || -z "$external_scratch_minimum_free_gib" ]]; then
     printf 'External scratch requires root, mounted volume, and minimum free GiB\n' >&2
     exit 64
@@ -301,6 +304,9 @@ if ((external_configured == 1)); then
     --stderr "$stderr_path"
     --process-environment 'OMPI_MCA_osc_sm_backing_directory={execution_directory}'
   )
+  if [[ -n "$external_scratch_required_filesystem" ]]; then
+    scratch_prepare+=(--required-filesystem "$external_scratch_required_filesystem")
+  fi
   if ((${#execution_inputs[@]} > 0)); then
     for item in "${execution_inputs[@]}"; do
       scratch_prepare+=(--execution-input "$item")
