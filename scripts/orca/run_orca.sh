@@ -363,9 +363,9 @@ mkdir -p "$scratch_parent"
 local_scratch_dir=$(mktemp -d "$scratch_parent/cmw-orca.XXXXXXXX")
 export TMPDIR="$local_scratch_dir"
 
-orca_version=$(
-  "$orca_command" --version 2>/dev/null | head -n 1 || true
-)
+# ORCA 6.1.1 treats `--version` as an input filename rather than a metadata
+# query.  The finalizer obtains the authoritative version from the real output.
+orca_version=""
 
 input_name=$(basename "$run_input")
 launch=("$orca_command" "$input_name")

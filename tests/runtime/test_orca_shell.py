@@ -30,6 +30,7 @@ class OrcaShellTests(unittest.TestCase):
             shutil.copyfile(FIXTURE, structure)
             fake = root / "fake orca"
             invocation = root / "invocation.json"
+            version_probe = root / "version-probe.txt"
             fake.write_text(
                 textwrap.dedent(
                     f"""\
@@ -40,6 +41,7 @@ class OrcaShellTests(unittest.TestCase):
                     import sys
 
                     if sys.argv[1:] == ["--version"]:
+                        pathlib.Path({str(version_probe)!r}).write_text("called")
                         print("synthetic ORCA 1.0")
                         raise SystemExit(0)
                     cwd = pathlib.Path.cwd()
@@ -177,6 +179,7 @@ class OrcaShellTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(first.returncode, 0, msg=first.stderr)
+            self.assertFalse(version_probe.exists())
             invocation_record = json.loads(invocation.read_text(encoding="utf-8"))
             execution_directory = Path(invocation_record["working_directory"])
             local_tmpdir = Path(invocation_record["tmpdir"])
