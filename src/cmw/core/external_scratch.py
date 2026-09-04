@@ -24,6 +24,7 @@ EXTERNAL_SCRATCH_RECORD = "external-scratch.json"
 OWNER_RECORD = ".cmw-external-scratch-owner.json"
 COPYBACK_OWNER_RECORD = ".cmw-copyback-owner.json"
 ROLE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 class ExternalScratchError(RuntimeError):
@@ -166,6 +167,7 @@ def prepare_external_scratch(
     attempt_id: str,
     input_files: Mapping[str, Path | str],
     output_files: Mapping[str, Path | str],
+    process_environment: Mapping[str, str] | None = None,
     allow_empty_output_roles: Sequence[str] = ("stderr",),
     minimum_free_gib: float,
     mount_checker: Callable[[Path], bool] = os.path.ismount,
@@ -277,6 +279,19 @@ def prepare_external_scratch(
                 + ", ".join(sorted(unknown_empty))
             )
 
+        environment: dict[str, str] = {}
+        for raw_name, raw_value in (process_environment or {}).items():
+            name = str(raw_name)
+            value = str(raw_value)
+            if (
+                ENVIRONMENT_NAME_PATTERN.fullmatch(name) is None
+                or "\x00" in value
+                or "\n" in value
+                or "\r" in value
+            ):
+                raise ExternalScratchError("process environment is malformed")
+            environment[name] = value
+
         record: dict[str, object] = {
             "schema_version": EXTERNAL_SCRATCH_SCHEMA_VERSION,
             "status": "PREPARED",
@@ -290,6 +305,7 @@ def prepare_external_scratch(
             "canonical_attempt_directory": str(attempt),
             "inputs": inputs,
             "outputs": outputs,
+            "process_environment": dict(sorted(environment.items())),
             "preflight": {
                 **capacity,
                 "mounted_volume": True,

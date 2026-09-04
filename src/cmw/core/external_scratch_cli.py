@@ -34,6 +34,16 @@ def _mapping(values: list[str], *, name: str) -> dict[str, Path]:
     return result
 
 
+def _string_mapping(values: list[str], *, name: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for value in values:
+        key, separator, selected = value.partition("=")
+        if not separator or not key or not selected or key in result:
+            raise ExternalScratchError(f"invalid {name} declaration: {value!r}")
+        result[key] = selected
+    return result
+
+
 def _target_id(path: Path) -> str:
     value = read_json(path)
     target = value.get("target")
@@ -81,6 +91,9 @@ def _prepare(args: argparse.Namespace) -> int:
         attempt_id=layout.attempt_identifier,
         input_files=inputs,
         output_files=outputs,
+        process_environment=_string_mapping(
+            args.process_environment, name="process environment"
+        ),
         allow_empty_output_roles=("stderr",),
         minimum_free_gib=args.minimum_free_gib,
     )
@@ -138,6 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--output", required=True)
     prepare.add_argument("--stderr", required=True)
     prepare.add_argument("--artifact", action="append", default=[])
+    prepare.add_argument("--process-environment", action="append", default=[])
     prepare.set_defaults(handler=_prepare)
 
     running = sub.add_parser("running")

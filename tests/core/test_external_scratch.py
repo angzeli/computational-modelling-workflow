@@ -64,6 +64,9 @@ class ExternalScratchTests(unittest.TestCase):
                 "output": selected_attempt / "stage.out",
                 "stderr": selected_attempt / "stage.err",
             },
+            process_environment={
+                "OMPI_MCA_osc": "pt2pt",
+            },
             minimum_free_gib=800,
             mount_checker=mount_checker or (lambda path: path == self.mount),
             usage_provider=lambda _: DiskUsage(2000 * GIB, 1000 * GIB, free_gib * GIB),
@@ -162,6 +165,10 @@ class ExternalScratchTests(unittest.TestCase):
 
         self.assertEqual(first["target_id"], self.target.target_id)
         self.assertEqual(second["target_id"], self.target.target_id)
+        self.assertEqual(
+            first["process_environment"],
+            {"OMPI_MCA_osc": "pt2pt"},
+        )
         self.assertNotEqual(first["execution_directory"], second["execution_directory"])
         self.assertTrue(first_path.is_file())
         self.assertTrue(second_path.is_file())

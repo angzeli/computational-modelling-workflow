@@ -298,6 +298,7 @@ if ((external_configured == 1)); then
     --geometry-contract "$geometry_contract"
     --output "$output"
     --stderr "$stderr_path"
+    --process-environment OMPI_MCA_osc=pt2pt
   )
   if ((${#execution_inputs[@]} > 0)); then
     for item in "${execution_inputs[@]}"; do
@@ -327,6 +328,11 @@ if ((external_configured == 1)); then
     'import json,sys; d=json.load(open(sys.argv[1])); print(next(x["execution_path"] for x in d["outputs"] if x["role"] == "stderr"))' \
     "$external_scratch_record")
   external_execution_directory="$run_directory"
+  while IFS= read -r scratch_assignment; do
+    [[ -z "$scratch_assignment" ]] || export "$scratch_assignment"
+  done < <("$PYTHON_BIN" -c \
+    'import json,sys; value=json.load(open(sys.argv[1])).get("process_environment", {}); [print(f"{name}={value[name]}") for name in sorted(value)]' \
+    "$external_scratch_record")
 fi
 
 if [[ -n "$runtime_contract" ]]; then
