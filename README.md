@@ -159,6 +159,11 @@ configuration, runtime behavior, cube validation, and plan examples are
 documented in
 [`docs/molecular/multiwfn-cubes.md`](docs/molecular/multiwfn-cubes.md).
 
+Prepared local commands can be executed one at a time through `cmw jobs`, with
+a persistent queue, detached controller and optional terminal console. See
+[`docs/cmw-jobs.md`](docs/cmw-jobs.md) for installation, controls, ownership
+limits and a safe synthetic demo.
+
 Development checks remain deterministic and require no ORCA installation:
 
 ```sh

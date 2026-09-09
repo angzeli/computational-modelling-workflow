@@ -21,7 +21,10 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering",
 ]
-dependencies = ["ase>=3.23", "PyYAML>=6.0"]
+dependencies = ["ase>=3.23", "PyYAML>=6.0", "psutil>=6,<8"]
+
+[project.optional-dependencies]
+jobs = ["textual>=1.0,<7"]
 
 [project.scripts]
 cmw = "cmw.cli:main"

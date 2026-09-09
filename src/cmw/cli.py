@@ -317,6 +317,8 @@ def build_parser() -> argparse.ArgumentParser:
     layout_status.add_argument("--verbose", action="store_true")
     layout_status.add_argument("--json", action="store_true")
     layout_status.set_defaults(handler=_execution_layout_status)
+    from cmw.jobs.cli import register
+    register(subcommands)
     return parser
 
 

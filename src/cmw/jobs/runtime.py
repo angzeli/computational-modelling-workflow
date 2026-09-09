@@ -1,0 +1,307 @@
+"""Detached local lifecycle and conservative reconciliation.
+
+The packaged shell owns payload launch, descriptors, traps and exit-code capture.
+This module provides the necessary POSIX session bootstrap, transactional launch
+admission, ownership decisions and bounded process-group supervision.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from uuid import uuid4
+
+from cmw.core.provenance import atomic_write_json
+from .ownership import exclusive, group_exists, group_members, identity, lock_held, owner_alive
+from .store import ACTIVE, PENDING, JobsError, Store
+
+INTERVAL = 0.15
+CANCEL_GRACE = 2.0
+_CHILDREN = []
+
+
+def reap_detached():
+    _CHILDREN[:] = [process for process in _CHILDREN if process.poll() is None]
+
+
+def runtime_environment():
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(str(Path(p).resolve()) for p in sys.path if p))
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def detached(arguments, log):
+    log.parent.mkdir(parents=True, exist_ok=True)
+    reap_detached()
+    with log.open("ab", buffering=0) as output:
+        process = subprocess.Popen([sys.executable, "-m", "cmw.jobs.runtime", *arguments],
+                                stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                                start_new_session=True, close_fds=True, env=runtime_environment(), cwd="/")
+    _CHILDREN.append(process)
+    return process
+
+
+def start(store):
+    # Serialize client start requests separately from the long-lived owner lock.
+    with exclusive(store.root / "start.lock"):
+        state = store.snapshot()
+        if state["controller"]["online"]:
+            raise JobsError("Controller already online; use resume to enable dispatch")
+        if lock_held(store.root / "controller.lock"):
+            raise JobsError("Controller ownership is uncertain; inspect controller.log")
+        with store.transaction() as con:
+            control = store.control(con)
+            blocked = any(j["status"] in {"Unknown", "Cancelling"} for j in store.rows(con))
+            control.update(stop=False, dispatch=not blocked, reason="Needs attention" if blocked else "Starting controller")
+            store.set_control(con, control)
+        process = detached(["controller", str(store.root)], store.root / "controller.log")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise JobsError("Controller failed to start; inspect controller.log")
+            if store.snapshot()["controller"]["online"]:
+                return
+            time.sleep(0.05)
+        raise JobsError("Controller startup not confirmed; inspect status before retrying")
+
+
+def stop(store):
+    with store.transaction() as con:
+        control = store.control(con)
+        control.update(stop=True, dispatch=False, reason="Controller stop requested; active execution continues")
+        store.set_control(con, control)
+        store.event(con, None, control["reason"])
+
+
+def mark_unknown(store, con, job, reason):
+    job.update(status="Unknown", reason=reason)
+    store.save(con, job)
+    control = store.control(con)
+    control.update(dispatch=False, reason=f"Needs attention: {job['display_id']}: {reason}")
+    store.set_control(con, control)
+    store.event(con, job["id"], reason)
+
+
+def reconcile(store, con, job):
+    if job["status"] == "Unknown":
+        return
+    attempt = store.root / "attempts" / job["attempt_id"]
+    if job["worker"] and owner_alive(job["worker"]) and lock_held(attempt / "worker.lock"):
+        return
+    # Starting may be between intent commit and worker registration. A grace
+    # period blocks the slot but never authorizes relaunching this attempt.
+    if job["worker"] is None and time.time() - job["claimed_at"] < 5:
+        return
+    mark_unknown(store, con, job, "Worker ownership/completion cannot be verified; automatic progression stopped")
+
+
+def launch_blocker(job):
+    if not Path(job["cwd"]).is_dir():
+        return "Working directory no longer exists"
+    command = job["argv"][0]
+    path = {**os.environ, **job["env"]}.get("PATH", os.defpath)
+    if "/" in command:
+        executable = Path(command)
+        if not executable.is_absolute():
+            executable = Path(job["cwd"]) / executable
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            return f"Executable is missing or not executable: {command}"
+    else:
+        # The detached controller runs in /; PATH lookup must match payload cwd.
+        search_path = os.pathsep.join(
+            str(Path(entry) if Path(entry).is_absolute() else Path(job["cwd"]) / entry)
+            for entry in path.split(os.pathsep)
+        )
+        if shutil.which(command, path=search_path) is None:
+            return f"Executable not found: {command}"
+    return ""
+
+
+def tick(store):
+    launch = None
+    with store.transaction() as con:
+        control = store.control(con)
+        control["heartbeat"] = time.time()
+        store.set_control(con, control)
+        active = [j for j in store.rows(con) if j["status"] in ACTIVE]
+        for job in active:
+            reconcile(store, con, job)
+        control = store.control(con)
+        if control["stop"]:
+            return False
+        if active or not control["dispatch"]:
+            return True
+        pending = sorted((j for j in store.rows(con) if j["status"] in PENDING), key=lambda j: j["order"])
+        if not pending or pending[0]["status"] == "Hold":
+            return True
+        job = pending[0]
+        blocker = launch_blocker(job)
+        if blocker:
+            if job["reason"] != blocker:
+                job["reason"] = blocker
+                store.save(con, job)
+                store.event(con, job["id"], blocker)
+            return True
+        job.update(status="Starting", order=None, claim=uuid4().hex,
+                   claimed_at=time.time(), reason="Launch intent persisted")
+        store.save(con, job)
+        store.normalize(con)
+        store.event(con, job["id"], "Launch intent acquired")
+        launch = job
+    if launch:
+        try:
+            detached(["worker", str(store.root), str(launch["id"]), launch["claim"]], store.root / "controller.log")
+        except OSError as exc:
+            # Popen failed before a child could exec. No attempt is relaunched.
+            finish(store, launch["id"], launch["claim"], "Fail", None, f"Worker launch failed: {exc}")
+    return True
+
+
+def controller(store):
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    with exclusive(store.root / "controller.lock"):
+        with store.transaction() as con:
+            control = store.control(con)
+            control.update(owner=identity(), heartbeat=time.time())
+            store.set_control(con, control)
+            store.event(con, None, "Controller online")
+        print("CMW Jobs controller online", flush=True)
+        try:
+            while tick(store):
+                # Reap only our finished guardians; they own their payloads.
+                reap_detached()
+                time.sleep(INTERVAL)
+        finally:
+            with store.transaction() as con:
+                control = store.control(con)
+                control.update(owner=None, dispatch=False, reason="Controller offline")
+                store.set_control(con, control)
+                store.event(con, None, "Controller offline; active execution remains independent")
+            print("CMW Jobs controller offline", flush=True)
+
+
+def finish(store, job_id, claim, status, code, reason, *, termination_signal=None):
+    with store.transaction() as con:
+        job = store.get(con, job_id)
+        if job["claim"] != claim or job["status"] not in ACTIVE:
+            raise JobsError("Attempt no longer owns completion")
+        if job["cancel_requested"] and status != "Unknown":
+            status, reason = "Cancelled", "Managed process group termination confirmed"
+        job.update(status=status, exit_code=code, signal=termination_signal,
+                   finished_at=time.time(), reason=reason)
+        store.save(con, job)
+        control = store.control(con)
+        if status == "Unknown" or status == "Cancelled" or (status == "Fail" and job["on_failure"] == "pause"):
+            control.update(dispatch=False, reason=f"{job['display_id']}: {status}; manual attention/resume required")
+            store.set_control(con, control)
+        store.event(con, job["id"], f"{status}: {reason}")
+
+
+def worker(store, job_id, claim):
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    with store.transaction() as con:
+        initial = store.get(con, job_id)
+    attempt = store.root / "attempts" / initial["attempt_id"]
+    with exclusive(attempt / "worker.lock"):
+        with store.transaction() as con:
+            job = store.get(con, job_id)
+            if job["claim"] != claim or job["status"] not in {"Starting", "Cancelling"} or job["worker"]:
+                raise JobsError("Worker launch admission rejected")
+            job["worker"] = identity()
+            store.save(con, job)
+        receipt = attempt / "payload-exit.json"
+        env = runtime_environment()
+        env.update(job["env"])
+        try:
+            # A pipe carries only GO/RELEASE, never computational output.
+            leader = subprocess.Popen(["/bin/bash", str(Path(__file__).with_name("payload.sh")),
+                sys.executable, runtime_environment()["PYTHONPATH"], str(receipt), job["logs"]["stdout"], job["logs"]["stderr"], *job["argv"]],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cwd=job["cwd"], env=env, start_new_session=True, close_fds=True)
+        except OSError as exc:
+            finish(store, job_id, claim, "Fail", None, f"Launch failed: {exc}")
+            return
+        group = identity(leader.pid)
+        try:
+            with store.transaction() as con:
+                job = store.get(con, job_id)
+                job.update(group=group, started_at=time.time(), reason="")
+                if not job["cancel_requested"]:
+                    job["status"] = "Run"
+                store.save(con, job)
+                store.event(con, job["id"], "Execution started; group ownership persisted")
+            leader.stdin.write(b"GO\n")
+            leader.stdin.flush()
+            cancel_at = None
+            code = None
+            while True:
+                with store.transaction() as con:
+                    job = store.get(con, job_id)
+                members = group_members(leader.pid)
+                if job["cancel_requested"]:
+                    # The unreaped direct child pins this PID/group; birth identity
+                    # additionally protects signalling from corrupted stale metadata.
+                    if cancel_at is None:
+                        if not owner_alive(group):
+                            raise JobsError("Group leader lost before cancellation; no signal sent")
+                        os.killpg(leader.pid, signal.SIGTERM)
+                        cancel_at = time.monotonic()
+                    elif time.monotonic() - cancel_at > CANCEL_GRACE and members:
+                        if not owner_alive(group):
+                            raise JobsError("Group ownership lost during cancellation")
+                        os.killpg(leader.pid, signal.SIGKILL)
+                        leader.wait(timeout=5)
+                        # Reparented zombies are ended; live group members block.
+                        deadline = time.monotonic() + 5
+                        while group_exists(leader.pid) and time.monotonic() < deadline:
+                            time.sleep(INTERVAL)
+                        if group_exists(leader.pid):
+                            raise JobsError("Process group termination remains uncertain")
+                        finish(store, job_id, claim, "Cancelled", 137, "Termination confirmed", termination_signal=signal.SIGKILL)
+                        return
+                if receipt.exists():
+                    evidence = json.loads(receipt.read_text())
+                    code = int(evidence["exit_code"])
+                    if members == [leader.pid] or set(members) == {leader.pid}:
+                        leader.stdin.write(b"RELEASE\n")
+                        leader.stdin.flush()
+                        leader.wait(timeout=5)
+                        if group_exists(leader.pid):
+                            raise JobsError("Process group still contains live members after release")
+                        finish(store, job_id, claim, "Done" if code == 0 else "Fail", code,
+                               "Execution contract completed; scientific checks not evaluated" if code == 0 else f"Exit code {code}")
+                        return
+                if not owner_alive(group):
+                    raise JobsError("Group leader disappeared without a verified complete process tree")
+                time.sleep(INTERVAL)
+        except Exception as exc:
+            with store.transaction() as con:
+                mark_unknown(store, con, store.get(con, job_id), str(exc))
+            # Do not terminate uncertain computations or fabricate completion.
+        finally:
+            if leader.stdin:
+                leader.stdin.close()
+
+
+def main():
+    operation, *args = sys.argv[1:]
+    if operation == "receipt":
+        atomic_write_json(Path(args[0]), {"exit_code": int(args[1]), "recorded_at": time.time()})
+        return
+    store = Store(args[0])
+    if operation == "controller":
+        controller(store)
+    elif operation == "worker":
+        worker(store, int(args[1]), args[2])
+    else:
+        raise JobsError("Unknown internal lifecycle operation")
+
+
+if __name__ == "__main__":
+    main()
