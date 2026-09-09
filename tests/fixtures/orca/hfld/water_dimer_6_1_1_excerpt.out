@@ -1,0 +1,77 @@
+# Native ORCA 6.1.1 synthetic water dimer HFLD* excerpts; 2026-09-07.
+|  1> ! HFLD def2-TZVP(-f) def2-TZVP/C def2/J RIJCOSX DefGrid3 VeryTightSCF SP
+|  2> %pal nprocs 8 end
+|  3> %maxcore 3000
+|  4> %mdci
+|  5>  DoLEDHF true
+|  6>  TCutPNO 3.33e-7
+|  7>  TCutPairs 1e-5
+|  8> end
+|  9> * xyz 0 1
+| 10> O(1) 0.000 0.000 0.000
+| 11> H(1) 0.758 0.000 0.504
+| 12> H(1) -0.758 0.000 0.504
+| 13> O(2) 0.000 0.000 2.900
+| 14> H(2) 0.758 0.000 3.404
+| 15> H(2) -0.758 0.000 3.404
+| 16> *
+| 17>
+TOTAL SCF ENERGY
+----------------
+
+Total Energy       :       -152.11190015804993 Eh           -4139.17523 eV
+
+Components:
+  1 <-> 1
+    Intrafragment pairs 1 <-> 1 neglected for CCSD
+  1 <-> 2
+  2 <-> 2
+    Intrafragment pairs 2 <-> 2 neglected for CCSD
+
+Entering RIJCOSX section of LED
+End RIJCOSX section of LED
+
+----------------------------------------
+REFERENCE ENERGY E(0) DECOMPOSITION (Eh)
+----------------------------------------
+
+Nuclear repulsion     =        37.464940309273
+One electron energy   =      -284.197102991780 (T=      152.407172077781, V=     -436.604275069561)
+Two electron energy   =        94.620263081731 (J=      112.630856705173, K=      -18.010593623442)
+                        ----------------------
+Total energy          =      -152.111899600777
+Consistency check     =      -152.111899600777 (sum of intra- and inter-fragment energies)
+
+Kinetic energy        =       152.407172077781
+Singles contributions:
+Singles energy                          0.000000004
+
+
+-------------------------------------------------
+FINAL SUMMARY DLPNO-CCSD ENERGY DECOMPOSITION (Eh)
+-------------------------------------------------
+
+Intrafragment REF. energy:
+Intra fragment   1 (REF.)              -76.047344728
+Intra fragment   2 (REF.)              -76.047958299
+
+Interaction of fragments  2 and  1:
+Electrostatics (REF.)                  -0.014014522
+Exchange (REF.)                        -0.002582053
+Dispersion (strong pairs)              -0.000985684
+Dispersion (weak pairs)                -0.000070390
+
+Sum of non dispersive correlation terms:
+Non dispersion (strong pairs)          -0.000329958
+Non dispersion (weak pairs)             0.000000000
+
+#Time for LED analysis ..       0.1 (sec)
+----------------------------   ----------------
+Inter-fragment dispersion       -0.001056073
+----------------------------   ----------------
+
+
+-------------------------   --------------------
+FINAL SINGLE POINT ENERGY      -152.112956231503
+-------------------------   --------------------
+****ORCA TERMINATED NORMALLY****

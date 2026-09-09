@@ -273,6 +273,56 @@ class OrcaRuntimeTests(unittest.TestCase):
                         working_directory=working,
                     )
 
+    def test_darwin_overlay_can_materialize_verified_copy_for_external_scratch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            working = root / "external scratch"
+            working.mkdir()
+            library = root / "mpi" / "libmpi.40.dylib"
+            library.parent.mkdir()
+            library.write_text("mpi", encoding="utf-8")
+            record = {
+                "runtime_id": "runtime",
+                "platform": "Darwin",
+                "launch_overlay": {
+                    "strategy": "working_directory_symlink",
+                    "files": [
+                        {
+                            "name": library.name,
+                            "source": str(library.resolve()),
+                            "size_bytes": library.stat().st_size,
+                            "sha256": file_hash(library),
+                        }
+                    ],
+                },
+            }
+            probe = {"status": "PASSED", "code": "VALID_ORCA_MPI_LOADER"}
+            with (
+                patch(
+                    "cmw.molecular.orca.runtime.validate_orca_runtime_contract",
+                    return_value=record,
+                ),
+                patch(
+                    "cmw.molecular.orca.runtime._probe_macos_loader",
+                    return_value=probe,
+                ),
+            ):
+                launch = materialize_orca_runtime_contract(
+                    record,
+                    orca_executable=root / "orca",
+                    working_directory=working,
+                    copy_working_directory_overlay=True,
+                )
+
+            destination = working / library.name
+            self.assertTrue(destination.is_file())
+            self.assertFalse(destination.is_symlink())
+            self.assertEqual(destination.read_bytes(), library.read_bytes())
+            self.assertEqual(launch["strategy"], "working_directory_copy")
+            self.assertEqual(launch["validation"]["status"], "PASSED")
+
     def test_loader_probe_detects_actual_dyld_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

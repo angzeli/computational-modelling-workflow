@@ -13,6 +13,10 @@ NPROCS=${NPROCS:-1}
 MAXCORE_MB=${MAXCORE_MB:-1000}
 CMW_REQUIRE_MINIMUM=${CMW_REQUIRE_MINIMUM:-0}
 CMW_IMAGINARY_TOLERANCE_CM1=${CMW_IMAGINARY_TOLERANCE_CM1:-0.0}
+external_scratch_root=${CMW_EXTERNAL_SCRATCH_ROOT:-}
+external_scratch_mount=${CMW_EXTERNAL_SCRATCH_MOUNT:-}
+external_scratch_minimum_free_gib=${CMW_EXTERNAL_SCRATCH_MINIMUM_FREE_GIB:-}
+external_scratch_required_filesystem=${CMW_EXTERNAL_SCRATCH_REQUIRED_FILESYSTEM:-}
 
 input=""
 target=""
@@ -28,6 +32,7 @@ minimum_free_disk_gb=""
 disk_check_path=""
 replace_stale=0
 artifacts=()
+execution_inputs=()
 
 usage() {
   printf '%s\n' \
@@ -38,6 +43,10 @@ usage() {
     "                   [--runtime-contract FILE]" \
     "                   [--require-runtime-contract]" \
     "                   [--minimum-free-disk-gb NUMBER --disk-check-path DIR]" \
+    "                   [--external-scratch-root DIR --external-scratch-mount DIR]" \
+    "                   [--external-scratch-minimum-free-gib NUMBER]" \
+    "                   [--external-scratch-required-filesystem TYPE]" \
+    "                   [--execution-input ROLE=FILE]" \
     "                   [--replace-stale-lock]" >&2
 }
 
@@ -54,6 +63,11 @@ while (($#)); do
     --require-runtime-contract) require_runtime_contract=1; shift ;;
     --minimum-free-disk-gb) minimum_free_disk_gb=${2:?}; shift 2 ;;
     --disk-check-path) disk_check_path=${2:?}; shift 2 ;;
+    --external-scratch-root) external_scratch_root=${2:?}; shift 2 ;;
+    --external-scratch-mount) external_scratch_mount=${2:?}; shift 2 ;;
+    --external-scratch-minimum-free-gib) external_scratch_minimum_free_gib=${2:?}; shift 2 ;;
+    --external-scratch-required-filesystem) external_scratch_required_filesystem=${2:?}; shift 2 ;;
+    --execution-input) execution_inputs+=("${2:?}"); shift 2 ;;
     --artifact) artifacts+=("${2:?}"); shift 2 ;;
     --replace-stale-lock) replace_stale=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -110,6 +124,24 @@ if ((${#artifacts[@]} > 0)); then
     resolved_artifacts+=("$role=$(absolute_path "$path")")
   done
 fi
+execution_outputs=()
+if ((${#resolved_artifacts[@]} > 0)); then
+  execution_outputs=("${resolved_artifacts[@]}")
+fi
+
+external_scratch_record="$input_directory/external-scratch.json"
+external_configured=0
+if [[ -n "$external_scratch_root" || -n "$external_scratch_mount" || -n "$external_scratch_minimum_free_gib" || -n "$external_scratch_required_filesystem" ]]; then
+  if [[ -z "$external_scratch_root" || -z "$external_scratch_mount" || -z "$external_scratch_minimum_free_gib" ]]; then
+    printf 'External scratch requires root, mounted volume, and minimum free GiB\n' >&2
+    exit 64
+  fi
+  if [[ -z "$layout" || -z "$geometry_contract" ]]; then
+    printf 'External scratch requires execution-layout and geometry contracts\n' >&2
+    exit 64
+  fi
+  external_configured=1
+fi
 
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
@@ -127,12 +159,26 @@ if [[ -n "$minimum_free_disk_gb" || -n "$disk_check_path" ]]; then
   fi
 fi
 
-if "$PYTHON_BIN" -m cmw.molecular.orca.cli reuse \
-  --target "$target" --metadata "$metadata" >/dev/null 2>&1
-then
-  printf '[REUSED] %s\n' "$metadata"
-  exit 0
-fi
+reuse_if_available() {
+  if "$PYTHON_BIN" -m cmw.molecular.orca.cli reuse \
+    --target "$target" --metadata "$metadata" >/dev/null 2>&1
+  then
+    if [[ -f "$external_scratch_record" ]]; then
+      if ! "$PYTHON_BIN" -m cmw.core.external_scratch_cli cleanup \
+        --record "$external_scratch_record" \
+        --finalization-metadata "$metadata" >/dev/null
+      then
+        printf 'Reusable result has external scratch requiring safe cleanup: %s\n' \
+          "$external_scratch_record" >&2
+        exit 75
+      fi
+    fi
+    printf '[REUSED] %s\n' "$metadata"
+    exit 0
+  fi
+}
+
+reuse_if_available
 
 if [[ ! -f "$input" || ! -f "$target" ]]; then
   printf 'ORCA input or target metadata is missing\n' >&2
@@ -166,10 +212,11 @@ if [[ -n "$runtime_contract" ]]; then
     'import json,sys; print(json.load(sys.stdin)["environment"]["library_path_variable"])')
   runtime_library_prefix=$(printf '%s' "$runtime_json" | "$PYTHON_BIN" -c \
     'import json,sys; print(":".join(json.load(sys.stdin)["environment"]["library_path_prepend"]))')
+  runtime_assignments=$(printf '%s' "$runtime_json" | "$PYTHON_BIN" -c \
+    'import json,sys; value=json.load(sys.stdin)["environment"].get("variables", {}); [print(f"{name}={value[name]}") for name in sorted(value)]')
   while IFS= read -r runtime_assignment; do
     [[ -z "$runtime_assignment" ]] || export "$runtime_assignment"
-  done < <(printf '%s' "$runtime_json" | "$PYTHON_BIN" -c \
-    'import json,sys; value=json.load(sys.stdin)["environment"].get("variables", {}); [print(f"{name}={value[name]}") for name in sorted(value)]')
+  done <<<"$runtime_assignments"
   export PATH="$runtime_path_prefix${PATH:+:$PATH}"
   case "$runtime_library_variable" in
     DYLD_LIBRARY_PATH)
@@ -191,7 +238,8 @@ lock_path="${target}.lock"
 lock_json=""
 lock_token=""
 child_pid=""
-scratch_dir=""
+local_scratch_dir=""
+external_execution_directory=""
 
 cleanup() {
   local status=$?
@@ -204,8 +252,13 @@ cleanup() {
     "$PYTHON_BIN" -m cmw.molecular.orca.cli lock release \
       --lock "$lock_path" --token "$lock_token" >/dev/null 2>&1 || true
   fi
-  if [[ -n "$scratch_dir" && -d "$scratch_dir" && $(basename "$scratch_dir") == cmw-orca.* ]]; then
-    rm -r -- "$scratch_dir"
+  if [[ -n "$local_scratch_dir" && -d "$local_scratch_dir" && $(basename "$local_scratch_dir") == cmw-orca.* ]]; then
+    rm -r -- "$local_scratch_dir"
+  fi
+  if ((status != 0)) && [[ -f "$external_scratch_record" ]]; then
+    "$PYTHON_BIN" -m cmw.core.external_scratch_cli fail \
+      --record "$external_scratch_record" \
+      --reason "ORCA runner exited with status $status" >/dev/null 2>&1 || true
   fi
   exit "$status"
 }
@@ -226,25 +279,79 @@ lock_token=$(printf '%s' "$lock_json" | "$PYTHON_BIN" -c \
   'import json,sys; print(json.load(sys.stdin)["owner"]["token"])')
 
 # Close the race between the first reuse check and lock acquisition.
-if "$PYTHON_BIN" -m cmw.molecular.orca.cli reuse \
-  --target "$target" --metadata "$metadata" >/dev/null 2>&1
-then
-  printf '[REUSED] %s\n' "$metadata"
-  exit 0
-fi
+reuse_if_available
 
 if [[ -e "$metadata" || -e "$output" || -e "$stderr_path" ]]; then
   printf 'Non-reusable attempt artifacts already exist; choose a new attempt directory\n' >&2
   exit 73
 fi
 
+run_directory="$input_directory"
+run_input="$input"
+run_output="$output"
+run_stderr="$stderr_path"
+if ((external_configured == 1)); then
+  scratch_prepare=(
+    "$PYTHON_BIN" -m cmw.core.external_scratch_cli prepare
+    --scratch-root "$external_scratch_root"
+    --mount "$external_scratch_mount"
+    --minimum-free-gib "$external_scratch_minimum_free_gib"
+    --layout "$layout"
+    --target "$target"
+    --input "$input"
+    --geometry-contract "$geometry_contract"
+    --output "$output"
+    --stderr "$stderr_path"
+    --process-environment 'OMPI_MCA_osc_sm_backing_directory={execution_directory}'
+  )
+  if [[ -n "$external_scratch_required_filesystem" ]]; then
+    scratch_prepare+=(--required-filesystem "$external_scratch_required_filesystem")
+  fi
+  if ((${#execution_inputs[@]} > 0)); then
+    for item in "${execution_inputs[@]}"; do
+      scratch_prepare+=(--execution-input "$item")
+    done
+  fi
+  if ((${#execution_outputs[@]} > 0)); then
+    for item in "${execution_outputs[@]}"; do
+      scratch_prepare+=(--artifact "$item")
+    done
+  fi
+  if ! scratch_prepare_json=$("${scratch_prepare[@]}"); then
+    printf 'External scratch preflight or preparation failed: %s\n' \
+      "$scratch_prepare_json" >&2
+    exit 74
+  fi
+  run_directory=$("$PYTHON_BIN" -c \
+    'import json,sys; print(json.load(open(sys.argv[1]))["execution_directory"])' \
+    "$external_scratch_record")
+  run_input=$("$PYTHON_BIN" -c \
+    'import json,sys; d=json.load(open(sys.argv[1])); print(next(x["execution_path"] for x in d["inputs"] if x["role"] == "primary"))' \
+    "$external_scratch_record")
+  run_output=$("$PYTHON_BIN" -c \
+    'import json,sys; d=json.load(open(sys.argv[1])); print(next(x["execution_path"] for x in d["outputs"] if x["role"] == "output"))' \
+    "$external_scratch_record")
+  run_stderr=$("$PYTHON_BIN" -c \
+    'import json,sys; d=json.load(open(sys.argv[1])); print(next(x["execution_path"] for x in d["outputs"] if x["role"] == "stderr"))' \
+    "$external_scratch_record")
+  external_execution_directory="$run_directory"
+  scratch_assignments=$("$PYTHON_BIN" -c \
+    'import json,sys; value=json.load(open(sys.argv[1])).get("process_environment", {}); [print(f"{name}={value[name]}") for name in sorted(value)]' \
+    "$external_scratch_record")
+  while IFS= read -r scratch_assignment; do
+    [[ -z "$scratch_assignment" ]] || export "$scratch_assignment"
+  done <<<"$scratch_assignments"
+fi
+
 if [[ -n "$runtime_contract" ]]; then
-  if ! runtime_launch_json=$(
-    "$PYTHON_BIN" -m cmw.molecular.orca.cli runtime-materialize \
-      --runtime "$runtime_contract" --orca-exe "$orca_command" \
-      --working-directory "$input_directory" \
-      --output "$runtime_launch_manifest"
-  ); then
+  runtime_materialize=(
+    "$PYTHON_BIN" -m cmw.molecular.orca.cli runtime-materialize
+    --runtime "$runtime_contract" --orca-exe "$orca_command"
+    --working-directory "$run_directory"
+    --output "$runtime_launch_manifest"
+  )
+  ((external_configured == 0)) || runtime_materialize+=(--copy-working-directory-overlay)
+  if ! runtime_launch_json=$("${runtime_materialize[@]}"); then
     printf 'ORCA launch-time runtime validation failed: %s\n' \
       "$runtime_launch_json" >&2
     exit 69
@@ -252,16 +359,23 @@ if [[ -n "$runtime_contract" ]]; then
   resolved_artifacts+=("runtime_launch_contract=$runtime_launch_manifest")
 fi
 
+if ((external_configured == 1)); then
+  "$PYTHON_BIN" -m cmw.core.external_scratch_cli running \
+    --record "$external_scratch_record" >/dev/null
+fi
+
+# ORCA file scratch and large OSC backing files follow the external execution
+# directory. Keep MPI session/transport files on the local POSIX filesystem.
 scratch_parent=${TMPDIR:-/tmp}
 mkdir -p "$scratch_parent"
-scratch_dir=$(mktemp -d "$scratch_parent/cmw-orca.XXXXXXXX")
-export TMPDIR="$scratch_dir"
+local_scratch_dir=$(mktemp -d "$scratch_parent/cmw-orca.XXXXXXXX")
+export TMPDIR="$local_scratch_dir"
 
-orca_version=$(
-  "$orca_command" --version 2>/dev/null | head -n 1 || true
-)
+# ORCA 6.1.1 treats `--version` as an input filename rather than a metadata
+# query.  The finalizer obtains the authoritative version from the real output.
+orca_version=""
 
-input_name=$(basename "$input")
+input_name=$(basename "$run_input")
 launch=("$orca_command" "$input_name")
 if [[ ${CMW_CAFFEINATE:-0} == 1 ]] && command -v caffeinate >/dev/null 2>&1; then
   launch=(caffeinate -i "${launch[@]}")
@@ -269,14 +383,25 @@ fi
 
 set +e
 (
-  cd "$input_directory"
+  cd "$run_directory"
   exec "${launch[@]}"
-) </dev/null >"$output" 2>"$stderr_path" &
+) </dev/null >"$run_output" 2>"$run_stderr" &
 child_pid=$!
 wait "$child_pid"
 process_status=$?
 child_pid=""
 set -e
+
+if ((external_configured == 1)); then
+  if ! "$PYTHON_BIN" -m cmw.core.external_scratch_cli copy-back \
+    --record "$external_scratch_record" \
+    --process-exit-code "$process_status" >/dev/null
+  then
+    printf 'External scratch copy-back failed; scratch was preserved: %s\n' \
+      "$external_execution_directory" >&2
+    exit 75
+  fi
+fi
 
 finalize=(
   "$PYTHON_BIN" -m cmw.molecular.orca.cli finalize
@@ -297,5 +422,15 @@ fi
 if ! "${finalize[@]}" >/dev/null; then
   printf 'ORCA attempt did not satisfy execution, scientific, or artifact validation\n' >&2
   exit 70
+fi
+if ((external_configured == 1)); then
+  if ! "$PYTHON_BIN" -m cmw.core.external_scratch_cli cleanup \
+    --record "$external_scratch_record" \
+    --finalization-metadata "$metadata" >/dev/null
+  then
+    printf 'Scientific result finalized, but owned scratch cleanup failed: %s\n' \
+      "$external_execution_directory" >&2
+    exit 75
+  fi
 fi
 printf '[COMPLETE] %s\n' "$metadata"

@@ -212,6 +212,30 @@ def finalize_attempt(
             scientific.imaginary_frequencies_cm1,
             scientific.significant_imaginary_frequencies_cm1,
         )
+    hfld_validation = None
+    hfld_protocol = target.calculation.get("protocol", {})
+    if hfld_protocol.get("hfld_contract"):
+        from .hfld import CONTRACT, HFLDError, parse_hfld, parse_rhf_reference
+
+        try:
+            if hfld_protocol["hfld_contract"] != CONTRACT:
+                raise HFLDError("unsupported native HFLD contract")
+            native_text = output_path.read_text(encoding="utf-8")
+            role = hfld_protocol.get("hfld_role")
+            if role == "supersystem":
+                native = parse_hfld(native_text).to_dict()
+            elif role == "reference":
+                native = {"rhf_energy_hartree": parse_rhf_reference(native_text)}
+            else:
+                raise HFLDError("unknown native HFLD role")
+            hfld_validation = {"valid": True, "contract": CONTRACT, "native": native}
+        except (OSError, UnicodeError, ValueError) as exc:
+            hfld_validation = {"valid": False, "reason": str(exc)}
+            scientific = type(scientific)(
+                ScientificStatus.INVALID, stage_type, str(exc),
+                scientific.imaginary_frequencies_cm1,
+                scientific.significant_imaginary_frequencies_cm1,
+            )
     attempt = ExecutionAttempt.create(
         target_id=target.target_id,
         resources=resources,
@@ -317,6 +341,7 @@ def finalize_attempt(
         )
         parent_artifacts = []
     record = {
+        **({"hfld_validation": hfld_validation} if hfld_validation is not None else {}),
         "schema_version": ORCA_JOB_SCHEMA_VERSION,
         "target": target.to_dict(),
         "execution_intent": orca_execution_intent(stage_type).to_dict(),
