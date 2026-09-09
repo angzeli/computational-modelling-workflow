@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -231,7 +232,7 @@ class XYZToPoscarTests(unittest.TestCase):
         source = self.write_xyz("charged-preview.xyz", ["C 0 0 0", "H 4 1 2"])
         repository = Path(__file__).resolve().parents[2]
         environment = os.environ.copy()
-        environment["PYTHON_BIN"] = str(repository / ".venv/bin/python")
+        environment["PYTHON_BIN"] = sys.executable
         completed = subprocess.run(
             (
                 str(repository / "scripts/workflows/xyz_to_poscar.sh"),
@@ -263,7 +264,7 @@ class XYZToPoscarTests(unittest.TestCase):
         output = self.root / "CLI_POSCAR"
         repository = Path(__file__).resolve().parents[2]
         environment = os.environ.copy()
-        environment["PYTHON_BIN"] = str(repository / ".venv/bin/python")
+        environment["PYTHON_BIN"] = sys.executable
         completed = subprocess.run(
             (
                 str(repository / "scripts/workflows/xyz_to_poscar.sh"),

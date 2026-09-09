@@ -340,6 +340,78 @@ class MultiwfnArtifactIntegrationTests(unittest.TestCase):
             )
         self.assertNotEqual(excited.artifact_id, s1_excited.artifact_id)
 
+    def test_missing_canonical_selection_blocks_both_finalizers(self) -> None:
+        excited, state, output = self._excited_artifact("singlet", 1)
+        metadata = dict(excited.metadata)
+        metadata.pop("selected_state_identities")
+        invalid_parent = replace(excited, metadata=metadata)
+
+        nto_layout = self._layout("multiwfn_nto_missing_selection")
+        nto_rendered = Multiwfn38NtoRenderer().render(
+            state,
+            orca_output_path=output,
+            source_wavefunction_path=self.wavefunction,
+            scientific_protocol_hash=excited.metadata["scientific_protocol_hash"],
+            source_geometry_hash=excited.metadata["source_geometry_hash"],
+            execution_layout=nto_layout.to_dict(),
+            execution_attempt={"attempt_id": "attempt_001"},
+        )
+        nto_files = self._materialize_outputs(
+            nto_rendered,
+            self._historical_session_with_current_wavefunction(
+                "multiwfn_3_8_s1_nto.session.log"
+            ),
+        )
+        nto_parsed = parse_multiwfn38_nto_session_file(
+            Path(nto_files["session_log"]),
+            expected_state=state,
+            output_mwfn_path=nto_files["nto_mwfn"],
+        )
+        with self.assertRaisesRegex(
+            MultiwfnFinalizationError, "selected_state_identities"
+        ):
+            finalize_multiwfn_nto_artifact(
+                invalid_parent,
+                nto_rendered,
+                nto_parsed,
+                process_exit_code=0,
+                files=nto_files,
+                runtime_provenance=self.runtime,
+            )
+
+        hea_layout = self._layout("multiwfn_hea_missing_selection")
+        hea_rendered = Multiwfn38HoleElectronRenderer().render(
+            state,
+            orca_output_path=output,
+            source_wavefunction_path=self.wavefunction,
+            scientific_protocol_hash=excited.metadata["scientific_protocol_hash"],
+            source_geometry_hash=excited.metadata["source_geometry_hash"],
+            execution_layout=hea_layout.to_dict(),
+            execution_attempt={"attempt_id": "attempt_001"},
+        )
+        hea_files = self._materialize_outputs(
+            hea_rendered,
+            self._historical_session_with_current_wavefunction(
+                "multiwfn_3_8_s1_hea.session.log"
+            ),
+        )
+        hea_parsed = parse_multiwfn38_hole_electron_session_file(
+            Path(hea_files["session_log"]),
+            expected_state=state,
+            expected_grid_quality="medium",
+        )
+        with self.assertRaisesRegex(
+            MultiwfnFinalizationError, "selected_state_identities"
+        ):
+            finalize_multiwfn_hole_electron_artifact(
+                invalid_parent,
+                hea_rendered,
+                hea_parsed,
+                process_exit_code=0,
+                files=hea_files,
+                runtime_provenance=self.runtime,
+            )
+
     def test_2026_artifact_finalizes_through_verified_short_alias_lineage(self) -> None:
         excited, state, output = self._excited_artifact("singlet", 1)
         layout = self._layout("multiwfn_2026_nto")

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import math
 from typing import Mapping, Sequence
+
+from cmw.core.artifacts import ExcitedStateArtifact
 
 
 SPIN_MANIFOLDS = frozenset({"singlet", "triplet"})
@@ -16,6 +18,15 @@ class ExcitedStateDataError(ValueError):
     """Raised when quantitative excited-state evidence is internally inconsistent."""
 
     code = "FAILED_EXCITED_STATE_DATA"
+
+
+class ExcitedStateSelectionContractError(ValueError):
+    """Raised when selected states cannot support downstream analysis."""
+
+    code = "FAILED_EXCITED_STATE_SELECTION_CONTRACT"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(f"{self.code}: {message}")
 
 
 @dataclass(frozen=True, order=True)
@@ -638,6 +649,267 @@ def resolve_excited_states(
     return tuple(resolve_excited_state(states, request) for request in requests)
 
 
+def attach_selected_state_identities(
+    artifact: ExcitedStateArtifact,
+    selected_records: Sequence[ExcitedStateRecord | Mapping[str, object]],
+    selection_results: Sequence[StateSelectionResult | Mapping[str, object]] = (),
+    *,
+    preserve_legacy_alias: bool = True,
+) -> ExcitedStateArtifact:
+    """Return a canonical selected-state parent without mutating scientific evidence.
+
+    Selections are attached as complete quantitative records so downstream tools
+    can validate both identity and observables.  Repeating the operation with the
+    same inputs is deterministic and returns an artifact with the same identity.
+    """
+
+    if not isinstance(artifact, ExcitedStateArtifact):
+        raise ExcitedStateSelectionContractError(
+            "selection attachment requires an ExcitedStateArtifact"
+        )
+    records = _artifact_excited_state_records(artifact)
+    available = _unique_records_by_identity(records, "excited_states")
+    requested = tuple(_coerce_state_record(item) for item in selected_records)
+    if not requested:
+        raise ExcitedStateSelectionContractError(
+            "at least one selected excited-state record is required"
+        )
+    selected = _unique_records_by_identity(requested, "selected records")
+    for key, record in selected.items():
+        parent = available.get(key)
+        if parent is None or parent.to_dict() != record.to_dict():
+            raise ExcitedStateSelectionContractError(
+                "selected state does not uniquely match a quantitative parent record"
+            )
+
+    selected_payload = [record.to_dict() for record in requested]
+    selected_keys = tuple(record.canonical_key for record in requested)
+    _reject_conflicting_selection_aliases(
+        artifact.metadata, selected_keys, allow_empty=True
+    )
+
+    results: list[StateSelectionResult] = []
+    for item in selection_results:
+        try:
+            result = (
+                item
+                if isinstance(item, StateSelectionResult)
+                else StateSelectionResult.from_mapping(item)
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExcitedStateSelectionContractError(
+                "state_selection_results are invalid"
+            ) from exc
+        results.append(result)
+    result_payload = [item.to_dict() for item in results]
+    result_identity_keys = {
+        (
+            item.selected_identity.spin_manifold,
+            item.selected_identity.local_state_index,
+        )
+        for item in results
+        if item.selected_identity is not None
+    }
+    if result_payload and set(selected_keys) != result_identity_keys:
+        raise ExcitedStateSelectionContractError(
+            "selected records and resolved selection results disagree"
+        )
+
+    metadata = dict(artifact.metadata)
+    metadata.pop("artifact_id", None)
+    metadata["selected_state_identities"] = selected_payload
+    metadata["state_selection_results"] = result_payload
+    if preserve_legacy_alias:
+        metadata["selected_states"] = selected_payload
+    else:
+        metadata.pop("selected_states", None)
+    selected_artifact = replace(artifact, metadata=metadata)
+    validate_excited_state_selection_contract(selected_artifact)
+    return selected_artifact
+
+
+def validate_excited_state_selection_contract(
+    artifact: ExcitedStateArtifact,
+    requested_state: ExcitedStateRecord | Mapping[str, object] | None = None,
+) -> tuple[ExcitedStateRecord, ...]:
+    """Validate the canonical parent contract before downstream materialization."""
+
+    if not isinstance(artifact, ExcitedStateArtifact):
+        raise ExcitedStateSelectionContractError(
+            "selection validation requires an ExcitedStateArtifact"
+        )
+    if not artifact.validation.passed:
+        raise ExcitedStateSelectionContractError(
+            "parent ExcitedStateArtifact is not validated"
+        )
+    records = _artifact_excited_state_records(artifact)
+    available = _unique_records_by_identity(records, "excited_states")
+    raw_selected = artifact.metadata.get("selected_state_identities")
+    if not _is_mapping_sequence(raw_selected) or not raw_selected:
+        raise ExcitedStateSelectionContractError(
+            "parent artifact lacks canonical selected_state_identities"
+        )
+    selected = tuple(_selected_parent_record(item, available) for item in raw_selected)
+    _unique_records_by_identity(selected, "selected_state_identities")
+    selected_keys = tuple(record.canonical_key for record in selected)
+    _reject_conflicting_selection_aliases(artifact.metadata, selected_keys)
+
+    raw_results = artifact.metadata.get("state_selection_results")
+    if raw_results is not None:
+        if not _is_mapping_sequence(raw_results):
+            raise ExcitedStateSelectionContractError(
+                "state_selection_results must be a sequence of mappings"
+            )
+        try:
+            results = tuple(StateSelectionResult.from_mapping(item) for item in raw_results)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExcitedStateSelectionContractError(
+                "state_selection_results are invalid"
+            ) from exc
+        selected_result_keys = {
+            (
+                item.selected_identity.spin_manifold,
+                item.selected_identity.local_state_index,
+            )
+            for item in results
+            if item.selected_identity is not None
+        }
+        if raw_results and selected_result_keys != set(selected_keys):
+            raise ExcitedStateSelectionContractError(
+                "canonical selections and selection results disagree"
+            )
+
+    if requested_state is not None:
+        requested = _coerce_state_record(requested_state)
+        parent = available.get(requested.canonical_key)
+        if parent is None or parent.to_dict() != requested.to_dict():
+            raise ExcitedStateSelectionContractError(
+                "requested state does not uniquely match the parent artifact"
+            )
+        if requested.canonical_key not in set(selected_keys):
+            raise ExcitedStateSelectionContractError(
+                "requested state was not selected in the parent artifact"
+            )
+    return selected
+
+
+def _artifact_excited_state_records(
+    artifact: ExcitedStateArtifact,
+) -> tuple[ExcitedStateRecord, ...]:
+    raw_states = artifact.metadata.get("excited_states")
+    if not _is_mapping_sequence(raw_states) or not raw_states:
+        raise ExcitedStateSelectionContractError(
+            "parent artifact lacks quantitative excited-state records"
+        )
+    try:
+        return tuple(ExcitedStateRecord.from_mapping(item) for item in raw_states)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ExcitedStateSelectionContractError(
+            "parent quantitative excited-state records are invalid"
+        ) from exc
+
+
+def _coerce_state_record(
+    value: ExcitedStateRecord | Mapping[str, object],
+) -> ExcitedStateRecord:
+    if isinstance(value, ExcitedStateRecord):
+        return value
+    if not isinstance(value, Mapping):
+        raise ExcitedStateSelectionContractError(
+            "selected states must be quantitative excited-state records"
+        )
+    try:
+        return ExcitedStateRecord.from_mapping(value)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ExcitedStateSelectionContractError(
+            "selected excited-state record is invalid"
+        ) from exc
+
+
+def _unique_records_by_identity(
+    records: Sequence[ExcitedStateRecord],
+    label: str,
+) -> dict[tuple[str, int], ExcitedStateRecord]:
+    result: dict[tuple[str, int], ExcitedStateRecord] = {}
+    for record in records:
+        if record.canonical_key in result:
+            raise ExcitedStateSelectionContractError(
+                f"{label} contain duplicate canonical identities"
+            )
+        result[record.canonical_key] = record
+    return result
+
+
+def _selected_parent_record(
+    value: Mapping[str, object],
+    available: Mapping[tuple[str, int], ExcitedStateRecord],
+) -> ExcitedStateRecord:
+    try:
+        key = (
+            str(value["spin_manifold"]).casefold(),
+            int(value.get("local_state_index", value.get("state_index"))),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ExcitedStateSelectionContractError(
+            "canonical selected-state identity is invalid"
+        ) from exc
+    record = available.get(key)
+    if record is None:
+        raise ExcitedStateSelectionContractError(
+            "canonical selected state is absent from excited_states"
+        )
+    if "excitation_energy_ev" in value:
+        selected_record = _coerce_state_record(value)
+        if selected_record.to_dict() != record.to_dict():
+            raise ExcitedStateSelectionContractError(
+                "canonical selected-state record conflicts with excited_states"
+            )
+    return record
+
+
+def _reject_conflicting_selection_aliases(
+    metadata: Mapping[str, object],
+    expected_keys: Sequence[tuple[str, int]],
+    *,
+    allow_empty: bool = False,
+) -> None:
+    for key in ("selected_state_identities", "selected_states"):
+        raw = metadata.get(key)
+        if raw is None:
+            continue
+        if not _is_mapping_sequence(raw):
+            raise ExcitedStateSelectionContractError(
+                f"{key} must be a sequence of mappings"
+            )
+        if allow_empty and not raw:
+            continue
+        observed: list[tuple[str, int]] = []
+        for item in raw:
+            try:
+                observed.append(
+                    (
+                        str(item["spin_manifold"]).casefold(),
+                        int(item.get("local_state_index", item.get("state_index"))),
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ExcitedStateSelectionContractError(
+                    f"{key} contains an invalid state identity"
+                ) from exc
+        if len(set(observed)) != len(observed) or set(observed) != set(expected_keys):
+            raise ExcitedStateSelectionContractError(
+                "canonical and legacy selected-state aliases conflict"
+            )
+
+
+def _is_mapping_sequence(value: object) -> bool:
+    return (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes))
+        and all(isinstance(item, Mapping) for item in value)
+    )
+
+
 def _canonical_policy(value: str) -> str:
     aliases = {
         "lowest_singlet": "lowest_state",
@@ -742,6 +1014,7 @@ __all__ = [
     "ExcitedStateDataError",
     "ExcitedStateIdentity",
     "ExcitedStateRecord",
+    "ExcitedStateSelectionContractError",
     "OrbitalTransitionRecord",
     "StateSelectionRequest",
     "StateSelectionResult",
@@ -749,4 +1022,6 @@ __all__ = [
     "TransitionFilterSummary",
     "resolve_excited_state",
     "resolve_excited_states",
+    "attach_selected_state_identities",
+    "validate_excited_state_selection_contract",
 ]

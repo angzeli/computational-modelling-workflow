@@ -16,6 +16,7 @@ from cmw.molecular.multiwfn.excited_states import (
     Multiwfn38HoleElectronRenderer,
     Multiwfn38NtoRenderer,
     Multiwfn2026HoleElectronRenderer,
+    Multiwfn2026IfctRenderer,
     Multiwfn2026NtoRenderer,
     MultiwfnSessionParseError,
     MultiwfnStateIdentityError,
@@ -28,11 +29,13 @@ from cmw.molecular.multiwfn.excited_states import (
     parse_multiwfn38_nto_session_file,
     parse_multiwfn2026_hole_electron_session,
     parse_multiwfn2026_hole_electron_session_file,
+    parse_multiwfn2026_ifct_session,
     parse_multiwfn2026_nto_session,
     parse_multiwfn2026_nto_session_file,
 )
 from cmw.molecular.multiwfn.runtime import MENU_CONTRACT
 from cmw.molecular.orca.excited_states import parse_orca_tda_excited_states_file
+from cmw.molecular.stacking.hole_electron import FragmentDefinition
 
 
 FIXTURE_ROOT = Path(__file__).parents[2] / "fixtures"
@@ -252,9 +255,10 @@ class Multiwfn38RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
         self.assertEqual(t2.settings_metadata["grid_quality"], "medium")
 
     def test_command_uses_wavefunction_argument_and_materialized_menu(self) -> None:
+        orca_output = ORCA_ROOT / "orca_6_1_1_tda_singlets.out"
         rendered = Multiwfn38NtoRenderer().render(
             self.s1,
-            orca_output_path=ORCA_ROOT / "orca_6_1_1_tda_singlets.out",
+            orca_output_path=orca_output,
             source_wavefunction_path=self.wavefunction,
             scientific_protocol_hash="protocol-hash",
             source_geometry_hash="b" * 64,
@@ -302,6 +306,12 @@ class Multiwfn38RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
             rendered.to_dict()["auxiliary_inputs"][0]["local_path"],
             ORCA_OUTPUT_LOCAL_PATH,
         )
+        self.assertIn(ORCA_OUTPUT_LOCAL_PATH, rendered.stdin_text)
+        self.assertNotIn(str(orca_output.resolve()), rendered.stdin_text)
+        self.assertNotIn(str(self.wavefunction.resolve()), rendered.stdin_text)
+        auxiliary_identity = rendered.auxiliary_inputs[0].source_identity
+        self.assertEqual(auxiliary_identity["path"], str(orca_output.resolve()))
+        self.assertEqual(auxiliary_identity["sha256"], file_hash(orca_output))
 
     def test_auxiliary_input_alias_fails_closed_on_conflict(self) -> None:
         rendered = Multiwfn38NtoRenderer().render(
@@ -416,6 +426,16 @@ class Multiwfn38RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
         manifest = self.layout.working_directory / "multiwfn-runtime-alias.txt"
         self.assertEqual(provenance["alias_manifest_path"], str(manifest.resolve()))
         self.assertEqual(provenance["alias_manifest_sha256"], file_hash(manifest))
+        manifest_text = manifest.read_text(encoding="utf-8")
+        self.assertIn(f"source_target={self.wavefunction.resolve()}", manifest_text)
+        self.assertEqual(
+            rendered.source_wavefunction_identity["sha256"],
+            file_hash(self.wavefunction),
+        )
+        self.assertNotIn(
+            str((ORCA_ROOT / "orca_6_1_1_tda_singlets.out").resolve()),
+            rendered.stdin_text,
+        )
 
     def test_fragment_request_is_explicitly_deferred(self) -> None:
         with self.assertRaises(DeferredFragmentAnalysisError) as raised:
@@ -644,6 +664,59 @@ class Multiwfn2026RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
         self.assertNotIn("17", t2.menu_sequence)
         self.assertEqual(t2.grammar_id, "multiwfn_2026_7_15_nonfragment_hea_v1")
 
+    def _render_ifct(self, fragments, *, atom_count=5):
+        return Multiwfn2026IfctRenderer().render(
+            self.s1,
+            orca_output_path=ORCA_ROOT / "orca_6_1_1_tda_singlets.out",
+            source_wavefunction_path=self.wavefunction,
+            fragment_definitions=fragments,
+            atom_count=atom_count,
+            scientific_protocol_hash="protocol-hash",
+            source_geometry_hash="b" * 64,
+            execution_layout=self.layout.to_dict(),
+            execution_attempt=self.attempt,
+            settings_identity=self.settings_identity,
+        )
+
+    def test_exact_ifct_menu_converts_complete_zero_based_partition(self) -> None:
+        fragments = (
+            FragmentDefinition("fragment_A", (0, 1, 3)),
+            FragmentDefinition("fragment_B", (2, 4)),
+        )
+        rendered = self._render_ifct(fragments)
+
+        self.assertEqual(
+            rendered.menu_sequence,
+            (
+                "18", "8", "2", ORCA_OUTPUT_LOCAL_PATH, "1", "2",
+                "1-2,4", "3,5", "0", "0", "q",
+            ),
+        )
+        self.assertEqual(rendered.analysis, "ifct")
+        self.assertEqual(
+            rendered.settings_metadata["fragment_definitions"][0]
+            ["atom_indices_zero_based"],
+            [0, 1, 3],
+        )
+        self.assertEqual(rendered.to_dict(), self._render_ifct(fragments).to_dict())
+
+    def test_ifct_partition_rejects_overlap_and_missing_atoms(self) -> None:
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            self._render_ifct(
+                (
+                    FragmentDefinition("fragment_A", (0, 1, 2)),
+                    FragmentDefinition("fragment_B", (2, 3, 4)),
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "cover.*exactly"):
+            self._render_ifct(
+                (
+                    FragmentDefinition("fragment_A", (0, 1)),
+                    FragmentDefinition("fragment_B", (3, 4)),
+                )
+            )
+
+
     def test_settings_identity_is_required_and_command_must_match_it(self) -> None:
         with self.assertRaisesRegex(ValueError, "settings identity"):
             Multiwfn2026NtoRenderer().render(
@@ -685,6 +758,66 @@ class Multiwfn2026RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
                 runtime={**runtime, "settings_sha256": "c" * 64},
                 attempt_directory=self.layout.working_directory,
                 stdin_path=stdin,
+            )
+
+
+class Multiwfn2026IfctParserTests(MultiwfnFixtureMixin, unittest.TestCase):
+    def _session(self, *, state=1, hole_1="60.12", electron_1="55.08"):
+        return f""" Multiwfn -- A Multifunctional Wavefunction Analyzer
+ Version 2026.7.15 (release date is the same as version name)
+ ( Number of parallel threads: 2 Current date: 2026-09-03 Time: 10:00:00 )
+ Loaded /tmp/source.molden.input successfully!
+ State: {state} Exc. Energy: {self.s1.excitation_energy_ev:.3f} eV Multi.: 1 MO pairs: 4
+ Loading configuration coefficients of excited state   {state}...
+ Radial grids: 75 Angular grids: 434 Total: 32550
+ Contribution of each fragment to hole and electron:
+ 1 Hole: {hole_1} % Electron: {electron_1} %
+ 2 Hole: 39.88 % Electron: 44.92 %
+ Construction of interfragment charger-transfer matrix has finished!
+ Variation of population number of fragment 1: -0.05040
+ Variation of population number of fragment 2: 0.05040
+ Intrafragment electron redistribution of fragment 1: 0.33114
+ Intrafragment electron redistribution of fragment 2: 0.17913
+ 1 -> 2: 0.27440 1 <- 2: 0.22400 Net 1 -> 2: 0.05040
+ Intrinsic charge transfer percentage, CT(%): 49.840 %
+ Intrinsic local excitation percentage, LE(%): 50.160 %
+ Apparent charge transfer percentage, CT(%): 5.040 %
+ Apparent local excitation percentage, LE(%): 94.960 %
+"""
+
+    def test_ifct_parser_is_deterministic_and_normalized(self) -> None:
+        labels = ("H4TABAPy", "H4TBAPy")
+        first = parse_multiwfn2026_ifct_session(
+            self._session(), expected_state=self.s1, fragment_labels=labels
+        )
+        second = parse_multiwfn2026_ifct_session(
+            self._session(), expected_state=self.s1, fragment_labels=labels
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            [item.fragment_label for item in first.fragments], list(labels)
+        )
+        self.assertAlmostEqual(sum(item.hole_fraction for item in first.fragments), 1.0)
+        self.assertAlmostEqual(
+            sum(item.electron_fraction for item in first.fragments), 1.0
+        )
+        self.assertAlmostEqual(first.fragments[0].delta_e_minus_h, -0.0504)
+        self.assertAlmostEqual(first.transfer.net_source_to_target_electrons, 0.0504)
+        self.assertEqual(first.state_evidence.selected_identity, self.s1.identity)
+
+    def test_ifct_parser_fails_closed_on_population_and_state_identity(self) -> None:
+        with self.assertRaisesRegex(MultiwfnSessionParseError, "close to unity"):
+            parse_multiwfn2026_ifct_session(
+                self._session(hole_1="59.12"),
+                expected_state=self.s1,
+                fragment_labels=("fragment_A", "fragment_B"),
+            )
+        with self.assertRaises(MultiwfnStateIdentityError):
+            parse_multiwfn2026_ifct_session(
+                self._session(state=2),
+                expected_state=self.s1,
+                fragment_labels=("fragment_A", "fragment_B"),
             )
 
 
