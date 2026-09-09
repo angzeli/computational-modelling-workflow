@@ -28,10 +28,16 @@ from .execution_contract import (
     ExecutionIntent,
 )
 from .execution_layout import (
+    DEFAULT_SHORT_TARGET_ID_WIDTH,
     ExecutionLayout,
     ExecutionLayoutError,
+    ExecutionLayoutVersion,
+    TARGET_MANIFEST_FILENAME,
+    build_target_manifest,
     execution_target_directory,
+    execution_target_directory_v2,
     next_attempt_identifier,
+    write_target_manifest,
 )
 from .job import ExecutionAttempt
 from .provenance import atomic_write_json, file_hash, read_json, stable_hash
@@ -200,6 +206,8 @@ class ExecutionPlan:
         default_factory=dict
     )
     provenance: Mapping[str, object] = field(default_factory=dict)
+    layout_version: ExecutionLayoutVersion = ExecutionLayoutVersion.V2
+    short_target_id_width: int = DEFAULT_SHORT_TARGET_ID_WIDTH
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "nodes", tuple(self.nodes))
@@ -209,6 +217,11 @@ class ExecutionPlan:
         }
         object.__setattr__(self, "available_artifacts", available)
         object.__setattr__(self, "provenance", dict(self.provenance))
+        object.__setattr__(
+            self, "layout_version", ExecutionLayoutVersion(self.layout_version)
+        )
+        if self.short_target_id_width < 8:
+            raise ValueError("short target id width must be at least 8")
         self.validate()
 
     @property
@@ -304,6 +317,10 @@ class ExecutionPlan:
                 for node_id, artifacts in sorted(self.available_artifacts.items())
             },
             "provenance": dict(self.provenance),
+            "execution_layout": {
+                "version": self.layout_version.value,
+                "short_target_id_width": self.short_target_id_width,
+            },
         }
 
     @classmethod
@@ -313,6 +330,10 @@ class ExecutionPlan:
         raw_graph = value.get("workflow_graph")
         if not isinstance(raw_graph, Mapping):
             raise ValueError("execution plan requires a workflow_graph mapping")
+        raw_layout = value.get("execution_layout")
+        layout_configuration = (
+            dict(raw_layout) if isinstance(raw_layout, Mapping) else {}
+        )
         plan = cls(
             workflow_graph=WorkflowGraph.from_mapping(raw_graph),
             nodes=tuple(
@@ -328,6 +349,14 @@ class ExecutionPlan:
                 ).items()
             },
             provenance=dict(value.get("provenance", {})),
+            layout_version=ExecutionLayoutVersion(
+                str(layout_configuration.get("version", "v1"))
+            ),
+            short_target_id_width=int(
+                layout_configuration.get(
+                    "short_target_id_width", DEFAULT_SHORT_TARGET_ID_WIDTH
+                )
+            ),
         )
         if value.get("execution_plan_id") not in (None, plan.execution_plan_id):
             raise ValueError("stored execution-plan identity does not match content")
@@ -494,7 +523,11 @@ class MaterializedExecutionNode:
 
     @classmethod
     def from_mapping(
-        cls, value: Mapping[str, Any], *, status: MaterializationStatus | None = None
+        cls,
+        value: Mapping[str, Any],
+        *,
+        status: MaterializationStatus | None = None,
+        root_override: Path | str | None = None,
     ) -> "MaterializedExecutionNode":
         if value.get("schema_version") != MATERIALIZED_EXECUTION_SCHEMA_VERSION:
             raise ValueError("unsupported materialized-execution schema")
@@ -520,7 +553,9 @@ class MaterializedExecutionNode:
             ),
             target=dict(value["target"]),
             attempt=attempt,
-            layout=ExecutionLayout.from_mapping(dict(value["execution_layout"])),
+            layout=ExecutionLayout.from_mapping(
+                dict(value["execution_layout"]), root_override=root_override
+            ),
             status=status or MaterializationStatus(str(value["status"])),
             input_files={
                 str(role): str(path)
@@ -646,8 +681,16 @@ class WorkflowPlanMaterializer:
             if not directory.is_dir() or not manifest_path.is_file():
                 continue
             try:
+                stored_layout = read_json(manifest_path).get("execution_layout", {})
+                root_override: Path | None = None
+                if (
+                    isinstance(stored_layout, Mapping)
+                    and stored_layout.get("schema_version") == 2
+                ):
+                    working_path = Path(str(stored_layout["working_path"]))
+                    root_override = directory.parents[len(working_path.parts) - 1]
                 record = MaterializedExecutionNode.from_mapping(
-                    read_json(manifest_path)
+                    read_json(manifest_path), root_override=root_override
                 )
             except (OSError, UnicodeError, ValueError, KeyError, TypeError):
                 continue
@@ -751,12 +794,28 @@ class WorkflowPlanMaterializer:
         target_record["target_id"] = target.target_id
 
         project_root = Path(project_root).expanduser().resolve()
-        target_directory = execution_target_directory(
-            project_root,
-            system_identifier=system_identifier,
-            workflow_node_identifier=node_id,
-            target_identifier=target.target_id,
+        operational_stage_value = node.renderer_configuration.get(
+            "operational_stage"
         )
+        operational_stage = (
+            str(operational_stage_value)
+            if operational_stage_value is not None
+            else None
+        )
+        if plan.layout_version is ExecutionLayoutVersion.V2:
+            target_directory = execution_target_directory_v2(
+                project_root,
+                target_identifier=target.target_id,
+                operational_stage=operational_stage,
+                short_id_width=plan.short_target_id_width,
+            )
+        else:
+            target_directory = execution_target_directory(
+                project_root,
+                system_identifier=system_identifier,
+                workflow_node_identifier=node_id,
+                target_identifier=target.target_id,
+            )
         resource_profile_hash = resource_profile.execution_profile_hash
         runtime_identity_hash = stable_hash(dict(runtime_identity))
         previous = self._prepared_record(
@@ -781,7 +840,28 @@ class WorkflowPlanMaterializer:
             workflow_node_identifier=node_id,
             target_identifier=target.target_id,
             attempt_identifier=attempt_identifier,
+            version=plan.layout_version,
+            operational_stage=(
+                operational_stage
+                if plan.layout_version is ExecutionLayoutVersion.V2
+                else None
+            ),
+            short_id_width=plan.short_target_id_width,
         )
+        if layout.version is ExecutionLayoutVersion.V2:
+            write_target_manifest(
+                layout.target_directory / TARGET_MANIFEST_FILENAME,
+                build_target_manifest(
+                    layout,
+                    target=target_record,
+                    source_artifact_ids=tuple(
+                        artifact.artifact_id for artifact in input_artifacts
+                    ),
+                    execution_intent=node.execution_intent.to_dict(),
+                    execution_plan_id=plan.execution_plan_id,
+                    provenance=plan.provenance,
+                ),
+            )
         layout.create_working_directory()
         atomic_write_json(layout.layout_path, layout.to_dict())
         try:

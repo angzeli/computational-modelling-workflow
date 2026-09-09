@@ -196,6 +196,10 @@ class WorkflowPlanMaterializerTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, MaterializationStatus.PREPARED)
+        self.assertEqual(result.layout.version.value, "v2")
+        self.assertTrue(
+            (result.layout.target_directory / "target-manifest.json").is_file()
+        )
         self.assertEqual(result.attempt.attempt_id, "attempt_001")
         self.assertTrue(result.layout.working_directory.is_dir())
         self.assertTrue(all(Path(path).is_absolute() for path in result.input_files.values()))
@@ -282,9 +286,7 @@ class WorkflowPlanMaterializerTests(unittest.TestCase):
                 resource_profile=self.profile,
                 runtime_identity=self.runtime,
             )
-        failures = tuple(
-            self.root.glob("calculation/**/materialization-failure.json")
-        )
+        failures = tuple(self.root.glob("**/materialization-failure.json"))
         self.assertEqual(len(failures), 1)
 
     def test_incompatible_renderer_fails_closed(self) -> None:

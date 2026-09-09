@@ -22,6 +22,27 @@ class ExecutionContractError(ValueError):
     code = "FAILED_EXECUTION_CONTRACT_MISMATCH"
 
 
+def canonical_stage_type(value: object) -> str:
+    """Return one stable token for the canonical CMW molecular stages.
+
+    Enum members, their qualified string representation, and case variants are
+    accepted at API boundaries. Program-specific stages outside this small
+    canonical set are preserved verbatim.
+    """
+
+    raw = value.value if isinstance(value, Enum) else str(value)
+    token = str(raw).strip()
+    if token.casefold().startswith("stagetype."):
+        token = token.split(".", 1)[1]
+    aliases = {
+        "opt": "OPT",
+        "freq": "FREQ",
+        "sp": "SP",
+        "tddft": "TDDFT",
+    }
+    return aliases.get(token.casefold(), token)
+
+
 @dataclass(frozen=True)
 class ExecutionIntent:
     """Explicit bridge from a scientific stage to program execution behavior."""
@@ -31,11 +52,13 @@ class ExecutionIntent:
     required_behavior: str
 
     def __post_init__(self) -> None:
-        if not self.stage_type.strip():
+        stage_type = canonical_stage_type(self.stage_type)
+        if not stage_type:
             raise ValueError("execution intent requires a scientific stage type")
         if not self.required_behavior.strip():
             raise ValueError("execution intent requires an execution behavior")
         object.__setattr__(self, "task", ComputationalTask(self.task))
+        object.__setattr__(self, "stage_type", stage_type)
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -57,4 +80,5 @@ __all__ = [
     "ComputationalTask",
     "ExecutionContractError",
     "ExecutionIntent",
+    "canonical_stage_type",
 ]

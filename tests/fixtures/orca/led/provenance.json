@@ -1,0 +1,23 @@
+{
+  "fixture_policy": "Reduced verbatim grammar and numerical rows from completed local ORCA 6.1.1 calculations; no production output is copied in full.",
+  "reference_semantics": "FROZEN_FRAGMENT_IN_DIMER_BASIS",
+  "h4tbapy": {
+    "dimer": "calculation/hof_h4tbapy/dimer/e5cc5eb82c650ff6c362646180ec296ac583093749862b4e2414aee585572ce7/attempts/attempt_002/stage.out",
+    "fragment_a": "calculation/hof_h4tbapy/fragment_a/0e82878d10034dde07ec4ffb40ddae5a8a0cbb2e269159d5e49571cb48286462/attempts/attempt_001/stage.out",
+    "fragment_b": "calculation/hof_h4tbapy/fragment_b/9d8157a557ecdb5338c1a8ebc3afb060f3d2b815c5f95a6c3c8fad3e1e878e3d/attempts/attempt_001/stage.out",
+    "active_atom_indices": {
+      "fragment_a": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+      "fragment_b": [18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
+    },
+    "audit_note": "The curated table reused fragment-A numbers for fragment B. The exact production contract uses the distinct fragment-B output."
+  },
+  "h4tabapy": {
+    "dimer": "calculation/hof_h4tabapy/dimer/26559910a101cae9558a2271b0220715fdab149a070b4e50a90a3304bf4fcaca/attempts/attempt_001/stage.out",
+    "fragment_a": "calculation/hof_h4tabapy/fragment_a/db5fec8612c08190def824636bb2b1529ce7209011c60f4cd152cabb0dcfcc37/attempts/attempt_001/stage.out",
+    "fragment_b": "calculation/hof_h4tabapy/fragment_b/87e67d16b2d82c5d7e12195c4c1bc5ea20bb4c3a1546e7a2b69e4afa41d2025e/attempts/attempt_001/stage.out",
+    "active_atom_indices": {
+      "fragment_a": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+      "fragment_b": [20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
+    }
+  }
+}

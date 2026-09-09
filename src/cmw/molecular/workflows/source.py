@@ -14,6 +14,7 @@ from cmw.core.artifacts import (
     artifact_from_dict,
 )
 from cmw.core.job import JobTarget
+from cmw.core.execution_layout import resolve_internal_path, resolve_recorded_layout
 from cmw.core.provenance import file_hash, read_json
 from cmw.structure.xyz import geometry_hash, read_xyz
 
@@ -69,18 +70,31 @@ class ValidatedSource:
         return value
 
 
-def _artifact_path(result_path: Path, artifact: Mapping[str, Any]) -> Path:
+def _artifact_path(
+    result_path: Path,
+    artifact: Mapping[str, Any],
+    record: Mapping[str, Any],
+) -> Path:
     value = Path(str(artifact.get("path", "")))
+    layout_record = record.get("execution_layout")
+    if isinstance(layout_record, Mapping):
+        layout = resolve_recorded_layout(layout_record, metadata_path=result_path)
+        return resolve_internal_path(
+            value, layout_record=layout_record, resolved_layout=layout
+        )
     return value if value.is_absolute() else result_path.parent / value
 
 
 def _validated_artifact(
-    result_path: Path, artifacts: Mapping[str, Any], role: str
+    result_path: Path,
+    artifacts: Mapping[str, Any],
+    role: str,
+    record: Mapping[str, Any],
 ) -> tuple[Path, str]:
     artifact = artifacts.get(role)
     if not isinstance(artifact, dict):
         raise ValueError(f"validated source lacks required artifact role: {role}")
-    path = _artifact_path(result_path, artifact)
+    path = _artifact_path(result_path, artifact, record)
     if not path.is_file():
         raise FileNotFoundError(f"source artifact is missing: {role}: {path}")
     actual_hash = file_hash(path)
@@ -248,10 +262,10 @@ def validate_source_result(path: Path) -> ValidatedSource:
     elif semantic_contract is not None and spin_mode == "restricted":
         raise ValueError("restricted semantic contract lacks frontier_orbitals evidence")
     wavefunction_path, wavefunction_hash = _validated_artifact(
-        result_path, artifacts, "wavefunction"
+        result_path, artifacts, "wavefunction", record
     )
     geometry_path, geometry_artifact_hash = _validated_artifact(
-        result_path, artifacts, "geometry"
+        result_path, artifacts, "geometry", record
     )
     geometry = read_xyz(geometry_path)
     identity = geometry_hash(geometry)

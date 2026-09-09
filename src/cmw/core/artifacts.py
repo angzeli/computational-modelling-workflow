@@ -11,8 +11,14 @@ from .execution_contract import (
     ComputationalTask,
     ExecutionContractError,
     ExecutionIntent,
+    canonical_stage_type,
 )
-from .execution_layout import ExecutionLayout, ExecutionLayoutError
+from .execution_layout import (
+    ExecutionLayout,
+    ExecutionLayoutError,
+    resolve_internal_path,
+    resolve_recorded_layout,
+)
 from .provenance import stable_hash
 
 
@@ -227,6 +233,12 @@ class FragmentEnergyArtifact(EnergyArtifact):
     TYPE = "FragmentEnergyArtifact"
 
 
+class LEDFragmentReferenceArtifact(FragmentEnergyArtifact):
+    """Frozen fragment evaluated with partner basis functions for LED assembly."""
+
+    TYPE = "LEDFragmentReferenceArtifact"
+
+
 class InteractionEnergyArtifact(EnergyArtifact):
     TYPE = "InteractionEnergyArtifact"
 
@@ -241,8 +253,40 @@ class DeformationEnergyArtifact(EnergyArtifact):
     TYPE = "DeformationEnergyArtifact"
 
 
+@dataclass(frozen=True)
 class LEDArtifact(AnalysisArtifact):
-    TYPE = "LEDArtifact"
+    """Validated numerical local-energy decomposition."""
+
+    TYPE: ClassVar[str] = "LEDArtifact"
+
+    led_result: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        object.__setattr__(self, "led_result", dict(self.led_result))
+
+    def _identity_payload(self) -> dict[str, object]:
+        payload = super()._identity_payload()
+
+        def without_paths(value: object) -> object:
+            if isinstance(value, Mapping):
+                return {
+                    str(key): without_paths(item)
+                    for key, item in value.items()
+                    if key != "source_path"
+                }
+            if isinstance(value, (list, tuple)):
+                return [without_paths(item) for item in value]
+            return value
+
+        if self.led_result:
+            payload["led_result"] = without_paths(self.led_result)
+        return payload
+
+    def to_dict(self) -> dict[str, object]:
+        value = super().to_dict()
+        value["led_result"] = dict(self.led_result)
+        return value
 
 
 class DensityArtifact(AnalysisArtifact):
@@ -304,6 +348,7 @@ ARTIFACT_TYPES: dict[str, type[Artifact]] = {
         SinglePointArtifact,
         DimerEnergyArtifact,
         FragmentEnergyArtifact,
+        LEDFragmentReferenceArtifact,
         InteractionEnergyArtifact,
         CPInteractionArtifact,
         DeformationEnergyArtifact,
@@ -373,6 +418,8 @@ def artifact_from_dict(value: Mapping[str, Any]) -> Artifact:
                 "geometry_hash": str(value.get("geometry_hash", "")),
             }
         )
+    if issubclass(cls, LEDArtifact):
+        arguments["led_result"] = dict(value.get("led_result", {}))
     artifact = cls(
         **arguments,
     )
@@ -533,17 +580,74 @@ def validate_artifact_compatibility(
         _validate_deformation_parents(selected)
 
     if isinstance(artifact, LEDArtifact):
-        compatible = [
-            parent
-            for parent in selected
-            if isinstance(parent, CalculationArtifact)
-            and "dlpno" in _normal(parent.method)
-            and parent.protocol.get("led") is True
-        ]
-        if not compatible:
-            raise ArtifactCompatibilityError(
-                "LEDArtifact requires a validated DLPNO calculation with LED enabled"
-            )
+        if artifact.protocol.get("led_contract") == "intermolecular_six_component_v1":
+            dimers = [
+                parent
+                for parent in selected
+                if isinstance(parent, DimerEnergyArtifact)
+                and parent.protocol.get("led_role") == "dimer"
+                and parent.protocol.get("led") is True
+                and "dlpno" in _normal(parent.method)
+            ]
+            references = [
+                parent
+                for parent in selected
+                if isinstance(parent, LEDFragmentReferenceArtifact)
+                and parent.protocol.get("led_role") == "fragment_reference"
+            ]
+            if len(selected) != 3 or len(dimers) != 1 or len(references) != 2:
+                raise ArtifactCompatibilityError(
+                    "six-component LEDArtifact requires one dimer LED result and "
+                    "two LED fragment-reference results"
+                )
+            if any(
+                parent.protocol.get("reference_semantics")
+                != "FROZEN_FRAGMENT_IN_DIMER_BASIS"
+                for parent in references
+            ):
+                raise ArtifactCompatibilityError(
+                    "LED fragment references require FROZEN_FRAGMENT_IN_DIMER_BASIS semantics"
+                )
+            method_contracts = {
+                parent.protocol.get("led_method_contract_hash")
+                for parent in selected
+            }
+            geometry_hashes = {
+                parent.protocol.get("full_dimer_geometry_hash")
+                for parent in selected
+            }
+            partitions = {
+                parent.protocol.get("fragment_partition_hash")
+                for parent in selected
+            }
+            if None in method_contracts or len(method_contracts) != 1:
+                raise ArtifactCompatibilityError(
+                    "LED parent calculations use incompatible scientific inputs"
+                )
+            if None in geometry_hashes or len(geometry_hashes) != 1:
+                raise ArtifactCompatibilityError(
+                    "LED parent calculations use different dimer geometries"
+                )
+            if None in partitions or len(partitions) != 1:
+                raise ArtifactCompatibilityError(
+                    "LED parent calculations use different fragment partitions"
+                )
+            if not artifact.led_result:
+                raise ArtifactCompatibilityError(
+                    "six-component LEDArtifact requires validated numerical results"
+                )
+        else:
+            compatible = [
+                parent
+                for parent in selected
+                if isinstance(parent, CalculationArtifact)
+                and "dlpno" in _normal(parent.method)
+                and parent.protocol.get("led") is True
+            ]
+            if not compatible:
+                raise ArtifactCompatibilityError(
+                    "LEDArtifact requires a validated DLPNO calculation with LED enabled"
+                )
 
     if isinstance(artifact, IGMHArtifact):
         if not any(isinstance(parent, DensityArtifact) for parent in selected):
@@ -840,7 +944,9 @@ def _method_metadata(calculation: Mapping[str, Any]) -> tuple[str | None, str | 
     )
 
 
-def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
+def artifact_from_result(
+    record: Mapping[str, Any], *, metadata_path: Path | str | None = None
+) -> Artifact:
     """Map a legacy ORCA or Multiwfn result to the typed artifact model."""
 
     target = record.get("target")
@@ -849,7 +955,7 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
     target_id = str(target.get("target_id", ""))
     if not target_id:
         raise ValueError("result target lacks target_id")
-    stage_type = str(target.get("stage_type", ""))
+    stage_type = canonical_stage_type(target.get("stage_type", ""))
     calculation = dict(target.get("calculation", {}))
     method, basis, protocol = _method_metadata(calculation)
 
@@ -896,7 +1002,12 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
             raise ExecutionLayoutError(
                 f"{ExecutionLayoutError.code}: result execution layout is invalid"
             )
-        layout = ExecutionLayout.from_mapping(layout_record)
+        if metadata_path is None:
+            layout = ExecutionLayout.from_mapping(layout_record)
+        else:
+            layout = resolve_recorded_layout(
+                layout_record, metadata_path=metadata_path
+            )
         attempt_record = record.get("attempt")
         if not isinstance(attempt_record, Mapping):
             raise ExecutionLayoutError(
@@ -910,8 +1021,12 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
             if not isinstance(item, Mapping):
                 continue
             path = Path(str(item.get("path", "")))
-            if layout is not None and not path.is_absolute():
-                path = layout.working_directory / path
+            if layout is not None and isinstance(layout_record, Mapping):
+                path = resolve_internal_path(
+                    path,
+                    layout_record=layout_record,
+                    resolved_layout=layout,
+                )
             files[str(role)] = str(path.resolve()) if layout is not None else str(path)
     parents = [str(item) for item in record.get("parent_artifacts", ())]
     source = record.get("source")
@@ -950,7 +1065,16 @@ def artifact_from_result(record: Mapping[str, Any]) -> Artifact:
                     f"{ExecutionContractError.code}: result execution intent "
                     f"does not match stage {stage_type}"
                 )
-        cls = task_artifacts[task]
+        if task is ComputationalTask.SINGLE_POINT and protocol.get(
+            "led_role"
+        ) == "fragment_reference":
+            cls = LEDFragmentReferenceArtifact
+        elif task is ComputationalTask.SINGLE_POINT and protocol.get(
+            "led_role"
+        ) == "dimer":
+            cls = DimerEnergyArtifact
+        else:
+            cls = task_artifacts[task]
     elif stage_type == "MULTIWFN_ESP":
         cls = DensityArtifact
     elif stage_type == "MULTIWFN_IGMH":
@@ -1025,6 +1149,7 @@ __all__ = [
     "HoleElectronArtifact",
     "InteractionEnergyArtifact",
     "LEDArtifact",
+    "LEDFragmentReferenceArtifact",
     "NTOArtifact",
     "OptimizationArtifact",
     "SinglePointArtifact",

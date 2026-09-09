@@ -12,6 +12,7 @@ from cmw.core.artifacts import (
     FragmentEnergyArtifact,
     IGMHArtifact,
     LEDArtifact,
+    LEDFragmentReferenceArtifact,
     SinglePointArtifact,
     ValidationStatus,
     artifact_from_dict,
@@ -101,6 +102,20 @@ class ArtifactIdentityTests(unittest.TestCase):
             "d0247ba3658fe2791077cbafcf3e88cede3570ba57554eb7bb666c3ef85f6f36",
         )
 
+    def test_legacy_empty_led_artifact_identity_remains_readable(self) -> None:
+        legacy = LEDArtifact(
+            producing_calculation="legacy-led",
+            parent_artifacts=("parent",),
+        )
+        value = legacy.to_dict()
+        value.pop("led_result")
+
+        restored = artifact_from_dict(value)
+
+        self.assertIsInstance(restored, LEDArtifact)
+        self.assertEqual(restored.artifact_id, legacy.artifact_id)
+        self.assertEqual(restored.led_result, {})
+
     def test_legacy_orca_result_maps_without_replacing_existing_fields(self) -> None:
         target = JobTarget(
             "SP",
@@ -124,6 +139,38 @@ class ArtifactIdentityTests(unittest.TestCase):
         self.assertEqual(artifact.method, "PBE0")
         self.assertEqual(artifact.basis, "def2-SVP")
         self.assertEqual(artifact.files["output"], "stage.out")
+
+    def test_led_result_roles_map_to_typed_runtime_artifacts(self) -> None:
+        artifacts = []
+        for role in ("dimer", "fragment_reference"):
+            target = JobTarget(
+                "SP",
+                "a" * 64,
+                0,
+                1,
+                {
+                    "keywords": "DLPNO-CCSD(T) def2-TZVPP LED",
+                    "protocol": {
+                        "method": "DLPNO-CCSD(T)",
+                        "basis": "def2-TZVPP",
+                        "led_role": role,
+                    },
+                },
+            )
+            artifacts.append(
+                artifact_from_result(
+                    {
+                        "target": target.to_dict(),
+                        "execution": {"status": "SUCCESS"},
+                        "scientific": {"status": "VALID", "reason": "valid"},
+                        "artifacts": {"output": {"path": "stage.out"}},
+                        "reusable": True,
+                    }
+                )
+            )
+
+        self.assertIsInstance(artifacts[0], DimerEnergyArtifact)
+        self.assertIsInstance(artifacts[1], LEDFragmentReferenceArtifact)
 
 
 class ArtifactCompatibilityTests(unittest.TestCase):

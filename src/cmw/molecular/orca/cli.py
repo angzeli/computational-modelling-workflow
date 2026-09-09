@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 from cmw.core.artifacts import Artifact, artifact_from_dict
-from cmw.core.execution_layout import ExecutionLayout
+from cmw.core.execution_layout import ExecutionLayout, resolve_recorded_layout
 from cmw.core.execution_profiles import load_execution_profiles
 from cmw.core.job import GeometryLineage
 from cmw.core.locks import acquire_lock, inspect_lock, release_lock
@@ -153,8 +153,9 @@ def _finalize(args: argparse.Namespace) -> int:
         frequency_policy=FrequencyPolicy(args.require_minimum, args.imaginary_tolerance),
         parent_attempt_id=args.parent_attempt_id or None,
         execution_layout=(
-            ExecutionLayout.from_mapping(
-                json.loads(Path(args.layout).read_text(encoding="utf-8"))
+            resolve_recorded_layout(
+                json.loads(Path(args.layout).read_text(encoding="utf-8")),
+                metadata_path=Path(args.layout),
             )
             if args.layout
             else None

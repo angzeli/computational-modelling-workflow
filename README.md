@@ -18,10 +18,19 @@ This repository currently contains:
 - factual ORCA output parsing with separate OPT/FREQ/SP/TDDFT validation;
 - versioned targets, attempts, artifacts, lineage, local locks, and fail-closed
   reuse;
+- [ExecutionLayout v2](docs/execution-layout-v2.md), which keeps full scientific
+  identities in authoritative manifests while paths use one short opaque target
+  display layer, with transactional v1 migration and registry-backed resolution;
+- deterministic, dry-run-first cleanup of provably superseded attempts with
+  bounded provenance tombstones, explicit purge confirmation, and crash-safe
+  recovery;
 - a system-agnostic calculation/aggregation/derived-result workflow graph with
   typed scientific artifact contracts;
 - optional method-aware ORCA protocol validation for method, basis, PNO, LED,
   fragment, SCF, optimization, and frequency evidence;
+- ORCA 6.1.1 fixed-geometry intermolecular LED with exact ghost-basis fragment
+  references, six-component numerical reconstruction, typed finalization, and
+  hash-validated reuse;
 - a HOF domain adapter that validates two-fragment hydrogen-bonded systems and
   translates their YAML configuration into generic CP/LED workflow contracts;
 - shell-owned ORCA execution;
@@ -66,6 +75,9 @@ The reusable stacking contracts and artifact lineage are documented in
 [`docs/architecture/vertical-stacking-workflow.md`](docs/architecture/vertical-stacking-workflow.md).
 The HOF YAML mapping, validators, CP/LED graph, and non-executing ORCA input
 plans are documented in [`docs/adapters/hof.md`](docs/adapters/hof.md).
+The generic cleanup eligibility, plan-hash, transaction, registry, and purge
+contracts are documented in
+[`docs/architecture/attempt-cleanup.md`](docs/architecture/attempt-cleanup.md).
 
 ## Repository layout
 
@@ -130,6 +142,10 @@ geometry lineage, and resume behavior are documented in
 [`docs/molecular/orca-opt-freq-sp.md`](docs/molecular/orca-opt-freq-sp.md).
 Shell owns operational orchestration; Python owns scientific semantics and
 structured state.
+
+The generic three-calculation intermolecular LED contract, numerical equations,
+ORCA 6.1.1 grammar boundary, and refinalization/reuse behavior are documented in
+[`docs/molecular/orca-intermolecular-led.md`](docs/molecular/orca-intermolecular-led.md).
 
 Molecular XYZ files can be converted to centered orthorhombic or cubic VASP
 POSCAR cells with charge-aware automatic cell selection, per-face vacuum,

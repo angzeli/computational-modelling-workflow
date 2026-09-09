@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 from uuid import uuid4
 
+from .execution_contract import canonical_stage_type
 from .provenance import stable_hash
 
 
@@ -22,6 +23,10 @@ class JobTarget:
     charge: int
     multiplicity: int
     calculation: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "stage_type", canonical_stage_type(self.stage_type))
+        object.__setattr__(self, "calculation", dict(self.calculation))
 
     @property
     def target_id(self) -> str:

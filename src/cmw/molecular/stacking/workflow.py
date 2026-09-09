@@ -21,7 +21,7 @@ from cmw.core.artifacts import (
     ValidationStatus,
     WavefunctionArtifact,
 )
-from cmw.core.execution_layout import ExecutionLayout
+from cmw.core.execution_layout import ExecutionLayout, ExecutionLayoutVersion
 from cmw.core.provenance import stable_hash
 from cmw.core.workflow_graph import (
     ArtifactRequirement,
@@ -206,6 +206,7 @@ def _execution_layouts(
             node_id,
             stable_hash(identity),
             attempt_identifiers.get(node_id, "attempt_001"),
+            version=ExecutionLayoutVersion.V2,
         )
     return layouts
 
