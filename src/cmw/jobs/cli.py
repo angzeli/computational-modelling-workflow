@@ -27,6 +27,46 @@ def elapsed(value):
     return f"{hours:02}:{minutes:02}:{seconds:02}"
 
 
+def metric(value, quality, pattern, *, stale=False):
+    if value is None:
+        return "…" if quality == "warming-up" else "—"
+    marker = "~" if stale else "*" if quality == "partial" else "?" if quality == "unavailable" else ""
+    return pattern.format(value) + marker
+
+
+def usage_cells(usage):
+    usage = usage or {}
+    cores = usage.get("cpu_cores")
+    cpu = metric(None if cores is None else cores * 100, usage.get("cpu_quality"), "{:.0f}%", stale=usage.get("stale", False))
+    rss = usage.get("rss_bytes")
+    memory = metric(None if rss is None else rss / 2**30, usage.get("memory_quality"), "{:.1f} GiB RSS", stale=usage.get("stale", False))
+    return cpu, memory
+
+
+def usage_detail(usage):
+    if not usage:
+        return "CPU NOW: —   RAM NOW: — (no current workload sample)"
+    cpu, memory = usage_cells(usage)
+    age = usage.get("age_seconds")
+    return (f"CPU NOW: {cpu} (100% = one logical CPU)   RAM NOW: {memory} (aggregate RSS)\n"
+            f"Measurement age: {'—' if age is None else f'{age:.1f}s'}{' STALE' if usage.get('stale') else ''}\n"
+            f"CPU quality: {usage.get('cpu_quality', 'unavailable')} ({usage.get('cpu_members', 0)}/{usage.get('total_members', 0)} members); "
+            f"RAM quality: {usage.get('memory_quality', 'unavailable')} ({usage.get('memory_members', 0)}/{usage.get('total_members', 0)} members)\n"
+            "RSS sums may count shared pages more than once; usage is not requested resources.\n"
+            f"{usage.get('reason') or ''}")
+
+
+def machine_text(usage):
+    usage = usage or {}
+    cpu = metric(usage.get("cpu_percent"), usage.get("cpu_quality"), "{:.0f}%", stale=usage.get("stale", False))
+    used, total = usage.get("ram_used_bytes"), usage.get("ram_total_bytes")
+    memory = "—" if used is None or total is None else f"{used / 2**30:.1f} / {total / 2**30:.1f} GiB"
+    if usage.get("stale"):
+        memory += "~"
+    warm = " (warming up)" if usage.get("cpu_quality") == "warming-up" else ""
+    return f"Machine: CPU {cpu}{warm}   RAM {memory}"
+
+
 def tail(path, limit=16384):
     if limit < 1 or limit > 1024 * 1024:
         raise JobsError("Tail bytes must be between 1 and 1048576")
@@ -61,6 +101,7 @@ def external_detail(observation):
             f"Ownership: {observation.get('ownership', 'External / unattributed')} — not managed by this queue\n"
             f"Engine: {observation['engine']}   PID: {observation['pid']}   Observed OS state: {observation.get('status', '—')}\n"
             f"NPROC (observed processes): {observation.get('nproc', 1)}   Process age: {elapsed(observation.get('age_seconds'))}\n"
+            f"{usage_detail(observation.get('usage'))}\n"
             f"Executable: {observation.get('exe') or '—'}\nWorking directory: {observation.get('cwd') or '—'}\n"
             "CPUs requested: —   RAM requested: —   Scientific status: Not evaluated\n"
             f"Evidence: {json.dumps(observation.get('evidence', []), ensure_ascii=False)}\n"
@@ -72,17 +113,21 @@ def status_text(state):
     control = state["controller"]
     online = "Stale" if control["stale"] else "Online" if control["online"] else "Offline"
     lines = ["CMW / JOBS — local", f"Controller: {online}   Dispatch: {'ON' if control['dispatch'] else 'OFF'}   Mode: Sequential",
-             "ORDER  JOB ID      NAME                  ENGINE      STATUS       CPUS  ELAPSED     REASON"]
+             machine_text(state.get("machine_usage")),
+             "ORDER  JOB ID      NAME                  ENGINE      STATUS       CPUS  CPU NOW  RAM NOW          ELAPSED     REASON"]
     for job in state["jobs"]:
+        cpu_now, ram_now = usage_cells(job.get("usage"))
         lines.append(f"{str(job['order'] or '—'):>5}  {job['display_id']:<10}  {safe_text(job['name'])[:20]:20}  {safe_text(job['engine'])[:10]:10}  "
-                     f"{job['status']:11}  {str(job['resources']['cpus'] or '—'):>4}  {elapsed(job['elapsed']):>10}  {safe_text(job['reason'])}")
+                     f"{job['status']:11}  {str(job['resources']['cpus'] or '—'):>4}  {cpu_now:>7}  {ram_now:>15}  {elapsed(job['elapsed']):>10}  {safe_text(job['reason'])}")
     if not state["jobs"]:
         lines.append("No jobs. Add a prepared command with cmw jobs add, then explicitly start.")
     lines.append(guard_text(state))
     lines.append("EXTERNAL ACTIVITY — READ ONLY (NPROC = observed processes; AGE = process age)")
     for item in state.get("external_activity", {}).get("observations", []):
+        cpu_now, ram_now = usage_cells(item.get("usage"))
         lines.append(f"{item['id']}  {item['engine']}  PID {item['pid']}  NPROC {item.get('nproc', 1)}  "
-                     f"OS {item.get('status', '—')}  AGE {elapsed(item.get('age_seconds'))}  {item.get('exe') or '—'}")
+                     f"OS {item.get('status', '—')}  CPU NOW {cpu_now}  RAM NOW {ram_now}  AGE {elapsed(item.get('age_seconds'))}  {item.get('exe') or '—'}")
+    lines.append("CPU NOW: 100% = one logical CPU; RAM NOW: aggregate RSS (shared pages may repeat). … warming up; * partial; ~ stale; ? unavailable cached value.")
     lines.append("Best-effort pre-dispatch observation; no machine-wide reservation or exclusion.")
     lines.append(f"State: {state['state_directory']}")
     return "\n".join(lines)
@@ -172,7 +217,7 @@ def handle(args):
                     raise JobsError(f"External observation no longer observed: {args.job_id}")
                 print(json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False) if args.json else safe_text(external_detail(result)))
                 return 0
-            state = store.snapshot()
+            state = project(store) if operation == "show" else store.snapshot()
             candidates = [j for j in state["jobs"] if str(args.job_id) in {str(j["id"]), f"J{j['id']}", j["display_id"]}]
             if not candidates:
                 raise JobsError(f"No such job: {args.job_id}")

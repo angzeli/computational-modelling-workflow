@@ -66,8 +66,8 @@ screen row order. The console keeps rows stable while ORDER changes.
 
 Console keys: Enter details, L logs, P toggle dispatch, H hold/release, O order,
 X cancellation confirmation, Q or Ctrl-C detach. Arrow/Page keys scroll. Narrow
-layouts retain ORDER, ID, status, requested CPUs and elapsed duration; names,
-engine, reason and resource details remain in the selected-job panel. Very small
+layouts prioritize ID, status/engine, current CPU/RSS and elapsed/process age;
+order, requested CPUs, names, engine and reason remain available in details. Very small
 terminals can scroll the table horizontally. Details and logs have scrollable
 panels. Live log tails are bounded to 16 KiB per stream and unchanged logs are
 not reread. Control sequences are stripped and UI markup is rendered literally.
@@ -102,6 +102,53 @@ injected into input files. Missing resource data is displayed as a dash. Header
 resource totals describe active/uncertain attempts only. ELAPSED excludes queue
 waiting time and is fixed after completion; hours can exceed 24. Controller
 heartbeat age and stale/offline state are displayed independently of job state.
+
+## Current CPU and RAM usage
+
+The machine line describes the whole local Mac: CPU is a percentage from changes
+in host CPU-time counters. RAM shows used / total in GiB, with used defined as
+`total - available`. This is psutil's platform accounting, not a claim of byte-for-byte agreement
+with macOS Activity Monitor. It is independent of the visible workload totals.
+
+CPU NOW displays **100% per fully busy logical CPU**: summed process CPU-time
+deltas divided by monotonic elapsed time, multiplied by 100. `710%` means roughly
+7.1 logical CPUs' worth of CPU time over the sample interval. Workload CPU can
+exceed 100%; it is not capped by requested CPUs or NPROC. The machine header
+retains the whole-host 0–100% scale. JSON retains raw `cpu_cores` for compatibility.
+The first observation needs a baseline and shows `…` (warming up), not fake zero.
+A sampling gap longer than five seconds also starts a fresh CPU baseline.
+The console retains its sampler and updates in the existing two-second background
+observation cycle. One-shot `status`/`show` starts a new sampler, so CPU ordinarily
+warms up there while available RAM is reported immediately.
+
+RAM NOW is current aggregate RSS from verified live members. **Summing RSS can
+count shared pages more than once**; it is not exact physical memory ownership or
+reserved RAM. Requested CPU slots, MPI ranks, threads/rank and memory remain
+unchanged in job declarations and details. External requested resources remain
+unknown. Pending and terminal jobs show no current workload usage; Done does not
+keep a previous Run measurement labelled current.
+
+The table uses `*` for a partial measurement, `~` for stale values, `?` for an
+unavailable cached value and `—` when no value is available. Details show CPU and
+RAM quality separately, measurement age, and measured/total member counts. New
+members need their own CPU baseline; a partial RSS subtotal remains visible when
+some relevant members are inaccessible. Samples older than five seconds are
+stale. Sampling runs outside rendering and failures retain distinguishable
+last-known data without changing execution state.
+
+`cmw jobs status --json` adds `machine_usage`, plus `usage` on each active managed
+job and external observation. Numbers remain raw CPU percentages/core-equivalents
+and bytes, accompanied by timestamps, age, stale, quality, member counts and
+reason. `cmw jobs show <JOB_OR_OBS_ID>` uses the same projection. No telemetry is
+stored as database history or emitted as per-sample queue events.
+
+Telemetry is advisory: zero CPU does not mean a sleeping/stopped computation has
+finished, unavailable RSS does not invalidate an external observation, and low
+machine CPU cannot bypass BUSY. Existing ownership, guard, cancellation and
+completion evidence remain authoritative. There are no peaks, history, resource
+limits, automatic tuning, resource-aware dispatch, IO/GPU/temperature metrics or
+ETA. The supported runtime boundary remains local macOS with the locked psutil
+dependency; tests use deterministic samples and owned benign processes.
 
 ## Integration and foreground command contract
 

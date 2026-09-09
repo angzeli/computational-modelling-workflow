@@ -53,6 +53,23 @@ class ActivityTests(unittest.TestCase):
                                     pids_provider=lambda:list(processes) if ids is None else ids,
                                     process_factory=factory)
 
+    def test_client_reuses_snapshot_without_caching_or_persisting_pid_inventory(self):
+        state = {'jobs': [], 'controller': {'online': False, 'stale': False, 'dispatch': False}}
+        def collect(store, requested, deadline):
+            self.assertTrue(requested.get('_telemetry_membership'))
+            return self.collect({1: process(1)}, state=requested)
+        observer = activity.Observer(collector=collect)
+        sampler = Mock()
+        sampler.sample.return_value = {'machine_usage': {}, 'jobs': {}, 'external': {}}
+        result = activity.project(self.store, state=state, observer=observer, sampler=sampler)
+        self.assertEqual(sampler.sample.call_args.args[3], [1])
+        self.assertNotIn('_pids', result['external_activity'])
+        self.assertNotIn('_pids', observer.last)
+        self.assertNotIn('_telemetry_membership', state)
+        self.assertNotIn('_telemetry_membership', result)
+        controller_result = self.collect({1: process(1)})
+        self.assertNotIn('_pids', controller_result)
+
     def test_default_names_and_exact_paths(self):
         for name, engine in activity.NAMES.items():
             with self.subTest(name=name):

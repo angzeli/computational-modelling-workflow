@@ -328,3 +328,73 @@ The user subsequently supplied an actual macOS Terminal screenshot confirming
 the visible external VASP row, NPROC 8, representative PID 90828, read-only label,
 BUSY/blocked guard, offline controller and dispatch OFF. Visible console
 verification is complete. The console was left open; no controller was started.
+
+
+## Runtime CPU/RAM telemetry refinement
+
+Current resource usage is an ephemeral client projection layered onto the existing
+activity/ownership evidence. `cmw.jobs.telemetry.Sampler` retains per-identity CPU
+baselines for one viewing client. The shared activity projection supplies current
+membership; telemetry does not decide ownership or admit execution. It adds
+`machine_usage` and workload `usage` objects without changing requested-resource,
+managed-state or external-guard fields. No database history or metric events are
+introduced.
+
+Machine CPU uses host CPU-counter deltas as a percentage. Machine RAM is total
+minus available, with total separately retained. Workload CPU is summed verified
+member CPU-time deltas divided by monotonic elapsed time, in logical CPU
+core-equivalents. Workload RAM is summed current RSS, with the explicit shared-page
+double-count caveat. CPU requires a baseline; newly observed members yield
+warming-up/partial quality instead of fabricated zero. Quality, member coverage,
+measurement age and stale flags accompany numeric values; telemetry failure never
+changes BUSY/NO_MATCH or Run/Unknown.
+
+The existing two-second TUI background observation cycle owns a persistent sampler.
+Rendering only ages cached measurements, with the shared five-second freshness
+threshold. Managed cache entries are keyed by attempt identity and attached only
+while the latest managed snapshot remains active. Both managed and external
+read-only detail panels refresh from that cache. Wide and narrow tables display
+CPU NOW and RAM NOW, while declarations retain requested resources in details.
+CLI status/show use the same projection; a fresh one-shot CPU sample is normally
+warming up. The machine header remains distinct from workload usage.
+
+Validation targets are the existing local macOS/psutil runtime, deterministic
+format/model and console fixtures, owned synthetic processes, and final
+current-wheel/live observation acceptance. No historical
+peaks, resource enforcement, scheduler changes or new scientific claims are part
+of this refinement.
+
+Current refinement validation (9 September 2026): 81 Jobs tests passed, followed
+by the focused console test after the final active-attempt cache pruning. The
+suite includes deterministic CPU/memory and identity cases, owned Python
+CPU/allocation/idle fixtures, separate external workloads, surviving managed
+payload children, and unchanged guard behavior under metric denial. Missing
+pinned group-leader behavior is tested deterministically; the real managed
+fixture's packaged shell guardian remains until its release handshake.
+
+One fresh wheel was built and installed outside the checkout into a new Python
+3.14 environment using the locked dependency constraints. Core import, packaged
+payload shell, status/JSON, missing-extra behavior and subsequent Jobs-extra
+console initialization passed. The installed console rendered a gated synthetic
+workload at about 0.97c with 36,339,712 RSS bytes and fresh machine metrics. Its
+owned process exited through the release gate and was reaped; viewing did not
+create a queue database.
+
+Read-only normal-state observation still found the VASP family represented by
+PID 90828 with eight members. The newly launched terminal session rendered 8.0c,
+1.1 GiB RSS, machine CPU 77%, machine RAM 27.7/36.0 GiB, and BUSY/blocked admission
+with controller offline and dispatch OFF. These are interval runtime readings,
+not scientific results. Actual desktop-window visual acceptance remains pending:
+the app queued opening the new console panel, while its terminal-reader tool
+returned a separate shell prompt. That limitation must not be described as a
+failure to detect VASP or as completed visible-window acceptance. No research
+process was modified, production controller restarted, or real calculation
+launched. This refinement has not been committed or pushed.
+
+The user subsequently supplied the 14:49:09 actual Terminal screenshot, resolving
+the visible-window gate: VASP PID 90828 was visibly read-only with 7.1c, 0.9 GiB
+RSS, machine CPU 96%, RAM 27.7/36.0 GiB and BUSY/blocked admission. At the user's
+request, workload CPU presentation now multiplies core-equivalents by 100 and
+displays an integer percentage (7.1 cores becomes 710%). Details explain that
+100% means one logical CPU; machine CPU keeps its whole-host scale. The sampler
+and raw JSON `cpu_cores` field are unchanged. This is a display-only refinement.

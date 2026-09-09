@@ -89,7 +89,8 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
         budget()
         p = process_factory(pid)
         return p, identity(pid)
-    for pid in pids_provider():
+    pids = list(pids_provider())
+    for pid in pids:
         budget()
         try:
             p = process_factory(pid)
@@ -232,9 +233,12 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
     state_name = 'BUSY' if observations else 'UNCERTAIN' if uncertain else 'NO_MATCH'
     reason = ('Recognized external computation observed' if observations else
               'Material process observation uncertainty' if uncertain else 'No recognized external computation observed')
-    return {'state': state_name, 'reason': reason, 'scope': SCOPE, 'observed_at': now,
+    result = {'state': state_name, 'reason': reason, 'scope': SCOPE, 'observed_at': now,
             'checked_at': now, 'age_seconds': 0, 'stale': False, 'coverage': coverage,
             'observations': observations}
+    if state.get('_telemetry_membership'):
+        result['_pids'] = list(pids)
+    return result
 
 
 class Observer:
@@ -269,6 +273,7 @@ threads. Its late result cannot authorize admission; a later call starts fresh.
                 return unavailable('External clear observation is stale or incomplete', previous=result, source=source)
             result['source'] = source
             self.last = copy.deepcopy(result)
+            self.last.pop('_pids', None)
             return result
 
 
@@ -296,9 +301,14 @@ def admission(state, guard):
             'authority': 'Client observation only; controller rechecks before launch'}
 
 
-def project(store, state=None, observer=None):
+def project(store, state=None, observer=None, sampler=None):
     state = copy.deepcopy(state if state is not None else store.snapshot())
+    state['_telemetry_membership'] = True
     guard = (observer or DEFAULT_OBSERVER).scan(store, state, source='client')
+    state.pop('_telemetry_membership', None)
+    pids = guard.pop('_pids', None)
+    if guard.get('stale'):
+        pids = None
     control = state['controller']
     state['external_activity'] = guard
     state['controller_guard'] = control.get('external_guard')
@@ -306,4 +316,11 @@ def project(store, state=None, observer=None):
     pending = sorted((j for j in state['jobs'] if j['status'] in PENDING), key=lambda j:j['order'])
     if not permits(guard) and pending and pending[0]['status']=='Queue' and control['dispatch'] and not any(j['status'] in ACTIVE for j in state['jobs']):
         pending[0]['reason'] = guard['reason']
+    from .telemetry import Sampler
+    usage = (sampler or Sampler()).sample(store, state, guard, pids)
+    state['machine_usage'] = usage['machine_usage']
+    for job in state['jobs']:
+        job['usage'] = usage['jobs'].get(job.get('attempt_id')) if job['status'] in ACTIVE else None
+    for observation in guard['observations']:
+        observation['usage'] = usage['external'].get(observation['id'])
     return state

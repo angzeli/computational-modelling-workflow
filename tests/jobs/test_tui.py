@@ -42,7 +42,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 table=app.query_one(DataTable)
                 self.assertEqual(table.row_count,24)
-                self.assertEqual(len(table.columns),8)
+                self.assertEqual(len(table.columns),10)
                 await pilot.press('down','down','down','down')
                 selected=app.selected_id
                 self.assertEqual(selected,'J5.1')

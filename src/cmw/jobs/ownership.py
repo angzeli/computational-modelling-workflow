@@ -57,12 +57,12 @@ def lock_held(path, *, strict=False):
         return True  # Inaccessible ownership must not authorize dispatch.
 
 
-def group_members(pgid):
+def group_members(pgid, *, pids=None, process_factory=psutil.Process):
     """Only inspect membership of the group we created. No engine-name discovery."""
     members = []
-    for pid in psutil.pids():
+    for pid in psutil.pids() if pids is None else pids:
         try:
-            if os.getpgid(pid) == pgid and psutil.Process(pid).status() != psutil.STATUS_ZOMBIE:
+            if os.getpgid(pid) == pgid and process_factory(pid).status() != psutil.STATUS_ZOMBIE:
                 members.append(pid)
         except (ProcessLookupError, psutil.NoSuchProcess):
             continue
@@ -85,3 +85,32 @@ def group_exists(pgid):
     except PermissionError as exc:
         raise JobsError("Process group absence cannot be verified") from exc
     return True
+
+
+def observed_group_members(store, job, pids, *, process_factory=psutil.Process, identity_provider=identity):
+    """Use the existing guardian lock and dedicated process group contract.
+
+The live locked guardian owns surviving group children after the leader exits.
+A live replacement with the original leader PID is never accepted.
+"""
+    group = job.get('group')
+    if pids is None or not group or not owner_alive(job.get('worker')):
+        return [], 'Managed membership unavailable'
+    if not lock_held(store.root/'attempts'/job['attempt_id']/'worker.lock', strict=True):
+        return [], 'Managed guardian lock unavailable'
+    try:
+        if identity_provider(group['pid']) != group:
+            return [], 'Managed group leader identity changed'
+    except (psutil.NoSuchProcess, ProcessLookupError):
+        pass
+    members = []
+    for pid in group_members(group['pid'], pids=pids, process_factory=process_factory):
+        try:
+            owner = identity_provider(pid)
+            if (owner['host'] != group['host'] or owner['boot'] != group['boot'] or
+                    os.getsid(pid) != group['pid'] or os.getpgid(pid) != group['pid']):
+                continue
+            members.append({'identity': owner, 'pgid': group['pid']})
+        except (psutil.NoSuchProcess, ProcessLookupError):
+            continue
+    return members, ''

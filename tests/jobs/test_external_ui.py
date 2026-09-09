@@ -133,7 +133,7 @@ class ExternalTuiTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.resize_terminal(64, 28)
                     await pilot.pause()
                     self.assertEqual(app.external_selected_id, 'E101-birth-17')
-                    self.assertEqual(len(table.columns), 4)
+                    self.assertEqual(len(table.columns), 5)
                     stale = projection()
                     stale['external_activity'].update(state='UNAVAILABLE', stale=True, reason='Fixture timeout')
                     app.accept_activity(stale)

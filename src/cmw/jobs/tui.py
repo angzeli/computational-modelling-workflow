@@ -14,8 +14,8 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 
-from .cli import elapsed, safe_text, tail, guard_text, external_detail
-from .store import PENDING, JobsError, Store
+from .cli import elapsed, safe_text, tail, guard_text, external_detail, usage_cells, usage_detail, machine_text
+from .store import ACTIVE, PENDING, JobsError, Store
 
 
 def literal(value):
@@ -30,12 +30,14 @@ def detail(job, *, narrow=False):
     if not job:
         return "No selection. Add a prepared job through cmw jobs add."
     resource = job["resources"]
+    cpu_now, ram_now = usage_cells(job.get("usage"))
     resources = (f"Requested: {resource['cpus'] or '—'} CPUs / {resource['memory_gib'] or '—'} GiB\n"
                  f"MPI: {resource['mpi_ranks'] or '—'} ranks × {resource['threads_per_rank'] or '—'} threads/rank\n" if narrow else
                  f"CPUs requested: {resource['cpus'] or '—'}    MPI ranks: {resource['mpi_ranks'] or '—'}    "
                  f"Threads/rank: {resource['threads_per_rank'] or '—'}    RAM requested: {resource['memory_gib'] or '—'} GiB\n")
     return (f"SELECTED: {job['display_id']} / {job['name']}\n"
             f"Status: {job['status']}    Order: {job['order'] or '—'}    Engine: {job['engine']}\n"
+            f"CPU NOW: {cpu_now}   RAM NOW: {ram_now}\n"
             f"{resources}"
             f"Working directory: {job['cwd']}\n{job['reason'] or '—'}")
 
@@ -79,10 +81,11 @@ class Inspect(ModalScreen):
     Inspect Static { height: auto; }
     """
 
-    def __init__(self, store, job_id, logs=False):
+    def __init__(self, store, job_id, logs=False, job_provider=None):
         super().__init__()
         self.store, self.job_id, self.logs = store, job_id, logs
         self.log_stamps = None
+        self.job_provider = job_provider
 
     def compose(self):
         with Vertical():
@@ -93,11 +96,11 @@ class Inspect(ModalScreen):
 
     def on_mount(self):
         self.refresh_content()
-        if self.logs:
-            self.set_interval(1, self.refresh_content)
+        self.set_interval(1 if self.logs else 0.5, self.refresh_content)
 
     def refresh_content(self):
-        job = next((j for j in self.store.snapshot()["jobs"] if j["display_id"] == self.job_id), None)
+        job = (self.job_provider(self.job_id) if self.job_provider and not self.logs else
+               next((j for j in self.store.snapshot()["jobs"] if j["display_id"] == self.job_id), None))
         if not job:
             self.query_one("#body", Static).update("Job is no longer available")
             return
@@ -114,7 +117,7 @@ class Inspect(ModalScreen):
             self.log_stamps = stamps
             text = "\n\n".join(f"{stream.upper()} · {path}\n{tail(path)}" for stream, path in job["logs"].items())
         else:
-            text = (detail(job) + f"\n\nAttempt: {job['attempt_id']}\n"
+            text = (detail(job) + "\n\n" + usage_detail(job.get("usage")) + f"\n\nAttempt: {job['attempt_id']}\n"
                     f"Enqueued: {timestamp(job['enqueued_at'])}\nStarted: {timestamp(job['started_at'])}\n"
                     f"Finished: {timestamp(job['finished_at'])}\nExit code: {job['exit_code']}   Signal: {job['signal']}\n"
                     f"Failure policy: {job['on_failure']}\nCHECK: Not evaluated\n\n"
@@ -126,16 +129,25 @@ class ExternalInspect(ModalScreen):
     BINDINGS = [("escape", "dismiss(None)", "Back"), ("q", "dismiss(None)", "Back"), ("ctrl+c", "dismiss(None)", "Back")]
     DEFAULT_CSS = Inspect.DEFAULT_CSS.replace("Inspect", "ExternalInspect")
 
-    def __init__(self, observation):
+    def __init__(self, observation, provider=None):
         super().__init__()
         self.observation = observation
+        self.provider = provider
 
     def compose(self):
         with Vertical():
             yield Label("EXTERNAL OBSERVATION — READ ONLY")
             with VerticalScroll():
-                yield Static(literal(external_detail(self.observation)), markup=False)
+                yield Static(literal(external_detail(self.observation)), id="external-body", markup=False)
             yield Label("Esc / Q: back · No managed controls or logs")
+
+    def on_mount(self):
+        self.set_interval(0.5, self.refresh_content)
+
+    def refresh_content(self):
+        observation = self.provider(self.observation['id']) if self.provider else self.observation
+        self.query_one("#external-body", Static).update(literal(
+            external_detail(observation) if observation else "External process no longer observed; outcome is not known."))
 
 
 class JobsTable(DataTable):
@@ -154,6 +166,7 @@ class JobsApp(App):
     CSS = """
     Screen { background: #111820; color: #d7e0e8; }
     #heading { height: 1; padding: 0 1; color: #b7d8dd; text-style: bold; }
+    #machine { height: auto; max-height: 2; padding: 0 1; color: #b7d8dd; }
     #controller { height: auto; min-height: 2; padding: 0 1; color: #a9b9c7; }
     #table { height: 1fr; min-height: 5; margin: 1 1 0 1; }
     DataTable > .datatable--header { background: #22303d; color: #d7e0e8; text-style: bold; }
@@ -172,7 +185,7 @@ class JobsApp(App):
                 Binding("o", "order", "Order"), Binding("x", "cancel", "Cancel"),
                 Binding("q", "quit", "Detach", priority=True), Binding("ctrl+c", "quit", "Detach", show=False, priority=True)]
 
-    def __init__(self, store=None, *, clock=None, observer=None):
+    def __init__(self, store=None, *, clock=None, observer=None, sampler=None):
         super().__init__()
         self.store = store or Store()
         self.clock = clock
@@ -185,11 +198,15 @@ class JobsApp(App):
         self.external_columns_mode = None
         self.activity_projection = {}
         self.observer = observer
+        self.sampler = sampler
+        self.job_usage = {}
         self.collecting = False
+        self.empty_notice_shown = False
 
     def compose(self):
         yield Static("CMW / JOBS                                             LOCAL", id="heading")
         yield Static(id="controller", markup=False)
+        yield Static(id="machine", markup=False)
         yield JobsTable(id="table", cursor_type="row", zebra_stripes=True)
         yield Static(id="guard", markup=False)
         yield Static("EXTERNAL ACTIVITY — READ ONLY", id="external-heading", markup=False)
@@ -216,30 +233,59 @@ class JobsApp(App):
                 from .activity import DEFAULT_OBSERVER, project
                 if self.observer is None:
                     self.observer = DEFAULT_OBSERVER
-                state = project(self.store, observer=self.observer)
-                projection = {key: state[key] for key in ("external_activity", "admission", "controller_guard") if key in state}
+                if self.sampler is None:
+                    from .telemetry import Sampler
+                    self.sampler = Sampler()
+                state = project(self.store, observer=self.observer, sampler=self.sampler)
+                projection = {key: state[key] for key in ("external_activity", "admission", "controller_guard", "machine_usage") if key in state}
+                projection["job_usage"] = {j["attempt_id"]: j.get("usage") for j in state["jobs"] if j["status"] in ACTIVE}
             except Exception as exc:
                 # A client collection failure must not erase the last observed processes.
                 guard = deepcopy(self.activity_projection.get("external_activity", {}))
                 guard.update(state="UNAVAILABLE", reason=f"Client observation failed: {exc}", stale=True,
                              source="client", scope="current local user / recognized accessible executables")
                 guard.setdefault("observations", [])
-                projection = {"external_activity": guard, "admission": {"permitted": False, "reason": guard["reason"]}}
+                projection = {**deepcopy(self.activity_projection), "external_activity": guard, "admission": {"permitted": False, "reason": guard["reason"]}}
             self.call_from_thread(self.accept_activity, projection)
         self.run_worker(collect, thread=True, group="external-observation", exit_on_error=False)
 
     def accept_activity(self, projection):
-        self.activity_projection = projection
+        self.activity_projection = deepcopy(projection)
+        self.job_usage = self.activity_projection.get("job_usage", {})
         self.collecting = False
         self.refresh_state()
 
-    def external_selected(self):
+    def external_observation(self, observation_id):
         return next((item for item in self.activity_projection.get("external_activity", {}).get("observations", [])
-                     if item["id"] == self.external_selected_id), None)
+                     if item["id"] == observation_id), None)
+
+    def external_selected(self):
+        return self.external_observation(self.external_selected_id)
+
+    def current_job(self, job_id):
+        return next((job for job in (self.state or {}).get("jobs", []) if job["display_id"] == job_id), None)
+
+    def refresh_usage(self):
+        from .telemetry import age_usage
+        self.activity_projection["machine_usage"] = age_usage(self.activity_projection.get("machine_usage"))
+        active_ids = {job['attempt_id'] for job in self.state['jobs'] if job['status'] in ACTIVE}
+        self.job_usage = {key: value for key, value in self.job_usage.items() if key in active_ids}
+        for job in self.state['jobs']:
+            job['usage'] = age_usage(self.job_usage.get(job['attempt_id'])) if job['status'] in ACTIVE else None
+        for item in self.activity_projection.get('external_activity', {}).get('observations', []):
+            item['usage'] = age_usage(item.get('usage'))
+        self.query_one("#machine", Static).update(literal(machine_text(self.activity_projection.get("machine_usage"))))
 
     def selected_text(self):
         item = self.external_selected()
-        return external_detail(item) if item else detail(self.selected(), narrow=self.size.width < 110)
+        if item:
+            cpu_now, ram_now = usage_cells(item.get('usage'))
+            return (f"EXTERNAL: {item['id']} / {item['engine']} — READ ONLY\n"
+                    f"Ownership: {item.get('ownership', 'External / unattributed')} · PID {item['pid']}\n"
+                    f"CPU NOW: {cpu_now}   RAM NOW: {ram_now}\n"
+                    f"NPROC: {item.get('nproc', 1)} observed processes · Process age: {elapsed(item.get('age_seconds'))}\n"
+                    f"Working directory: {item.get('cwd') or '—'}\nEnter: measurement quality and evidence")
+        return detail(self.selected(), narrow=self.size.width < 110)
 
     def external_read_only(self):
         if self.external_selected_id:
@@ -264,9 +310,9 @@ class JobsApp(App):
         self.query_one("#external-heading", Static).update(literal(
             f"EXTERNAL ACTIVITY — READ ONLY · {len(observations)} observations · {len((guard or {}).get('coverage', {}).get('warnings', []))} coverage warnings"))
         table.display = bool(observations)
-        columns = ([('id', 'OBS ID', 18), ('engine', 'ENGINE', 7), ('pid', 'PID', 7), ('nproc', 'NPROC', 5),
-                    ('status', 'OS STATE', 10), ('age', 'PROCESS AGE', 11), ('exe', 'EXECUTABLE', 40)] if wide else
-                   [('id', 'OBS ID', 16), ('engine', 'ENGINE', 6), ('pid', 'PID', 7), ('nproc', 'NPROC', 5)])
+        columns = ([('id', 'OBS ID', 14), ('engine', 'ENGINE', 6), ('pid', 'PID', 7), ('nproc', 'NPROC', 5),
+                    ('status', 'OS STATE', 9), ('cpu_now', 'CPU NOW', 7), ('ram_now', 'RAM NOW', 15), ('age', 'PROCESS AGE', 11), ('exe', 'EXECUTABLE', 32)] if wide else
+                   [('id', 'OBS ID', 12), ('engine', 'ENGINE', 5), ('cpu_now', 'CPU NOW', 7), ('ram_now', 'RAM NOW', 15), ('age', 'AGE', 8)])
         if wide != self.external_columns_mode:
             table.clear(columns=True)
             for key, label, width in columns:
@@ -279,7 +325,8 @@ class JobsApp(App):
                 table.remove_row(key)
                 self.external_rows.remove(key)
         for item in observations:
-            values = dict(item, age=elapsed(item.get('age_seconds')))
+            cpu_now, ram_now = usage_cells(item.get('usage'))
+            values = dict(item, age=elapsed(item.get('age_seconds')), cpu_now=cpu_now, ram_now=ram_now)
             cells = [literal(values.get(column) or '—') for column, _, _ in columns]
             if item['id'] not in self.external_rows:
                 table.add_row(*cells, key=item['id'])
@@ -307,6 +354,7 @@ class JobsApp(App):
         except (ValueError, OSError) as exc:
             self.query_one("#message", Static).update(literal(f"State unavailable: {exc}"))
             return
+        self.refresh_usage()
         control = self.state["controller"]
         status = "STALE — needs attention" if control["stale"] else "Online" if control["online"] else "Offline"
         jobs = self.state["jobs"]
@@ -314,18 +362,27 @@ class JobsApp(App):
         cpu = sum(j["resources"]["cpus"] or 0 for j in active) or "—"
         ram = sum(j["resources"]["memory_gib"] or 0 for j in active) or "—"
         age = "never" if control["age_seconds"] is None else f"{int(control['age_seconds'])}s ago"
-        self.query_one("#controller", Static).update(literal(
-            f"Controller: {status}   Dispatch intent: {'ON' if control['dispatch'] else 'OFF'}   Mode: Sequential   Updated: {age}\n"
-            f"CPUs requested: {cpu}   RAM requested: {ram} GiB   Run: {sum(j['status']=='Run' for j in jobs)}   "
-            f"Queue: {sum(j['status']=='Queue' for j in jobs)}   Hold: {sum(j['status']=='Hold' for j in jobs)}"))
+        compact = self.size.width < 110 or self.size.height < 36
+        counts = (f"Run: {sum(j['status']=='Run' for j in jobs)}   Queue: {sum(j['status']=='Queue' for j in jobs)}   "
+                  f"Hold: {sum(j['status']=='Hold' for j in jobs)}")
+        header = (f"Controller: {status}   Dispatch intent: {'ON' if control['dispatch'] else 'OFF'}\nManaged: {counts} · Sequential" if compact else
+                  f"Controller: {status}   Dispatch intent: {'ON' if control['dispatch'] else 'OFF'}   Mode: Sequential   Updated: {age}\n"
+                  f"Managed requested: CPUs {cpu}   RAM: {ram} GiB   {counts}")
+        self.query_one("#controller", Static).update(literal(header))
+        self.query_one("#events", Static).display = not compact
+        self.query_one("#guard", Static).styles.max_height = 3 if compact else 5
+        self.query_one("#external", DataTable).styles.height = 4 if compact else 5
+        self.query_one("#selected", Static).styles.max_height = 3 if compact else 7
         table = self.query_one(DataTable)
+        table.styles.min_height = 3 if compact else 5
+        table.display = bool(jobs)
         wide = self.size.width >= 110
         self.refresh_external(wide)
         self.query_one(Footer).display = wide
         self.query_one("#shortcuts", Static).display = not wide
-        columns = ([('order', 'ORDER', 5), ('id', 'JOB ID', 9), ('name', 'NAME', 18), ('engine', 'ENGINE', 9),
-                    ('status', 'STATUS', 10), ('cpus', 'CPUS', 4), ('elapsed', 'ELAPSED', 10), ('reason', 'REASON', 28)] if wide else
-                   [('order', 'ORDER', 5), ('id', 'JOB ID', 8), ('status', 'STATUS', 10), ('cpus', 'CPUS', 4), ('elapsed', 'ELAPSED', 10)])
+        columns = ([('order', 'ORDER', 5), ('id', 'JOB ID', 8), ('name', 'NAME', 16), ('engine', 'ENGINE', 7),
+                    ('status', 'STATUS', 10), ('cpus', 'CPUS', 4), ('cpu_now', 'CPU NOW', 7), ('ram_now', 'RAM NOW', 15), ('elapsed', 'ELAPSED', 10), ('reason', 'REASON', 28)] if wide else
+                   [('id', 'JOB ID', 8), ('status', 'STATUS', 9), ('cpu_now', 'CPU NOW', 7), ('ram_now', 'RAM NOW', 15), ('elapsed', 'ELAPSED', 10)])
         # Rebuild only on layout changes; refreshes update cells in place.
         if wide != self.columns_mode:
             table.clear(columns=True)
@@ -335,8 +392,10 @@ class JobsApp(App):
             self.row_ids = []
         for job in jobs:
             key = job['display_id']
+            cpu_now, ram_now = usage_cells(job.get('usage'))
             values = {'order': str(job['order'] or '—').rjust(5), 'id': key, 'name': job['name'], 'engine': job['engine'],
                       'status': job['status'], 'cpus': str(job['resources']['cpus'] or '—').rjust(4),
+                      'cpu_now': cpu_now, 'ram_now': ram_now,
                       'elapsed': elapsed(job['elapsed']).rjust(10), 'reason': job['reason'] or '—'}
             cells = []
             for column, _, _ in columns:
@@ -360,8 +419,11 @@ class JobsApp(App):
         events = self.state['events'][-3:]
         self.query_one("#events", Static).update(literal("EVENTS\n" + "\n".join(
             f"{datetime.fromtimestamp(e['time']).strftime('%H:%M:%S')}  {'J'+str(e['job_id'])+'.1' if e['job_id'] else 'Controller'}  {e['message']}" for e in events)))
-        if not jobs:
+        if not jobs and not self.empty_notice_shown:
             self.query_one("#message", Static).update("No managed jobs. Add, then start explicitly. Best-effort guard; no machine-wide reservation. Q detaches.")
+            self.empty_notice_shown = True
+        elif jobs:
+            self.empty_notice_shown = False
 
     def on_data_table_row_selected(self, event):
         if event.data_table.id == "external":
@@ -393,10 +455,10 @@ class JobsApp(App):
 
     def action_details(self):
         if self.external_selected():
-            self.push_screen(ExternalInspect(self.external_selected()))
+            self.push_screen(ExternalInspect(self.external_selected(), provider=self.external_observation))
             return
         if self.selected_id:
-            self.push_screen(Inspect(self.store, self.selected_id))
+            self.push_screen(Inspect(self.store, self.selected_id, job_provider=self.current_job))
 
     def action_logs(self):
         if self.external_read_only():
