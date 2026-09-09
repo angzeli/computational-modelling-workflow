@@ -40,7 +40,7 @@ def exclusive(path):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def lock_held(path):
+def lock_held(path, *, strict=False):
     if not path.exists():
         return False
     try:
@@ -52,6 +52,8 @@ def lock_held(path):
             fcntl.flock(handle, fcntl.LOCK_UN)
         return False
     except OSError:
+        if strict:
+            raise
         return True  # Inaccessible ownership must not authorize dispatch.
 
 

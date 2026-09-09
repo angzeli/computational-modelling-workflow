@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,7 +14,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 
-from .cli import elapsed, safe_text, tail
+from .cli import elapsed, safe_text, tail, guard_text, external_detail
 from .store import PENDING, JobsError, Store
 
 
@@ -120,8 +122,31 @@ class Inspect(ModalScreen):
         self.query_one("#body", Static).update(literal(text))
 
 
+class ExternalInspect(ModalScreen):
+    BINDINGS = [("escape", "dismiss(None)", "Back"), ("q", "dismiss(None)", "Back"), ("ctrl+c", "dismiss(None)", "Back")]
+    DEFAULT_CSS = Inspect.DEFAULT_CSS.replace("Inspect", "ExternalInspect")
+
+    def __init__(self, observation):
+        super().__init__()
+        self.observation = observation
+
+    def compose(self):
+        with Vertical():
+            yield Label("EXTERNAL OBSERVATION — READ ONLY")
+            with VerticalScroll():
+                yield Static(literal(external_detail(self.observation)), markup=False)
+            yield Label("Esc / Q: back · No managed controls or logs")
+
+
 class JobsTable(DataTable):
     BINDINGS = [Binding("enter", "select_cursor", "Details")]
+
+    def on_focus(self):
+        if self.id == "external" and self.row_count:
+            self.app.external_selected_id = self.app.external_rows[self.cursor_row]
+        elif self.id == "table":
+            self.app.external_selected_id = None
+        self.app.query_one("#selected", Static).update(literal(self.app.selected_text()))
 
 
 class JobsApp(App):
@@ -133,6 +158,9 @@ class JobsApp(App):
     #table { height: 1fr; min-height: 5; margin: 1 1 0 1; }
     DataTable > .datatable--header { background: #22303d; color: #d7e0e8; text-style: bold; }
     DataTable > .datatable--cursor { background: #30475a; color: #ffffff; }
+    #guard { height: auto; max-height: 5; padding: 0 1; color: #efbd82; }
+    #external-heading { height: 1; padding: 0 1; }
+    #external { height: 5; margin: 0 1; }
     #selected { height: auto; max-height: 7; margin: 1 1 0 1; padding: 0 1; border-left: solid #5c8996; }
     #events { height: 5; margin: 1 1 0 1; color: #9caeba; }
     #message { height: auto; max-height: 3; padding: 0 1; color: #efbd82; }
@@ -144,7 +172,7 @@ class JobsApp(App):
                 Binding("o", "order", "Order"), Binding("x", "cancel", "Cancel"),
                 Binding("q", "quit", "Detach", priority=True), Binding("ctrl+c", "quit", "Detach", show=False, priority=True)]
 
-    def __init__(self, store=None, *, clock=None):
+    def __init__(self, store=None, *, clock=None, observer=None):
         super().__init__()
         self.store = store or Store()
         self.clock = clock
@@ -152,14 +180,23 @@ class JobsApp(App):
         self.selected_id = None
         self.columns_mode = None
         self.row_ids = []
+        self.external_selected_id = None
+        self.external_rows = []
+        self.external_columns_mode = None
+        self.activity_projection = {}
+        self.observer = observer
+        self.collecting = False
 
     def compose(self):
         yield Static("CMW / JOBS                                             LOCAL", id="heading")
         yield Static(id="controller", markup=False)
         yield JobsTable(id="table", cursor_type="row", zebra_stripes=True)
+        yield Static(id="guard", markup=False)
+        yield Static("EXTERNAL ACTIVITY — READ ONLY", id="external-heading", markup=False)
+        yield JobsTable(id="external", cursor_type="row", zebra_stripes=True)
         yield Static(id="selected", markup=False)
         yield Static(id="events", markup=False)
-        yield Static("Q / Ctrl-C detaches; execution continues independently.", id="message", markup=False)
+        yield Static("Best-effort guard; no machine-wide reservation. Q / Ctrl-C detaches; execution continues.", id="message", markup=False)
         yield Static("Enter Details · L Logs · P Dispatch · H Hold\nO Order · X Cancel · Q / Ctrl-C Detach", id="shortcuts", markup=False)
         yield Footer()
 
@@ -167,6 +204,95 @@ class JobsApp(App):
         self.refresh_state()
         self.query_one(DataTable).focus()
         self.set_interval(0.5, self.refresh_state)
+        self.collect_activity()
+        self.set_interval(2, self.collect_activity)
+
+    def collect_activity(self):
+        if self.collecting:
+            return
+        self.collecting = True
+        def collect():
+            try:
+                from .activity import DEFAULT_OBSERVER, project
+                if self.observer is None:
+                    self.observer = DEFAULT_OBSERVER
+                state = project(self.store, observer=self.observer)
+                projection = {key: state[key] for key in ("external_activity", "admission", "controller_guard") if key in state}
+            except Exception as exc:
+                # A client collection failure must not erase the last observed processes.
+                guard = deepcopy(self.activity_projection.get("external_activity", {}))
+                guard.update(state="UNAVAILABLE", reason=f"Client observation failed: {exc}", stale=True,
+                             source="client", scope="current local user / recognized accessible executables")
+                guard.setdefault("observations", [])
+                projection = {"external_activity": guard, "admission": {"permitted": False, "reason": guard["reason"]}}
+            self.call_from_thread(self.accept_activity, projection)
+        self.run_worker(collect, thread=True, group="external-observation", exit_on_error=False)
+
+    def accept_activity(self, projection):
+        self.activity_projection = projection
+        self.collecting = False
+        self.refresh_state()
+
+    def external_selected(self):
+        return next((item for item in self.activity_projection.get("external_activity", {}).get("observations", [])
+                     if item["id"] == self.external_selected_id), None)
+
+    def selected_text(self):
+        item = self.external_selected()
+        return external_detail(item) if item else detail(self.selected(), narrow=self.size.width < 110)
+
+    def external_read_only(self):
+        if self.external_selected_id:
+            self.query_one("#message", Static).update("External observation is read-only: no logs, cancel, hold, or order actions.")
+            return True
+        return False
+
+    def refresh_external(self, wide):
+        guard = self.activity_projection.get("external_activity")
+        if guard and guard.get("observed_at") is not None:
+            guard["age_seconds"] = max(0, time.time() - guard["observed_at"])
+            from .activity import MAX_AGE
+            if guard["age_seconds"] > MAX_AGE:
+                guard.update(state="UNAVAILABLE", stale=True, reason="Client observation is stale")
+                self.activity_projection["admission"] = {"permitted": False, "reason": guard["reason"]}
+        if guard:
+            from .activity import admission
+            self.activity_projection["admission"] = admission(self.state, guard)
+        self.query_one("#guard", Static).update(literal(guard_text(self.activity_projection)))
+        table = self.query_one("#external", DataTable)
+        observations = (guard or {}).get("observations", [])
+        self.query_one("#external-heading", Static).update(literal(
+            f"EXTERNAL ACTIVITY — READ ONLY · {len(observations)} observations · {len((guard or {}).get('coverage', {}).get('warnings', []))} coverage warnings"))
+        table.display = bool(observations)
+        columns = ([('id', 'OBS ID', 18), ('engine', 'ENGINE', 7), ('pid', 'PID', 7), ('nproc', 'NPROC', 5),
+                    ('status', 'OS STATE', 10), ('age', 'PROCESS AGE', 11), ('exe', 'EXECUTABLE', 40)] if wide else
+                   [('id', 'OBS ID', 16), ('engine', 'ENGINE', 6), ('pid', 'PID', 7), ('nproc', 'NPROC', 5)])
+        if wide != self.external_columns_mode:
+            table.clear(columns=True)
+            for key, label, width in columns:
+                table.add_column(label, key=key, width=width)
+            self.external_columns_mode = wide
+            self.external_rows = []
+        ids = [item['id'] for item in observations]
+        for key in list(self.external_rows):
+            if key not in ids:
+                table.remove_row(key)
+                self.external_rows.remove(key)
+        for item in observations:
+            values = dict(item, age=elapsed(item.get('age_seconds')))
+            cells = [literal(values.get(column) or '—') for column, _, _ in columns]
+            if item['id'] not in self.external_rows:
+                table.add_row(*cells, key=item['id'])
+                self.external_rows.append(item['id'])
+            else:
+                for (column, _, _), cell in zip(columns, cells):
+                    if table.get_cell(item['id'], column) != cell:
+                        table.update_cell(item['id'], column, cell)
+        if self.external_selected_id and self.external_selected_id not in ids:
+            self.external_selected_id = None
+            self.query_one("#message", Static).update("Selected external process is no longer observed; outcome is not known.")
+        if self.external_selected_id in self.external_rows:
+            table.move_cursor(row=self.external_rows.index(self.external_selected_id), animate=False, scroll=False)
 
     def on_resize(self):
         if self.is_mounted:
@@ -189,11 +315,12 @@ class JobsApp(App):
         ram = sum(j["resources"]["memory_gib"] or 0 for j in active) or "—"
         age = "never" if control["age_seconds"] is None else f"{int(control['age_seconds'])}s ago"
         self.query_one("#controller", Static).update(literal(
-            f"Controller: {status}   Dispatch: {'ON' if control['dispatch'] else 'OFF'}   Mode: Sequential   Updated: {age}\n"
+            f"Controller: {status}   Dispatch intent: {'ON' if control['dispatch'] else 'OFF'}   Mode: Sequential   Updated: {age}\n"
             f"CPUs requested: {cpu}   RAM requested: {ram} GiB   Run: {sum(j['status']=='Run' for j in jobs)}   "
             f"Queue: {sum(j['status']=='Queue' for j in jobs)}   Hold: {sum(j['status']=='Hold' for j in jobs)}"))
         table = self.query_one(DataTable)
         wide = self.size.width >= 110
+        self.refresh_external(wide)
         self.query_one(Footer).display = wide
         self.query_one("#shortcuts", Static).display = not wide
         columns = ([('order', 'ORDER', 5), ('id', 'JOB ID', 9), ('name', 'NAME', 18), ('engine', 'ENGINE', 9),
@@ -229,19 +356,32 @@ class JobsApp(App):
             self.selected_id = jobs[0]['display_id']
         if self.selected_id in self.row_ids and table.cursor_row != self.row_ids.index(self.selected_id):
             table.move_cursor(row=self.row_ids.index(self.selected_id), animate=False, scroll=False)
-        self.query_one("#selected", Static).update(literal(detail(self.selected(), narrow=self.size.width < 110)))
+        self.query_one("#selected", Static).update(literal(self.selected_text()))
         events = self.state['events'][-3:]
         self.query_one("#events", Static).update(literal("EVENTS\n" + "\n".join(
             f"{datetime.fromtimestamp(e['time']).strftime('%H:%M:%S')}  {'J'+str(e['job_id'])+'.1' if e['job_id'] else 'Controller'}  {e['message']}" for e in events)))
         if not jobs:
-            self.query_one("#message", Static).update("No jobs. Use cmw jobs add, then start explicitly. Q detaches.")
+            self.query_one("#message", Static).update("No managed jobs. Add, then start explicitly. Best-effort guard; no machine-wide reservation. Q detaches.")
 
     def on_data_table_row_selected(self, event):
+        if event.data_table.id == "external":
+            self.external_selected_id = event.row_key.value
+        else:
+            self.external_selected_id = None
+            self.selected_id = event.row_key.value
         self.action_details()
 
     def on_data_table_row_highlighted(self, event):
-        self.selected_id = event.row_key.value
-        self.query_one("#selected", Static).update(literal(detail(self.selected(), narrow=self.size.width < 110)))
+        if event.data_table.id == "external":
+            if not event.data_table.has_focus:
+                return
+            self.external_selected_id = event.row_key.value
+        else:
+            if self.query_one("#external", DataTable).has_focus:
+                return
+            self.external_selected_id = None
+            self.selected_id = event.row_key.value
+        self.query_one("#selected", Static).update(literal(self.selected_text()))
 
     def apply(self, function):
         try:
@@ -252,10 +392,15 @@ class JobsApp(App):
         self.refresh_state()
 
     def action_details(self):
+        if self.external_selected():
+            self.push_screen(ExternalInspect(self.external_selected()))
+            return
         if self.selected_id:
             self.push_screen(Inspect(self.store, self.selected_id))
 
     def action_logs(self):
+        if self.external_read_only():
+            return
         if self.selected_id:
             self.push_screen(Inspect(self.store, self.selected_id, logs=True))
 
@@ -263,11 +408,15 @@ class JobsApp(App):
         self.apply(lambda: self.store.dispatch(not self.state['controller']['dispatch']))
 
     def action_hold(self):
+        if self.external_read_only():
+            return
         job = self.selected()
         if job:
             self.apply(lambda: self.store.change(job['display_id'], 'release' if job['status']=='Hold' else 'hold', expected=job['status']))
 
     def action_order(self):
+        if self.external_read_only():
+            return
         job = self.selected()
         if not job:
             return
@@ -280,6 +429,8 @@ class JobsApp(App):
         self.push_screen(Prompt(f"Move {job['display_id']} / {job['name']} to pending order:", order=True), submit)
 
     def action_cancel(self):
+        if self.external_read_only():
+            return
         job = self.selected()
         if not job:
             return

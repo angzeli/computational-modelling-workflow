@@ -16,6 +16,7 @@ from cmw.jobs.cli import elapsed, safe_text, status_text, tail
 from cmw.jobs.ownership import exclusive, group_members, identity, owner_alive
 from cmw.jobs.runtime import launch_blocker, reap_detached, reconcile, start, stop
 from cmw.jobs.store import JobsError, Store
+from tests.jobs.isolated_runtime import environment, install
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,6 +33,8 @@ def wait_for(predicate, timeout=12):
 
 class QueueTests(unittest.TestCase):
     def setUp(self):
+        self.isolation = install()
+        self.addCleanup(self.isolation.close)
         self.temp = tempfile.TemporaryDirectory(prefix="cmw jobs 空格 ")
         self.root = Path(self.temp.name).resolve()
         self.store = Store(self.root / "state")
@@ -242,16 +245,25 @@ class QueueTests(unittest.TestCase):
 import sys
 from cmw.jobs import runtime
 from cmw.jobs.store import Store
+from tests.jobs.isolated_runtime import install
+isolation = install()
 runtime.group_members = lambda pid: [pid]
 runtime.worker(Store(sys.argv[1]),1,'enumeration-race')
 """
         try:
+            authority = exclusive(self.store.root / 'controller.lock')
+            authority.__enter__()
+            with self.store.transaction() as con:
+                control = self.store.control(con)
+                control.update(owner=identity(), dispatch=True, stop=False)
+                self.store.set_control(con, control)
             subprocess.run([sys.executable,'-c',program,str(self.store.root)],check=True,timeout=10,
-                env={**os.environ,'PYTHONPATH':str(ROOT/'src'),'PYTHONDONTWRITEBYTECODE':'1'})
+                env=environment())
             self.assertEqual(self.jobs()[0]['status'],'Unknown')
             self.assertIn('still contains live members',self.jobs()[0]['reason'])
             self.assertIsNone(self.jobs()[1]['started_at'])
         finally:
+            authority.__exit__(None, None, None)
             release.touch()
             wait_for(marker.exists)
         from cmw.jobs.ownership import group_exists
@@ -277,6 +289,8 @@ import os,sys
 from pathlib import Path
 from cmw.jobs import runtime
 from cmw.jobs.store import Store
+from tests.jobs.isolated_runtime import install
+isolation = install()
 from cmw.jobs.ownership import identity
 from cmw.core.provenance import atomic_write_json
 boundary, state, audit = sys.argv[1:]
@@ -298,16 +312,26 @@ if boundary == 'before_finish':
     runtime.finish = lambda *args, **kwargs: os._exit(94)
 runtime.worker(Store(state),1,'test-claim')
 """
+                authority = exclusive(store.root / 'controller.lock')
+                authority.__enter__()
+                with store.transaction() as con:
+                    control = store.control(con)
+                    control.update(owner=identity(), dispatch=True, stop=False)
+                    store.set_control(con, control)
                 process = subprocess.Popen([sys.executable,'-c',program,boundary,str(store.root),str(audit)],
-                    env={**os.environ,'PYTHONPATH':str(ROOT/'src'),'PYTHONDONTWRITEBYTECODE':'1'})
+                    env=environment())
                 try:
                     self.assertIn(process.wait(timeout=10), (91,92,93,94))
+                    authority.__exit__(None, None, None)
+                    authority = None
                     start(store)
                     wait_for(lambda: store.snapshot()['jobs'][0]['status']=='Unknown')
                     self.assertIsNone(store.snapshot()['jobs'][1]['started_at'])
                     self.assertEqual(marker.exists(),boundary=='before_finish')
                     self.assertFalse(store.snapshot()['controller']['dispatch'])
                 finally:
+                    if authority is not None:
+                        authority.__exit__(None, None, None)
                     # This audit belongs solely to our deliberately interrupted
                     # test worker. Never scan for or signal external engine names.
                     if audit.exists():
@@ -384,9 +408,9 @@ runtime.worker(Store(state),1,'test-claim')
             handle.write(b'end')
         self.assertEqual(len(tail(log,64)),3)  # NUL controls are removed.
         self.assertTrue(tail(log).endswith('end'))
-        env={**os.environ,'PYTHONPATH':str(ROOT/'src'),'PYTHONDONTWRITEBYTECODE':'1'}
+        env=environment()
         for args,code in [(['status','--json'],0),(['show','J99','--json'],2)]:
-            result = subprocess.run([sys.executable,'-m','cmw.cli','jobs','--state',str(self.store.root),*args],capture_output=True,text=True,env=env)
+            result = subprocess.run([sys.executable,'-m','tests.jobs.isolated_runtime','cli','jobs','--state',str(self.store.root),*args],capture_output=True,text=True,env=env)
             self.assertEqual(result.returncode,code,result.stderr)
             json.loads(result.stdout)
             self.assertNotIn('\x1b',result.stdout)

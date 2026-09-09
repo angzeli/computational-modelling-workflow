@@ -19,6 +19,7 @@ from cmw.jobs.ownership import owner_alive
 from cmw.jobs.runtime import reap_detached, stop
 from cmw.jobs.store import Store
 from tests.jobs.test_jobs import wait_for
+from tests.jobs.isolated_runtime import environment
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -69,9 +70,9 @@ class TerminalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='cmw terminal 空格 ') as temporary:
             root=Path(temporary).resolve()
             store=Store(root/'state')
-            env={**os.environ,'PYTHONPATH':str(ROOT/'src'),'PYTHONDONTWRITEBYTECODE':'1','TERM':'xterm-256color',
+            env={**environment(),'TERM':'xterm-256color',
                  'CMW_JOBS_STATE':str(store.root)}
-            cli=[sys.executable,'-m','cmw.cli','jobs']
+            cli=[sys.executable,'-m','tests.jobs.isolated_runtime','cli','jobs']
             import subprocess
             release = root/'release-A'
             for name in ('A','B','C'):

@@ -39,6 +39,35 @@ def tail(path, limit=16384):
         return "No log yet."
 
 
+def guard_text(state):
+    guard = state.get("external_activity")
+    if not guard:
+        return "Guard: UNAVAILABLE — observation pending; admission blocked"
+    admission = state.get("admission", {})
+    age = elapsed(guard.get("age_seconds"))
+    previous = state.get("controller_guard")
+    controller_note = (f"\nController last evaluation: {previous.get('state', 'UNAVAILABLE')} at {previous.get('observed_at', 'unknown')} (separate from client scan)"
+                       if previous else "")
+    return (f"Admission: {'AWAITING CONTROLLER CHECK' if admission.get('permitted') else 'BLOCKED'} — {admission.get('reason', guard['reason'])}\n"
+            f"Guard: {guard['state']} — {guard['reason']}  Scan age: {age}{' STALE' if guard.get('stale') else ''}\n"
+            f"Scope: {guard.get('scope', 'current local user / recognized accessible executables')}  Source: {guard.get('source', 'client')}"
+            + controller_note
+            + ("\nCONFLICT: managed and external activity overlap; neither is interrupted." if admission.get('conflict') else "")
+            + "".join(f"\nCoverage: {warning}" for warning in guard.get('coverage', {}).get('warnings', [])))
+
+
+def external_detail(observation):
+    return (f"EXTERNAL OBSERVATION: {observation['id']} — READ ONLY\n"
+            f"Ownership: {observation.get('ownership', 'External / unattributed')} — not managed by this queue\n"
+            f"Engine: {observation['engine']}   PID: {observation['pid']}   Observed OS state: {observation.get('status', '—')}\n"
+            f"NPROC (observed processes): {observation.get('nproc', 1)}   Process age: {elapsed(observation.get('age_seconds'))}\n"
+            f"Executable: {observation.get('exe') or '—'}\nWorking directory: {observation.get('cwd') or '—'}\n"
+            "CPUs requested: —   RAM requested: —   Scientific status: Not evaluated\n"
+            f"Evidence: {json.dumps(observation.get('evidence', []), ensure_ascii=False)}\n"
+            "Observation only. No cancel, hold, reorder, retry, or logs.\n"
+            + json.dumps(observation, indent=2, ensure_ascii=False))
+
+
 def status_text(state):
     control = state["controller"]
     online = "Stale" if control["stale"] else "Online" if control["online"] else "Offline"
@@ -49,12 +78,19 @@ def status_text(state):
                      f"{job['status']:11}  {str(job['resources']['cpus'] or '—'):>4}  {elapsed(job['elapsed']):>10}  {safe_text(job['reason'])}")
     if not state["jobs"]:
         lines.append("No jobs. Add a prepared command with cmw jobs add, then explicitly start.")
+    lines.append(guard_text(state))
+    lines.append("EXTERNAL ACTIVITY — READ ONLY (NPROC = observed processes; AGE = process age)")
+    for item in state.get("external_activity", {}).get("observations", []):
+        lines.append(f"{item['id']}  {item['engine']}  PID {item['pid']}  NPROC {item.get('nproc', 1)}  "
+                     f"OS {item.get('status', '—')}  AGE {elapsed(item.get('age_seconds'))}  {item.get('exe') or '—'}")
+    lines.append("Best-effort pre-dispatch observation; no machine-wide reservation or exclusion.")
     lines.append(f"State: {state['state_directory']}")
     return "\n".join(lines)
 
 
 def register(subcommands):
-    parser = subcommands.add_parser("jobs", help="local sequential queue and terminal console")
+    parser = subcommands.add_parser("jobs", help="local sequential queue and terminal console",
+        description="Local queue with best-effort external activity observation for the current user; no machine-wide reservation or exclusion.")
     parser.add_argument("--state", type=Path, help="isolated state directory (or CMW_JOBS_STATE)")
     operations = parser.add_subparsers(dest="jobs_operation", required=True)
     for name in ("status", "start", "stop", "pause", "resume", "watch"):
@@ -94,6 +130,7 @@ def register(subcommands):
 def handle(args):
     store = Store(args.state)
     operation = args.jobs_operation
+    from .activity import project
     try:
         if operation == "watch":
             try:
@@ -117,15 +154,24 @@ def handle(args):
         elif operation in {"start", "stop"}:
             from . import runtime
             getattr(runtime, operation)(store)
-            result = store.snapshot()
+            result = project(store)
         elif operation in {"pause", "resume"}:
             store.dispatch(operation == "resume")
-            result = store.snapshot()
+            result = project(store)
         elif operation in {"hold", "release", "move", "cancel"}:
             result = store.change(args.job_id, operation, position=getattr(args, "position", None), confirm=getattr(args, "yes", False))
         elif operation == "status":
-            result = store.snapshot()
+            result = project(store)
         else:
+            if str(args.job_id).startswith("E"):
+                if operation != "show":
+                    raise JobsError("External observations are read-only; external logs are not available")
+                state = project(store)
+                result = next((item for item in state["external_activity"]["observations"] if item["id"] == args.job_id), None)
+                if result is None:
+                    raise JobsError(f"External observation no longer observed: {args.job_id}")
+                print(json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False) if args.json else safe_text(external_detail(result)))
+                return 0
             state = store.snapshot()
             candidates = [j for j in state["jobs"] if str(args.job_id) in {str(j["id"]), f"J{j['id']}", j["display_id"]}]
             if not candidates:

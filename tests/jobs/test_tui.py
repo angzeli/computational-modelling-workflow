@@ -17,6 +17,12 @@ from cmw.jobs.tui import JobsApp, Inspect
 
 
 class TuiTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # Existing managed-client tests do not need the host process table.
+        observation = patch.object(JobsApp, 'collect_activity')
+        observation.start()
+        self.addCleanup(observation.stop)
+
     async def test_interactions_selection_resize_logs_and_render(self):
         with tempfile.TemporaryDirectory(prefix='cmw tui ') as directory:
             store = Store(Path(directory)/'state')

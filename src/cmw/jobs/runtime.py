@@ -19,6 +19,7 @@ from uuid import uuid4
 from cmw.core.provenance import atomic_write_json
 from .ownership import exclusive, group_exists, group_members, identity, lock_held, owner_alive
 from .store import ACTIVE, PENDING, JobsError, Store
+from . import activity
 
 INTERVAL = 0.15
 CANCEL_GRACE = 2.0
@@ -123,9 +124,34 @@ def launch_blocker(job):
     return ""
 
 
+def record_guard(store, con, guard):
+    control = store.control(con)
+    previous = control.get('external_guard', {})
+    control['external_guard'] = guard
+    store.set_control(con, control)
+    if previous.get('state') != guard['state'] or previous.get('reason') != guard['reason']:
+        store.event(con, None, 'External guard: ' + guard['state'] + ': ' + guard['reason'])
+        # Bound guard transition history without pruning managed lifecycle events.
+        con.execute("DELETE FROM events WHERE job_id IS NULL AND message LIKE 'External guard:%' "
+                    "AND id NOT IN (SELECT id FROM events WHERE job_id IS NULL AND message LIKE 'External guard:%' ORDER BY id DESC LIMIT 100)")
+
+
+def dispatch_authority(store, control):
+    try:
+        return (control['dispatch'] and not control['stop'] and owner_alive(control['owner'])
+                and lock_held(store.root / 'controller.lock', strict=True))
+    except OSError:
+        return False
+
+
 def tick(store):
     launch = None
+    # OS collection is outside the write transaction. All controls/order are
+    # read again under the existing claim transaction after the fresh scan.
+    guard = activity.DEFAULT_OBSERVER.scan(store, source='controller')
     with store.transaction() as con:
+        control = store.control(con)
+        record_guard(store, con, guard)
         control = store.control(con)
         control["heartbeat"] = time.time()
         store.set_control(con, control)
@@ -135,12 +161,16 @@ def tick(store):
         control = store.control(con)
         if control["stop"]:
             return False
-        if active or not control["dispatch"]:
+        if active or not dispatch_authority(store, control) or not activity.permits(guard):
             return True
         pending = sorted((j for j in store.rows(con) if j["status"] in PENDING), key=lambda j: j["order"])
         if not pending or pending[0]["status"] == "Hold":
             return True
         job = pending[0]
+        # A refused supervisor returns the row to Queue before releasing its
+        # attempt lock. Never reclaim it in that short cleanup interval.
+        if lock_held(store.root / 'attempts' / job['attempt_id'] / 'worker.lock'):
+            return True
         blocker = launch_blocker(job)
         if blocker:
             if job["reason"] != blocker:
@@ -176,7 +206,7 @@ def controller(store):
             while tick(store):
                 # Reap only our finished guardians; they own their payloads.
                 reap_detached()
-                time.sleep(INTERVAL)
+                time.sleep(1.0)
         finally:
             with store.transaction() as con:
                 control = store.control(con)
@@ -229,8 +259,36 @@ def worker(store, job_id, claim):
             return
         group = identity(leader.pid)
         try:
+            before = store.snapshot()
+            pending_ids = [(j['id'], j['order'], j['status']) for j in before['jobs'] if j['status'] in PENDING]
+            guard = activity.DEFAULT_OBSERVER.scan(store, before, source='supervisor-admission')
             with store.transaction() as con:
+                record_guard(store, con, guard)
                 job = store.get(con, job_id)
+                control = store.control(con)
+                pending_now = [(j['id'], j['order'], j['status']) for j in store.rows(con) if j['status'] in PENDING]
+                admitted = (job['claim'] == claim and job['status'] == 'Starting' and
+                            not job['cancel_requested'] and dispatch_authority(store, control) and
+                            pending_ids == pending_now and activity.permits(guard))
+                if not admitted:
+                    # Closing GO pipe ends only our not-yet-admitted shell. No
+                    # payload or external process has been launched/signalled.
+                    leader.stdin.close()
+                    leader.wait(timeout=5)
+                    if group_exists(leader.pid):
+                        raise JobsError('Unadmitted payload helper has not exited')
+                    if job['claim'] != claim or job['status'] not in {'Starting', 'Cancelling'}:
+                        # Reconciliation/another identity remains authoritative;
+                        # refusal must not erase Unknown or a changed claim.
+                        return
+                    if job['cancel_requested']:
+                        job.update(status='Cancelled', finished_at=time.time(), reason='Cancelled before payload admission')
+                    else:
+                        job.update(status='Queue', order=0, reason=guard['reason'] if not activity.permits(guard) else 'Admission controls/order changed')
+                    job.update(worker=None, group=None, claim=None, claimed_at=None)
+                    store.save(con, job)
+                    store.normalize(con)
+                    return
                 job.update(group=group, started_at=time.time(), reason="")
                 if not job["cancel_requested"]:
                     job["status"] = "Run"

@@ -178,3 +178,153 @@ installation evidence is unchanged. This local environment issue is not a source
 commit blocker and was not worked around by modifying package code or the environment.
 Disposition after the narrow fixes: ready to commit. No commit or publication
 operation was performed.
+
+## External Activity Guard refinement — plan and compatibility boundary
+
+Starting point: clean `main` at `3ba21395f66308de93235fe6df6d4f4bfac416d5`.
+The default macOS user state resolves to `~/Library/Application Support/cmw/jobs`;
+no state override was present in the viewing command. Its controller was offline
+and it contained no managed attempts. Read-only process metadata on this Mac
+showed eight live `vasp_std` executables under a common birth-identified `prte`
+launcher/session. The old projection only displayed SQLite jobs; it had no
+external observer. These processes are external to this selected queue. Another
+queue origin was not established. No scientific files or process environments
+were read and no production process/controller was changed.
+
+Plan: add one shared bounded process observer with explicit evidence/coverage,
+reuse Jobs birth identity and verified group ownership, extend status JSON
+additively, and add a separate read-only console panel. Evaluate admission before
+claim and again in the supervisor before payload GO, preserving pending order
+and user dispatch intent when blocked. Validate through fixture-owned process
+metadata and existing synthetic lifecycle tests, then a fresh installed wheel.
+
+The guard is best-effort avoidance of recognized accessible current-user local
+executables, not a global machine lock. It cannot exclude manual launches after
+its scan or coordinate independently configured queues atomically. Observation
+never grants cancellation/ownership or establishes scientific completion. Existing
+SQLite managed identities, queue lifecycle, runner, receipt and scientific
+contracts remain authoritative. No version/dependency changes or publication.
+
+### Guard implementation and acceptance evidence
+
+One new `jobs.activity` module shares bounded collection, classification and
+admission projection across controller, supervisor, CLI and TUI. Existing Jobs
+identity/lock helpers, queue transactions, process-group lifecycle and packaged
+payload are retained. psutil 7.2.2 source inspection confirmed that process_iter,
+creation time and executable metadata cache values, and Process.exe may fall
+back to argv[0]. The observer therefore uses fresh identities and the platform
+executable accessor, without clearing a shared cache or reading command lines.
+
+Independent boundary review found and corrected three coupled issues: strict
+lock-access evidence is required before excluding managed candidates; a pending
+attempt's still-held supervisor lock prevents immediate reclaim; and refused
+admission preserves concurrent Unknown or changed-claim state. Final launcher
+revalidation clears obsolete grouping while retaining every surviving worker.
+
+Newly executed checks: all 51 Jobs tests passed (75.905 s), including 15 observer
+fixtures, six lock/rollback boundary regressions, five real guard integration
+cases, existing lifecycle/runner/PTY checks, and external CLI/TUI tests. Another
+60 existing profile/layout/intent/lock/provenance compatibility tests passed
+(0.550 s). These are current runs; the older broad offline result above is not
+claimed as rerun. Integration discovery is restricted through a test-only launcher
+to birth-verified fixture PIDs; no public production bypass exists. Two acceptance
+tests were further changed to wait for explicit guard transitions instead of
+fixed timing windows, with a focused follow-up run recorded separately.
+
+Read-only live acceptance identified the existing VASP family through its OS
+executable path, eight process identities and a common dedicated MPI launcher
+session while the selected queue was empty/offline. Same-user executable-access
+blind spots were also reported, not suppressed to force NO_MATCH. Group count
+was not claimed as allocated CPUs, and no scientific completion was inferred.
+
+Test-environment limitation: two early attempts to execute benign copied system
+sleep binaries became orphaned in macOS uninterruptible exec state. Exact-owned
+identity cleanup with SIGCONT/SIGKILL did not clear them during bounded checks.
+Subsequent real tests use ordinary Python release-gated fixtures and those exit
+and are reaped normally. The two kernel-stuck copies prevent claiming that no
+synthetic processes remain. No research process was signalled; no OS service,
+production controller or existing editable environment was modified to resolve
+this environment problem. This limitation must remain explicit in closeout.
+
+Follow-up evidence: the two explicitly synchronized guard tests passed (5.689 s).
+A real metadata test additionally proved selected-queue managed exclusion while
+an independent process with the identical executable still blocked (3.633 s).
+A final projection regression ensures existing executable preflight also remains
+visible as blocked admission; the directly affected CLI/TUI checks passed with it.
+
+The final source wheel was built again after that projection correction and
+installed outside the checkout into a second fresh environment using unchanged,
+platform-aware locked dependencies. Core-only import resolved to site-packages;
+all Jobs package bytes matched source, including activity.py and payload.sh;
+status/JSON worked without Textual/Rich and watch reported its missing extra.
+After installing the supported jobs extra, the actual terminal console rendered
+external VASP and detached normally. Its isolated detached controller observed
+the live blocker and kept the synthetic job pending without claim/start/marker,
+then stopped. The ordinary default user state remained empty and offline. The
+existing editable import still failed and was not repaired.
+
+The initial temporary installer stalled on downloads; an attempted hand-written
+constraint list also exposed duplicate platform versions. Neither was a source
+defect. Exporting the unchanged lock with its proper platform markers resolved
+the temporary installation. No dependency lock or package metadata was changed.
+
+Final live observation still showed eight VASP processes, with executable and
+verified launcher/session evidence, external/unattributed to the selected queue.
+Five pre-existing same-user metadata blind spots remained, plus one from the
+kernel-stuck test fixture. They remain coverage warnings and would prevent a
+clear admission claim even after the VASP observation disappears. Both abandoned
+copied fixtures were still STAT UE at final inspection; no further unsafe cleanup
+or system intervention was attempted. All later fixtures and wheel-smoke
+controllers exited normally. No commit, push, tag, release or version bump.
+
+## Bounded final caveat investigation
+
+Starting state remained `main` at `3ba21395f66308de93235fe6df6d4f4bfac416d5`,
+with the guard changes unstaged/untracked and no staged changes. No existing
+work was discarded. The applicable working agreement requires read-only research
+observation and does not require another signal to the known test copies.
+
+PIDs 11338 and 11897 still matched births 1788932262.479477 and
+1788932319.953141 on the same host/boot. Both were parented by PID 1, had no
+observed descendants, and remained `UE`; the installed ps manual defines this
+as uninterruptible wait plus trying to exit. Wait channel was `-`, so no exact
+kernel wait reason was established. Their PGID/SID pairs were 11323/11323 and
+11888/11888. The first OS executable path was unavailable; the second still
+identified the temporary copied binary. Both retained copied-sleep argv and
+checkout cwd. No additional signals were sent.
+
+The creating agent's original tool evidence traces the first to the abandoned
+external_fixture in the pause test: copyfile('/bin/sleep', temporary binary),
+chmod(0700), then direct Popen([binary, '60']). The second came from a standalone
+diagnostic copyfile/chmod/Popen([binary, '10']) snippet. Neither used CMW's
+controller, supervisor, payload helper or GO path, nor explicit new group/session
+settings. The first terminate/wait timed out; the second diagnostic's intended
+kill/wait does not establish exactly where it stalled. No code-signing or kernel
+root cause was proven. Classification: TEST-ONLY / MACOS EDGE CONDITION — NOT A
+SOURCE BLOCKER. Ordinary CMW can launch arbitrary prepared executables, but no
+evidence implicates its production process-management logic in these artifacts.
+
+A narrow guard policy defect was demonstrated: absent executable paths on
+unrecognized ordinary same-user process names were treated as material blockers.
+Those are now explicit non-blocking scope limitations, not proven engine matches.
+A recognized default or configured executable basename with missing critical
+metadata still fails closed; unknown user/name scope and scan failures still
+block. This supersedes the previous blanket executable-gap policy above. No
+per-PID ignore mechanism, production configuration change or global bypass was
+added. Four directly relevant tests passed (0.009 s), including the new regression
+for ordinary missing paths and configured-name uncertainty.
+
+Actual normal-state observation remained BUSY for one eight-process VASP family.
+A labelled read-only counterfactual, excluding only that family's freshly matched
+PID/birth identities, returned NO_MATCH with zero material uncertainties. Five
+ordinary-process executable gaps and the first UE fixture remained non-blocking
+coverage limitations; the second UE copy was unrecognized by its actual path.
+The normal queue remained empty, offline and dispatch-disabled.
+
+The real console was launched through the verified source CLI against the explicit
+normal state, in an interactive PTY. Its live terminal output showed VASP, NPROC 8,
+representative PID 90828, external/read-only ownership, BUSY and blocked admission.
+The user subsequently supplied an actual macOS Terminal screenshot confirming
+the visible external VASP row, NPROC 8, representative PID 90828, read-only label,
+BUSY/blocked guard, offline controller and dispatch OFF. Visible console
+verification is complete. The console was left open; no controller was started.

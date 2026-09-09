@@ -222,3 +222,103 @@ workflow with fake ORCA. Tests require local process-identity and terminal acces
 a restrictive sandbox may deny macOS sysctl/PTY operations. All test queues and
 processes are isolated. See the [implementation record](architecture/cmw-jobs-implementation.md)
 for measured validation results and compatibility boundaries.
+
+## External activity and admission guard
+
+`cmw jobs status`, `cmw jobs status --json` and `cmw jobs watch` observe external
+activity even with no managed jobs and an offline controller. Starting or resuming
+is not needed to observe. External observations have `E...` identifiers and a
+separate read-only table; `cmw jobs show E...` displays current evidence. They are
+never inserted into the managed `jobs` array. External logs, cancel, hold, order,
+retry, adoption and scientific checks are unavailable. An observation disappearing
+means **no longer observed**, not Done, Fail or scientific completion.
+
+Default scope is the current local user and accessible local process metadata,
+validated here on macOS Apple Silicon. The recognized OS executable basenames
+are `vasp_std`, `vasp_gam`, `vasp_ncl` and the ORCA main executable `orca`.
+An editor, shell, Python analysis script, `mpirun` or `caffeinate` does not match
+merely because its arguments mention an engine. No `orca_*` wildcard is used.
+Arbitrarily renamed engines, independent workers with other names, other users,
+containers and remote machines are outside the recognition guarantee.
+
+For a differently named executable, an optional `external-activity.json` in the
+selected Jobs state directory accepts only an additive exact-path mapping:
+
+```json
+{"executables": {"/absolute/path/to/custom-engine": "VASP"}}
+```
+
+Values are `VASP` or `ORCA`; paths are resolved without executing any hooks.
+Defaults cannot be disabled. Invalid/unreadable configuration blocks admission.
+There is no force option or per-PID ignore list. Existing resource profiles do
+not provide a global engine executable registry; this small mapping supplies
+only that missing recognition information. No process environments, open files,
+scientific inputs/logs or full command-line inventories are read.
+
+| Guard state | Meaning and admission effect |
+| --- | --- |
+| NO_MATCH | No recognized external computation observed in a usable fresh scan; remaining controller, user intent, order, ownership and preflight gates still apply |
+| BUSY | Recognized live external computation observed; block new dispatch |
+| UNCERTAIN | Material identity, executable, ownership or intended-scope coverage gap; block new dispatch |
+| UNAVAILABLE | Collection/configuration error, timeout or unusable stale evidence; block new dispatch |
+
+Evidence, coverage warnings, observation time and source are separate JSON fields
+under `external_activity`; `controller_guard` reports the controller/supervisor's
+last evaluation, distinct from a newer client scan. `admission` is a client
+projection, never a launch token. Existing managed JSON fields keep their
+meanings. Missing optional cwd is a missing detail. When an OS executable path is unavailable but the process name is not a
+recognized engine or configured executable basename, report a non-blocking scope
+limitation. This is not a per-PID exemption or proof of executable identity.
+Recognized names with unresolved executable/identity evidence remain UNCERTAIN;
+missing user-scope/name metadata and scan failures still fail closed.
+Verified other-user processes are excluded before further inspection. Sleeping
+and stopped engines still block; verified zombies alone do not, and surviving
+workers are evaluated independently.
+
+The collector uses fresh process objects and OS executable evidence rather than
+psutil's shared `process_iter` cache or its argv-based executable fallback. Each
+scan has a one-second budget and at most one in-flight daemon collector per
+observer. A timed-out collector never authorizes launch; no unbounded retry
+threads are created. Stale last-known observations remain display evidence only.
+Clients refresh observations modestly in a background worker; the controller
+scans independently of clients and checks again in the supervisor before payload
+GO. Scans run outside SQLite write transactions; controls and queue order are
+revalidated under the existing claim/admission transactions. A caught blocker
+leaves/restores the job pending without a payload start or fabricated receipt.
+Guard transition events are bounded to the latest 100; full polling inventories
+are not appended to event history.
+
+A blocked controller may remain online with dispatch intent ON. The guard does
+not turn queued jobs into user-Hold, Fail or Cancelled. Once a fresh scan clears,
+ordinary sequential dispatch proceeds only while intent remains enabled and all
+other gates pass. Manual pause, held head, failure policy, Unknown ownership and
+unconfirmed cancellation retain their existing effects. Resume does not bypass
+the guard. External activity appearing during managed execution produces a
+conflict warning; neither process is interrupted automatically.
+
+Only verified ownership in the selected queue exempts a managed engine: its
+persisted, birth-verified pinned group/session, live supervisor and held worker
+lock. Equal names or working directories confer no ownership. Another queue's
+process remains external unless this queue proves ownership; no filesystem search
+for other state databases is performed.
+
+Grouping is presentation only: direct children of a birth-verified MPI launcher
+leading their dedicated session may be grouped. Cwd, names, an interactive shell,
+terminal session or bare PGID alone never group computations. Incomplete family
+evidence produces separate observations; every surviving recognized process still
+blocks independently. NPROC means observed process count, not allocated CPUs or
+proven MPI ranks. AGE is the oldest currently observed member's process age, not
+an authoritative job start time; it may change when that member disappears.
+External requested CPUs/RAM remain unknown.
+
+This is **best-effort conflict avoidance, not machine-wide mutual exclusion**.
+No-match does not prove the machine idle. A manual engine can start after a scan
+or after a managed payload begins. Independent state directories have no shared
+global machine lock. The existing at-most-one-execution guarantee applies to the
+selected managed queue only.
+
+An already-running controller retains the code it loaded. To obtain this guard,
+use the normal explicit stop/start lifecycle when you choose; installing or
+opening a new client does not upgrade that controller. No production controller
+was restarted as part of this refinement. An already-open watch client also needs
+to be detached and reopened to load new display code.
