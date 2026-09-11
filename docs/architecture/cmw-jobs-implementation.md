@@ -517,3 +517,88 @@ were released/reaped; unrelated historical processes were not touched. Limits
 remain one primary plus one auxiliary, explicit trusted resource declarations,
 admission-only enforcement, conservative external identity/write-scope checks,
 and no machine-wide exclusion, arbitrary backfill, automatic tuning or HPC.
+
+## Nested MPI external family correction (11 September 2026)
+
+Starting point: main at `1f06c586d9dd8f6729b21c657577d2f2813f11f7`.
+Pre-existing display-ID changes in the CLI/store, a documentation paragraph and
+`test_display_id.py` were left intact. The bounded correction changes only the
+shared activity grouping, its reservation fingerprint and directly relevant
+tests/documentation. Resource policy, execution ownership, launch scripts and
+scientific inputs remain unchanged.
+
+Root cause: grouping required the direct MPI launcher PID to equal the engine
+session ID, and the launcher to lead that session. Actual read-only topology was
+payload shell 36479 → Python wrapper 36480 → launcher 36494 → eight VASP ranks
+36496–36503. The launcher was invoked as `prterun`; its native executable is
+`prte`, already in the recognized-launcher set. The valid wrapper topology was
+rejected by CMW, not by MPI or the user's launch command, creating eight external
+observations and the later additional-external-computation refusal.
+
+The original launcher-led-session path remains supported. The additional path
+requires a verified direct recognized MPI parent and a bounded ancestry of at
+most eight nodes reaching this installation's exact packaged `payload.sh` under
+`/bin/bash`. The guardian must lead its session/group, and every ancestor must
+share the current UID/session, have no controlling terminal, and expose current
+birth/executable identity. Intermediate wrappers are identity-bound. Each grouped
+rank must have the same direct launcher and engine executable. Separate launchers
+remain separate, including beneath one payload guardian; generic shell ancestry,
+same cwd/session, or similar executable names are insufficient.
+
+Final collection rechecks each rank's parent/group/session and the complete
+launcher/ancestor proof. Loss or replacement removes grouping without hiding
+surviving ranks. Family IDs distinguish executable/ancestry, and reservation
+fingerprints include member births, executable, launcher executable, parent,
+group/session and nested proof. Existing conservative membership invalidation is
+retained. Pre-fix reservations expire conservatively under the stronger binding;
+no production reservation was created or rewritten. Both controller and final
+supervisor use the same activity collector; no scheduler-specific grouping copy
+was introduced.
+
+Eight new deterministic family tests passed, covering the eight-rank topology,
+existing launchers, separate families, generic-shell/cwd rejection, PID/ancestor
+and executable replacement, membership/launcher loss, final topology races,
+telemetry membership and normal sharing resource checks. Three new actual
+controller/worker tests passed in 0.791 seconds: missing reservation prevents
+launch, a valid isolated reservation executes one auxiliary exactly once, and
+reservation removal after claim prevents payload GO. Controller and independently
+spawned supervisor record equal one-family IDs/fingerprints. Test-owned benign
+supervisors/payloads were reaped; external process tables were deterministic.
+Existing activity, sharing-policy and telemetry cases also passed during the
+focused run. One test fixture initially lacked mocked process-group reads for
+telemetry; correcting that fixture yielded all eight new deterministic passes.
+
+Live source-CLI acceptance against the default non-owning state
+`~/Library/Application Support/cmw/jobs` changed eight one-rank observations to
+one family `Eb77171aa93ae`, NPROC 8, Guard BUSY, External/unattributed read-only.
+Fresh aggregate telemetry covered all eight members: about 701% CPU and
+1,112,735,744 bytes RSS (1.04 GiB) at the sampled interval. These are observations,
+not resource bounds or scientific completion evidence. The default state was
+empty, Sequential and offline; its actual refusal remained external BUSY. A
+clearly labelled in-memory Bounded Sharing decision over fresh live evidence
+instead refused `External workload has no valid coexistence reservation`, with
+no production configuration written. The independent owning VASP queue remained
+outside this correction; no controller was restarted or job held/released.
+
+The held IFCT state directory was not supplied in the request and differs from
+the default state: the known VASP-owning queue's J2.1 is the running VASP itself.
+A clarification was requested; no job-ID-only control was attempted. Production
+reservation remains a subsequent explicit action in the correct IFCT queue,
+using the fresh observation ID, a justified CPU declaration and a user-chosen
+conservative memory budget. Current RSS is never substituted for that budget.
+
+The relevant Jobs suite ran once: 143 tests in 119.661 seconds, with 142 passing
+and one unrelated pre-existing failure in
+`test_display_id.DisplayIdTests.test_invalid_labels_do_not_mutate`. That test
+compares complete successive `Store.snapshot()` values, including their naturally
+changing `observed_at` timestamps; it never invokes the changed grouping or
+fingerprint code. The pre-existing test/store changes were not modified to hide
+this failure. All grouping, guard, sharing, telemetry and lifecycle tests passed.
+No full repository-wide or fresh-wheel campaign was repeated: package metadata
+and runtime assets are unchanged. Final focused diff/whitespace inspection passed.
+
+Disposition: MPI FAMILY GROUPING FIXED — ACCEPTANCE PASSED, with the unrelated
+display-ID test failure recorded above. No production reservation was declared,
+no production controller/job control was issued, and no research process or file
+was modified. This task launched only isolated benign test payloads, which were
+reaped. No IFCT/scientific calculation, commit, push, tag or release was performed.

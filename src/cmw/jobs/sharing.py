@@ -35,7 +35,7 @@ def fingerprint(observation):
     if not members or len({json.dumps(m['identity'], sort_keys=True) for m in members}) != len(members):
         raise JobsError('External family identity incomplete or duplicated')
     binding = {'id': observation['id'], 'engine': observation['engine'],
-               'members': sorted(({k: m.get(k) for k in ('identity', 'exe', 'launcher', 'pgid', 'sid')}
+               'members': sorted(({k: m.get(k) for k in ('identity', 'exe', 'launcher', 'launcher_exe', 'family', 'ppid', 'pgid', 'sid')}
                                   for m in members), key=lambda m: json.dumps(m, sort_keys=True))}
     return hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
 

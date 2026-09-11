@@ -361,13 +361,32 @@ lock. Equal names or working directories confer no ownership. Another queue's
 process remains external unless this queue proves ownership; no filesystem search
 for other state databases is performed.
 
-Grouping is presentation only: direct children of a birth-verified MPI launcher
-leading their dedicated session may be grouped. Cwd, names, an interactive shell,
-terminal session or bare PGID alone never group computations. Incomplete family
-evidence produces separate observations; every surviving recognized process still
-blocks independently. NPROC means observed process count, not allocated CPUs or
-proven MPI ranks. AGE is the oldest currently observed member's process age, not
-an authoritative job start time; it may change when that member disappears.
+Grouping identifies an observed family, never execution ownership. Homogeneous
+engine executables sharing a verified direct MPI-launcher parent may group when
+the launcher leads their session. A nested launcher also qualifies when a
+birth-verified ancestry (at most eight nodes, including launcher and leader)
+reaches a noninteractive `/bin/bash` session/group leader running this CMW
+installation's exact packaged `payload.sh`. Intermediate wrappers are allowed;
+every ancestor must have the same current user/session, no controlling terminal,
+and verified executable and process identity. This supports payload shell →
+Python wrapper → `prterun` → VASP ranks without changing how VASP is launched.
+
+Cwd, names, a generic shell, session equality or bare PGID alone never group
+computations. Separate MPI launchers remain separate families even beneath one
+payload shell. Rank parent/group/session and full launcher ancestry are rechecked
+before publishing the observation. Launcher/ancestor loss or ambiguity removes
+grouping; surviving engines remain visible separately, or uncertainty blocks
+admission. The guard stays BUSY and the family stays external/read-only.
+
+Family reservations bind engine members/executables, launcher identity/executable,
+and the nested session-leader/ancestry proof. PID reuse, executable replacement,
+ancestry changes or changed rank membership invalidate the previous reservation.
+The stronger binding also conservatively expires reservations from before this
+grouping fix; review fresh evidence before declaring a replacement. Grouping
+success never creates consent: explicit CPU and conservative memory budgets are
+still required. NPROC is observed process count, not an allocated CPU budget;
+current RSS is not a future memory bound. AGE is the oldest observed member's
+process age, not an authoritative job start time, and can change when it exits.
 External requested CPUs/RAM remain unknown.
 
 This is **best-effort conflict avoidance, not machine-wide mutual exclusion**.

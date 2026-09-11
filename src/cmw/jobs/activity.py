@@ -89,6 +89,46 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
         budget()
         p = process_factory(pid)
         return p, identity(pid)
+    def launcher_family(c):
+        """Verify one direct MPI parent, optionally beneath our payload guardian.
+
+        The bounded ancestry is grouping evidence only; it grants no ownership.
+        Repeating this at final collection also binds intermediate wrapper births.
+        """
+        parent, parent_id = fresh(c['ppid'])
+        parent_exe = native_executable(parent)
+        sid = c['sid']
+        if (Path(parent_exe).name not in LAUNCHERS or parent.uids().real != uid or
+                os.getsid(parent.pid) != sid or identity(parent.pid) != parent_id or
+                native_executable(process_factory(parent.pid)) != parent_exe):
+            return None
+        binding = {'launcher': parent_id, 'launcher_exe': parent_exe, 'family': None}
+        if parent.pid == sid:
+            return binding  # Existing launcher-as-session-leader contract.
+        ancestry, seen = [], set()
+        current = parent.pid
+        for _ in range(8):
+            if current in seen:
+                return None
+            seen.add(current)
+            node, node_id = fresh(current)
+            exe = native_executable(node)
+            ppid, pgid = node.ppid(), os.getpgid(current)
+            if (not exe or node.uids().real != uid or node.status() == psutil.STATUS_ZOMBIE or
+                    os.getsid(current) != sid or node.terminal() is not None):
+                return None
+            ancestry.append({'identity': node_id, 'exe': exe, 'ppid': ppid, 'pgid': pgid, 'sid': sid})
+            if current == sid:
+                argv = node.cmdline()
+                payload = str(Path(__file__).with_name('payload.sh').resolve())
+                if (exe != '/bin/bash' or pgid != sid or len(argv) < 2 or
+                        not Path(argv[1]).is_absolute() or str(Path(argv[1]).resolve()) != payload):
+                    return None
+                binding['family'] = {'session_leader': node_id, 'ancestry': ancestry, 'payload': payload}
+                # The first node must still be the initially verified launcher.
+                return binding if ancestry[0]['identity'] == parent_id and ancestry[0]['exe'] == parent_exe else None
+            current = ppid
+        return None
     pids = list(pids_provider())
     for pid in pids:
         budget()
@@ -164,20 +204,16 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
             if managed:
                 coverage['managed'] += 1
                 continue
-            # Narrow display grouping: direct engine children of a birth-verified
-            # MPI launcher that leads their dedicated session. Shell ancestry,
-            # cwd and generic session equality alone never create a family.
+            # Same session/cwd alone never groups engines. Nested launchers need
+            # a verified ancestry ending at this runtime's dedicated payload shell.
             candidate['launcher'] = None
             candidate['launcher_exe'] = None
+            candidate['family'] = None
             try:
-                parent, parent_id = fresh(ppid)
-                parent_exe = native_executable(parent)
-                if (Path(parent_exe).name in LAUNCHERS and sid == ppid and
-                    os.getsid(ppid) == ppid and parent.uids().real == uid and
-                    identity(ppid) == parent_id and native_executable(process_factory(ppid)) == parent_exe):
-                    candidate['launcher'] = parent_id
-                    candidate['launcher_exe'] = parent_exe
-                    candidate['evidence'].append('Direct verified MPI launcher parent and dedicated session (grouping inference)')
+                binding = launcher_family(candidate)
+                if binding:
+                    candidate.update(binding)
+                    candidate['evidence'].append('Direct verified MPI launcher parent and verified dedicated session ancestry (grouping inference)')
             except (psutil.Error, OSError):
                 pass  # Grouping failure never removes an independently live engine.
             candidates.append(candidate)
@@ -189,7 +225,7 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
             uncertain.append(f'PID {pid}: intended user scope or critical metadata unavailable')
     budget()
     # Revalidate every surviving candidate at the end, including exec transitions
-    # and launcher disappearance; display grouping never controls admission.
+    # and launcher/session ancestry loss. Sharing consumes only this fresh result.
     live = []
     for c in candidates:
         try:
@@ -200,16 +236,19 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
             if p.status() == psutil.STATUS_ZOMBIE:
                 coverage['zombies'] += 1
                 continue
+            if (p.ppid(), os.getpgid(c['pid']), os.getsid(c['pid'])) != (c['ppid'], c['pgid'], c['sid']):
+                uncertain.append(f"PID {c['pid']}: final parent/group/session revalidation failed")
+                continue
             if c['launcher']:
                 try:
-                    parent, parent_id = fresh(c['launcher']['pid'])
-                    if parent_id != c['launcher'] or native_executable(parent) != c['launcher_exe']:
+                    if launcher_family(c) != {k: c[k] for k in ('launcher', 'launcher_exe', 'family')}:
                         c['launcher'] = None
                 except (psutil.Error, OSError):
                     c['launcher'] = None
                 if c['launcher'] is None:
                     c['evidence'] = [e for e in c['evidence'] if 'grouping inference' not in e]
                     c['launcher_exe'] = None
+                    c['family'] = None
             live.append(c)
         except (psutil.NoSuchProcess, ProcessLookupError):
             coverage['vanished'] += 1
@@ -220,6 +259,9 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
     for c in live:
         owner = c['launcher'] or c['identity']
         key = json.dumps(owner, sort_keys=True) + c['engine']
+        if c['launcher']:
+            # Homogeneous executable families, never all engines under a shell.
+            key += json.dumps({'exe': c['exe'], 'family': c['family']}, sort_keys=True)
         grouped.setdefault(key, []).append(c)
     observations = []
     for key, members in grouped.items():
