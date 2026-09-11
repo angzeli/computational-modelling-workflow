@@ -41,6 +41,62 @@ def _positive(value, name, integer=False):
     return int(value) if integer else value
 
 
+def declared_cpu_demand(resources):
+    """Declared MPI/thread metadata can contradict a smaller sharing budget."""
+    return (resources.get('mpi_ranks') or 1) * (resources.get('threads_per_rank') or 1)
+
+
+def scheduler_defaults():
+    return {"mode": "sequential", "cpu_budget": None, "memory_gib": None,
+            "cpu_reserve": None, "min_available_gib": None, "external_reservation": None}
+
+
+def scheduling_defaults(cwd):
+    return {"role": "primary", "allow_auxiliary": False, "independent": False,
+            "resource_contract": None, "write_scope": cwd}
+
+
+def _job_defaults(job):
+    if 'cwd' in job:
+        job.setdefault('scheduling', scheduling_defaults(job['cwd']))
+        job.setdefault('sharing_anchor', None)
+    return job
+
+
+def _nonnegative(value, name):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise JobsError(f"{name} must be nonnegative and finite")
+    return value
+
+
+def _scheduling(value, resources, cwd):
+    result = dict(value)
+    if not isinstance(result['role'], str) or result['role'] not in {'primary', 'auxiliary'}:
+        raise JobsError('Scheduling role must be primary or auxiliary')
+    if not isinstance(result['allow_auxiliary'], bool) or not isinstance(result['independent'], bool):
+        raise JobsError('Sharing flags must be boolean')
+    if result['resource_contract'] is not None and result['resource_contract'] != 'trusted-declared':
+        raise JobsError('Resource contract must be trusted-declared')
+    scope = result['write_scope']
+    if not isinstance(scope, (str, Path)) or not str(scope) or '\0' in str(scope):
+        raise JobsError('Write scope must be a nonempty path')
+    location = Path(scope).expanduser()
+    location = (location if location.is_absolute() else Path(cwd)/location).resolve()
+    if not location.is_dir():
+        raise JobsError('Write scope must be an existing directory')
+    result['write_scope'] = str(location)
+    if result['role'] == 'auxiliary':
+        if result['allow_auxiliary']:
+            raise JobsError('Only a primary may allow an auxiliary')
+        if not result['independent'] or result['resource_contract'] != 'trusted-declared':
+            raise JobsError('Auxiliary requires independence and an explicit trusted-declared resource contract')
+        if resources.get('cpus') is None or resources.get('memory_gib') is None:
+            raise JobsError('Auxiliary requires declared CPUs and memory')
+        if declared_cpu_demand(resources) > resources['cpus']:
+            raise JobsError('Declared MPI/thread demand exceeds Auxiliary CPU request')
+    return result
+
+
 class Store:
     def __init__(self, root: Path | str | None = None):
         self.root = Path(root).expanduser().resolve() if root is not None else default_state()
@@ -57,9 +113,22 @@ class Store:
             con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             con.execute("CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL)")
             con.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, time REAL, job_id INTEGER, message TEXT)")
-            con.execute("INSERT OR IGNORE INTO meta VALUES ('control', ?)", (json.dumps({"schema": 1, "dispatch": False, "stop": False, "reason": "Not started", "heartbeat": None, "owner": None}),))
-            if self.control(con)["schema"] != 1:
+            con.execute("INSERT OR IGNORE INTO meta VALUES ('control', ?)", (json.dumps({"schema": 2, "dispatch": False, "stop": False, "reason": "Not started", "heartbeat": None, "owner": None, "scheduler": scheduler_defaults()}),))
+            raw_control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
+            if type(raw_control.get('schema')) is not int or raw_control['schema'] not in {1, 2}:
                 raise JobsError("Unsupported Jobs state schema")
+            if raw_control['schema'] == 1:
+                # Old supervisors reject schema 2 on their next receipt/finalize
+                # transaction. Keep their state readable until they are done.
+                from .ownership import lock_held, owner_alive
+                if (any(job['status'] in ACTIVE for job in self.rows(con)) or
+                        lock_held(self.root/'controller.lock') or owner_alive(raw_control.get('owner'))):
+                    raise JobsError('Legacy Jobs runtime still active or unresolved; let legacy attempts finish '
+                                    'and stop the legacy controller with its original installation before migration')
+                control = self.control(con)
+                self.set_control(con, control)
+                for job in self.rows(con):
+                    self.save(con, job)
             yield con
             con.commit()
         except sqlite3.Error as exc:
@@ -73,7 +142,12 @@ class Store:
 
     @staticmethod
     def control(con):
-        return json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
+        control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
+        if type(control.get('schema')) is not int or control['schema'] not in {1, 2}:
+            raise JobsError('Unsupported Jobs state schema')
+        control['schema'] = 2
+        control['scheduler'] = {**scheduler_defaults(), **control.get('scheduler', {})}
+        return control
 
     @staticmethod
     def set_control(con, control):
@@ -81,7 +155,7 @@ class Store:
 
     @staticmethod
     def rows(con):
-        return [json.loads(row[0]) for row in con.execute("SELECT data FROM jobs ORDER BY id")]
+        return [_job_defaults(json.loads(row[0])) for row in con.execute("SELECT data FROM jobs ORDER BY id")]
 
     @staticmethod
     def get(con, job_id):
@@ -92,7 +166,7 @@ class Store:
         row = con.execute("SELECT data FROM jobs WHERE id=?", (number,)).fetchone()
         if row is None:
             raise JobsError(f"No such job: {job_id}")
-        job = json.loads(row[0])
+        job = _job_defaults(json.loads(row[0]))
         if "." in str(job_id) and str(job_id) != job["display_id"]:
             raise JobsError("Attempt identity differs")
         return job
@@ -113,7 +187,8 @@ class Store:
 
     def add(self, *, argv, cwd, name, engine="Command", cpus=None, memory_gib=None,
             mpi_ranks=None, threads_per_rank=None, env=None, hold=False,
-            on_failure="pause", layout=None):
+            on_failure="pause", layout=None, role="primary", allow_auxiliary=False,
+            independent=False, resource_contract=None, write_scope=None):
         argv = list(argv)
         if not argv or any(not isinstance(a, str) or "\0" in a for a in argv) or not argv[0]:
             raise JobsError("An explicit nonempty argv without NUL bytes is required")
@@ -143,6 +218,9 @@ class Store:
         resources = {"cpus": _positive(cpus, "CPUs", True), "memory_gib": _positive(memory_gib, "Memory"),
                      "mpi_ranks": _positive(mpi_ranks, "MPI ranks", True),
                      "threads_per_rank": _positive(threads_per_rank, "Threads/rank", True)}
+        scheduling = _scheduling(dict(role=role, allow_auxiliary=allow_auxiliary,
+            independent=independent, resource_contract=resource_contract,
+            write_scope=str(directory) if write_scope is None else write_scope), resources, directory)
         with self.transaction() as con:
             number = con.execute("INSERT INTO jobs(data) VALUES ('{}')").lastrowid
             pending = [j for j in self.rows(con) if j.get("status") in PENDING]
@@ -153,11 +231,89 @@ class Store:
                    "on_failure": on_failure, "enqueued_at": time.time(), "started_at": None,
                    "finished_at": None, "exit_code": None, "signal": None, "reason": "",
                    "worker": None, "group": None, "claim": None, "claimed_at": None,
-                   "cancel_requested": False}
+                   "cancel_requested": False, "scheduling": scheduling, "sharing_anchor": None}
             job["logs"] = {stream: str(self.root / "attempts" / job["attempt_id"] / f"{stream}.log") for stream in ("stdout", "stderr")}
             self.save(con, job)
             self.event(con, number, f"Enqueued at order {job['order']}")
         return job
+
+    def configure_sharing(self, mode, *, cpu_budget=None, memory_gib=None,
+                          cpu_reserve=None, min_available_gib=None):
+        if not isinstance(mode, str) or mode not in {'sequential', 'bounded-sharing'}:
+            raise JobsError('Scheduling mode must be sequential or bounded-sharing')
+        updates = dict(cpu_budget=cpu_budget, memory_gib=memory_gib,
+                       cpu_reserve=cpu_reserve, min_available_gib=min_available_gib)
+        with self.transaction() as con:
+            control = self.control(con)
+            scheduler = dict(control['scheduler'])
+            for key, value in updates.items():
+                if value is not None:
+                    scheduler[key] = (_positive(value, key, key == 'cpu_budget') if key in {'cpu_budget', 'memory_gib'}
+                                      else _nonnegative(value, key))
+            if mode == 'bounded-sharing' and any(scheduler[key] is None for key in updates):
+                raise JobsError('First Bounded Sharing activation requires all four explicit resource policy values')
+            if any(value is not None for value in updates.values()) or mode == 'bounded-sharing':
+                import psutil
+                try:
+                    logical = psutil.cpu_count(logical=True)
+                    physical_gib = psutil.virtual_memory().total / (1024 ** 3)
+                except (psutil.Error, OSError) as exc:
+                    raise JobsError('Physical host resources unavailable; cannot validate sharing policy') from exc
+                if not logical or physical_gib <= 0:
+                    raise JobsError('Physical host resources unavailable; cannot validate sharing policy')
+                if (scheduler['cpu_budget'] is not None and scheduler['cpu_budget'] > logical or
+                        scheduler['cpu_reserve'] is not None and scheduler['cpu_reserve'] >= logical):
+                    raise JobsError('CPU policy exceeds observable logical CPU capacity')
+                if (scheduler['memory_gib'] is not None and scheduler['memory_gib'] > physical_gib or
+                        scheduler['min_available_gib'] is not None and scheduler['min_available_gib'] >= physical_gib):
+                    raise JobsError('Memory policy exceeds observable physical RAM')
+            scheduler['mode'] = mode
+            control['scheduler'] = scheduler
+            self.set_control(con, control)
+            self.event(con, None, 'Scheduling policy configured: ' + mode)
+        return scheduler
+
+    def set_sharing(self, job_id, *, role=None, allow_auxiliary=None, independent=None,
+                    resource_contract=None, write_scope=None):
+        updates = {k: v for k, v in dict(role=role, allow_auxiliary=allow_auxiliary,
+            independent=independent, resource_contract=resource_contract, write_scope=write_scope).items() if v is not None}
+        with self.transaction() as con:
+            job = self.get(con, job_id)
+            if job['status'] not in PENDING:
+                if (job['status'] not in ACTIVE or job['scheduling']['role'] != 'primary' or
+                        set(updates) != {'allow_auxiliary'}):
+                    raise JobsError('Only allow_auxiliary metadata may change on an active primary; other sharing edits require a pending job')
+            job['scheduling'] = _scheduling({**job['scheduling'], **updates}, job['resources'], job['cwd'])
+            self.save(con, job)
+            self.event(con, job['id'], 'Sharing declaration updated')
+        return job
+
+    def set_external_reservation(self, reservation):
+        if reservation is not None:
+            keys = {'observation_id', 'fingerprint', 'cpu_budget', 'memory_gib', 'write_scope',
+                    'created_at', 'source', 'allow_auxiliary'}
+            if not isinstance(reservation, dict) or set(reservation) != keys:
+                raise JobsError('External reservation has an invalid shape')
+            if (not isinstance(reservation['observation_id'], str) or not re.fullmatch(r'E[0-9a-f]+', reservation['observation_id']) or
+                    not isinstance(reservation['fingerprint'], str) or not re.fullmatch(r'[0-9a-f]{64}', reservation['fingerprint']) or
+                    reservation['source'] != 'user supplied' or reservation['allow_auxiliary'] is not True):
+                raise JobsError('External reservation identity/source is invalid')
+            reservation = dict(reservation)
+            if reservation['cpu_budget'] is None or reservation['memory_gib'] is None:
+                raise JobsError('External reservation requires explicit CPU and memory budgets')
+            reservation['cpu_budget'] = _positive(reservation['cpu_budget'], 'External CPUs', True)
+            reservation['memory_gib'] = _positive(reservation['memory_gib'], 'External memory')
+            _nonnegative(reservation['created_at'], 'Reservation timestamp')
+            scope = reservation['write_scope']
+            if (not isinstance(scope, str) or '\0' in scope or not Path(scope).is_absolute() or
+                    not Path(scope).is_dir() or str(Path(scope).resolve()) != scope):
+                raise JobsError('External reservation requires a resolved existing write directory')
+        with self.transaction() as con:
+            control = self.control(con)
+            control['scheduler']['external_reservation'] = reservation
+            self.set_control(con, control)
+            self.event(con, None, 'External reservation revoked' if reservation is None else 'External reservation declared')
+        return control['scheduler']
 
     def dispatch(self, enabled):
         with self.transaction() as con:
@@ -211,7 +367,7 @@ class Store:
 
     def snapshot(self, *, now=None):
         now = time.time() if now is None else now
-        empty = {"schema": 1, "dispatch": False, "stop": False, "owner": None, "heartbeat": None, "reason": "No queue; use cmw jobs add, then start"}
+        empty = {"schema": 2, "scheduler": scheduler_defaults(), "dispatch": False, "stop": False, "owner": None, "heartbeat": None, "reason": "No queue; use cmw jobs add, then start"}
         if not self.path.exists():
             control, jobs, events = empty, [], []
         else:
@@ -219,8 +375,14 @@ class Store:
             con = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=10)
             try:
                 con.execute("BEGIN")
-                control, jobs = self.control(con), self.rows(con)
-                events = [dict(zip(("id", "time", "job_id", "message"), row)) for row in con.execute("SELECT * FROM events ORDER BY id DESC LIMIT 30")][::-1]
+                tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if not tables:
+                    # A rejected first mutation can roll back CREATE TABLE while
+                    # leaving the new empty SQLite file. No existing data is reset.
+                    control, jobs, events = empty, [], []
+                else:
+                    control, jobs = self.control(con), self.rows(con)
+                    events = [dict(zip(("id", "time", "job_id", "message"), row)) for row in con.execute("SELECT * FROM events ORDER BY id DESC LIMIT 30")][::-1]
             except sqlite3.Error as exc:
                 raise JobsError(f"Queue database unavailable: {exc}") from exc
             finally:
@@ -229,7 +391,7 @@ class Store:
         online = bool(control["owner"] and owner_alive(control["owner"]) and lock_held(self.root / "controller.lock"))
         age = None if control["heartbeat"] is None else max(0, now - control["heartbeat"])
         stale = bool(online and (age is None or age > 5))
-        current = next((j for j in jobs if j["status"] in ACTIVE), None)
+        current = [j for j in jobs if j["status"] in ACTIVE]
         pending = sorted((j for j in jobs if j["status"] in PENDING), key=lambda j: j["order"])
         for job in jobs:
             job["elapsed"] = None if job["started_at"] is None else max(0, (job["finished_at"] or now) - job["started_at"])
@@ -237,7 +399,7 @@ class Store:
                 if job["status"] == "Hold":
                     job["reason"] = "User hold"
                 elif current:
-                    job["reason"] = f"Waiting for {current['display_id']} ({current['status']})"
+                    job["reason"] = "Active: " + ", ".join(f"{j['display_id']} ({j['status']})" for j in current)
                 elif not online:
                     job["reason"] = "Controller offline; use start"
                 elif stale:
@@ -249,6 +411,7 @@ class Store:
                 elif not job["reason"]:
                     job["reason"] = "Next in queue"
             job["check"] = None
-        return {"schema": 1, "state_directory": str(self.root), "controller_log": str(self.root / "controller.log"),
+        return {"schema": 2, "state_directory": str(self.root), "controller_log": str(self.root / "controller.log"),
                 "controller": {**control, "online": online, "stale": stale, "age_seconds": age},
-                "mode": "Sequential", "observed_at": now, "jobs": jobs, "events": events}
+                "mode": "Bounded Sharing" if control["scheduler"]["mode"] == "bounded-sharing" else "Sequential",
+                "scheduler": control["scheduler"], "observed_at": now, "jobs": jobs, "events": events}

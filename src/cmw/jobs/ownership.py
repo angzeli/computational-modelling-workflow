@@ -57,23 +57,48 @@ def lock_held(path, *, strict=False):
         return True  # Inaccessible ownership must not authorize dispatch.
 
 
-def group_members(pgid, *, pids=None, process_factory=psutil.Process):
+def group_members(pgid, *, pids=None, process_factory=psutil.Process, session=False):
     """Only inspect membership of the group we created. No engine-name discovery."""
     members = []
+    membership = os.getsid if session else os.getpgid
     for pid in psutil.pids() if pids is None else pids:
         try:
-            if os.getpgid(pid) == pgid and process_factory(pid).status() != psutil.STATUS_ZOMBIE:
+            if membership(pid) == pgid and process_factory(pid).status() != psutil.STATUS_ZOMBIE:
                 members.append(pid)
         except (ProcessLookupError, psutil.NoSuchProcess):
             continue
         except (PermissionError, psutil.AccessDenied) as exc:
             # A group member whose state is unreadable cannot be declared ended.
             try:
-                if os.getpgid(pid) == pgid:
+                if membership(pid) == pgid:
                     raise JobsError("Managed process group is not fully observable") from exc
             except ProcessLookupError:
                 pass
     return members
+
+
+def signal_session(owner, signum):
+    """Signal owned subgroups before the pinned leader; never adopt another session."""
+    sid = owner['pid']
+    if not owner_alive(owner) or os.getsid(sid) != sid:
+        raise JobsError('Dedicated session ownership lost; no signal sent')
+    groups = set()
+    for pid in group_members(sid, session=True):
+        try:
+            if os.getsid(pid) == sid:
+                groups.add(os.getpgid(pid))
+        except ProcessLookupError:
+            continue
+    for pgid in sorted(groups - {sid}) + [sid]:
+        if not owner_alive(owner):
+            raise JobsError('Dedicated session ownership lost during cancellation')
+        try:
+            if os.getsid(pgid) != sid or os.getpgid(pgid) != pgid:
+                raise JobsError('Session subgroup identity cannot be verified')
+            os.killpg(pgid, signum)
+        except ProcessLookupError:
+            # An ended subgroup needs no signal. Final membership still gates completion.
+            continue
 
 
 def group_exists(pgid):
@@ -104,13 +129,14 @@ A live replacement with the original leader PID is never accepted.
     except (psutil.NoSuchProcess, ProcessLookupError):
         pass
     members = []
-    for pid in group_members(group['pid'], pids=pids, process_factory=process_factory):
+    session = job.get('env', {}).get('CMW_JOBS_OWN_SESSION') == '1'
+    for pid in group_members(group['pid'], pids=pids, process_factory=process_factory, session=session):
         try:
             owner = identity_provider(pid)
             if (owner['host'] != group['host'] or owner['boot'] != group['boot'] or
-                    os.getsid(pid) != group['pid'] or os.getpgid(pid) != group['pid']):
+                    os.getsid(pid) != group['pid'] or (not session and os.getpgid(pid) != group['pid'])):
                 continue
-            members.append({'identity': owner, 'pgid': group['pid']})
+            members.append({'identity': owner, 'pgid': os.getpgid(pid)})
         except (psutil.NoSuchProcess, ProcessLookupError):
             continue
     return members, ''

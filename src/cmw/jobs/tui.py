@@ -14,7 +14,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 
-from .cli import elapsed, safe_text, tail, guard_text, external_detail, usage_cells, usage_detail, machine_text
+from .cli import elapsed, safe_text, tail, guard_text, external_detail, usage_cells, usage_detail, machine_text, sharing_text, job_sharing_detail, observation_sharing
 from .store import ACTIVE, PENDING, JobsError, Store
 
 
@@ -117,7 +117,7 @@ class Inspect(ModalScreen):
             self.log_stamps = stamps
             text = "\n\n".join(f"{stream.upper()} · {path}\n{tail(path)}" for stream, path in job["logs"].items())
         else:
-            text = (detail(job) + "\n\n" + usage_detail(job.get("usage")) + f"\n\nAttempt: {job['attempt_id']}\n"
+            text = (detail(job) + "\n\n" + job_sharing_detail(job) + "\n\n" + usage_detail(job.get("usage")) + f"\n\nAttempt: {job['attempt_id']}\n"
                     f"Enqueued: {timestamp(job['enqueued_at'])}\nStarted: {timestamp(job['started_at'])}\n"
                     f"Finished: {timestamp(job['finished_at'])}\nExit code: {job['exit_code']}   Signal: {job['signal']}\n"
                     f"Failure policy: {job['on_failure']}\nCHECK: Not evaluated\n\n"
@@ -150,6 +150,34 @@ class ExternalInspect(ModalScreen):
             external_detail(observation) if observation else "External process no longer observed; outcome is not known."))
 
 
+class SharingInspect(ModalScreen):
+    BINDINGS = [("escape", "dismiss(None)", "Back"), ("q", "dismiss(None)", "Back"), ("ctrl+c", "dismiss(None)", "Back")]
+    DEFAULT_CSS = Inspect.DEFAULT_CSS.replace("Inspect", "SharingInspect")
+
+    def __init__(self, provider):
+        super().__init__()
+        self.provider = provider
+
+    def compose(self):
+        with Vertical():
+            yield Label("SCHEDULING DETAILS — READ ONLY")
+            with VerticalScroll():
+                yield Static(id="sharing-body", markup=False)
+            yield Label("Esc / Q: back · CLI config/sharing/reserve change declarations")
+
+    def on_mount(self):
+        self.refresh_content()
+        self.set_interval(0.5, self.refresh_content)
+
+    def refresh_content(self):
+        state = self.provider()
+        text = (f"Mode: {state.get('mode', 'Sequential')}\n" + sharing_text(state) + "\n" + guard_text(state)
+                + "\n\nRequested resources, admission commitments and observed usage are separate.\n"
+                + "Declarations are not OS-enforced limits; external processes remain read-only.\n\n"
+                + json.dumps({'scheduler': state.get('scheduler'), 'admission': state.get('admission')}, indent=2, ensure_ascii=False))
+        self.query_one("#sharing-body", Static).update(literal(text))
+
+
 class JobsTable(DataTable):
     BINDINGS = [Binding("enter", "select_cursor", "Details")]
 
@@ -166,6 +194,7 @@ class JobsApp(App):
     CSS = """
     Screen { background: #111820; color: #d7e0e8; }
     #heading { height: 1; padding: 0 1; color: #b7d8dd; text-style: bold; }
+    #sharing { height: auto; max-height: 4; padding: 0 1; color: #b7d8dd; }
     #machine { height: auto; max-height: 2; padding: 0 1; color: #b7d8dd; }
     #controller { height: auto; min-height: 2; padding: 0 1; color: #a9b9c7; }
     #table { height: 1fr; min-height: 5; margin: 1 1 0 1; }
@@ -180,7 +209,7 @@ class JobsApp(App):
     Footer { background: #22303d; }
     #shortcuts { height: auto; background: #22303d; color: #d7e0e8; padding: 0 1; }
     """
-    BINDINGS = [Binding("enter", "details", "Details"), Binding("l", "logs", "Logs"),
+    BINDINGS = [Binding("enter", "details", "Details"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
                 Binding("p", "dispatch", "Dispatch"), Binding("h", "hold", "Hold"),
                 Binding("o", "order", "Order"), Binding("x", "cancel", "Cancel"),
                 Binding("q", "quit", "Detach", priority=True), Binding("ctrl+c", "quit", "Detach", show=False, priority=True)]
@@ -207,6 +236,7 @@ class JobsApp(App):
         yield Static("CMW / JOBS                                             LOCAL", id="heading")
         yield Static(id="controller", markup=False)
         yield Static(id="machine", markup=False)
+        yield Static(id="sharing", markup=False)
         yield JobsTable(id="table", cursor_type="row", zebra_stripes=True)
         yield Static(id="guard", markup=False)
         yield Static("EXTERNAL ACTIVITY — READ ONLY", id="external-heading", markup=False)
@@ -214,7 +244,7 @@ class JobsApp(App):
         yield Static(id="selected", markup=False)
         yield Static(id="events", markup=False)
         yield Static("Best-effort guard; no machine-wide reservation. Q / Ctrl-C detaches; execution continues.", id="message", markup=False)
-        yield Static("Enter Details · L Logs · P Dispatch · H Hold\nO Order · X Cancel · Q / Ctrl-C Detach", id="shortcuts", markup=False)
+        yield Static("Enter Details · L Logs · P Dispatch · H Hold\nO Order · X Cancel · B Scheduling · Q / Ctrl-C Detach", id="shortcuts", markup=False)
         yield Footer()
 
     def on_mount(self):
@@ -237,7 +267,7 @@ class JobsApp(App):
                     from .telemetry import Sampler
                     self.sampler = Sampler()
                 state = project(self.store, observer=self.observer, sampler=self.sampler)
-                projection = {key: state[key] for key in ("external_activity", "admission", "controller_guard", "machine_usage") if key in state}
+                projection = {key: state[key] for key in ("external_activity", "admission", "controller_guard", "machine_usage", "sharing_evidence", "scheduler", "mode") if key in state}
                 projection["job_usage"] = {j["attempt_id"]: j.get("usage") for j in state["jobs"] if j["status"] in ACTIVE}
             except Exception as exc:
                 # A client collection failure must not erase the last observed processes.
@@ -256,8 +286,9 @@ class JobsApp(App):
         self.refresh_state()
 
     def external_observation(self, observation_id):
-        return next((item for item in self.activity_projection.get("external_activity", {}).get("observations", [])
+        item = next((item for item in self.activity_projection.get("external_activity", {}).get("observations", [])
                      if item["id"] == observation_id), None)
+        return {**item, "scheduling_context": observation_sharing({**(self.state or {}), "admission": self.activity_projection.get('admission', {})})} if item else None
 
     def external_selected(self):
         return self.external_observation(self.external_selected_id)
@@ -285,13 +316,21 @@ class JobsApp(App):
                     f"CPU NOW: {cpu_now}   RAM NOW: {ram_now}\n"
                     f"NPROC: {item.get('nproc', 1)} observed processes · Process age: {elapsed(item.get('age_seconds'))}\n"
                     f"Working directory: {item.get('cwd') or '—'}\nEnter: measurement quality and evidence")
-        return detail(self.selected(), narrow=self.size.width < 110)
+        text = detail(self.selected(), narrow=self.size.width < 110)
+        job = self.selected()
+        if job and self.state.get('mode') == 'Bounded Sharing':
+            role = job.get('scheduling', {}).get('role', 'primary').title()
+            text = text.replace(f"SELECTED: {job['display_id']}", f"SELECTED: {job['display_id']} [{role}]")
+        return text
 
     def external_read_only(self):
         if self.external_selected_id:
             self.query_one("#message", Static).update("External observation is read-only: no logs, cancel, hold, or order actions.")
             return True
         return False
+
+    def display_state(self):
+        return {**self.activity_projection, **(self.state or {}), "admission": self.activity_projection.get("admission", {})}
 
     def refresh_external(self, wide):
         guard = self.activity_projection.get("external_activity")
@@ -304,7 +343,17 @@ class JobsApp(App):
         if guard:
             from .activity import admission
             self.activity_projection["admission"] = admission(self.state, guard)
-        self.query_one("#guard", Static).update(literal(guard_text(self.activity_projection)))
+            decision = self.activity_projection["admission"]
+            for job in self.state['jobs']:
+                if job['status'] in PENDING and job['id'] == decision.get('candidate_id'):
+                    job['reason'] = decision['reason']
+        display_state = self.display_state()
+        self.query_one("#guard", Static).update(literal(guard_text(display_state)))
+        compact = self.size.width < 110 or self.size.height < 36
+        sharing = self.query_one("#sharing", Static)
+        sharing.display = self.state.get('mode') == 'Bounded Sharing'
+        sharing.styles.max_height = 1 if compact else 4
+        sharing.update(literal(sharing_text(display_state, compact=compact)))
         table = self.query_one("#external", DataTable)
         observations = (guard or {}).get("observations", [])
         self.query_one("#external-heading", Static).update(literal(
@@ -354,6 +403,7 @@ class JobsApp(App):
         except (ValueError, OSError) as exc:
             self.query_one("#message", Static).update(literal(f"State unavailable: {exc}"))
             return
+        self.state['sharing_evidence'] = self.activity_projection.get('sharing_evidence')
         self.refresh_usage()
         control = self.state["controller"]
         status = "STALE — needs attention" if control["stale"] else "Online" if control["online"] else "Offline"
@@ -363,10 +413,12 @@ class JobsApp(App):
         ram = sum(j["resources"]["memory_gib"] or 0 for j in active) or "—"
         age = "never" if control["age_seconds"] is None else f"{int(control['age_seconds'])}s ago"
         compact = self.size.width < 110 or self.size.height < 36
+        mode = self.state.get('mode', 'Sequential')
+        bounded = mode == 'Bounded Sharing'
         counts = (f"Run: {sum(j['status']=='Run' for j in jobs)}   Queue: {sum(j['status']=='Queue' for j in jobs)}   "
                   f"Hold: {sum(j['status']=='Hold' for j in jobs)}")
-        header = (f"Controller: {status}   Dispatch intent: {'ON' if control['dispatch'] else 'OFF'}\nManaged: {counts} · Sequential" if compact else
-                  f"Controller: {status}   Dispatch intent: {'ON' if control['dispatch'] else 'OFF'}   Mode: Sequential   Updated: {age}\n"
+        header = (f"Controller: {status}   Dispatch intent: {'ON' if control['dispatch'] else 'OFF'}\nManaged: {counts} · {mode}" if compact else
+                  f"Controller: {status}   Dispatch intent: {'ON' if control['dispatch'] else 'OFF'}   Mode: {mode}   Updated: {age}\n"
                   f"Managed requested: CPUs {cpu}   RAM: {ram} GiB   {counts}")
         self.query_one("#controller", Static).update(literal(header))
         self.query_one("#events", Static).display = not compact
@@ -383,17 +435,23 @@ class JobsApp(App):
         columns = ([('order', 'ORDER', 5), ('id', 'JOB ID', 8), ('name', 'NAME', 16), ('engine', 'ENGINE', 7),
                     ('status', 'STATUS', 10), ('cpus', 'CPUS', 4), ('cpu_now', 'CPU NOW', 7), ('ram_now', 'RAM NOW', 15), ('elapsed', 'ELAPSED', 10), ('reason', 'REASON', 28)] if wide else
                    [('id', 'JOB ID', 8), ('status', 'STATUS', 9), ('cpu_now', 'CPU NOW', 7), ('ram_now', 'RAM NOW', 15), ('elapsed', 'ELAPSED', 10)])
-        # Rebuild only on layout changes; refreshes update cells in place.
-        if wide != self.columns_mode:
+        if bounded:
+            columns = [(('role', 'ROLE', 9) if key == 'engine' else (key, 'ID P/A' if key == 'id' and not wide else label, width))
+                       for key, label, width in columns]
+        # Rebuild only on layout/mode changes; refreshes update cells in place.
+        layout_mode = (wide, bounded)
+        if layout_mode != self.columns_mode:
             table.clear(columns=True)
             for key, label, width in columns:
                 table.add_column(label, key=key, width=width)
-            self.columns_mode = wide
+            self.columns_mode = layout_mode
             self.row_ids = []
         for job in jobs:
             key = job['display_id']
             cpu_now, ram_now = usage_cells(job.get('usage'))
-            values = {'order': str(job['order'] or '—').rjust(5), 'id': key, 'name': job['name'], 'engine': job['engine'],
+            role = job.get('scheduling', {}).get('role', 'primary')
+            values = {'order': str(job['order'] or '—').rjust(5), 'id': key + (' A' if role == 'auxiliary' else ' P') if bounded and not wide else key, 'name': job['name'], 'engine': job['engine'],
+                      'role': role.title(),
                       'status': job['status'], 'cpus': str(job['resources']['cpus'] or '—').rjust(4),
                       'cpu_now': cpu_now, 'ram_now': ram_now,
                       'elapsed': elapsed(job['elapsed']).rjust(10), 'reason': job['reason'] or '—'}
@@ -452,6 +510,9 @@ class JobsApp(App):
         except (ValueError, OSError) as exc:
             self.query_one("#message", Static).update(literal(f"Not applied: {exc}"))
         self.refresh_state()
+
+    def action_scheduling(self):
+        self.push_screen(SharingInspect(self.display_state))
 
     def action_details(self):
         if self.external_selected():

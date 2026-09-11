@@ -398,3 +398,122 @@ request, workload CPU presentation now multiplies core-equivalents by 100 and
 displays an integer percentage (7.1 cores becomes 710%). Details explain that
 100% means one logical CPU; machine CPU keeps its whole-host scale. The sampler
 and raw JSON `cpu_cores` field are unchanged. This is a display-only refinement.
+
+## Bounded Sharing implementation plan (11 September 2026)
+
+Starting checkout: `2262be57b0aee82dc1b024668c1670f5a125f34a`, schema 1.
+Pre-existing uncommitted work adds dedicated-session ownership in activity,
+ownership and runtime, related documentation/tests, and a prepared Multiwfn IFCT
+runner. Preserve those changes and their scientific/execution contracts.
+
+The store already represents multiple jobs and supervisors; controller tick
+reconciles every active attempt, and cancellation/finish target one attempt.
+Single-slot assumptions to replace are tick's unconditional active veto, the
+final GO guard-only permission, snapshot's first-active waiting reason, and
+hard-coded Sequential presentation. Telemetry already maps all active attempts.
+
+Implement a shared admission evaluator and bounded observation window. Keep
+Sequential as the migration/default policy. In explicitly configured Bounded
+Sharing, permit only one consented primary plus one explicitly independent,
+trusted-resource auxiliary, selected in stable auxiliary order. Persist role,
+consent, write scope and the admitted anchor on jobs; persist one identity-bound
+external scheduling reservation without changing external ownership/BUSY.
+
+Starting atomically consumes declared CPU/RAM inside the existing transaction.
+Both tick and final GO re-evaluate persistent order/roles/anchor, commitments,
+external evidence, disjoint resolved write scopes, and fresh sustained host
+headroom. Running work is never automatically stopped for pressure/overrun.
+A lingering auxiliary blocks the next primary. Use independent existing
+supervisors and preserve failure/pause/cancellation semantics.
+
+Validate schema-1 migration, policy thresholds/order, synthetic managed and
+external overlap, transactional and final-GO races, restart/cancellation, and
+CLI/TUI projections. Then run the relevant Jobs suite and one broad offline
+compatibility regression, followed by one final-source installed-wheel smoke.
+Only isolated synthetic jobs/configuration are authorized for acceptance.
+
+### Implemented disposition
+
+`sharing.py` supplies the single admission decision used by controller claims,
+the supervisor's final GO transaction, CLI/JSON and the console. Schema 2 adds
+explicit scheduler policy, per-job role/consent/independence/resource contract and
+resolved write scope, plus one external identity-bound reservation. Schema-1
+read-only views supply compatible defaults without writing; migration is atomic
+and refuses active/unresolved legacy attempts or a live/locked legacy controller.
+This prevents an older supervisor from encountering an unsupported schema during
+finalization. No production state was migrated for testing.
+
+Sequential keeps the ordinary single-slot/global-order policy. Bounded Sharing
+selects only the first pending auxiliary during an active sharing window, with a
+held auxiliary blocking that lane. Without an anchor, the ordinary global queue
+order applies. Starting is the transactional resource commitment; Run,
+Cancelling and Unknown retain it. Missing declarations remain unknown in the
+display rather than becoming zero. Final GO rechecks the same decision with
+independent host evidence, current controls/order and the admitted anchor. A
+refused auxiliary returns at its original queue position, without payload work.
+Each existing supervisor retains its own ownership, logs and cancellation scope.
+
+CPU/RAM commitments include a valid external declaration without changing BUSY or
+external ownership. Auxiliary CPU/RAM, independence and `trusted-declared` consent
+are mandatory; known MPI ranks times threads/rank cannot exceed declared CPUs.
+The existing Multiwfn runtime prepares explicit per-run thread settings and checks
+contradictory declarations; opaque prepared commands still require the user's
+explicit trust assertion, not an engine-name exemption. Existing runner inputs,
+finalization and scientific contracts are unchanged.
+
+Host admission uses two fresh observations at least 0.5 seconds apart: oldest at
+most five seconds, newest at most two seconds. Worst observed free logical CPU
+capacity must cover candidate CPUs plus reserve, and minimum available RAM must
+cover candidate memory plus margin. Recent available swap-out counter growth is
+an additional veto; historical swap usage is not. Two CPU samples more than
+0.05 core above a declaration, or a current RSS subtotal above declared memory,
+warn and veto new admission. Partial measured subtotals can demonstrate overruns;
+shared-page RSS double counting remains explicit. Resolved equal or ancestor/
+descendant write scopes block sharing. These are admission checks, not resource
+enforcement, and never automatically stop running work.
+
+Validation: the broad offline regression passed 644 tests in 322.872 seconds.
+The new gated runtime cases cover managed/external overlap, single auxiliary and
+primary lanes, a lingering auxiliary, pause/hold, both-job restart, independent
+failure/cancellation, external expiry, simultaneous claim transactions and final
+CPU/RAM/external GO refusals. Deterministic cases cover exact commitments,
+headroom/freshness/swap, identity changes, write scopes and overrun warnings. A
+small owned real CPU fixture produced fresh bounded sampler evidence and was
+reaped without exact-percentage assertions. CLI/JSON and wide/narrow console
+checks retain the 713%-style display and separate external read-only controls.
+Following final refinements, 31 policy/store/UI tests passed in 1.603 seconds;
+the final external-GO queue-position regression also passed. The broad suite was
+not redundantly repeated after those focused refinements.
+
+During this task a separate concurrent commit, `14fc760` (queue-managed IFCT
+runner), advanced HEAD and tracked the three pre-existing IFCT files. That work
+and the pre-existing session-ownership changes were preserved. This task made no
+commit, push, tag or version change. Final installed-wheel results follow below.
+
+One final-source `computational_modelling_workflow-0.1.0-py3-none-any.whl` was
+built and installed in a fresh Python 3.14 environment outside the checkout under
+`/tmp/cmw-sharing-wheel.htLXoR`. Imports resolved from that environment's
+`site-packages`, with no checkout import path. Core-only imports, packaged payload
+shell, CLI help, human/JSON status, expected missing-console-extra error (exit 2),
+and isolated schema-1 read/migration passed. Installing the supported Jobs extra
+from locked cached dependencies enabled the actual console.
+
+Installed-wheel gated synthetic Primary + prepared Multiwfn-labelled Auxiliary
+overlap passed, with deterministic private test headroom evidence. The next
+Primary stayed queued after the first Primary ended until the Auxiliary also
+ended. An actual 150-by-42 PTY rendered Bounded Sharing, both roles, commitments
+and machine CPU/RAM; Q detached while both executions continued. All three jobs
+ended Done/exit 0, the isolated controller stopped, and owned runtime identities
+were verified gone. Eight documentation commands, including the prepared
+Multiwfn example, parsed against the installed CLI without execution. Evidence
+is recorded in that temporary directory's core/runtime/CLI summary JSON and PTY
+log. The separate owned CPU-sampler test supplies real host integration evidence;
+the package concurrency test does not claim real-host spare-capacity acceptance.
+
+Disposition: BOUNDED SHARING IMPLEMENTED — ACCEPTANCE PASSED. No real scientific
+engine ran, no research process was signalled or modified, and no production
+queue, reservation or controller was mutated for acceptance. New test fixtures
+were released/reaped; unrelated historical processes were not touched. Limits
+remain one primary plus one auxiliary, explicit trusted resource declarations,
+admission-only enforcement, conservative external identity/write-scope checks,
+and no machine-wide exclusion, arbitrary backfill, automatic tuning or HPC.

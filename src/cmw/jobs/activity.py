@@ -145,7 +145,8 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
                 if job['status'] not in ACTIVE or not job.get('group'):
                     continue
                 group = job['group']
-                if pgid != group['pid'] or sid != group['pid']:
+                session = job.get('env', {}).get('CMW_JOBS_OWN_SESSION') == '1'
+                if (not session and pgid != group['pid']) or sid != group['pid']:
                     continue
                 try:
                     verified = (owner_alive(group) and owner_alive(job.get('worker')) and
@@ -155,7 +156,8 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
                 if verified:
                     # Membership alone is used only while the original pinned
                     # group leader is birth-verified, never for a bare PGID.
-                    if identity(pid) == owner and os.getpgid(pid) == group['pid']:
+                    if (identity(pid) == owner and os.getsid(pid) == group['pid']
+                            and (session or os.getpgid(pid) == group['pid'])):
                         managed = True
                 else:
                     uncertain.append(f'PID {pid}: selected queue group ownership unresolved')
@@ -282,6 +284,9 @@ DEFAULT_OBSERVER = Observer()
 
 def admission(state, guard):
     """Project effective permission without changing dispatch intent or queue state."""
+    if state.get('scheduler', {}).get('mode') == 'bounded-sharing':
+        from .sharing import evaluate
+        return evaluate(state, guard, state.get('sharing_evidence'))
     control = state['controller']
     active = any(j['status'] in ACTIVE for j in state['jobs'])
     pending = sorted((j for j in state['jobs'] if j['status'] in PENDING), key=lambda j:j['order'])
@@ -317,10 +322,22 @@ def project(store, state=None, observer=None, sampler=None):
     if not permits(guard) and pending and pending[0]['status']=='Queue' and control['dispatch'] and not any(j['status'] in ACTIVE for j in state['jobs']):
         pending[0]['reason'] = guard['reason']
     from .telemetry import Sampler
-    usage = (sampler or Sampler()).sample(store, state, guard, pids)
+    sampler = sampler or Sampler()
+    if state.get('scheduler', {}).get('mode') == 'bounded-sharing':
+        sampler.swap_memory = psutil.swap_memory
+    usage = sampler.sample(store, state, guard, pids)
     state['machine_usage'] = usage['machine_usage']
     for job in state['jobs']:
         job['usage'] = usage['jobs'].get(job.get('attempt_id')) if job['status'] in ACTIVE else None
     for observation in guard['observations']:
         observation['usage'] = usage['external'].get(observation['id'])
+    if state.get('scheduler', {}).get('mode') == 'bounded-sharing':
+        from .sharing import EvidenceWindow, evaluate
+        if not hasattr(sampler, '_sharing_window'):
+            sampler._sharing_window = EvidenceWindow()
+        state['sharing_evidence'] = sampler._sharing_window.add(usage, source='client')
+        state['admission'] = evaluate(state, guard, state['sharing_evidence'])
+        for job in state['jobs']:
+            if job['status'] in PENDING:
+                job['reason'] = evaluate(state, guard, state['sharing_evidence'], candidate_id=job['id'])['reason']
     return state

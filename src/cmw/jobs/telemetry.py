@@ -44,11 +44,12 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
 """
     def __init__(self, *, process_factory=psutil.Process, identity_provider=identity,
                  cpu_times=psutil.cpu_times, virtual_memory=psutil.virtual_memory,
-                 monotonic=time.monotonic, wall_time=time.time):
+                 monotonic=time.monotonic, wall_time=time.time, swap_memory=None):
         self.process_factory = process_factory
         self.identity = identity_provider
         self.cpu_times = cpu_times
         self.virtual_memory = virtual_memory
+        self.swap_memory = swap_memory
         self.monotonic = monotonic
         self.wall_time = wall_time
         self.baselines = {}
@@ -121,6 +122,11 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
                           ram_total_bytes=int(memory.total), memory_quality='fresh')
         except (psutil.Error, OSError, ValueError) as exc:
             reasons.append(f'Machine memory: {type(exc).__name__}')
+        if self.swap_memory is not None:
+            try:
+                result['swap_out_bytes'] = int(self.swap_memory().sout)
+            except (psutil.Error, OSError, ValueError):
+                result['swap_out_bytes'] = None
         result.update(observed_at=self.wall_time(), age_seconds=0, reason='; '.join(reasons))
         return result, baseline
 

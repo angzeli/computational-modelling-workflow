@@ -96,6 +96,42 @@ def guard_text(state):
             + "".join(f"\nCoverage: {warning}" for warning in guard.get('coverage', {}).get('warnings', [])))
 
 
+def sharing_text(state, *, compact=False):
+    decision = state.get("admission", {})
+    if state.get("mode", decision.get("mode")) != "Bounded Sharing":
+        return ""
+    number = lambda value: "—" if value is None else f"{value:g}" if isinstance(value, (int, float)) else str(value)
+    committed = (f"Committed: CPU {number(decision.get('cpu_committed'))}/{number(decision.get('cpu_budget'))}   "
+                 f"RAM {number(decision.get('memory_committed_gib'))}/{number(decision.get('memory_budget_gib'))} GiB")
+    if compact:
+        return committed + (" !" if decision.get('warnings') else "")
+    anchor = decision.get('anchor_primary')
+    if anchor is None:
+        anchor = next((job.get('sharing_anchor') for job in state.get('jobs', []) if job.get('sharing_anchor') and job['status'] in {'Starting', 'Run', 'Cancelling', 'Unknown'}), None)
+    if isinstance(anchor, dict):
+        anchor = anchor.get('id', anchor)
+    available = decision.get('host_memory_available_bytes')
+    return (committed + f"\nAuxiliary slot: {decision.get('auxiliary_slot', '—')}   Anchor: {anchor or '—'}\n"
+            f"External reservation: {decision.get('external_reservation_state', 'none')}   Write scopes: {decision.get('write_scope_result', '—')}\n"
+            + "".join(f"Sharing warning: {warning}\n" for warning in decision.get('warnings', []))
+            + f"Host CPU headroom: {number(decision.get('host_cpu_headroom'))} logical CPUs   "
+            f"Available RAM: {'—' if available is None else f'{available / 2**30:.1f} GiB'}")
+
+
+def job_sharing_detail(job):
+    scheduling = job.get('scheduling', {})
+    return (f"Role: {scheduling.get('role', 'primary').title()}   Auxiliary coexistence: {'Allowed' if scheduling.get('allow_auxiliary') else 'Exclusive'}\n"
+            f"Independent: {bool(scheduling.get('independent'))}   Resource contract: {scheduling.get('resource_contract') or 'none'}\n"
+            f"Write scope: {scheduling.get('write_scope') or job.get('cwd') or '—'}\n"
+            f"Sharing anchor: {job.get('sharing_anchor') or '—'}")
+
+
+def observation_sharing(state):
+    return {'reservation': state.get('scheduler', {}).get('external_reservation'),
+            'reservation_state': state.get('admission', {}).get('external_reservation_state', 'none'),
+            'admission_reason': state.get('admission', {}).get('reason')}
+
+
 def external_detail(observation):
     return (f"EXTERNAL OBSERVATION: {observation['id']} — READ ONLY\n"
             f"Ownership: {observation.get('ownership', 'External / unattributed')} — not managed by this queue\n"
@@ -105,6 +141,7 @@ def external_detail(observation):
             f"Executable: {observation.get('exe') or '—'}\nWorking directory: {observation.get('cwd') or '—'}\n"
             "CPUs requested: —   RAM requested: —   Scientific status: Not evaluated\n"
             f"Evidence: {json.dumps(observation.get('evidence', []), ensure_ascii=False)}\n"
+            f"Selected queue sharing declaration (not process ownership): {json.dumps(observation.get('scheduling_context'), ensure_ascii=False)}\n"
             "Observation only. No cancel, hold, reorder, retry, or logs.\n"
             + json.dumps(observation, indent=2, ensure_ascii=False))
 
@@ -112,13 +149,15 @@ def external_detail(observation):
 def status_text(state):
     control = state["controller"]
     online = "Stale" if control["stale"] else "Online" if control["online"] else "Offline"
-    lines = ["CMW / JOBS — local", f"Controller: {online}   Dispatch: {'ON' if control['dispatch'] else 'OFF'}   Mode: Sequential",
+    lines = ["CMW / JOBS — local", f"Controller: {online}   Dispatch: {'ON' if control['dispatch'] else 'OFF'}   Mode: {state.get('mode', 'Sequential')}",
              machine_text(state.get("machine_usage")),
              "ORDER  JOB ID      NAME                  ENGINE      STATUS       CPUS  CPU NOW  RAM NOW          ELAPSED     REASON"]
+    if sharing_text(state):
+        lines.insert(3, sharing_text(state))
     for job in state["jobs"]:
         cpu_now, ram_now = usage_cells(job.get("usage"))
         lines.append(f"{str(job['order'] or '—'):>5}  {job['display_id']:<10}  {safe_text(job['name'])[:20]:20}  {safe_text(job['engine'])[:10]:10}  "
-                     f"{job['status']:11}  {str(job['resources']['cpus'] or '—'):>4}  {cpu_now:>7}  {ram_now:>15}  {elapsed(job['elapsed']):>10}  {safe_text(job['reason'])}")
+                     f"{job['status']:11}  {str(job['resources']['cpus'] or '—'):>4}  {cpu_now:>7}  {ram_now:>15}  {elapsed(job['elapsed']):>10}  {safe_text(job['reason'])}  ROLE {job.get('scheduling', {}).get('role', 'primary')}")
     if not state["jobs"]:
         lines.append("No jobs. Add a prepared command with cmw jobs add, then explicitly start.")
     lines.append(guard_text(state))
@@ -155,6 +194,11 @@ def register(subcommands):
     add.add_argument("--on-failure", choices=("pause", "continue"), default="pause")
     add.add_argument("--hold", action="store_true")
     add.add_argument("--layout", type=Path, help="link and verify an existing CMW layout; does not bypass its runner")
+    add.add_argument("--role", choices=("primary", "auxiliary"), default="primary")
+    add.add_argument("--allow-auxiliary", action="store_true", help="primary scheduling consent; does not change the command")
+    add.add_argument("--independent", action="store_true", help="assert no dependency on or unsafe writes to the primary")
+    add.add_argument("--trust-resources", action="store_true", help="explicitly trust declared CPU/RAM bounds; not OS-enforced")
+    add.add_argument("--write-scope", type=Path, help="declared write tree; defaults to resolved cwd")
     add.add_argument("--json", action="store_true")
     add.add_argument("argv", nargs="...")
     add.set_defaults(handler=handle)
@@ -171,6 +215,37 @@ def register(subcommands):
             command.add_argument("--bytes", type=int, default=16384)
         command.set_defaults(handler=handle)
 
+    config = operations.add_parser("config", help="view/configure scheduler policy; never enables dispatch")
+    config.add_argument("--mode", choices=("sequential", "bounded-sharing"))
+    config.add_argument("--cpu-budget", type=int)
+    config.add_argument("--memory-budget-gib", type=float)
+    config.add_argument("--cpu-reserve", type=float)
+    config.add_argument("--min-available-gib", type=float)
+    config.add_argument("--json", action="store_true")
+    config.set_defaults(handler=handle)
+    sharing = operations.add_parser("sharing", help="declare a managed role/consent; never restarts execution")
+    sharing.add_argument("job_id")
+    sharing.add_argument("--role", choices=("primary", "auxiliary"))
+    consent = sharing.add_mutually_exclusive_group()
+    consent.add_argument("--allow-auxiliary", dest="allow_auxiliary", action="store_true")
+    consent.add_argument("--revoke-auxiliary", dest="allow_auxiliary", action="store_false")
+    sharing.set_defaults(allow_auxiliary=None)
+    sharing.add_argument("--independent", action="store_true", default=None)
+    sharing.add_argument("--trust-resources", action="store_true", default=None)
+    sharing.add_argument("--write-scope", type=Path)
+    sharing.add_argument("--json", action="store_true")
+    sharing.set_defaults(handler=handle)
+    reserve = operations.add_parser("reserve", help="declare identity-bound external coexistence; never adopts/signals it")
+    reserve.add_argument("observation_id")
+    reserve.add_argument("--cpus", type=int, required=True)
+    reserve.add_argument("--memory-gib", type=float, required=True)
+    reserve.add_argument("--write-scope", type=Path)
+    reserve.add_argument("--json", action="store_true")
+    reserve.set_defaults(handler=handle)
+    unreserve = operations.add_parser("unreserve", help="remove external coexistence consent; running work is untouched")
+    unreserve.add_argument("--json", action="store_true")
+    unreserve.set_defaults(handler=handle)
+
 
 def handle(args):
     store = Store(args.state)
@@ -184,7 +259,27 @@ def handle(args):
                 raise JobsError('Console dependency missing; install with: pip install -e ".[jobs]"') from exc
             JobsApp(store).run()
             return 0
-        if operation == "add":
+        if operation == "config":
+            values = {"cpu_budget": args.cpu_budget, "memory_gib": args.memory_budget_gib,
+                      "cpu_reserve": args.cpu_reserve, "min_available_gib": args.min_available_gib}
+            current = store.snapshot()["scheduler"]
+            result = (store.configure_sharing(args.mode or current["mode"], **values)
+                      if args.mode is not None or any(value is not None for value in values.values()) else current)
+        elif operation == "sharing":
+            result = store.set_sharing(args.job_id, role=args.role, allow_auxiliary=args.allow_auxiliary,
+                                      independent=args.independent, resource_contract="trusted-declared" if args.trust_resources else None,
+                                      write_scope=args.write_scope)
+        elif operation == "reserve":
+            from .sharing import make_reservation
+            state = project(store)
+            observation = next((item for item in state['external_activity']['observations'] if item['id'] == args.observation_id), None)
+            if observation is None:
+                raise JobsError(f"External observation no longer observed: {args.observation_id}")
+            reservation = make_reservation(observation, state['external_activity'], args.cpus, args.memory_gib, write_scope=args.write_scope)
+            result = store.set_external_reservation(reservation)
+        elif operation == "unreserve":
+            result = store.set_external_reservation(None)
+        elif operation == "add":
             environment = {}
             for entry in args.env:
                 if "=" not in entry:
@@ -195,7 +290,8 @@ def handle(args):
             result = store.add(argv=argv, cwd=args.cwd, name=args.name, engine=args.engine,
                 cpus=args.cpus, memory_gib=args.memory_gib, mpi_ranks=args.mpi_ranks,
                 threads_per_rank=args.threads_per_rank, env=environment, hold=args.hold,
-                on_failure=args.on_failure, layout=args.layout)
+                on_failure=args.on_failure, layout=args.layout, role=args.role, allow_auxiliary=args.allow_auxiliary,
+                independent=args.independent, resource_contract="trusted-declared" if args.trust_resources else None, write_scope=args.write_scope)
         elif operation in {"start", "stop"}:
             from . import runtime
             getattr(runtime, operation)(store)
@@ -215,6 +311,7 @@ def handle(args):
                 result = next((item for item in state["external_activity"]["observations"] if item["id"] == args.job_id), None)
                 if result is None:
                     raise JobsError(f"External observation no longer observed: {args.job_id}")
+                result = {**result, "scheduling_context": observation_sharing(state)}
                 print(json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False) if args.json else safe_text(external_detail(result)))
                 return 0
             state = project(store) if operation == "show" else store.snapshot()

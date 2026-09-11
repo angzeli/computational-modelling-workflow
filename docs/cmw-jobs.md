@@ -1,8 +1,10 @@
-# CMW Jobs: local sequential execution
+# CMW Jobs: local execution and bounded sharing
 
 CMW Jobs runs already-prepared, trusted foreground commands in an explicit order.
-Exactly one execution in this queue may own the execution slot. External programs
-started outside Jobs are outside this guarantee. This is a local POSIX feature;
+Sequential mode is the default: exactly one managed execution may own the slot.
+Explicit Bounded Sharing permits one primary plus at most one managed auxiliary;
+primaries never overlap. External programs started outside Jobs remain outside
+CMW execution ownership. This is a local POSIX feature;
 macOS Apple Silicon is the acceptance platform for this implementation. Linux and
 other platforms have not been validated. Windows execution is not supported.
 
@@ -59,13 +61,21 @@ cancellation does not disturb the active job. Running cancellation requires
 pauses dispatch until explicit resume after termination is confirmed. TERM is
 sent first, with KILL after a two-second grace period if required.
 
+For a trusted MPI launcher that retains CMW's dedicated session but creates
+separate rank process groups, opt in with `--env CMW_JOBS_OWN_SESSION=1`.
+CMW then observes all live session members and signals verified subgroups before
+its pinned leader. Completion waits for the session to drain; telemetry and the
+external-workload guard use the same scope. Programs must not detach into new
+sessions. Default jobs retain process-group-only ownership. This opt-in has been
+tested locally with Open MPI 5.0.9; it does not validate scientific results.
+
 Hold and order apply only to jobs that have not started. A held or blocked queue
 head blocks later jobs. Move it explicitly, release it, fix its launch blocker,
 or cancel that pending job. The persistent ORDER is independent of job ID and
 screen row order. The console keeps rows stable while ORDER changes.
 
 Console keys: Enter details, L logs, P toggle dispatch, H hold/release, O order,
-X cancellation confirmation, Q or Ctrl-C detach. Arrow/Page keys scroll. Narrow
+X cancellation confirmation, B read-only scheduling details, Q or Ctrl-C detach. Arrow/Page keys scroll. Narrow
 layouts prioritize ID, status/engine, current CPU/RSS and elapsed/process age;
 order, requested CPUs, names, engine and reason remain available in details. Very small
 terminals can scroll the table horizontally. Details and logs have scrollable
@@ -144,9 +154,11 @@ stored as database history or emitted as per-sample queue events.
 
 Telemetry is advisory: zero CPU does not mean a sleeping/stopped computation has
 finished, unavailable RSS does not invalidate an external observation, and low
-machine CPU cannot bypass BUSY. Existing ownership, guard, cancellation and
+machine CPU alone cannot bypass BUSY. In explicitly enabled Bounded Sharing,
+fresh host telemetry adds admission vetoes after identity, declarations and
+commitment checks; it never releases an existing commitment. Existing ownership, guard, cancellation and
 completion evidence remain authoritative. There are no peaks, history, resource
-limits, automatic tuning, resource-aware dispatch, IO/GPU/temperature metrics or
+limits, automatic tuning, arbitrary parallel scheduling, IO/GPU/temperature metrics or
 ETA. The supported runtime boundary remains local macOS with the locked psutil
 dependency; tests use deterministic samples and owned benign processes.
 
@@ -305,7 +317,7 @@ scientific inputs/logs or full command-line inventories are read.
 | Guard state | Meaning and admission effect |
 | --- | --- |
 | NO_MATCH | No recognized external computation observed in a usable fresh scan; remaining controller, user intent, order, ownership and preflight gates still apply |
-| BUSY | Recognized live external computation observed; block new dispatch |
+| BUSY | Recognized live external computation observed; blocks Sequential dispatch; only a valid explicit coexistence reservation can permit an Auxiliary under Bounded Sharing |
 | UNCERTAIN | Material identity, executable, ownership or intended-scope coverage gap; block new dispatch |
 | UNAVAILABLE | Collection/configuration error, timeout or unusable stale evidence; block new dispatch |
 
@@ -337,7 +349,7 @@ are not appended to event history.
 
 A blocked controller may remain online with dispatch intent ON. The guard does
 not turn queued jobs into user-Hold, Fail or Cancelled. Once a fresh scan clears,
-ordinary sequential dispatch proceeds only while intent remains enabled and all
+dispatch proceeds according to the configured mode only while intent remains enabled and all
 other gates pass. Manual pause, held head, failure policy, Unknown ownership and
 unconfirmed cancellation retain their existing effects. Resume does not bypass
 the guard. External activity appearing during managed execution produces a
@@ -361,11 +373,192 @@ External requested CPUs/RAM remain unknown.
 This is **best-effort conflict avoidance, not machine-wide mutual exclusion**.
 No-match does not prove the machine idle. A manual engine can start after a scan
 or after a managed payload begins. Independent state directories have no shared
-global machine lock. The existing at-most-one-execution guarantee applies to the
-selected managed queue only.
+global machine lock. Sequential exclusivity and the explicit primary/auxiliary
+limits apply to the selected managed queue only.
 
 An already-running controller retains the code it loaded. To obtain this guard,
 use the normal explicit stop/start lifecycle when you choose; installing or
 opening a new client does not upgrade that controller. No production controller
 was restarted as part of this refinement. An already-open watch client also needs
 to be detached and reopened to load new display code.
+
+
+## Bounded Sharing: one primary and one auxiliary
+
+This mode is explicit admission control, not an OS-enforced CPU/RAM limit. Existing
+state and jobs remain Sequential and Primary/exclusive after migration, with IDs,
+attempts, order, logs and events preserved. Configuration never starts a controller
+or enables dispatch. Returning to Sequential stops future overlaps without
+interrupting already-running work.
+
+Legacy schema-1 state remains readable without migration. New mutations migrate
+it transactionally to schema 2 only after legacy active attempts have finished
+and the original controller is no longer present by owner/lock evidence. The old
+running implementation cannot read schema 2 safely: let its attempts finish,
+then stop that controller using its original installation before performing new
+mutations. CMW does not automatically kill work, stop controllers or restart them
+to migrate. These restrictions apply to legacy-state migration, not ordinary
+sharing-consent changes in an already-schema-2 queue.
+
+A primary is ordinary production work. Primaries remain strictly sequential.
+An auxiliary is explicitly independent work with declared CPU/RAM requirements,
+a trusted resource contract and a known write directory. Engine names, expected
+duration, low observed CPU and NPROC never imply eligibility. Declared MPI ranks
+and threads/rank must not imply more CPUs than the sharing commitment. Only the first
+pending auxiliary can bypass waiting primaries during a sharing window; a held
+auxiliary blocks later auxiliaries. This is not arbitrary backfill or best-fit
+selection. With no primary/shareable external workload, ordinary queue order
+applies; an auxiliary may execute alone in that ordinary sequential position.
+
+A managed primary must consent to coexistence. Enqueue with `--allow-auxiliary`,
+or change only that consent while it is active in an already-schema-2 queue,
+without restarting the primary. Pending-job declarations can be edited through
+`sharing`; active resource budgets, role and write scope cannot be rewritten.
+An auxiliary that outlives its anchor continues independently,
+but the next primary waits until it finishes. At most one auxiliary is active.
+Both jobs retain their own supervisors, logs, verified cancellation scope and
+completion evidence. Restart reconciles both; failure/cancellation can pause
+future dispatch but never automatically kills the other execution. Starting,
+Run, Cancelling and Unknown retain commitments; Unknown/Cancelling block new
+admission. Only confirmed terminal state releases a managed commitment.
+
+### Policy and declarations
+
+```sh
+cmw jobs config
+cmw jobs config --mode bounded-sharing --cpu-budget 10 --memory-budget-gib 24 \
+  --cpu-reserve 1 --min-available-gib 4
+cmw jobs config --mode sequential
+cmw jobs sharing J1.1 --allow-auxiliary
+cmw jobs sharing J1.1 --revoke-auxiliary
+cmw jobs sharing J2.1 --role auxiliary --independent --trust-resources \
+  --write-scope /absolute/independent-analysis
+cmw jobs status --json
+```
+
+Values and IDs above are examples, not defaults or recommended budgets. First
+activation requires all four explicit policy values; configuration checks logical
+CPU and physical RAM capacity. `--cpus`/`--memory-gib` on `add` remain per-job
+requests and must already exist before marking a pending job Auxiliary.
+`--trust-resources` records `trusted-declared`: the user vouches for
+conservative bounds and a prepared command that respects them. CMW neither proves
+arbitrary scientific independence nor silently rewrites inputs, threads, MPI,
+NCORE or analysis options. Opaque commands default to exclusive Primary.
+
+Requested, committed and observed resources are separate. Admission requires the
+sum of existing commitments plus the auxiliary's declared request to fit both
+configured budgets. A current `713%` reading does not reduce an eight-slot
+commitment; low RSS does not release committed RAM. Missing CPU or memory
+requests prevent sharing. A valid external reservation contributes its declared
+CPU and memory budgets, not NPROC or measured RSS.
+
+Sharing also requires two fresh host observations, at least 0.5 seconds apart,
+within a five-second window, with the latest no older than two seconds. The
+minimum estimated free logical CPU capacity across that window must cover the
+auxiliary's CPU request plus the configured reserve. Minimum available RAM must
+cover its declared memory plus the safety margin. Available means total minus
+currently used as defined by the existing telemetry model. A warming-up, stale
+or unavailable window refuses new auxiliary admission. The controller and final
+supervisor obtain their own private fresh evidence; opening the console never
+authorizes GO. A one-shot `status` or `show` client starts a new sampling window
+and may report warming up even while the controller has usable evidence. `watch`
+retains its client sampler and needs roughly two observation cycles after CPU
+warm-up to populate the two-sample sharing window. Client and controller timing
+remain independent; the controller/supervisor always recheck before launch.
+
+A sustained observed CPU overrun across the two samples or a current RSS subtotal
+above declared memory produces a warning and stops further admission. RSS may
+count shared pages twice, so this is a conservative admission stop, not proof of
+physical ownership. No existing workload is automatically killed, paused,
+reniced or retuned. Conditions may change after admission. When available, an increase in the existing psutil swap-out byte counter across
+the fresh window also vetoes new auxiliary admission. Historical nonzero swap
+usage alone is not a veto. Missing swap counters do not replace the mandatory
+CPU/available-RAM checks; a separate memory-pressure tool/subsystem is deferred.
+
+Write scopes default to resolved working directories. Same, parent/child,
+missing or inaccessible trees prevent coexistence. Independent scopes do not
+prove safe scientific dependencies: `--independent` also asserts that the
+auxiliary neither needs the primary to finish nor consumes unsafely changing
+outputs. There is no detailed file-access analysis or scientific artifact handoff.
+
+### External VASP plus a prepared independent analysis
+
+First inspect the actual observation; do not guess an E ID or derive budgets from
+NPROC/current usage. This non-executed template assumes the user has independently
+verified the external launch bounds and prepared an analysis command with matching
+thread/memory behavior:
+
+```sh
+cmw jobs status
+cmw jobs show E_REPLACE_WITH_CURRENT_OBSERVATION_ID
+cmw jobs config --mode bounded-sharing --cpu-budget 10 --memory-budget-gib 24 \
+  --cpu-reserve 1 --min-available-gib 4
+cmw jobs reserve E_REPLACE_WITH_CURRENT_OBSERVATION_ID --cpus 8 --memory-gib 8 \
+  --write-scope /absolute/vasp-case
+cmw jobs add --name independent-Multiwfn --engine Multiwfn \
+  --cwd /absolute/completed-independent-analysis --role auxiliary \
+  --cpus 1 --memory-gib 1 --independent --trust-resources \
+  --write-scope /absolute/completed-independent-analysis \
+  -- /bin/bash /absolute/completed-independent-analysis/prepared-run.sh
+cmw jobs status --json
+cmw jobs start
+cmw jobs watch
+```
+
+The example budgets are user declarations, not Multiwfn defaults or enforced
+limits; Multiwfn is not inherently lightweight. Prepare and verify its own
+threading/settings before using the trusted contract. The analysis directory
+must be independent of the ongoing VASP case. No real Multiwfn or VASP is launched
+by documentation validation.
+
+`reserve` records one identity-bound coexistence declaration from a fresh complete
+external observation. It keeps the workload external/read-only and the guard
+BUSY. It never creates a managed attempt or signalling authority. The binding
+includes current verified family members and executable/launcher/group evidence;
+changed identity, membership or disappearance invalidates it conservatively.
+Unknown metadata or an additional unreserved external computation blocks new
+admission. An inaccessible/inconsistent external cwd needs an explicit write
+scope. `cmw jobs unreserve` revokes consent without touching running processes.
+A lingering auxiliary still blocks the next primary after its external anchor
+expires. No new VASP can inherit an earlier reservation through PID reuse.
+
+The console shows commitments, roles and the auxiliary slot separately from live
+CPU/RSS. In narrow tables `P`/`A` beside the ID means Primary/Auxiliary. Press B
+for the complete read-only scheduling decision: anchor, external reservation,
+write scopes, headroom, policy, warnings and exact refusal reason. Enter retains
+job/external details; external actions remain read-only. JSON exposes the same
+`scheduler`, `admission`, `scheduling` and `sharing_anchor` data without formatted
+numeric values. Sampling alone writes no telemetry history.
+
+### Isolated synthetic demonstration
+
+This optional demonstration creates a separate queue and two benign waiting shell
+commands. It does not use scientific engines. Observe admission with `status`;
+headroom may legitimately prevent overlap on a busy host.
+
+```sh
+demo=$(mktemp -d)
+mkdir "$demo/primary" "$demo/auxiliary"
+cmw jobs --state "$demo/state" config --mode bounded-sharing --cpu-budget 2 \
+  --memory-budget-gib 1 --cpu-reserve 1 --min-available-gib 1
+cmw jobs --state "$demo/state" add --name primary-fixture --cwd "$demo/primary" \
+  --cpus 1 --memory-gib 0.25 --allow-auxiliary \
+  -- /bin/sh -c 'while [ ! -f release ]; do /bin/sleep 0.1; done'
+cmw jobs --state "$demo/state" add --name auxiliary-fixture --cwd "$demo/auxiliary" \
+  --role auxiliary --cpus 1 --memory-gib 0.25 --independent --trust-resources \
+  -- /bin/sh -c 'while [ ! -f release ]; do /bin/sleep 0.1; done'
+cmw jobs --state "$demo/state" start
+cmw jobs --state "$demo/state" status
+# After both are Run, release only these fixture commands:
+touch "$demo/primary/release" "$demo/auxiliary/release"
+# Confirm both Done before stopping this isolated controller:
+cmw jobs --state "$demo/state" status
+cmw jobs --state "$demo/state" stop
+```
+
+Do not treat a temporary state directory as isolation from real external engine
+observation: an unreserved real VASP correctly blocks this demonstration. The test
+suite uses a private fixture-observation seam to avoid dependence on research
+processes; there is no production bypass. The feature does not implement arbitrary
+N-job scheduling, HPC, automatic retry, global machine locking, process adoption,
+SIGSTOP/SIGCONT time slicing or hard resource enforcement.
