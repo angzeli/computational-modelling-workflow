@@ -97,6 +97,14 @@ removed when the child exits. Executable hash, version, settings, requested
 threads, and process-health samples are execution provenance, not scientific
 target identity.
 
+On standalone TERM/INT, the wrapper forwards the signal to its known direct
+child, allows about two seconds for cooperation, then sends KILL and waits for
+bounded drainage. Confirmed termination returns 143/130 and removes the aliases.
+If termination remains unresolved, it returns 75, reports the retained alias
+directory and leaves those resources available to the child. Jobs wrapping adds
+its own process-group completion check; wrapper exit alone does not release a
+Jobs commitment or establish scientific validity.
+
 An optional generic execution profile may supply `nthreads` through the same
 runtime path. Its declared total memory is recorded in runtime provenance, but
 CMW does not translate it into a fictitious Multiwfn memory keyword. An

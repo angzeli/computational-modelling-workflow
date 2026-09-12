@@ -46,7 +46,7 @@ multiwfn_runtime_prepare() {
 
 multiwfn_runtime_launch() {
   local alias_root alias_path child_pid="" source_alias="" source_name="" source_path="" status=0
-  local previous_exit previous_int previous_term
+  local previous_exit previous_int previous_term interrupted=0 interrupt_signal="" probe
   if [[ -z "$MULTIWFN_RUN_SETTINGS_DIRECTORY" || ! -s "$MULTIWFN_RUN_SETTINGS_PATH" ]]; then
     printf 'Multiwfn run-local settings were not prepared\n' >&2
     return 64
@@ -60,13 +60,24 @@ multiwfn_runtime_launch() {
   previous_int=$(trap -p INT || true)
   alias_root=$(mktemp -d "${TMPDIR:-/tmp}/cmw-multiwfn.XXXXXXXX") || return 70
   alias_path=$alias_root/runtime
+  multiwfn_child_active() {
+    local owned IFS=$' \t\n'
+    [[ -n "$child_pid" ]] || return 1
+    # The shell's own job table retains authority across interrupted waits.
+    for owned in $(jobs -pr) $(jobs -ps); do
+      [[ "$owned" != "$child_pid" ]] || return 0
+    done
+    return 1
+  }
   cleanup_multiwfn_alias() {
+    if multiwfn_child_active; then return 0; fi
     [[ -z "$source_alias" ]] || rm -f -- "$source_alias"
     rm -f -- "$alias_path"
     rmdir "$alias_root" 2>/dev/null || true
   }
   forward_multiwfn_signal() {
-    [[ -z "$child_pid" ]] || kill -TERM "$child_pid" 2>/dev/null || true
+    if ((interrupted == 0)); then interrupted=$2; interrupt_signal=$1; fi
+    if multiwfn_child_active; then kill -"$1" "$child_pid" 2>/dev/null || true; fi
   }
   restore_multiwfn_traps() {
     trap - EXIT TERM INT
@@ -75,7 +86,8 @@ multiwfn_runtime_launch() {
     [[ -z "$previous_int" ]] || eval "$previous_int"
   }
   trap cleanup_multiwfn_alias EXIT
-  trap forward_multiwfn_signal TERM INT
+  trap 'forward_multiwfn_signal TERM 143' TERM
+  trap 'forward_multiwfn_signal INT 130' INT
   ln -s "$MULTIWFN_RUN_SETTINGS_DIRECTORY" "$alias_path"
   if (($#)); then
     source_path=$1
@@ -105,14 +117,42 @@ multiwfn_runtime_launch() {
       printf 'source_target=%s\n' "$source_path"
     fi
   } > multiwfn-runtime-alias.txt
+  if ((interrupted != 0)); then
+    cleanup_multiwfn_alias
+    restore_multiwfn_traps
+    return "$interrupted"
+  fi
   exec 9<&0
   Multiwfnpath="$alias_path" OMP_NUM_THREADS="$MULTIWFN_NTHREADS" \
     "$MULTIWFN_EXE" "$@" <&9 &
   child_pid=$!
+  # A trap can run between launch and assigning $!.
+  if ((interrupted != 0)); then forward_multiwfn_signal "$interrupt_signal" "$interrupted"; fi
+  # A signal just before a blocking wait would otherwise strand a resistant child.
+  while multiwfn_child_active && ((interrupted == 0)); do sleep 0.1 || true; done
+  if ((interrupted != 0)) && multiwfn_child_active; then
+    # Give the direct child two seconds to cooperate, then bound KILL drainage.
+    for probe in {1..40}; do
+      multiwfn_child_active || break
+      sleep 0.05 || true
+    done
+    if multiwfn_child_active; then kill -KILL "$child_pid" 2>/dev/null || true; fi
+    for probe in {1..40}; do
+      multiwfn_child_active || break
+      sleep 0.05 || true
+    done
+    if multiwfn_child_active; then
+      printf 'Multiwfn child %s termination unresolved; aliases retained at %s\n' "$child_pid" "$alias_root" >&2
+      exec 9<&-
+      restore_multiwfn_traps
+      return 75
+    fi
+  fi
   wait "$child_pid" || status=$?
   child_pid=""
   exec 9<&-
   cleanup_multiwfn_alias
   restore_multiwfn_traps
+  if ((interrupted != 0)); then return "$interrupted"; fi
   return "$status"
 }

@@ -117,9 +117,28 @@ output modes remain as requested. Schema-1 read/migration, active legacy refusal
 future-schema rejection and current state behavior remain intact. Independent
 review identified and closed the direct-controller lock-before-validation path.
 
+### EXEC-003 — fixed
+
+The standalone regression reproduced alias deletion while a TERM-resistant direct
+child remained alive. The shell now tracks its exact child in its own running and
+stopped job entries, observes until completion or interruption, and only reaps
+after the child has ended. TERM/INT starts a bounded cooperative wait, then KILL
+and bounded drainage. Confirmed shutdown retains exit 143/130 respectively.
+Unresolved termination returns 75 with an explicit diagnostic and retains aliases;
+EXIT cleanup cannot delete resources still needed by that child. No name-based
+or unrelated-group signalling is introduced. Scientific settings are unchanged.
+
+Validation: all 32 affected fake-Multiwfn runtime, IFCT and cube workflow tests
+passed, including five interruption cases. These cover the pre-wait signal race,
+TERM/INT resistance, Jobs wrapping and failed KILL with live-child alias retention.
+Cooperative behavior, ordinary exit status, stdin, threads and settings remain
+covered. Unrelated sentinel processes survive with the same birth identity.
+Shell syntax and independent lifecycle review passed; the timing fixture's final
+bounded startup refinement was checked separately.
+
 ### Remaining campaign
 
-EXEC-003, SEC-002, DOC-001 and DIST-001 are
+SEC-002, DOC-001 and DIST-001 are
 pending. PERF-001 and the architecture/scaling expansions listed in the request
 are explicitly deferred. Intentional ownership, admission, resource, scientific
 validity and fail-closed `Unknown` distinctions remain required throughout.
