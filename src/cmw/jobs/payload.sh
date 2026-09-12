@@ -13,6 +13,8 @@ trap '' HUP
 trap ':' TERM INT
 IFS= read -r instruction || exit 125
 [[ "$instruction" == GO ]] || exit 125
+# Restrict only CMW's log creation; preserve the payload's inherited umask.
+(umask 077; : >>"$stdout_path" && : >>"$stderr_path") || exit 125
 "$@" </dev/null >>"$stdout_path" 2>>"$stderr_path" &
 payload_pid=$!
 wait "$payload_pid"

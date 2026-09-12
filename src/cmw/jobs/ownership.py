@@ -7,7 +7,7 @@ import socket
 
 import psutil
 
-from .store import JobsError
+from .store import JobsError, private_opener
 
 
 def identity(pid=None):
@@ -29,7 +29,7 @@ def owner_alive(owner):
 def exclusive(path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with path.open("a+") as handle:
+    with open(path, "a+", opener=private_opener) as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:

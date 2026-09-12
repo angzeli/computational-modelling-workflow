@@ -64,14 +64,14 @@ while not p['release'].exists():
         return process, gates
 
     def select_external(self, processes):
-        self.store.root.mkdir(parents=True, exist_ok=True)
+        self.store.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         executable = activity.native_executable(psutil.Process(processes[0].pid))
         (self.store.root / 'external-activity.json').write_text(
             json.dumps({'executables': {executable: 'VASP'}}))
         self.select_pids([p.pid for p in processes])
 
     def select_pids(self, pids):
-        self.store.root.mkdir(parents=True, exist_ok=True)
+        self.store.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         (self.store.root / 'fixture-processes.json').write_text(
             json.dumps([identity(pid) for pid in pids]))
 

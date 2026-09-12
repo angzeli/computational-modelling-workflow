@@ -25,7 +25,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_trace_write_failure_does_not_prevent_signal(self):
         with patch.dict(os.environ, {'CMW_TEST_LIFECYCLE_TRACE': '1'}), \
-             patch('os.killpg') as signal_group, patch.object(Path, 'open', side_effect=OSError('unwritable')):
+             patch('os.killpg') as signal_group, patch('builtins.open', side_effect=OSError('unwritable')):
             with trace_runtime(Path('unwritable-test-root')):
                 os.killpg(987654, 15)
             signal_group.assert_called_once_with(987654, 15)

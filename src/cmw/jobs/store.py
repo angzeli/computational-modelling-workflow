@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import sys
 import time
 from uuid import uuid4
@@ -21,6 +22,11 @@ TERMINAL = {"Done", "Fail", "Cancelled"}
 
 class JobsError(ValueError):
     """A rejected operation, with no implied successful mutation."""
+
+
+def private_opener(path, flags):
+    """Explicit mode for newly created state files; existing modes are untouched."""
+    return os.open(path, flags, 0o600)
 
 
 def default_state() -> Path:
@@ -102,9 +108,22 @@ class Store:
         self.root = Path(root).expanduser().resolve() if root is not None else default_state()
         self.path = self.root / "queue.sqlite3"
 
+    def ensure_private_root(self):
+        if os.name != 'posix':
+            raise JobsError('Jobs state mutation requires POSIX ownership and permissions')
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        info = self.root.stat()
+        mode = stat.S_IMODE(info.st_mode)
+        if info.st_uid != os.geteuid() or mode & 0o077:
+            raise JobsError(f'Unsafe Jobs state directory {self.root}: mode {mode:04o}, owner UID {info.st_uid}. '
+                            'Persisted argv, env and logs may be sensitive. Create/select a private directory '
+                            'owned by your user with mode 0700 and use --state; existing permissions were not changed.')
+
     @contextmanager
     def transaction(self):
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.ensure_private_root()
+        with open(self.path, 'ab', opener=private_opener):
+            pass
         con = sqlite3.connect(self.path, timeout=10, isolation_level=None)
         con.row_factory = sqlite3.Row
         try:

@@ -96,9 +96,30 @@ passes in both default group mode and opted-in session mode. Scoped independent
 review found no signal-authority weakening; final fixture cleanup handles a
 verified terminal transition racing cancellation.
 
+### SEC-001 — fixed
+
+The original enqueue path accepted an existing mode-0755 state root. All Store
+mutations and both start/controller entrypoints now require a POSIX root owned by
+the effective user with no group/other mode bits. New roots use 0700; unsafe
+existing roots are refused before creating locks or sensitive metadata, with the
+path, mode, owner and private-directory guidance. No existing directory is chmodded.
+Read-only snapshots/status preserve existing permissions and do not create state.
+
+New databases, journals, locks, receipts and logs are 0600. The shell restricts
+log creation in a subshell, preserving the scientific payload's inherited umask.
+Existing files remain protected by the private root without changing their modes.
+The policy checks POSIX ownership/mode; it is not encryption.
+
+Validation: 20 privacy/store/display/diagnostic tests and 18 guard/telemetry/session
+runtime tests passed, followed by all seven final privacy cases and shell syntax
+validation. Umask 0000 and 0077 both produce private state files while payload
+output modes remain as requested. Schema-1 read/migration, active legacy refusal,
+future-schema rejection and current state behavior remain intact. Independent
+review identified and closed the direct-controller lock-before-validation path.
+
 ### Remaining campaign
 
-SEC-001, EXEC-003, SEC-002, DOC-001 and DIST-001 are
+EXEC-003, SEC-002, DOC-001 and DIST-001 are
 pending. PERF-001 and the architecture/scaling expansions listed in the request
 are explicitly deferred. Intentional ownership, admission, resource, scientific
 validity and fail-closed `Unknown` distinctions remain required throughout.

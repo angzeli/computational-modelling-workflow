@@ -67,9 +67,10 @@ for final-admission races. Production never reads it or selects this class.
 
 def detached(arguments, log):
     from cmw.jobs import runtime
+    from cmw.jobs.store import private_opener
     log.parent.mkdir(parents=True, exist_ok=True)
     runtime.reap_detached()
-    with log.open('ab', buffering=0) as output:
+    with open(log, 'ab', buffering=0, opener=private_opener) as output:
         process = subprocess.Popen(
             [sys.executable, '-m', 'tests.jobs.isolated_runtime', *arguments],
             stdin=subprocess.DEVNULL, stdout=output, stderr=output,

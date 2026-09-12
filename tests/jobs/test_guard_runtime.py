@@ -31,7 +31,7 @@ def external_fixture(test):
     lifecycle.wait_for(ready.exists)
     owned = identity(process.pid)
     executable = native_executable(psutil.Process(process.pid))
-    test.store.root.mkdir(parents=True, exist_ok=True)
+    test.store.root.mkdir(parents=True, exist_ok=True, mode=0o700)
     (test.store.root / 'external-activity.json').write_text(
         json.dumps({'executables': {executable: 'VASP'}}))
     (test.store.root / 'fixture-processes.json').write_text(json.dumps([owned]))

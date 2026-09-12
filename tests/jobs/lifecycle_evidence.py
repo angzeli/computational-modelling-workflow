@@ -13,6 +13,7 @@ from unittest.mock import patch
 import psutil
 
 from cmw.jobs.ownership import identity, lock_held, owner_alive
+from cmw.jobs.store import private_opener
 
 
 def owned_members(state, root, *, pgid=None):
@@ -129,7 +130,7 @@ def trace_runtime(root):
 
     def record(event, **details):
         try:
-            with path.open('a') as handle:
+            with open(path, 'a', opener=private_opener) as handle:
                 handle.write(json.dumps({'time': time.time(), 'monotonic': time.monotonic(),
                                          'event': event, **details})+'\n')
         except OSError:

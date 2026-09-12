@@ -221,8 +221,17 @@ storage. Explicit isolated state is supported for tests/demos.
 - `controller.log`: controller/supervisor lifecycle diagnostics.
 - `attempts/<UUID>/`: stdout/stderr, worker lock and atomic payload exit receipt.
 
-The state directory is created with private permissions; environment overrides
-and exact argv are persisted there and visible in job details. No scientific
+On POSIX systems, a new state directory is created with mode 0700. Mutations
+(including enqueue and controller start) require an existing root to be owned by
+the current user with no group/other permissions. A shared or differently owned
+root is refused with its path, mode and guidance to select a private `--state`
+directory; CMW never silently changes existing directory permissions. Read-only
+status/observation does not create state or change its permissions. Newly created
+database, lock, receipt and log files use mode 0600; the payload keeps its inherited
+umask for its own scientific files. Existing file permissions are preserved under
+the private root. These are POSIX ownership/mode checks, not an encryption boundary.
+
+Environment overrides and exact argv are persisted there and visible in job details. No scientific
 inputs, geometries, scripts, binaries, restart files, outputs or external data
 are snapshotted or guaranteed immutable. No directory checksums, file copies,
 source receipts, data handoffs, automatic cleanup or input rewrites occur.

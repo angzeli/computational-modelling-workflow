@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from cmw.core.provenance import atomic_write_json
 from .ownership import exclusive, group_exists, group_members, identity, lock_held, owner_alive, signal_session
-from .store import ACTIVE, PENDING, JobsError, Store
+from .store import ACTIVE, PENDING, JobsError, Store, private_opener
 from . import activity, sharing
 
 INTERVAL = 0.15
@@ -41,7 +41,7 @@ def runtime_environment():
 def detached(arguments, log):
     log.parent.mkdir(parents=True, exist_ok=True)
     reap_detached()
-    with log.open("ab", buffering=0) as output:
+    with open(log, "ab", buffering=0, opener=private_opener) as output:
         process = subprocess.Popen([sys.executable, "-m", "cmw.jobs.runtime", *arguments],
                                 stdin=subprocess.DEVNULL, stdout=output, stderr=output,
                                 start_new_session=True, close_fds=True, env=runtime_environment(), cwd="/")
@@ -50,6 +50,7 @@ def detached(arguments, log):
 
 
 def start(store):
+    store.ensure_private_root()
     # Serialize client start requests separately from the long-lived owner lock.
     with exclusive(store.root / "start.lock"):
         state = store.snapshot()
@@ -213,6 +214,7 @@ def tick(store):
 
 
 def controller(store):
+    store.ensure_private_root()
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     with exclusive(store.root / "controller.lock"):
         with store.transaction() as con:
@@ -279,6 +281,7 @@ def worker(store, job_id, claim):
     with store.transaction() as con:
         initial = store.get(con, job_id)
     attempt = store.root / "attempts" / initial["attempt_id"]
+    attempt.parent.mkdir(exist_ok=True, mode=0o700)
     with exclusive(attempt / "worker.lock"):
         with store.transaction() as con:
             job = store.get(con, job_id)
