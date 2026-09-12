@@ -136,9 +136,30 @@ covered. Unrelated sentinel processes survive with the same birth identity.
 Shell syntax and independent lifecycle review passed; the timing fixture's final
 bounded startup refinement was checked separately.
 
+### SEC-002 — fixed in current publication inputs
+
+The new bounded screen reproduced seven files with personal home paths. Review
+also identified four per-user macOS temporary paths in newer parser logs. In
+total, 40 path prefixes across nine reduced logs and two provenance manifests
+now use logical `/fixture-root` aliases. Field names, basenames, relative lineage,
+versions, original source/settings hashes and scientific values are preserved.
+Manifest notes distinguish original extraction from publication transformation;
+changed reduced-file hashes/sizes identify the new bytes, while their previous
+reduced identities remain recorded. No scientific source or provenance was removed.
+
+Validation: 43 affected parser/provenance/hygiene tests and all five final hygiene
+cases passed. Byte comparison after replacing only the declared roots proves
+every other log byte is unchanged, including carriage-return records. The screen
+checks all tracked content and wheel/sdist members without archive extraction;
+only the nine known parser log names are exempt from the runtime-log filename
+rule, and their contents are still scanned. Oversized inputs fail inspection.
+This is a bounded publication check, not a universal secrets or licensing audit.
+Final built-artifact checks follow in DIST-001. Earlier Git history and the
+immutable external audit package retain their original evidence and are unchanged.
+
 ### Remaining campaign
 
-SEC-002, DOC-001 and DIST-001 are
+DOC-001 and DIST-001 are
 pending. PERF-001 and the architecture/scaling expansions listed in the request
 are explicitly deferred. Intentional ownership, admission, resource, scientific
 validity and fail-closed `Unknown` distinctions remain required throughout.

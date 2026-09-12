@@ -23,7 +23,7 @@
  This is a restricted single-determinant wavefunction
  Orbitals from 1 to   100 are occupied
 
- Loaded /Users/liangze/Desktop/Tsinghua 2026 Summer/pdi_h2o2_production/pdi-theory-demo/calculations/pdi/excited_state_calculations/tda_singlets/pdi_tda_singlets_tprint.molden.input successfully!
+ Loaded /fixture-root/pdi/calculations/pdi/excited_state_calculations/tda_singlets/pdi_tda_singlets_tprint.molden.input successfully!
             ============ Electronic excitation analyses ============ 
  -1 Check, modify and export configuration coefficients of an excitation
  0 Return
@@ -73,5 +73,5 @@
  Exporting .mwfn file finished!
  Now you can load the newly generated file to visualize NTOs. Note that in this file the orbital energies correspond to NTO eigenvalues
 
- Reloading /Users/liangze/Desktop/Tsinghua 2026 Summer/pdi_h2o2_production/pdi-theory-demo/calculations/pdi/excited_state_calculations/tda_singlets/pdi_tda_singlets_tprint.molden.input to recover initial status...
+ Reloading /fixture-root/pdi/calculations/pdi/excited_state_calculations/tda_singlets/pdi_tda_singlets_tprint.molden.input to recover initial status...
  Loading finished!

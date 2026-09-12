@@ -24,7 +24,7 @@ OMP: Warning #182: OMP_STACKSIZE: ignored because KMP_STACKSIZE has been defined
  This is a restricted single-determinant wavefunction
  Orbitals from 1 to   100 are occupied
 
- Loaded /Users/liangze/Desktop/Tsinghua 2026 Summer/pdi_h2o2_production/pdi-theory-demo/calculations/pdi/excited_state_calculations/tda_singlets/pdi_tda_singlets_tprint.molden.input successfully!
+ Loaded /fixture-root/pdi/calculations/pdi/excited_state_calculations/tda_singlets/pdi_tda_singlets_tprint.molden.input successfully!
 
             ============ Electronic excitation analyses ============ 
  -1 Check, modify and export configuration coefficients of an excitation

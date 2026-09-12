@@ -1,15 +1,16 @@
 {
   "schema_version": 1,
   "statement": "Scientific text was copied verbatim from the listed ORCA outputs without numerical editing.",
+  "publication_transform": "Original extraction descriptions refer to the immutable source excerpts. Publication then replaces machine-specific path prefixes with logical /fixture-root aliases; path fields rooted at /fixture-root are publication aliases, including fields whose names retain absolute, not historical filesystem locations. Basenames, relative lineage, scientific bytes and original source hashes are retained. Reduced hashes and sizes describe the published bytes; pre-anonymization reduced identities are retained for transformed logs.",
   "fixtures": [
     {
       "reduced_fixture": "orca_6_1_1_tda_singlets.out",
       "reduced_fixture_sha256": "ed6c145eab77756aa1ab5647d880bb0cb61634899174ee76c50a6fec9d79b91c",
       "reduced_fixture_size_bytes": 13817,
-      "original_absolute_source_path": "/Users/liangze/Desktop/Tsinghua 2026 Summer/pdi_h2o2_production/pdi-theory-demo/calculations/pdi/excited_state_calculations/tda_singlets/pdi_tda_singlets_tprint.out",
+      "original_absolute_source_path": "/fixture-root/pdi/calculations/pdi/excited_state_calculations/tda_singlets/pdi_tda_singlets_tprint.out",
       "source_sha256": "cef4b9643eba34674ded7e1a1656e04d49546bcfa7c13fc25ee4bc4b5331ac73",
       "source_size_bytes": 6343119,
-      "related_input_absolute_path": "/Users/liangze/Desktop/Tsinghua 2026 Summer/pdi_h2o2_production/pdi-theory-demo/calculations/pdi/excited_state_calculations/tda_singlets/pdi_tda_singlets_tprint.inp",
+      "related_input_absolute_path": "/fixture-root/pdi/calculations/pdi/excited_state_calculations/tda_singlets/pdi_tda_singlets_tprint.inp",
       "related_input_sha256": "34a6962cf337de3b5f10edd72c71655fc901e2b294515bd9be3fcd76750f08b9",
       "related_input_size_bytes": 180,
       "retained_section_headings": [
@@ -28,10 +29,10 @@
       "reduced_fixture": "orca_6_1_1_tda_mixed.out",
       "reduced_fixture_sha256": "8dae16fdcf2f3bd1b74da8e9d817a15b02afc8dd9e653c64ca4557d9969adf11",
       "reduced_fixture_size_bytes": 14174,
-      "original_absolute_source_path": "/Users/liangze/Desktop/Tsinghua 2026 Summer/pdi_h2o2_production/pdi-theory-demo/calculations/pdi/excited_state_calculations/tda_triplets/pdi_tda_triplets_tprint.out",
+      "original_absolute_source_path": "/fixture-root/pdi/calculations/pdi/excited_state_calculations/tda_triplets/pdi_tda_triplets_tprint.out",
       "source_sha256": "83a068d2021479dc90cdb17abd2a2ebc7d0eb4859e71aa4c40b8445d99c0a406",
       "source_size_bytes": 5445499,
-      "related_input_absolute_path": "/Users/liangze/Desktop/Tsinghua 2026 Summer/pdi_h2o2_production/pdi-theory-demo/calculations/pdi/excited_state_calculations/tda_triplets/pdi_tda_triplets_tprint.inp",
+      "related_input_absolute_path": "/fixture-root/pdi/calculations/pdi/excited_state_calculations/tda_triplets/pdi_tda_triplets_tprint.inp",
       "related_input_sha256": "777aa9b50aed0e4af4725e71b4debf54238c105b6c87de20c9f546d9433f2bf4",
       "related_input_size_bytes": 179,
       "retained_section_headings": [

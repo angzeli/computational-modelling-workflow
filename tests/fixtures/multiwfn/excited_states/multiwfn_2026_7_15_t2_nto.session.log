@@ -23,7 +23,7 @@
  This is a restricted single-determinant wavefunction
  Orbitals from 1 to   100 are occupied
 
- Loaded /var/folders/n1/bmzcbfxs2fgc29_x3l4x_s_m0000gn/T//cmw-multiwfn.lJtnPSuV/source-pdi_tda_triplets_tprint.molden.input successfully!
+ Loaded /fixture-root/runtime-aliases/cmw-multiwfn.lJtnPSuV/source-pdi_tda_triplets_tprint.molden.input successfully!
             ============ Electronic excitation analyses ============ 
  -1 Check, modify and export configuration coefficients of an excitation
  0 Return
