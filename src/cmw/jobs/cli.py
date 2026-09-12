@@ -173,8 +173,10 @@ def status_text(state):
 
 
 def register(subcommands):
-    parser = subcommands.add_parser("jobs", help="local sequential queue and terminal console",
-        description="Local queue with best-effort external activity observation for the current user; no machine-wide reservation or exclusion.")
+    parser = subcommands.add_parser("jobs", help="local queue, optional bounded sharing and terminal console",
+        description="Local queue: Sequential by default; opt-in Bounded Sharing permits one Primary plus at most one Auxiliary. "
+                    "Telemetry may veto admission but never proves completion or releases commitments. "
+                    "Resource declarations are not hard OS limits; external activity observation provides no machine-wide exclusion.")
     parser.add_argument("--state", type=Path, help="isolated state directory (or CMW_JOBS_STATE)")
     operations = parser.add_subparsers(dest="jobs_operation", required=True)
     for name in ("status", "start", "stop", "pause", "resume", "watch"):

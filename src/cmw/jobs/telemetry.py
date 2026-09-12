@@ -1,7 +1,9 @@
-"""Ephemeral advisory usage of identities already observed by Jobs.
+"""Ephemeral observed usage of identities already verified by Jobs.
 
-No scheduler state, reservations, or ownership decisions depend on these reads.
-CPU baselines belong to one viewing client and use monotonic elapsed time.
+Fresh host samples may veto Bounded Sharing admission. They never grant ownership,
+certify completion, or release commitments because usage is low. Requested,
+committed and observed resources remain distinct; this module enforces no limits.
+CPU baselines belong to one sampler and use monotonic elapsed time.
 """
 from __future__ import annotations
 

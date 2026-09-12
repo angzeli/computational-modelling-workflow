@@ -480,7 +480,8 @@ conservative bounds and a prepared command that respects them. CMW neither prove
 arbitrary scientific independence nor silently rewrites inputs, threads, MPI,
 NCORE or analysis options. Opaque commands default to exclusive Primary.
 
-Requested, committed and observed resources are separate. Admission requires the
+Requested, committed, observed and enforced resources are separate concepts;
+CMW does not enforce hard OS resource limits. Admission requires the
 sum of existing commitments plus the auxiliary's declared request to fit both
 configured budgets. A current `713%` reading does not reduce an eight-slot
 commitment; low RSS does not release committed RAM. Missing CPU or memory

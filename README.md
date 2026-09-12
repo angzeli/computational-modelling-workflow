@@ -159,15 +159,21 @@ configuration, runtime behavior, cube validation, and plan examples are
 documented in
 [`docs/molecular/multiwfn-cubes.md`](docs/molecular/multiwfn-cubes.md).
 
-Prepared local commands can be executed one at a time through `cmw jobs`, with
-a persistent queue, detached controller and optional terminal console. See
+Prepared local commands run through `cmw jobs`, with a persistent queue, detached
+controller and optional terminal console. Sequential is the default; opt-in
+Bounded Sharing permits one Primary plus at most one Auxiliary. Resource requests,
+commitments and observed usage are distinct, and declarations are not enforced
+as hard OS limits. Telemetry can veto admission, but never certifies completion
+or releases commitments when usage is low. External BUSY remains BUSY even when
+explicit sharing consent permits bounded coexistence. See
 [`docs/cmw-jobs.md`](docs/cmw-jobs.md) for installation, controls, ownership
 limits and a safe synthetic demo.
 
-Development checks remain deterministic and require no ORCA installation:
+Development checks use synthetic engines and require no ORCA, VASP or Multiwfn
+installation. Include the optional console dependency for its tests:
 
 ```sh
-python3 -m pip install -e .
+python3 -m pip install -e '.[jobs]'
 python3 -m unittest discover -s tests
 ```
 

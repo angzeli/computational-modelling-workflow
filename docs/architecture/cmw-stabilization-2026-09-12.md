@@ -157,9 +157,23 @@ This is a bounded publication check, not a universal secrets or licensing audit.
 Final built-artifact checks follow in DIST-001. Earlier Git history and the
 immutable external audit package retain their original evidence and are unchanged.
 
+### DOC-001 — fixed
+
+README, top-level Jobs help, the telemetry module contract and the detailed
+resource explanation now agree: Sequential is default; explicit Bounded Sharing
+permits one Primary plus at most one Auxiliary. Observations can veto admission
+but cannot grant ownership, certify completion or release low-usage commitments.
+Requested, committed, observed and enforced resources remain separate; there
+are no hard OS limits. Explicit coexistence consent does not relabel external
+BUSY as idle. Historical development records are preserved.
+
+Validation: focused text/diff review and generated top-level/Jobs help. The README
+test installation includes the optional console dependency so its documented
+broad command also covers that interface. No execution behavior was changed.
+
 ### Remaining campaign
 
-DOC-001 and DIST-001 are
-pending. PERF-001 and the architecture/scaling expansions listed in the request
-are explicitly deferred. Intentional ownership, admission, resource, scientific
+DIST-001 and the final broad/artifact gates are pending. PERF-001 and the
+architecture/scaling expansions listed in the request are explicitly deferred.
+Intentional ownership, admission, resource, scientific
 validity and fail-closed `Unknown` distinctions remain required throughout.
