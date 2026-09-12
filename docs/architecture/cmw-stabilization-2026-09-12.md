@@ -38,9 +38,18 @@ contention, stale token rejection, and uncertain ownership. Both cleanup and the
 ORCA wrapper exercise the shared primitive. Independent scoped review found no
 material issue.
 
+### TEST-001 — fixed
+
+The baseline failure compared snapshots taken at different wall times. Both
+snapshots now use the same injected observation time, retaining equality of every
+field and rejection of all seven invalid labels. Production behavior is unchanged.
+The pre-existing feature was preserved in its separately authorized prerequisite
+commit, with two focused behavior tests and a fixed-time invalid-label probe.
+All three display-ID tests pass after the correction.
+
 ### Remaining campaign
 
-TEST-001, TEST-002, EXEC-002, SEC-001, EXEC-003, SEC-002, DOC-001 and DIST-001 are
+TEST-002, EXEC-002, SEC-001, EXEC-003, SEC-002, DOC-001 and DIST-001 are
 pending. PERF-001 and the architecture/scaling expansions listed in the request
 are explicitly deferred. Intentional ownership, admission, resource, scientific
 validity and fail-closed `Unknown` distinctions remain required throughout.
