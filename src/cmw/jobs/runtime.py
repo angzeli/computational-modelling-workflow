@@ -252,6 +252,28 @@ def finish(store, job_id, claim, status, code, reason, *, termination_signal=Non
         store.event(con, job["id"], f"{status}: {reason}")
 
 
+def _wait_for_group_end(pgid, *, session=False):
+    """Retain commitment until the kernel confirms absence after leader reaping."""
+    deadline = time.monotonic() + 5
+    while True:
+        uncertainty = None
+        try:
+            if not group_exists(pgid) and not (session and group_members(pgid, session=True)):
+                return
+        except JobsError as exc:
+            # A post-KILL absence probe can briefly fail with EPERM. Retry only
+            # this observation, never signal delivery or the completion decision.
+            if not isinstance(exc.__cause__, PermissionError):
+                raise
+            uncertainty = exc
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if uncertainty is not None:
+                raise uncertainty
+            raise JobsError("Process group still contains live members or termination remains uncertain")
+        time.sleep(min(INTERVAL, remaining))
+
+
 def worker(store, job_id, claim):
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     with store.transaction() as con:
@@ -333,8 +355,6 @@ def worker(store, job_id, claim):
             cancel_at = None
             code = None
             session = job.get('env', {}).get('CMW_JOBS_OWN_SESSION') == '1'
-            def remains():
-                return group_exists(leader.pid) or (session and bool(group_members(leader.pid, session=True)))
             while True:
                 with store.transaction() as con:
                     job = store.get(con, job_id)
@@ -358,12 +378,7 @@ def worker(store, job_id, claim):
                         else:
                             os.killpg(leader.pid, signal.SIGKILL)
                         leader.wait(timeout=5)
-                        # Reparented zombies are ended; live group members block.
-                        deadline = time.monotonic() + 5
-                        while remains() and time.monotonic() < deadline:
-                            time.sleep(INTERVAL)
-                        if remains():
-                            raise JobsError("Process group termination remains uncertain")
+                        _wait_for_group_end(leader.pid, session=session)
                         finish(store, job_id, claim, "Cancelled", 137, "Termination confirmed", termination_signal=signal.SIGKILL)
                         return
                 if receipt.exists():
@@ -373,8 +388,7 @@ def worker(store, job_id, claim):
                         leader.stdin.write(b"RELEASE\n")
                         leader.stdin.flush()
                         leader.wait(timeout=5)
-                        if remains():
-                            raise JobsError("Process group still contains live members after release")
+                        _wait_for_group_end(leader.pid, session=session)
                         if job['cancel_requested']:
                             finish(store, job_id, claim, 'Cancelled', code, 'Termination confirmed')
                         else:

@@ -94,7 +94,9 @@ def main():
             del sys.argv[1]
             raise SystemExit(cli_main())
         from cmw.jobs.runtime import main as runtime_main
-        runtime_main()
+        from tests.jobs.lifecycle_evidence import trace_runtime
+        with trace_runtime(sys.argv[2]):
+            runtime_main()
 
 
 if __name__ == '__main__':

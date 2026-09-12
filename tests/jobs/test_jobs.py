@@ -12,11 +12,13 @@ import time
 import unittest
 from unittest.mock import patch
 
+from cmw.jobs import runtime
 from cmw.jobs.cli import elapsed, safe_text, status_text, tail
 from cmw.jobs.ownership import exclusive, group_members, identity, owner_alive
 from cmw.jobs.runtime import launch_blocker, reap_detached, reconcile, start, stop
 from cmw.jobs.store import JobsError, Store
 from tests.jobs.isolated_runtime import environment, install
+from tests.jobs.lifecycle_evidence import retain_lifecycle_evidence
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -42,6 +44,7 @@ class QueueTests(unittest.TestCase):
 
     def tearDown(self):
         if self.store.path.exists():
+            controller = self.store.snapshot()['controller']['owner']
             for j in self.jobs():
                 if j['status'] in {'Run', 'Starting'}:
                     self.store.change(j['id'], 'cancel', confirm=True)
@@ -50,6 +53,9 @@ class QueueTests(unittest.TestCase):
             finally:
                 stop(self.store)
                 wait_for(lambda: not self.store.snapshot()['controller']['online'])
+                for child in runtime._CHILDREN:
+                    if controller and child.pid == controller['pid']:
+                        child.wait(timeout=5)
         reap_detached()
         self.temp.cleanup()
 
@@ -126,6 +132,7 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(self.jobs()[3]['status'], 'Fail')
         self.assertNotIn('misleading', tail(self.jobs()[3]['logs']['stdout']))
 
+    @retain_lifecycle_evidence
     def test_child_outlives_wrapper_and_cancellation_tree(self):
         marker = self.root/'child-finished'
         child = f"import time,pathlib; time.sleep(.8); pathlib.Path({str(marker)!r}).write_text('done')"
