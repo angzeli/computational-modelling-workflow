@@ -215,6 +215,12 @@ def register(subcommands):
             command.add_argument("--bytes", type=int, default=16384)
         command.set_defaults(handler=handle)
 
+    rename = operations.add_parser("rename-id", help="change an unstarted job's display prefix; preserves attempt identity")
+    rename.add_argument("job_id")
+    rename.add_argument("display_id")
+    rename.add_argument("--json", action="store_true")
+    rename.set_defaults(handler=handle)
+
     config = operations.add_parser("config", help="view/configure scheduler policy; never enables dispatch")
     config.add_argument("--mode", choices=("sequential", "bounded-sharing"))
     config.add_argument("--cpu-budget", type=int)
@@ -265,6 +271,8 @@ def handle(args):
             current = store.snapshot()["scheduler"]
             result = (store.configure_sharing(args.mode or current["mode"], **values)
                       if args.mode is not None or any(value is not None for value in values.values()) else current)
+        elif operation == "rename-id":
+            result = store.rename_id(args.job_id, args.display_id)
         elif operation == "sharing":
             result = store.set_sharing(args.job_id, role=args.role, allow_auxiliary=args.allow_auxiliary,
                                       independent=args.independent, resource_contract="trusted-declared" if args.trust_resources else None,

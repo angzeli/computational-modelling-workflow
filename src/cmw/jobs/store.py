@@ -159,6 +159,11 @@ class Store:
 
     @staticmethod
     def get(con, job_id):
+        # Custom display labels resolve to the same immutable job/attempt record.
+        row = con.execute("SELECT data FROM jobs WHERE json_extract(data, '$.display_id')=?",
+                          (str(job_id),)).fetchone()
+        if row is not None:
+            return _job_defaults(json.loads(row[0]))
         try:
             number = int(str(job_id).removeprefix("J").split(".")[0])
         except ValueError as exc:
@@ -235,6 +240,22 @@ class Store:
             job["logs"] = {stream: str(self.root / "attempts" / job["attempt_id"] / f"{stream}.log") for stream in ("stdout", "stderr")}
             self.save(con, job)
             self.event(con, number, f"Enqueued at order {job['order']}")
+        return job
+
+    def rename_id(self, job_id, display_id):
+        with self.transaction() as con:
+            job = self.get(con, job_id)
+            if job['status'] not in PENDING or job.get('started_at') is not None:
+                raise JobsError('Only an unstarted pending job may be renamed')
+            if self.control(con)['dispatch']:
+                raise JobsError('Pause dispatch before renaming a job ID')
+            suffix = job['display_id'][1:]
+            if not re.fullmatch(r'[A-DF-Z]' + re.escape(suffix), str(display_id)):
+                raise JobsError('Use one uppercase prefix other than E; keep the job and attempt numbers')
+            previous = job['display_id']
+            job['display_id'] = display_id
+            self.save(con, job)
+            self.event(con, job['id'], f'Job ID renamed: {previous} -> {display_id}')
         return job
 
     def configure_sharing(self, mode, *, cpu_budget=None, memory_gib=None,

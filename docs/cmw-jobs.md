@@ -41,6 +41,13 @@ cmw jobs cancel J1.1 --yes
 cmw jobs stop
 ```
 
+To label an existing unstarted Multiwfn job `M1.1`, first pause dispatch (or leave
+its controller offline), then use `cmw jobs rename-id J1.1 M1.1`. Only the single
+uppercase prefix changes; `E` is reserved for external observations. Job/attempt
+numbers, immutable attempt identity, commands and logs are preserved. Use the new
+full ID for subsequent controls; numeric job IDs and the short `J1` alias remain
+valid. This does not change engine classification or admission eligibility.
+
 IDs above are illustrative; use IDs returned by `add`. Options for `add` precede
 `--`; the remainder is an explicit argv array, not a shell command string.
 Relative or empty `PATH` entries are evaluated from the job working directory;
