@@ -80,25 +80,42 @@ def group_members(pgid, *, pids=None, process_factory=psutil.Process, session=Fa
 def signal_session(owner, signum):
     """Signal owned subgroups before the pinned leader; never adopt another session."""
     sid = owner['pid']
-    if not owner_alive(owner) or os.getsid(sid) != sid:
-        raise JobsError('Dedicated session ownership lost; no signal sent')
-    groups = set()
+
+    def verify_owner():
+        if not owner_alive(owner) or os.getsid(sid) != sid or os.getpgid(sid) != sid:
+            raise JobsError('Dedicated session ownership lost; no signal sent')
+
+    verify_owner()
+    groups = {sid: [owner]}
     for pid in group_members(sid, session=True):
         try:
-            if os.getsid(pid) == sid:
-                groups.add(os.getpgid(pid))
-        except ProcessLookupError:
-            continue
-    for pgid in sorted(groups - {sid}) + [sid]:
-        if not owner_alive(owner):
-            raise JobsError('Dedicated session ownership lost during cancellation')
-        try:
-            if os.getsid(pgid) != sid or os.getpgid(pgid) != pgid:
+            member = identity(pid)
+            pgid = os.getpgid(pid)
+            if os.getsid(pid) != sid:
                 raise JobsError('Session subgroup identity cannot be verified')
-            os.killpg(pgid, signum)
-        except ProcessLookupError:
-            # An ended subgroup needs no signal. Final membership still gates completion.
+            groups.setdefault(pgid, []).append(member)
+        except (ProcessLookupError, psutil.NoSuchProcess):
             continue
+    for pgid in sorted(groups.keys() - {sid}) + [sid]:
+        verify_owner()
+        for member in groups[pgid]:
+            if not owner_alive(member):
+                continue
+            try:
+                if os.getsid(member['pid']) != sid or os.getpgid(member['pid']) != pgid:
+                    raise JobsError('Session subgroup identity cannot be verified')
+                verify_owner()
+                if not owner_alive(member):
+                    continue
+                # A current birth-verified member witnesses a leaderless group.
+                # Numeric PGID alone never authorizes a signal.
+                os.killpg(pgid, signum)
+                break
+            except ProcessLookupError:
+                continue
+        else:
+            if group_exists(pgid):
+                raise JobsError('Session subgroup has no verified surviving member; no signal sent')
 
 
 def group_exists(pgid):

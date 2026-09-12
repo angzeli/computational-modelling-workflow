@@ -76,9 +76,29 @@ All 30 affected lifecycle, admission-boundary and diagnostic tests passed after
 the owned-handle teardown correction. Independent scoped review found no material
 completion or ownership weakening.
 
+### EXEC-002 — fixed
+
+The old function skipped a leaderless subgroup because it queried the missing
+leader PID; the focused regression reproduced the missing TERM target. Signal
+authority now comes from current member birth identities and rechecked SID/PGID
+membership under the verified pinned session owner. Subgroups are still signalled
+before the pinned leader. A vanished witness can be replaced by another verified
+member; an existing group without one fails closed. Numeric PGID alone never
+authorizes a signal. POSIX topology checks and signal delivery are not atomic;
+the existing portable check-to-syscall race remains a limitation.
+
+Validation: 19 focused ownership, completion and cancellation tests passed.
+Real fixtures reap the subgroup leader before readiness, verify the survivor's
+birth/SID/PGID, then exercise cooperative TERM and resistant KILL (exit 137,
+signal 9). A resistant survivor keeps its CPU commitment until confirmed ended.
+An unrelated session remains alive and un-signalled. Primary/Auxiliary isolation
+passes in both default group mode and opted-in session mode. Scoped independent
+review found no signal-authority weakening; final fixture cleanup handles a
+verified terminal transition racing cancellation.
+
 ### Remaining campaign
 
-EXEC-002, SEC-001, EXEC-003, SEC-002, DOC-001 and DIST-001 are
+SEC-001, EXEC-003, SEC-002, DOC-001 and DIST-001 are
 pending. PERF-001 and the architecture/scaling expansions listed in the request
 are explicitly deferred. Intentional ownership, admission, resource, scientific
 validity and fail-closed `Unknown` distinctions remain required throughout.

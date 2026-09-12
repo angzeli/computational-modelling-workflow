@@ -17,6 +17,7 @@ from cmw.jobs import activity, runtime, sharing
 from cmw.jobs.ownership import exclusive, identity, owner_alive
 from tests.jobs import test_jobs as lifecycle
 from tests.jobs.isolated_runtime import FixtureAdmissionSampler, detached
+from tests.jobs.lifecycle_evidence import retain_lifecycle_evidence
 
 
 class SharingRuntimeTests(unittest.TestCase):
@@ -187,6 +188,21 @@ class SharingRuntimeTests(unittest.TestCase):
         self.assertEqual(self.job(primary)['status'], 'Run')
         self.release(primary)
         self.completed(3)
+
+    def owned_session_case(self, exercise):
+        add = self.store.add
+        def session_add(**kwargs):
+            return add(**kwargs, env={'CMW_JOBS_OWN_SESSION': '1'})
+        with patch.object(self.store, 'add', side_effect=session_add):
+            exercise()
+
+    @retain_lifecycle_evidence
+    def test_owned_session_auxiliary_cancellation_preserves_primary(self):
+        self.owned_session_case(self.test_auxiliary_failure_and_cancellation_do_not_touch_primary)
+
+    @retain_lifecycle_evidence
+    def test_owned_session_primary_cancellation_preserves_auxiliary(self):
+        self.owned_session_case(self.test_primary_cancellation_leaves_auxiliary_alive_until_its_own_release)
 
     def test_primary_failure_preserves_auxiliary_and_pauses_next_primary(self):
         primary = self.add_gate('failed-primary', exit_code=7)
