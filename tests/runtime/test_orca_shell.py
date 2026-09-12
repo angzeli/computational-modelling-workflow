@@ -414,8 +414,9 @@ class OrcaShellTests(unittest.TestCase):
             self.assertTrue(
                 release_lock(attempt / "target.json.lock", token=held_lock.token)
             )
+            acquire_lock(attempt / "target.json.lock", job_id="stale", owner_pid=999_999_999)
             first = subprocess.run(
-                command,
+                (*command, "--replace-stale-lock"),
                 cwd=ROOT,
                 env=env,
                 input="manifest data that ORCA must not consume\n",

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -82,6 +83,24 @@ def inspect_lock(path: Path, *, hostname: str | None = None) -> LockInspection:
     return LockInspection(state, reasons[state], owner)
 
 
+@contextmanager
+def _mutation_guard(path: Path):
+    # The ownership pathname is replaceable; this inode must remain stable.
+    # Serialize release as well, so a delayed token check cannot unlink a successor.
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise RuntimeError("Local stage lock mutation requires POSIX file locks") from exc
+    guard = path.with_name(f".{path.name}.guard")
+    descriptor = os.open(guard, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(descriptor, "r+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def acquire_lock(
     path: Path,
     *,
@@ -92,6 +111,11 @@ def acquire_lock(
     """Acquire exclusively; stale replacement must be requested explicitly."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    with _mutation_guard(path):
+        return _acquire_locked(path, job_id=job_id, owner_pid=owner_pid, replace_stale=replace_stale)
+
+
+def _acquire_locked(path: Path, *, job_id: str, owner_pid: int | None, replace_stale: bool) -> LockOwner:
     inspection = inspect_lock(path)
     if inspection.state is LockState.STALE_LOCAL and replace_stale:
         try:
@@ -129,11 +153,14 @@ def acquire_lock(
 def release_lock(path: Path, *, token: str) -> bool:
     """Release only when the caller proves ownership with the lock token."""
 
-    inspection = inspect_lock(path)
-    if inspection.owner is None or inspection.owner.token != token:
+    if not path.parent.exists():
         return False
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return False
-    return True
+    with _mutation_guard(path):
+        inspection = inspect_lock(path)
+        if inspection.owner is None or inspection.owner.token != token:
+            return False
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        return True

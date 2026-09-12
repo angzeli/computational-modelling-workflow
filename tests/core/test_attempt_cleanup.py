@@ -700,6 +700,15 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn("rm -rf", source)
         self.assertNotIn("shell=True", source)
 
+    def test_stale_campaign_lock_uses_shared_recovery_primitive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = SyntheticCampaign(Path(temporary))
+            lock = fixture.root / ".cmw" / "cleanup.lock"
+            acquire_lock(lock, job_id="stale", owner_pid=999_999_999)
+            result = apply_cleanup_plan(fixture.plan(), open_writer_probe=_no_writer)
+            self.assertEqual(result.status, "COMMITTED")
+            self.assertFalse(lock.exists())
+
     def test_apply_invocation_resumes_incomplete_metadata_transaction(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = SyntheticCampaign(Path(temporary))
