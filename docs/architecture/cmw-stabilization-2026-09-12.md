@@ -171,9 +171,60 @@ Validation: focused text/diff review and generated top-level/Jobs help. The READ
 test installation includes the optional console dependency so its documented
 broad command also covers that interface. No execution behavior was changed.
 
-### Remaining campaign
+### DIST-001 — fixed at source/workflow level; remote execution pending
 
-DIST-001 and the final broad/artifact gates are pending. PERF-001 and the
-architecture/scaling expansions listed in the request are explicitly deferred.
-Intentional ownership, admission, resource, scientific
-validity and fail-closed `Unknown` distinctions remain required throughout.
+The new Python/package workflow selects two combinations: macOS 15 with Python
+3.14 for the primary acceptance path, and Ubuntu 24.04 with Python 3.10 for the
+declared lower bound. Each runs the documented full offline suite, builds a
+source archive and its wheel, screens publication contents, then checks fresh
+core-wheel, Jobs-wheel, sdist and editable installs outside the checkout.
+Only test launchers are copied beside the smoke driver; installed package origins
+are asserted. Every install exercises CLI/help/JSON, the packaged `payload.sh`,
+the optional Textual boundary and two synthetic Sequential/Bounded Sharing jobs.
+The console-enabled installs also initialize the headless TUI. Fixture payloads
+have finite deadlines; teardown checks owned handles and birth identities.
+
+The workflow uses read-only repository permissions, checkout/setup-python major
+v7, dependency-file keyed pip caching and a 30-minute job bound. It adds no release
+or publishing automation and invokes no licensed engine. YAML, referenced paths,
+commands, shell syntax and Python 3.10 syntax were checked locally. Scoped review
+covered import isolation and cleanup even after a failed drainage assertion.
+
+The complete artifact script passed locally on Python 3.14.3 using pip and the
+PEP 517/660 build paths, with recorded dependency-version constraints. All four
+dependency checks passed; all eight scheduling cases finished with no recorded
+live owner after cleanup. Core-only has no Textual and returns the expected
+missing-extra diagnostic; all three Jobs-extra installs passed TUI initialization.
+The wheel contains `payload.sh` and all 106 package files match current source
+bytes. Both built artifacts passed the bounded privacy/content screen.
+This does not establish Python 3.10 or Linux runtime acceptance locally, nor
+latest-range dependency compatibility. GitHub-hosted execution is pending because
+the campaign does not push. Existing platform claims remain unchanged.
+
+## Final confidence gates
+
+The final broad suite passed all **700 tests**, with zero failures, errors or
+skips (470.808 s). It covers current state, schema-1 read/migration, active legacy
+refusal and future-schema rejection. Schema 2 and version 0.1.0 / Pre-Alpha remain
+unchanged. Downgrading to an older schema-1 reader is unsupported; no downgrade
+converter is introduced. Scientific finalizers remain authoritative.
+
+An earlier final-suite invocation had 699 passes and one import error because
+the campaign supplied relative `PYTHONPATH` to a subprocess that changed cwd.
+That environment error was retained, corrected to absolute source paths, checked
+with the affected test, and followed by the complete green run above. It did not
+require a production/test-source patch or a skipped assertion.
+
+The final cancellation recurrence passed **25/25**, with 25 TERM and 25 KILL
+deliveries, no live recorded owner after any teardown, and five separate workers
+recovering from transient permission-observation errors. The deterministic lock
+regression exercises 20 synchronized stale-recovery interleavings. Leaderless
+session, unrelated-sentinel and Primary/Auxiliary isolation cases also pass in
+the broad suite. These are synthetic operational checks, not new scientific runs.
+
+All actionable audit items are remediated at the stated source/publication scope.
+PERF-001 and the explicitly excluded scaling/architecture changes remain deferred
+by design. Remaining gates are exact-commit remote CI and a separate public
+release decision; publishing full Git history also requires addressing its
+retained historical private paths without assuming current artifacts sanitize it.
+No push, tag, release or production-state migration is part of this campaign.

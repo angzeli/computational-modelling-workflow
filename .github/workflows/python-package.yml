@@ -1,0 +1,45 @@
+name: Python regressions and installed artifacts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression-package:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS acceptance / Python 3.14
+            os: macos-15
+            python: '3.14'
+          - label: Linux lower-bound check / Python 3.10
+            os: ubuntu-24.04
+            python: '3.10'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      CMW_JOBS_STATE: ${{ runner.temp }}/cmw-ci-unused-state
+      CMW_TEST_EVIDENCE_DIR: ${{ runner.temp }}/cmw-lifecycle-evidence
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install test and build dependencies
+        run: python -m pip install -e '.[jobs]' build
+      - name: Full deterministic offline suite (synthetic engines only)
+        run: python -m unittest discover -s tests
+      - name: Build, inspect and test fresh installations outside checkout
+        run: PYTHON_BIN="$(command -v python)" bash scripts/ci/check_artifacts.sh "$RUNNER_TEMP/cmw-artifact-check"
