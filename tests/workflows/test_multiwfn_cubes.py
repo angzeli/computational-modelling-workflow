@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -145,6 +146,47 @@ class MultiwfnCubeHarness(unittest.TestCase):
 
 
 class FmoWorkflowTests(MultiwfnCubeHarness):
+    def test_parent_retains_lock_through_normalization_and_finalization(self) -> None:
+        observer = self.root / "observe-python"
+        events_path = self.root / "lock-events.jsonl"
+        observer.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, subprocess, sys\n"
+            "from pathlib import Path\n"
+            "args = sys.argv[1:]\n"
+            "watched = args[:2] == ['-m', 'cmw.molecular.workflows.downstream_cli'] and "
+            "args[2] in ('lock', 'normalize', 'finalize')\n"
+            "if watched:\n"
+            "    action = args[3] if args[2] == 'lock' else args[2]\n"
+            "    option = '--lock' if args[2] == 'lock' else '--target'\n"
+            "    lock = Path(args[args.index(option) + 1] + ('' if option == '--lock' else '.lock'))\n"
+            "    before = lock.exists()\n"
+            "    owner_pid = json.loads(lock.read_text())['pid'] if before else None\n"
+            "status = subprocess.call([os.environ['CMW_TEST_PYTHON'], *args])\n"
+            "if watched:\n"
+            "    with open(os.environ['CMW_TEST_LOCK_EVENTS'], 'a') as handle:\n"
+            "        handle.write(json.dumps({'action': action, 'before': before, "
+            "'after': lock.exists(), 'status': status, 'caller_pid': os.getppid(), "
+            "'owner_pid': owner_pid}) + '\\n')\n"
+            "sys.exit(status)\n",
+            encoding="utf-8",
+        )
+        observer.chmod(0o700)
+        completed = self.run_workflow(
+            FMO,
+            env={**self.env, "PYTHON_BIN": str(observer), "CMW_TEST_PYTHON": sys.executable,
+                 "CMW_TEST_LOCK_EVENTS": str(events_path)},
+            check=False,
+        )
+        events = [json.loads(line) for line in events_path.read_text().splitlines()]
+        self.assertEqual(completed.returncode, 0, completed.stderr + repr(events))
+        self.assertEqual([event["action"] for event in events],
+                         ["acquire", "normalize", "finalize", "release"])
+        self.assertEqual([event["status"] for event in events], [0, 0, 0, 0])
+        self.assertEqual([event["before"] for event in events], [False, True, True, True])
+        self.assertEqual([event["after"] for event in events], [True, True, True, False])
+        self.assertEqual(events[-1]["caller_pid"], events[-1]["owner_pid"])
+
     def test_validated_source_produces_homo_lumo_and_reuses(self) -> None:
         first = self.run_workflow(FMO)
         result = json.loads(first.stdout)

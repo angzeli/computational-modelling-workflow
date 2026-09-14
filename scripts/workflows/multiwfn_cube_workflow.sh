@@ -167,6 +167,8 @@ multiwfn_cube_main() {
   }
   set +e
   (
+    # The parent owns the stage lock; runtime must not restore its cleanup trap.
+    trap - EXIT INT TERM
     cd "$attempt_directory"
     multiwfn_runtime_launch "$source_wavefunction" <menu.in >multiwfn.log 2>multiwfn.stderr
   ) &
