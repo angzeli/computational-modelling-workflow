@@ -319,6 +319,8 @@ def build_parser() -> argparse.ArgumentParser:
     layout_status.set_defaults(handler=_execution_layout_status)
     from cmw.jobs.cli import register
     register(subcommands)
+    from cmw.periodic.vasp.cli import register as register_vasp
+    register_vasp(subcommands)
     return parser
 
 

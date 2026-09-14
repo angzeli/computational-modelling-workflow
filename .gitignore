@@ -25,3 +25,8 @@ dist/
 
 # Local workflow results
 /runs/
+
+# Licensed VASP potential artifacts
+POTCAR
+POTCAR.*
+.cmw-potcar-*

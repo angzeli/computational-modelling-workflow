@@ -15,6 +15,8 @@ This repository currently contains:
 - strict XYZ parsing and stable geometry identity;
 - ASE-based molecular XYZ-to-POSCAR conversion with deterministic species
   grouping, atom mapping, vacuum validation, and provenance;
+- local VASP POTCAR assembly, variant discovery, and species-order checking
+  with explicit per-element overrides and no supplied licensed datasets;
 - factual ORCA output parsing with separate OPT/FREQ/SP/TDDFT validation;
 - versioned targets, attempts, artifacts, lineage, local locks, and fail-closed
   reuse;
@@ -48,7 +50,7 @@ This repository currently contains:
   hole/electron analysis.
 
 It does **not** redistribute Multiwfn or contain dimer-selection science,
-catalytic pathways, pymatgen, VASP execution, `INCAR`/`KPOINTS`/`POTCAR`
+catalytic pathways, pymatgen, VASP execution, `INCAR`/`KPOINTS`
 generation, scheduler execution, cluster locking, or generic retry ladders.
 
 ## Architectural scope
@@ -152,6 +154,13 @@ POSCAR cells with charge-aware automatic cell selection, per-face vacuum,
 deterministic species grouping, read-back validation, atom-index mapping, and
 conversion provenance. See
 [`docs/structure/xyz-to-poscar.md`](docs/structure/xyz-to-poscar.md).
+
+`cmw vasp potcar build` assembles local licensed potentials in POSCAR species
+order, defaulting to each element's suffix-free directory. Use repeated
+`--pot ELEMENT=VARIANT` for one-off overrides and `--potcar-root PATH` or
+`CMW_VASP_POTCAR_ROOT` for the local library. `cmw vasp potcar list ELEMENT`
+discovers variants; `cmw vasp potcar check` checks dataset identities and order.
+See the [POTCAR guide](docs/periodic/vasp-potcar.md) for paths and overwrite safety.
 
 Validated ORCA results can be consumed independently by the downstream FMO,
 ESP, and IGMH shell interfaces. Their source contract, explicit grid/fragment
