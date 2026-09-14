@@ -98,7 +98,9 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                     wait_for(lambda: store.snapshot()['jobs'][0]['status'] == 'Cancelled', timeout=8)
                 else:
                     self.assertIsNone(parent.poll())
-                    parent.wait(timeout=6)
+                    # Unresolved termination traverses both bounded polling loops;
+                    # allow process-launch overhead beyond their four seconds of sleep.
+                    parent.wait(timeout=10 if unresolved else 6)
                     stderr = (root/'wrapper.stderr').read_text()
                     if unresolved:
                         self.assertEqual(parent.returncode, 75, stderr)
