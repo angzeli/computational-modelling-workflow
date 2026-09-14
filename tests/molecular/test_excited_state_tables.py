@@ -411,8 +411,8 @@ class ExcitedStateCsvTests(unittest.TestCase):
 
     def test_atomic_four_table_write(self) -> None:
         bundle = _bundle()
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
-            root = Path(directory)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
             paths = {name: root / f"{name}.csv" for name in TABLE_NAMES}
             write_excited_state_csv_bundle(bundle, paths)
             self.assertTrue(all(path.is_file() for path in paths.values()))
@@ -422,8 +422,8 @@ class ExcitedStateCsvTests(unittest.TestCase):
     def test_validation_failure_writes_none(self) -> None:
         bundle = _bundle()
         invalid = replace(bundle, hea_state=())
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
-            root = Path(directory)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
             paths = {name: root / f"{name}.csv" for name in TABLE_NAMES}
             with self.assertRaises(ExcitedStateTableError):
                 write_excited_state_csv_bundle(invalid, paths)
@@ -431,8 +431,8 @@ class ExcitedStateCsvTests(unittest.TestCase):
 
     def test_install_error_restores_all_previous_tables(self) -> None:
         bundle = _bundle()
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
-            root = Path(directory)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
             paths = {name: root / f"{name}.csv" for name in TABLE_NAMES}
             for path in paths.values():
                 path.write_text("previous\n", encoding="utf-8")
@@ -456,11 +456,52 @@ class ExcitedStateCsvTests(unittest.TestCase):
                 )
             )
 
+    def test_temporary_parent_selection_and_cleanup(self) -> None:
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                default_parent = root / "default"
+                explicit_parent = root / "explicit"
+                default_parent.mkdir()
+                explicit_parent.mkdir()
+                paths = {name: root / f"{name}.csv" for name in TABLE_NAMES}
+                options = {"temporary_parent": explicit_parent} if explicit else {}
+                staged_parents = []
+                real_replace = os.replace
+
+                def observed_replace(source, destination):
+                    staged_parents.append(Path(source).parent.parent.resolve())
+                    return real_replace(source, destination)
+
+                with mock.patch.dict(os.environ, {"TMPDIR": str(default_parent)}), \
+                        mock.patch.object(tempfile, "tempdir", None), \
+                        mock.patch("cmw.molecular.excited_state_tables.os.replace", side_effect=observed_replace):
+                    write_excited_state_csv_bundle(_bundle(), paths, **options)
+                expected_parent = explicit_parent if explicit else default_parent
+                self.assertEqual(staged_parents, [expected_parent] * len(TABLE_NAMES))
+                self.assertTrue(all(path.is_file() for path in paths.values()))
+                self.assertEqual(list(default_parent.iterdir()), [])
+                self.assertEqual(list(explicit_parent.iterdir()), [])
+
+    def test_invalid_temporary_parent_writes_no_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            file_parent = root / "not-a-directory"
+            file_parent.write_text("preserve\n", encoding="utf-8")
+            paths = {name: root / f"{name}.csv" for name in TABLE_NAMES}
+            for parent in (root / "missing", file_parent):
+                with self.subTest(parent=parent), self.assertRaisesRegex(
+                    ExcitedStateTableError, "temporary parent does not exist"
+                ):
+                    write_excited_state_csv_bundle(_bundle(), paths, temporary_parent=parent)
+            self.assertFalse(any(path.exists() for path in paths.values()))
+            self.assertEqual(file_parent.read_text(encoding="utf-8"), "preserve\n")
+
 
 class FinalizedArtifactResolutionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(dir="/private/tmp")
-        self.root = Path(self.temporary.name)
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name).resolve()
         self.campaign = self.root / "campaign"
         (self.campaign / "calculation").mkdir(parents=True)
         self.target = self.campaign / "calculation" / "analysis" / "target"

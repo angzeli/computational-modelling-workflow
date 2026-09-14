@@ -957,7 +957,7 @@ def write_excited_state_csv_bundle(
     bundle: ExcitedStateTableBundle,
     output_paths: Mapping[str, str | Path],
     *,
-    temporary_parent: str | Path = "/private/tmp",
+    temporary_parent: str | Path | None = None,
 ) -> None:
     """Validate all datasets, stage all CSVs outside outputs, then replace all four."""
 
@@ -971,8 +971,10 @@ def write_excited_state_csv_bundle(
         "hea_state": HEA_COLUMNS,
     }
     staged: dict[str, Path] = {}
-    temp_root = Path(temporary_parent).resolve()
-    if str(temp_root) != "/private/tmp" and not temp_root.is_dir():
+    temp_root = Path(
+        tempfile.gettempdir() if temporary_parent is None else temporary_parent
+    ).resolve()
+    if not temp_root.is_dir():
         raise ExcitedStateTableError("temporary parent does not exist")
     with tempfile.TemporaryDirectory(
         prefix="cmw-excited-state-tables-", dir=temp_root
