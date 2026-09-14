@@ -23,6 +23,34 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         observation.start()
         self.addCleanup(observation.stop)
 
+    async def test_refresh_preserves_cursor_before_queued_highlight(self):
+        with tempfile.TemporaryDirectory(prefix='cmw tui cursor ') as directory:
+            store = Store(Path(directory)/'state')
+            for index in range(24):
+                store.add(argv=['/bin/echo', 'synthetic'], cwd=directory, name=str(index))
+            app = JobsApp(store)
+            async with app.run_test(size=(130, 40)) as pilot:
+                await pilot.pause()
+                table = app.query_one(DataTable)
+                table.move_cursor(row=4)
+                await pilot.pause()
+                self.assertEqual(app.selected_id, app.row_ids[4])
+                table.action_page_down()
+                moved = table.cursor_row
+                selected = app.row_ids[moved]
+                self.assertGreater(moved, 4)
+                # A timer refresh can arrive before the queued RowHighlighted event.
+                app.refresh_state()
+                self.assertEqual(table.cursor_row, moved)
+                self.assertEqual(app.selected_id, selected)
+                await pilot.pause()
+                self.assertEqual(app.selected_id, selected)
+                await pilot.resize_terminal(64, 28)
+                await pilot.pause()
+                self.assertEqual(app.selected_id, selected)
+                self.assertEqual(app.row_ids[table.cursor_row], selected)
+                await pilot.press('q')
+
     async def test_interactions_selection_resize_logs_and_render(self):
         with tempfile.TemporaryDirectory(prefix='cmw tui ') as directory:
             store = Store(Path(directory)/'state')

@@ -398,6 +398,10 @@ class JobsApp(App):
         return next((j for j in (self.state or {}).get("jobs", []) if j["display_id"] == self.selected_id), None)
 
     def refresh_state(self):
+        table = self.query_one(DataTable)
+        # Cursor movement precedes its queued highlight event; preserve that newer identity.
+        if table.has_focus and 0 <= table.cursor_row < len(self.row_ids):
+            self.selected_id = self.row_ids[table.cursor_row]
         try:
             self.state = self.store.snapshot(now=self.clock() if self.clock else None)
         except (ValueError, OSError) as exc:
@@ -425,7 +429,6 @@ class JobsApp(App):
         self.query_one("#guard", Static).styles.max_height = 3 if compact else 5
         self.query_one("#external", DataTable).styles.height = 4 if compact else 5
         self.query_one("#selected", Static).styles.max_height = 3 if compact else 7
-        table = self.query_one(DataTable)
         table.styles.min_height = 3 if compact else 5
         table.display = bool(jobs)
         wide = self.size.width >= 110
