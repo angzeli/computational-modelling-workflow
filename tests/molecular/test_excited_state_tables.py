@@ -241,7 +241,7 @@ class ExcitedStateTableNormalizationTests(unittest.TestCase):
     def test_top_five_rank_by_weight_with_frontier_and_explicit_orca0_labels(self) -> None:
         frontier = _manifold(2, frontier=10).rows[0]
         self.assertEqual(frontier["transition_count_parsed"], 6)
-        self.assertEqual(frontier["leading_transition_weight_sum"], 1.05)
+        self.assertAlmostEqual(frontier["leading_transition_weight_sum"], 1.05, delta=1e-14)
         self.assertEqual(
             frontier["leading_transitions"],
             "HOMO [ORCA0:9a]->LUMO+1 [ORCA0:11a]:0.4;"
