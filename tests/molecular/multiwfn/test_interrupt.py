@@ -100,7 +100,8 @@ signal.signal(signal.SIGTERM, interrupted)
 signal.signal(signal.SIGINT, interrupted)
 aliases=[Path(os.environ['Multiwfnpath']),Path(sys.argv[1])]
 atomic_write_json(root/'ready.json', {'owner':identity(),'aliases':[str(p) for p in aliases]})
-deadline=time.monotonic()+15
+# Outlive readiness (5 s), signal observation (2 s), and parent wait (15 s).
+deadline=time.monotonic()+25
 while not (root/'release').exists() and time.monotonic()<deadline:
     if not all(p.exists() for p in aliases): (root/'alias-lost-while-live').touch()
     time.sleep(.02)
@@ -131,7 +132,7 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                 env['CMW_TEST_REFUSE_KILL'] = '1'
             if early_interrupt:
                 env['CMW_TEST_EARLY_INTERRUPT'] = '1'
-            sentinel = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'])
+            sentinel = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(35)'])
             sentinel_owner = identity(sentinel.pid)
             parent = None
             parent_owner = None
@@ -167,9 +168,9 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                     wait_for(lambda: store.snapshot()['jobs'][0]['status'] == 'Cancelled', timeout=8)
                 else:
                     self.assertIsNone(parent.poll())
-                    # Unresolved termination traverses both bounded polling loops;
-                    # allow process-launch overhead beyond their four seconds of sleep.
-                    parent.wait(timeout=10 if unresolved else 6)
+                    # Hosted polling reached KILL at 7 s and kept draining after 10 s.
+                    # Both waits expire before the fake child's 25 s safety lifetime.
+                    parent.wait(timeout=15 if unresolved else 10)
                     stderr = (root/'wrapper.stderr').read_text()
                     if unresolved:
                         self.assertEqual(parent.returncode, 75, stderr)
