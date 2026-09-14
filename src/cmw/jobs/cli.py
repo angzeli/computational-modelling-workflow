@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import stat
 import sys
+import time
 import unicodedata
 
 from .store import JobsError, Store
@@ -77,6 +79,74 @@ def tail(path, limit=16384):
             return safe_text(handle.read(limit).decode("utf-8", errors="replace"))
     except FileNotFoundError:
         return "No log yet."
+
+
+def _unknown_worker_observation(owner):
+    import psutil
+    import socket
+    from .ownership import identity
+
+    if not isinstance(owner, dict) or not all(key in owner for key in ('pid', 'birth', 'host', 'boot')):
+        return {'verdict': 'missing', 'reason': 'No complete worker identity was recorded.'}
+    if isinstance(owner['pid'], bool) or not isinstance(owner['pid'], int) or owner['pid'] <= 0:
+        return {'verdict': 'unavailable', 'reason': 'The recorded worker PID is invalid.'}
+    try:
+        if owner['host'] != socket.gethostname():
+            return {'verdict': 'mismatch', 'reason': 'The recorded worker belongs to another host.'}
+        if owner['boot'] != psutil.boot_time():
+            return {'verdict': 'mismatch', 'reason': 'The recorded worker belongs to another boot.'}
+        current = identity(owner['pid'])
+        if current != owner:
+            return {'verdict': 'mismatch', 'reason': 'The PID has a different birth identity.',
+                    'observed_identity': current}
+        status = psutil.Process(owner['pid']).status()
+        current = identity(owner['pid'])
+        if current != owner:
+            return {'verdict': 'mismatch', 'reason': 'The PID identity changed during observation.',
+                    'observed_identity': current}
+        if status in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+            return {'verdict': 'gone', 'reason': f'The recorded worker has exited ({status}).'}
+        return {'verdict': 'matched', 'reason': 'The live process matches the recorded worker identity.',
+                'observed_identity': current}
+    except psutil.NoSuchProcess:
+        return {'verdict': 'gone', 'reason': 'The recorded worker process no longer exists.'}
+    except (psutil.Error, OSError) as exc:
+        return {'verdict': 'unavailable', 'reason': f'Worker observation failed: {type(exc).__name__}.'}
+
+
+def _unknown_lock_observation(store, attempt_id):
+    from .ownership import lock_held
+
+    if not isinstance(attempt_id, str) or re.fullmatch(r'[0-9a-f]{32}', attempt_id) is None:
+        return {'verdict': 'unavailable', 'reason': 'No valid attempt identifier was recorded.'}
+    attempt = store.root/'attempts'/attempt_id
+    path = attempt/'worker.lock'
+    try:
+        # Inspect explicitly: Path.exists() can hide permission errors. Never
+        # follow a redirected attempt path or create a lock for this observation.
+        for directory in (store.root, store.root/'attempts', attempt):
+            if not stat.S_ISDIR(directory.lstat().st_mode):
+                return {'verdict': 'unavailable', 'reason': 'The attempt path is not an ordinary directory.'}
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            return {'verdict': 'unavailable', 'reason': 'The worker lock is not an ordinary file.'}
+        held = lock_held(path, strict=True)
+        after = path.lstat()
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            return {'verdict': 'unavailable', 'reason': 'The worker lock changed during observation.'}
+        return {'verdict': 'held' if held else 'unheld',
+                'reason': 'The worker lock is currently held.' if held else 'The worker lock is currently unheld.'}
+    except FileNotFoundError:
+        return {'verdict': 'missing', 'reason': 'The worker lock or its attempt directory is absent.'}
+    except OSError as exc:
+        return {'verdict': 'unavailable', 'reason': f'Worker lock observation failed: {type(exc).__name__}.'}
+
+
+def _unknown_ownership_observation(store, job):
+    """Advisory evidence for show; never reconcile or grant control authority."""
+    return {'advisory': True, 'observed_at': time.time(),
+            'worker': _unknown_worker_observation(job.get('worker')),
+            'worker_lock': _unknown_lock_observation(store, job.get('attempt_id'))}
 
 
 def guard_text(state):
@@ -329,6 +399,8 @@ def handle(args):
             if not candidates:
                 raise JobsError(f"No such job: {args.job_id}")
             result = candidates[0]
+            if operation == "show" and result['status'] == 'Unknown':
+                result = {**result, 'ownership_observation': _unknown_ownership_observation(store, result)}
             if operation == "logs":
                 result = {"job_id": result["display_id"], "stream": args.stream,
                           "text": tail(result["logs"][args.stream], args.bytes)}

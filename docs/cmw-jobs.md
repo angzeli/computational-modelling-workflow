@@ -259,6 +259,15 @@ situation manually. There is deliberately no “force Done”, blind retry, or
 unsafe override for Unknown. In particular, do not erase state to resume a queue
 while an old execution might still be alive.
 
+For an Unknown job, `cmw jobs show J1.1` adds an ephemeral
+`ownership_observation`: the worker identity is matched, mismatched, gone,
+unavailable, or missing, and its attempt lock is held, unheld, missing, or
+unavailable. This advisory observation includes a timestamp and reasons. It
+does not update stored state or authorize recovery, signalling, or dispatch.
+The lock check briefly probes an existing file with a nonblocking kernel lock;
+it creates no files. A held lock alone does not identify its owner, and the
+process and lock observations are not an atomic snapshot.
+
 This is conservative recognition of existing managed execution, not exactly-once
 execution across arbitrary crashes and not scientific checkpoint/restart support.
 
