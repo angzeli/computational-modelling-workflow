@@ -177,6 +177,23 @@ python3 -m pip install -e '.[jobs]'
 python3 -m unittest discover -s tests
 ```
 
+## Tested support
+
+Python 3.10 or newer is declared. The [Python/package CI](.github/workflows/python-package.yml)
+checks Python 3.10 on Ubuntu 24.04 x64 and Python 3.14 on macOS 15 Apple Silicon,
+including wheel/sdist builds, fresh core/Jobs/editable installations, and synthetic
+POSIX lifecycle tests. Local acceptance also covers Python 3.14.3 on macOS 26.3
+Apple Silicon. Python 3.11–3.13 and other OS/architecture combinations
+have not been qualified in this campaign. macOS Apple Silicon remains the primary
+Jobs acceptance platform; Linux evidence covers these synthetic checks. Windows
+Jobs execution is unsupported. These checks do not validate real scientific engines.
+
+The wheel supplies the Python package and its runtime assets. Scientific shell
+workflows also require the repository `scripts/` tree from a checkout or extracted
+sdist, plus separately installed engines. Use an exact tested commit when trying
+this `0.1.0` Pre-Alpha package; formal release remains a separate gate. See the
+[Jobs support and ownership boundaries](docs/cmw-jobs.md).
+
 ## Website
 
 The static HTML/CSS/JavaScript source lives in `docs/website/` and has no build
