@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
+import hashlib
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -11,7 +13,7 @@ from unittest.mock import patch
 from cmw.cli import main
 from cmw.periodic.vasp.potentials import (
     build_potcar, check_potcar, list_potentials, parse_potcar,
-    read_poscar_species, resolve_root,
+    inspect_potcar, read_poscar_species, resolve_potcar, resolve_root,
 )
 
 
@@ -278,3 +280,144 @@ class PotcarTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 0)
         for text in ('suffix-free', 'ELEMENT=VARIANT', 'CMW_VASP_POTCAR_ROOT', '--force', 'does not provide'):
             self.assertIn(text, output.getvalue())
+
+    def test_same_element_wrong_variant_fails_without_publication(self):
+        (self.root / 'In_d' / 'POTCAR').write_bytes(synthetic('In', 'In'))
+        with self.assertRaisesRegex(ValueError, 'variant mismatch'):
+            self.build(pots=['In=In_d'])
+        self.assertFalse(self.output.exists())
+        with self.assertRaisesRegex(ValueError, 'variant mismatch'):
+            list_potentials('In', self.root)
+
+    def test_bounded_identity_and_date_are_not_library_release(self):
+        data = synthetic('In', 'In_d').replace(b'FAKE In_d', b'INVENTED In_d 01Jan2001 extra-comment')
+        record = inspect_potcar(data, species=['In'], strict=True)
+        identity = record['datasets'][0]
+        self.assertEqual((identity['label'], identity['family'], identity['dataset_date']),
+                         ('In_d', 'INVENTED', '01Jan2001'))
+        self.assertEqual(identity['sha256'], hashlib.sha256(data).hexdigest())
+        self.assertTrue(record['identity_valid'])
+        self.assertEqual(record['library_release'], {'value': None, 'basis': 'unestablished'})
+        self.assertIn('library_release', record['unestablished'])
+
+    def test_element_only_legacy_and_strict_unestablished_identity(self):
+        data = b'VRHFIN = In: invented\nEnd of Dataset\n'
+        self.assertTrue(inspect_potcar(data)['identity_valid'])
+        strict = inspect_potcar(data, strict=True)
+        self.assertFalse(strict['identity_valid'])
+        self.assertEqual({item['status'] for item in strict['comparability']}, {'unestablished'})
+        self.poscar.write_text(poscar('In'))
+        (self.root / 'In' / 'POTCAR').write_bytes(data)
+        result = self.build()
+        self.assertEqual(result['selection']['selection_status'], 'element_only')
+        self.assertEqual(check_potcar(self.poscar, self.output)[0].element, 'In')
+        with self.assertRaisesRegex(ValueError, 'identity requirements failed'):
+            resolve_potcar(self.poscar, root=self.root, strict=True)
+        (self.root / 'In_d' / 'POTCAR').write_bytes(data)
+        with self.assertRaisesRegex(ValueError, 'variant unestablished'):
+            resolve_potcar(self.poscar, root=self.root, pots=['In=In_d'])
+
+    def test_explicit_comparability_pass_mismatch_and_missing(self):
+        data = synthetic('In', 'In_d').replace(b'FAKE In_d', b'INVENTED In_d 01Jan2001')
+        requirements = {'family': 'INVENTED', 'dataset_date': '01Jan2001',
+                        'library_release': 'synthetic-release-2', 'variants': {'In': 'In_d'},
+                        'sha256': {'In': hashlib.sha256(data).hexdigest()}}
+        record = inspect_potcar(data, requirements=requirements, library_release='synthetic-release-2')
+        self.assertTrue(record['identity_valid'])
+        self.assertEqual({item['status'] for item in record['comparability']}, {'verified'})
+        missing = inspect_potcar(data, requirements=requirements)
+        self.assertFalse(missing['identity_valid'])
+        self.assertEqual(missing['comparability'][-1]['status'], 'unestablished')
+        for field, value in [('family', 'OTHER'), ('dataset_date', '02Jan2001'),
+                             ('variants', {'In': 'In'}), ('sha256', {'In': '0' * 64})]:
+            with self.subTest(field=field):
+                wrong = inspect_potcar(data, requirements={field: value})
+                self.assertFalse(wrong['identity_valid'])
+                self.assertEqual(wrong['comparability'][0]['status'], 'mismatch')
+
+    def test_requirement_shape_fails_closed(self):
+        for value in ({'release': 'x'}, {'variants': {'Ti': 'Ti_pv'}}, {'family': ''},
+                      {'sha256': {'In': 'bad'}}, {'variants': []}, []):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                inspect_potcar(synthetic('In'), requirements=value)
+
+    def test_repeated_blocks_record_counts_and_same_source_snapshot(self):
+        self.poscar.write_text(poscar('In Zn In'))
+        original = Path.read_bytes
+        calls = []
+        def read(path):
+            if path.is_relative_to(self.root.resolve()):
+                calls.append(path)
+            return original(path)
+        with patch.object(Path, 'read_bytes', read):
+            selection = resolve_potcar(self.poscar.read_bytes(), root=self.root, pots=['In=In_d'], strict=True)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(selection.record['species'], ['In', 'Zn', 'In'])
+        self.assertEqual(selection.record['counts'], [1, 1, 1])
+        self.assertEqual([block['requested_variant'] for block in selection.record['blocks']], ['In_d', 'Zn', 'In_d'])
+        self.assertEqual(selection.record['potcar_sha256'], hashlib.sha256(selection.content).hexdigest())
+        self.assertEqual(len(selection.source_paths), 2)
+
+    def test_selected_and_assembled_content_identities_are_exact(self):
+        source = self.root / 'In' / 'POTCAR'
+        data = synthetic('In').rstrip(b'\n')
+        source.write_bytes(data)
+        selection = resolve_potcar(self.poscar, root=self.root)
+        block = selection.record['blocks'][1]
+        self.assertEqual(block['source_sha256'], hashlib.sha256(data).hexdigest())
+        self.assertEqual(block['assembled_chunk_sha256'], hashlib.sha256(data + b'\n').hexdigest())
+        self.assertEqual(selection.record['datasets'][1]['sha256'], block['assembled_chunk_sha256'])
+
+    def test_publish_uses_validated_snapshot_without_rereading_library(self):
+        source = self.root / 'In' / 'POTCAR'
+        original_read = Path.read_bytes
+        reads = []
+        def read(path):
+            if path == source.resolve():
+                reads.append(path)
+                if len(reads) > 1:
+                    return synthetic('Ti')
+            return original_read(path)
+        with patch.object(Path, 'read_bytes', read):
+            result = self.build()
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(result['selection']['potcar_sha256'], hashlib.sha256(self.output.read_bytes()).hexdigest())
+        self.assertEqual(check_potcar(self.poscar, self.output)[1].element, 'In')
+
+    def test_json_preview_writes_nothing_and_preserves_sources(self):
+        before = {path: path.read_bytes() for path in self.work.rglob('*') if path.is_file()}
+        code, out, err = self.cli('build', self.poscar, '--output', self.output,
+                                  '--potcar-root', self.root, '--dry-run', '--json', '--strict-identity')
+        self.assertEqual(code, 0, err)
+        record = json.loads(out)
+        self.assertFalse(record['written'])
+        self.assertEqual(record['selection']['selection_status'], 'verified')
+        self.assertNotIn('synthetic payload', out)
+        after = {path: path.read_bytes() for path in self.work.rglob('*') if path.is_file()}
+        self.assertEqual(before, after)
+        self.assertFalse(self.output.exists())
+
+    def test_json_check_reports_unmet_requirements_with_nonzero_exit(self):
+        self.build()
+        requirements = self.work / 'requirements.json'
+        requirements.write_text(json.dumps({'variants': {'In': 'In_d'}}))
+        code, out, err = self.cli('check', self.poscar, '--potcar', self.output,
+                                  '--requirements', requirements, '--json')
+        self.assertEqual(code, 2, err)
+        self.assertFalse(json.loads(out)['identity_valid'])
+        code, out, err = self.cli('check', self.poscar, '--potcar', self.output, '--json')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)['selection_status'], 'unassessed')
+
+    def test_malformed_vrhfin_is_not_hidden_by_valid_title(self):
+        for value in (b'Qq:', b'nonsense', b''):
+            data = synthetic('In').replace(b'In: fake', value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_potcar(data)
+
+    def test_missing_requested_date_is_unestablished_and_invalid_date_fails(self):
+        record = inspect_potcar(synthetic('In'), requirements={'dataset_date': '01Jan2001'})
+        self.assertFalse(record['identity_valid'])
+        self.assertEqual(record['comparability'][0]['status'], 'unestablished')
+        with self.assertRaisesRegex(ValueError, 'invalid dataset date'):
+            parse_potcar(synthetic('In').replace(b'FAKE In', b'FAKE In 31Feb2001'))
