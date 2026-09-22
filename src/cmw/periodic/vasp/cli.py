@@ -9,6 +9,19 @@ from pathlib import Path
 from .potentials import build_potcar, inspect_potcar, list_potentials, read_poscar_blocks
 
 
+def _check_inputs(args: argparse.Namespace) -> int:
+    from .inputs import check_inputs
+
+    result = check_inputs(args.directory, record_path=args.preparation_record)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(f"Input check: {result['status']} (bounded preparation scope)")
+        for item in result["findings"]:
+            print(f"{item['severity']}: {item['code']}: {item['message']}")
+    return result["exit_code"]
+
+
 def _identity_options(args: argparse.Namespace) -> dict[str, object]:
     requirements = None
     if args.requirements is not None:
@@ -66,6 +79,11 @@ def _check(args: argparse.Namespace) -> int:
 def register(subcommands: argparse._SubParsersAction) -> None:
     vasp = subcommands.add_parser("vasp", help="prepare local VASP inputs")
     commands = vasp.add_subparsers(dest="vasp_command", required=True)
+    checking = commands.add_parser("check-inputs", help="read-only checks of a four-file input bundle")
+    checking.add_argument("directory", type=Path)
+    checking.add_argument("--preparation-record", "--record", type=Path, help="optional external Scratch preparation.json")
+    checking.add_argument("--json", action="store_true")
+    checking.set_defaults(handler=_check_inputs)
     description = (
         "Use local licensed POTCAR files; CMW does not provide potentials. "
         "Build defaults to the suffix-free directory matching each POSCAR species. "
