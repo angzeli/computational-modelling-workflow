@@ -22,6 +22,34 @@ def _check_inputs(args: argparse.Namespace) -> int:
     return result["exit_code"]
 
 
+def _prepare(args: argparse.Namespace) -> int:
+    from cmw.core.preparation_publication import PublicationError
+    from .preparation import PreparationError, prepare
+
+    try:
+        result = prepare(args.spec, output=args.output, scratch_root=args.scratch_root,
+                         record_directory=args.record_directory, scratch_mount=args.scratch_mount,
+                         dry_run=args.dry_run)
+    except (OSError, ValueError) as error:
+        result = {"status": "error", "code": getattr(error, "code", "PREPARATION_REJECTED"), "message": str(error)}
+        if isinstance(error, PreparationError):
+            result["findings"] = error.findings
+        if isinstance(error, PublicationError):
+            result.update(record_path=error.record_path, incomplete=error.incomplete)
+        print(json.dumps(result, indent=2, sort_keys=True) if args.json else f"{result['code']}: {error}")
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(f"Preparation: {result['publication']['state']}")
+        print(f"Inputs: {result['publication']['input_path']}")
+        print(f"Scratch record: {result['publication']['record_path']}")
+        if result["differences"] is not None:
+            print("Baseline comparison: " + json.dumps(result["differences"], sort_keys=True))
+        print("Effective inputs: unobserved; scientific suitability: unassessed")
+    return 0
+
+
 def _identity_options(args: argparse.Namespace) -> dict[str, object]:
     requirements = None
     if args.requirements is not None:
@@ -84,6 +112,15 @@ def register(subcommands: argparse._SubParsersAction) -> None:
     checking.add_argument("--preparation-record", "--record", type=Path, help="optional external Scratch preparation.json")
     checking.add_argument("--json", action="store_true")
     checking.set_defaults(handler=_check_inputs)
+    preparing = commands.add_parser("prepare", help="prepare explicit static/fixed-cell inputs and a separate Scratch record")
+    preparing.add_argument("--spec", type=Path, required=True, help="JSON preparation specification")
+    preparing.add_argument("--output", type=Path, required=True, help="new calculation input directory (exactly four files)")
+    preparing.add_argument("--scratch-root", type=Path, required=True, help="existing explicit Scratch root")
+    preparing.add_argument("--record-directory", type=Path, required=True, help="new record directory; relative to Scratch root")
+    preparing.add_argument("--scratch-mount", type=Path, help="optional required mounted filesystem containing Scratch")
+    preparing.add_argument("--dry-run", action="store_true", help="resolve and validate without any writes")
+    preparing.add_argument("--json", action="store_true")
+    preparing.set_defaults(handler=_prepare)
     description = (
         "Use local licensed POTCAR files; CMW does not provide potentials. "
         "Build defaults to the suffix-free directory matching each POSCAR species. "

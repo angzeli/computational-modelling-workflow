@@ -17,6 +17,8 @@ This repository currently contains:
   grouping, atom mapping, vacuum validation, and provenance;
 - local VASP POTCAR assembly, variant discovery, and species-order checking
   with explicit per-element overrides and no supplied licensed datasets;
+- bounded static/fixed-cell VASP preparation with exact four-file inputs,
+  Scratch-only preparation records, and read-only input-bundle checks;
 - factual ORCA output parsing with separate OPT/FREQ/SP/TDDFT validation;
 - versioned targets, attempts, artifacts, lineage, local locks, and fail-closed
   reuse;
@@ -50,8 +52,8 @@ This repository currently contains:
   hole/electron analysis.
 
 It does **not** redistribute Multiwfn or contain dimer-selection science,
-catalytic pathways, pymatgen, VASP execution, `INCAR`/`KPOINTS`
-generation, scheduler execution, cluster locking, or generic retry ladders.
+catalytic pathways, pymatgen, VASP execution, cluster scheduler execution,
+cluster locking, or generic retry ladders.
 
 ## Architectural scope
 
@@ -161,6 +163,15 @@ order, defaulting to each element's suffix-free directory. Use repeated
 `CMW_VASP_POTCAR_ROOT` for the local library. `cmw vasp potcar list ELEMENT`
 discovers variants; `cmw vasp potcar check` checks dataset identities and order.
 See the [POTCAR guide](docs/periodic/vasp-potcar.md) for paths and overwrite safety.
+
+`cmw vasp prepare` renders explicit static or fixed-cell relaxation inputs from a
+caller-owned profile while preserving prepared POSCAR bytes. Its input directory
+contains only INCAR, KPOINTS, POSCAR and POTCAR; `preparation.json` lives only in
+explicit Scratch. `cmw vasp check-inputs` checks inputs without sidecars or writes.
+See the [preparation guide](docs/periodic/vasp-preparation.md) for synthetic installed
+examples, required context, runtime distinctions and publication limits.
+`cmw structure embed-molecule` provides separate molecular embedding with its
+mapping in Scratch; legacy converter publication remains available.
 
 Validated ORCA results can be consumed independently by the downstream FMO,
 ESP, and IGMH shell interfaces. Their source contract, explicit grid/fragment

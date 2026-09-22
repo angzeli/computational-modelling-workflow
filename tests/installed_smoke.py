@@ -115,6 +115,145 @@ def lifecycle(root, mode):
     return {'mode': mode, 'statuses': ['Done', 'Done'], 'live_recorded_owners_after_cleanup': 0}
 
 
+def preparation_surface(root, cli):
+    """Exercise installed preparation commands with invented data, without Jobs."""
+    root.mkdir()
+    sources, project, scratch = root/'sources', root/'project', root/'scratch'
+    for directory in (sources, project, scratch):
+        directory.mkdir()
+    library = sources/'library'
+    (library/'H').mkdir(parents=True)
+    potential = library/'H'/'POTCAR'
+    potential.write_bytes(b'TITEL = PAW_PBE H 01Jan2001\nVRHFIN = H: invented\n'
+                          b'ENTIRELY INVENTED TEST DATA\nEnd of Dataset\n')
+    structure = sources/'source.POSCAR'
+    structure.write_text('invented two-block model\n1\n6 0 0\n0 6 0\n0 0 6\n'
+                         'H H\n1 1\nDirect\n0 0 0\n0.5 0.5 0.5\n')
+    molecule = sources/'molecule.xyz'
+    molecule.write_text('2\ninvented molecule\nH 0 0 0\nH 0 0 0.75\n')
+    periodic_xyz = sources/'periodic.xyz'
+    periodic_xyz.write_text('1\nLattice="6 0 0 0 6 0 0 0 6" pbc="T T T"\nH 0 0 0\n')
+    profile = {
+        'name': 'invented-smoke-profile',
+        'incar': {'GGA': 'PE', 'ENCUT': 300, 'PREC': 'Normal', 'ISPIN': 1,
+                  'ISMEAR': 0, 'SIGMA': 0.05, 'EDIFF': 1e-5, 'NELM': 20,
+                  'ALGO': 'Normal', 'ISTART': 0, 'ICHARG': 2},
+        'kpoints': {'mode': 'Gamma', 'mesh': [1, 1, 1], 'shift': [0, 0, 0]},
+        'potentials': {'root': 'library', 'variants': {'H': 'H'},
+                       'requirements': {'family': 'PAW_PBE'}},
+    }
+    specs = {}
+    for mode in ('static', 'fixed-cell-relaxation'):
+        specification = {'schema_version': 1, 'calculation': mode,
+                         'structure': 'source.POSCAR', 'profile': profile}
+        if mode == 'fixed-cell-relaxation':
+            specification['overrides'] = {'incar': {'IBRION': 2, 'NSW': 3, 'EDIFFG': -0.05, 'POTIM': 0.5}}
+        path = sources/(mode+'.json')
+        path.write_text(json.dumps(specification))
+        specs[mode] = path
+    source_snapshot = {path: path.read_bytes() for path in sources.rglob('*') if path.is_file()}
+    queue = root/'unexpected-jobs-state'
+    child_env = dict(os.environ)
+    child_env.pop('PYTHONPATH', None)
+    child_env.update(PYTHONDONTWRITEBYTECODE='1', CMW_JOBS_STATE=str(queue))
+    guard = '''import sys
+def forbid(*args, **kwargs):
+    raise AssertionError("Preparation attempted execution or Jobs mutation")
+def audit(event, args):
+    if event in {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.fork"}:
+        forbid()
+sys.addaudithook(audit)
+from cmw.jobs.store import Store
+from cmw.jobs import runtime
+Store.add = forbid
+runtime.start = runtime.stop = forbid
+from cmw.cli import main
+raise SystemExit(main(sys.argv[1:]))
+'''
+
+    def invoke(arguments, expected=0, guarded=False):
+        prefix = [sys.executable, '-c', guard] if guarded else [cli]
+        result = subprocess.run([*prefix, *map(str, arguments)], cwd=project, env=child_env,
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == expected, (arguments, result.returncode,
+                                                result.stdout[-4000:], result.stderr[-4000:])
+        assert not queue.exists(), 'Preparation unexpectedly created Jobs state'
+        return json.loads(result.stdout)
+
+    standalone = project/'standalone.POTCAR'
+    potcar_args = ['vasp', 'potcar', 'build', structure, '--potcar-root', library,
+                  '--output', standalone, '--strict-identity', '--json']
+    preview = invoke([*potcar_args, '--dry-run'])
+    assert not preview['written'] and not standalone.exists()
+    built = invoke(potcar_args)
+    assert built['written'] and built['selection']['species'] == ['H', 'H']
+    checked = invoke(['vasp', 'potcar', 'check', structure, '--potcar', standalone,
+                      '--strict-identity', '--json'])
+    assert checked['identity_valid'] and checked['dataset_count'] == 2
+    assert checked['library_release']['basis'] == 'unestablished'
+
+    bundles = {}
+    for mode, spec in specs.items():
+        output, record_dir = project/mode, scratch/mode
+        arguments = ['vasp', 'prepare', '--spec', spec, '--output', output,
+                     '--scratch-root', scratch, '--record-directory', mode, '--json']
+        planned = invoke([*arguments, '--dry-run'])
+        assert planned['dry_run'] and not output.exists() and not record_dir.exists()
+        invoke(arguments)
+        assert {path.name for path in output.iterdir()} == {'INCAR', 'KPOINTS', 'POSCAR', 'POTCAR'}
+        assert (output/'POSCAR').read_bytes() == source_snapshot[structure]
+        record = record_dir/'preparation.json'
+        assert record.is_file()
+        assessment = invoke(['vasp', 'check-inputs', output, '--preparation-record', record, '--json'])
+        assert assessment['status'] == 'valid'
+        assert invoke(['vasp', 'check-inputs', output, '--json'])['status'] == 'valid'
+        bundles[mode] = output
+    invoke(['vasp', 'prepare', '--spec', specs['static'], '--output', project/'guarded-static',
+            '--scratch-root', scratch, '--record-directory', 'guarded-static', '--json'], guarded=True)
+
+    for case in ('invalid', 'unsupported'):
+        directory = project/case
+        directory.mkdir()
+        for source in bundles['static'].iterdir():
+            (directory/source.name).write_bytes(source.read_bytes())
+        if case == 'invalid':
+            (directory/'POSCAR').write_text('malformed POSCAR\n')
+        else:
+            (directory/'KPOINTS').write_text('invented line path\n2\nLine-mode\nReciprocal\n0 0 0\n0.5 0 0\n')
+        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+        assessment = invoke(['vasp', 'check-inputs', directory, '--json'], expected=1 if case == 'invalid' else 2)
+        assert assessment['status'] == case
+        assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+
+    embedding_dir = project/'embedding'
+    embedding_dir.mkdir()
+    embedded = embedding_dir/'POSCAR'
+    embed_args = ['structure', 'embed-molecule', '--input', molecule, '--output', embedded,
+                  '--scratch-root', scratch, '--record-directory', 'embedding', '--json']
+    invoke([*embed_args, '--dry-run'])
+    assert not embedded.exists() and not (scratch/'embedding').exists()
+    invoke(embed_args)
+    assert {path.name for path in embedding_dir.iterdir()} == {'POSCAR'}
+    embedding = json.loads((scratch/'embedding'/'preparation.json').read_text())
+    assert embedding['record_kind'] == 'molecular-embedding'
+    assert embedding['mapping']['poscar_to_original'] == {'0': 0, '1': 1}
+    invoke(embed_args, expected=2)
+    invoke(['structure', 'embed-molecule', '--input', periodic_xyz, '--output', embedding_dir/'periodic.POSCAR',
+            '--scratch-root', scratch, '--record-directory', 'periodic-unsupported', '--json'], expected=2)
+    assert not (embedding_dir/'periodic.POSCAR').exists()
+    assert not (scratch/'periodic-unsupported').exists()
+    assert not list(project.rglob('preparation.json'))
+    assert not list(project.rglob('atom_mapping.json'))
+    assert not list(project.rglob('conversion_metadata.json'))
+    assert {path: path.read_bytes() for path in sources.rglob('*') if path.is_file()} == source_snapshot
+    assert not queue.exists()
+    return {'potcar_identity_preview_build_check': 'PASS', 'input_checker': 'PASS',
+            'static_and_fixed_cell': 'PASS', 'four_files_and_scratch_only_records': 'PASS',
+            'molecular_embedding': 'PASS', 'invalid_and_unsupported': 'PASS',
+            'sources_unchanged': 'PASS', 'execution_and_jobs_guard': 'PASS',
+            'pythonpath_removed': True}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kind', choices=('core', 'jobs', 'sdist', 'editable'), required=True)
@@ -153,6 +292,7 @@ def main():
     report = {'kind': args.kind, 'python': sys.version, 'package_origin': str(origin),
               'cli_json_asset_optional_boundary': 'PASS',
               'tui': 'not installed (expected)' if args.kind == 'core' else 'PASS',
+              'vasp_preparation': preparation_surface(args.output/'vasp-preparation', cli),
               'lifecycle': [lifecycle(args.output/mode, mode)
                             for mode in ('sequential', 'bounded-sharing')]}
     (args.output/'result.json').write_text(json.dumps(report, indent=2)+'\n')
