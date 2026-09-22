@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import math
 import os
+import re
 import tempfile
 from collections import Counter
 from dataclasses import dataclass
@@ -36,6 +39,7 @@ class _ConversionPlan:
 
     input_path: Path
     input_sha256: str
+    input_size_bytes: int
     atoms: Atoms
     original_symbols: tuple[str, ...]
     species_order: tuple[str, ...]
@@ -117,7 +121,7 @@ def _normalize_species_order(
     return tuple(normalized)
 
 
-def _read_single_xyz(path: Path) -> tuple[Atoms, str]:
+def _read_single_xyz(path: Path, *, ordinary_xyz_only: bool = False) -> tuple[Atoms, str, int]:
     """Read exactly one molecular XYZ record with ASE and stable input evidence."""
 
     if not path.exists():
@@ -125,9 +129,20 @@ def _read_single_xyz(path: Path) -> tuple[Atoms, str]:
     if not path.is_file():
         raise ValueError(f"XYZ input is not a regular file: {path}")
 
-    initial_sha256 = file_hash(path)
+    source_content = path.read_bytes()
+    initial_sha256 = hashlib.sha256(source_content).hexdigest()
+    source_text = source_content.decode("utf-8")
+    if ordinary_xyz_only:
+        if path.suffix.casefold() != ".xyz":
+            raise ValueError("molecular embedding requires ordinary .xyz input; CIF/extxyz periodic import is unsupported")
+        lines = source_text.splitlines()
+        comment = lines[1] if len(lines) > 1 else ""
+        if re.search(r"\b(?:lattice|pbc|properties|occupancy|occupancies|spacegroup|cell)\s*=", comment, re.I):
+            raise ValueError("extended XYZ cell/PBC/property metadata is unsupported by molecular embedding")
+        if any(len(line.split()) != 4 for line in lines[2:] if line.strip()):
+            raise ValueError("ordinary molecular XYZ requires element and three Cartesian coordinates per atom")
     try:
-        records = ase_read(path, format="xyz", index=":")
+        records = ase_read(io.StringIO(source_text), format="xyz", index=":")
     except (IndexError, KeyError, OSError, ValueError) as exc:
         raise ValueError(f"ASE could not read XYZ input {path}: {exc}") from exc
     final_sha256 = file_hash(path)
@@ -149,7 +164,7 @@ def _read_single_xyz(path: Path) -> tuple[Atoms, str]:
         math.isfinite(float(value)) for position in atoms.get_positions() for value in position
     ):
         raise ValueError("XYZ coordinates must be finite")
-    return atoms, initial_sha256
+    return atoms, initial_sha256, len(source_content)
 
 
 def _resolve_cell_mode(
@@ -195,6 +210,7 @@ def _build_plan(
     cell_mode: str,
     net_charge: int,
     species_order: Iterable[str] | None,
+    ordinary_xyz_only: bool = False,
 ) -> _ConversionPlan:
     """Validate inputs and construct the centered, species-grouped ASE structure."""
 
@@ -213,7 +229,9 @@ def _build_plan(
     )
 
     input_path = Path(input_xyz).expanduser()
-    source_atoms, input_sha256 = _read_single_xyz(input_path)
+    source_atoms, input_sha256, input_size_bytes = _read_single_xyz(
+        input_path, ordinary_xyz_only=ordinary_xyz_only
+    )
     original_symbols = tuple(source_atoms.get_chemical_symbols())
     selected_species = _normalize_species_order(original_symbols, species_order)
     poscar_to_original = tuple(
@@ -247,6 +265,7 @@ def _build_plan(
     return _ConversionPlan(
         input_path=input_path,
         input_sha256=input_sha256,
+        input_size_bytes=input_size_bytes,
         atoms=prepared,
         original_symbols=original_symbols,
         species_order=selected_species,
@@ -348,7 +367,7 @@ def _vacuum_clearances(atoms: Atoms) -> dict[str, float]:
 
 
 def _validate_written_poscar(
-    path: Path, plan: _ConversionPlan, mapping: dict[str, object]
+    path: Path | io.StringIO, plan: _ConversionPlan, mapping: dict[str, object]
 ) -> tuple[Atoms, dict[str, float]]:
     """Read back the POSCAR with ASE and fail on any structural disagreement."""
 
@@ -416,51 +435,35 @@ def _validate_written_poscar(
     return written, clearances
 
 
-def _write_poscar_atomically(path: Path, atoms: Atoms) -> Path:
-    """Write Cartesian VASP5 POSCAR content to a same-directory temporary file."""
+def _write_poscar_atomically(path: Path, content: bytes) -> Path:
+    """Write rendered POSCAR content to a same-directory temporary file."""
 
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     os.close(descriptor)
     temporary = Path(name)
     try:
-        ase_write(
-            temporary,
-            atoms,
-            format="vasp",
-            direct=False,
-            sort=False,
-            vasp5=True,
-            ignore_constraints=False,
-        )
+        temporary.write_bytes(content)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
     return temporary
 
 
-def xyz_to_poscar(
+def render_xyz_to_poscar(
     input_xyz: str | Path,
-    output_poscar: str | Path,
     *,
     vacuum: float = DEFAULT_VACUUM_ANGSTROM,
     cell_mode: str = "auto",
     net_charge: int = 0,
     species_order: Iterable[str] | None = None,
-) -> dict[str, object]:
-    """Convert one molecular XYZ to a centered periodic POSCAR.
+    ordinary_xyz_only: bool = False,
+) -> tuple[bytes, dict[str, object], dict[str, object]]:
+    """Render and read back the existing embedding algorithm entirely in memory.
 
-    ``vacuum`` is the minimum clearance in ångström from the outermost atomic
-    coordinate to each cell face. Atoms are grouped by element for VASP while
-    retaining their relative order within each group. The returned record is
-    also written as ``conversion_metadata.json`` beside the POSCAR.
-
-    ``net_charge`` is the caller-supplied formal molecular charge; it is never
-    inferred from composition. In ``auto`` mode, neutral molecules use an
-    orthorhombic cell and charged molecules use a cubic cell.
-
-    Raises:
-        OSError: If an input or output file cannot be accessed.
-        ValueError: If validation, species grouping, or POSCAR read-back fails.
+    Return exact POSCAR bytes, conversion metadata, and bidirectional atom mapping.
+    The canonical entry point uses ``ordinary_xyz_only`` to reject periodic or
+    extended input rather than dropping unsupported metadata. Legacy callers
+    retain their existing reader behavior.
     """
 
     plan = _build_plan(
@@ -469,28 +472,14 @@ def xyz_to_poscar(
         cell_mode=cell_mode,
         net_charge=net_charge,
         species_order=species_order,
+        ordinary_xyz_only=ordinary_xyz_only,
     )
-    output_path = Path(output_poscar).expanduser()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    mapping_path = output_path.parent / MAPPING_FILENAME
-    metadata_path = output_path.parent / METADATA_FILENAME
-    resolved_destinations = {
-        output_path.resolve(),
-        mapping_path.resolve(),
-        metadata_path.resolve(),
-    }
-    if len(resolved_destinations) != 3:
-        raise ValueError("POSCAR, mapping, and metadata output paths must be distinct")
-    if output_path.resolve() == plan.input_path.resolve():
-        raise ValueError("XYZ input and POSCAR output paths must be distinct")
-
     mapping = _mapping_record(plan)
-    temporary = _write_poscar_atomically(output_path, plan.atoms)
-    try:
-        written, clearances = _validate_written_poscar(temporary, plan, mapping)
-        temporary.replace(output_path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    buffer = io.StringIO()
+    ase_write(buffer, plan.atoms, format="vasp", direct=False, sort=False,
+              vasp5=True, ignore_constraints=False)
+    content = buffer.getvalue().encode("utf-8")
+    written, clearances = _validate_written_poscar(io.StringIO(buffer.getvalue()), plan, mapping)
 
     cell_vectors = [
         [float(value) for value in row] for row in written.cell.array.tolist()
@@ -498,14 +487,13 @@ def xyz_to_poscar(
     metadata: dict[str, object] = {
         "schema_version": CONVERSION_SCHEMA_VERSION,
         "input_file": str(plan.input_path.resolve()),
-        "output_file": str(output_path.resolve()),
         "input_sha256": plan.input_sha256,
-        "output_sha256": file_hash(output_path),
+        "input_size_bytes": plan.input_size_bytes,
+        "output_sha256": hashlib.sha256(content).hexdigest(),
         "atom_count": len(plan.atoms),
         "composition": plan.composition,
         "species_order": list(plan.species_order),
         "atom_reordering_performed": plan.atom_reordering_performed,
-        "mapping_file": str(mapping_path.resolve()),
         "net_charge": plan.net_charge,
         "requested_cell_mode": plan.requested_cell_mode,
         "resolved_cell_mode": plan.resolved_cell_mode,
@@ -538,6 +526,43 @@ def xyz_to_poscar(
             },
         },
     }
+    return content, metadata, mapping
+
+
+def xyz_to_poscar(
+    input_xyz: str | Path,
+    output_poscar: str | Path,
+    *,
+    vacuum: float = DEFAULT_VACUUM_ANGSTROM,
+    cell_mode: str = "auto",
+    net_charge: int = 0,
+    species_order: Iterable[str] | None = None,
+) -> dict[str, object]:
+    """Legacy embedding with overwrite and adjacent mapping/metadata files.
+
+    Vacuum is the minimum per-face clearance in ångström. The shared renderer
+    centers the molecule, groups species stably, and selects a cubic cell for
+    nonzero caller-supplied charge in auto mode. No charge is inferred.
+    """
+
+    content, metadata, mapping = render_xyz_to_poscar(
+        input_xyz, vacuum=vacuum, cell_mode=cell_mode, net_charge=net_charge,
+        species_order=species_order,
+    )
+    output_path = Path(output_poscar).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    mapping_path = output_path.parent / MAPPING_FILENAME
+    metadata_path = output_path.parent / METADATA_FILENAME
+    if len({output_path.resolve(), mapping_path.resolve(), metadata_path.resolve()}) != 3:
+        raise ValueError("POSCAR, mapping, and metadata output paths must be distinct")
+    if output_path.resolve() == Path(input_xyz).expanduser().resolve():
+        raise ValueError("XYZ input and POSCAR output paths must be distinct")
+    temporary = _write_poscar_atomically(output_path, content)
+    try:
+        temporary.replace(output_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    metadata.update(output_file=str(output_path.resolve()), mapping_file=str(mapping_path.resolve()))
     atomic_write_json(mapping_path, mapping)
     atomic_write_json(metadata_path, metadata)
     return {**metadata, "conversion_metadata_file": str(metadata_path.resolve())}
@@ -547,5 +572,6 @@ __all__ = [
     "CELL_MODES",
     "DEFAULT_VACUUM_ANGSTROM",
     "inspect_xyz_to_poscar",
+    "render_xyz_to_poscar",
     "xyz_to_poscar",
 ]

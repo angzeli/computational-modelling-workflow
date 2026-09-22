@@ -321,6 +321,8 @@ def build_parser() -> argparse.ArgumentParser:
     register(subcommands)
     from cmw.periodic.vasp.cli import register as register_vasp
     register_vasp(subcommands)
+    from cmw.structure.embedding import register as register_structure
+    register_structure(subcommands)
     return parser
 
 
