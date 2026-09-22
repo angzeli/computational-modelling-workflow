@@ -68,6 +68,8 @@ the changed locator. It does not change identities or repair publication. A
 non-complete record, missing inputs, unexpected file names, or changed bytes
 produces exit code 1 in this inspection result. The VASP checker can compose this
 check with its supported input semantics when an explicit record is supplied.
+Malformed JSON record shapes or a schema version other than integer `1` produce
+structured invalid-record findings instead of escaping the inspection API.
 
 ## Durability limits
 

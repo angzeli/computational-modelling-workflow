@@ -265,7 +265,8 @@ def inspect_publication(record_path: Path | str, *, input_path: Path | str | Non
     try:
         path = _direct(_absolute(record_path))
         value = read_json(path)
-        if value.get("schema_version") != 1 or not isinstance(value.get("publication"), dict):
+        if (not isinstance(value, dict) or type(value.get("schema_version")) is not int
+                or value["schema_version"] != 1 or not isinstance(value.get("publication"), dict)):
             raise ValueError("Unsupported or malformed preparation record")
         state = value["publication"]
         if state.get("state") != "complete":

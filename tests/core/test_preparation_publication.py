@@ -49,6 +49,26 @@ class PreparationPublicationTests(unittest.TestCase):
         self.assertFalse(list(self.root.glob("*.json")))
         self.assertEqual(inspect_publication(self.scratch / "case/preparation.json")["exit_code"], 0)
 
+    def test_malformed_record_shapes_return_structured_findings(self):
+        valid = publish_preparation(self.files, {}, self.plan())
+        path = self.scratch / "malformed.json"
+        malformed = [[], 1, "record", None, True]
+        for field, values in {
+            "schema_version": [True, 1.0, None, [], {"version": 1}],
+            "publication": [[], "complete", 1, None],
+            "prepared_inputs": [[], "INCAR", 1, None],
+        }.items():
+            malformed.extend({**valid, field: value} for value in values)
+        for value in malformed:
+            with self.subTest(value=value):
+                payload = json.dumps(value).encode()
+                path.write_bytes(payload)
+                result = inspect_publication(path)
+                self.assertEqual(result["status"], "invalid")
+                self.assertEqual(result["exit_code"], 1)
+                self.assertIn("PUBLICATION_RECORD_INVALID", [item["code"] for item in result["findings"]])
+                self.assertEqual(path.read_bytes(), payload)
+
     def test_unavailable_aliases_overlap_and_existing_destinations(self):
         with self.assertRaises(PublicationError):
             publication_plan(output=self.root / "inputs", scratch_root=self.root / "missing",
