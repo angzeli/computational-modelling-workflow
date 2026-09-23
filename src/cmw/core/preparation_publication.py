@@ -11,11 +11,12 @@ import ctypes
 from datetime import datetime, timezone
 import errno
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
 import sys
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 from uuid import uuid4
 
 from .provenance import atomic_write_json, canonical_json_bytes, read_json
@@ -165,6 +166,147 @@ def _cleanup_owned_stage(stage: Path, identity: list[int] | None) -> None:
         raise PublicationError("Staging ownership changed; automatic cleanup refused")
     shutil.rmtree(stage)
     _sync_directory(stage.parent)
+
+
+def record_publication_plan(scratch_root: Path | str, record_directory: Path | str,
+                            sources: Sequence[Path | str] = (),
+                            scratch_mount: Path | str | None = None,
+                            filename: str = "finalization.json") -> dict[str, object]:
+    """Plan one new Scratch-only record, without creating directories or files.
+
+    Include a source directory to protect its entire tree, not just named files.
+    No input destination, staging directory or source-side marker is created.
+    """
+    if (not isinstance(filename, str) or not filename or Path(filename).name != filename
+            or filename in {".", ".."} or "\\" in filename):
+        raise PublicationError("Record filename must be a safe basename")
+    root = _direct(_absolute(scratch_root))
+    if not root.is_dir():
+        raise PublicationError("Scratch root must be an existing directory")
+    mount = None if scratch_mount is None else _direct(_absolute(scratch_mount))
+    if mount is None and sys.platform == "darwin" and root.parts[1:2] == ("Volumes",):
+        mount = Path(*root.parts[:3])
+    if mount is not None and (not os.path.ismount(mount) or not root.is_relative_to(mount)):
+        raise PublicationError("Configured Scratch mount is not mounted or does not contain the root")
+    record_dir = Path(record_directory).expanduser()
+    record_dir = _direct(_absolute(record_dir if record_dir.is_absolute() else root / record_dir), exists=False)
+    if record_dir == root or not record_dir.is_relative_to(root):
+        raise PublicationError("Record directory must be a strict child of the Scratch root")
+    _direct(record_dir.parent)
+    if not record_dir.parent.is_dir() or not os.access(record_dir.parent, os.W_OK | os.X_OK):
+        raise PublicationError("Record parent must already exist and be writable")
+    if os.path.lexists(record_dir):
+        raise PublicationError(f"Refusing existing destination: {record_dir}")
+    protected = []
+    for source in sources:
+        path = _direct(_absolute(source))
+        if _overlap(record_dir, path):
+            raise PublicationError(f"Record destination overlaps a protected source: {path}")
+        protected.append(str(path))
+    return {"kind": "record", "scratch_root": str(root),
+            "scratch_mount": None if mount is None else str(mount),
+            "record_directory": str(record_dir), "filename": filename,
+            "record_path": str(record_dir / filename), "protected_sources": protected,
+            "record_parent_identity": _directory_identity(record_dir.parent)}
+
+
+def publish_record(record: Mapping[str, object], plan: Mapping[str, object],
+                   validate_sources: Callable[[], object] | None = None) -> dict[str, object]:
+    """Publish an immutable completed record in an exclusively acquired directory.
+
+    Intent is durable before source revalidation. A raised validator error, False,
+    or a mapping without ``valid: True`` refuses completion. A raise-only validator
+    may return None. Failures retain failed/incomplete evidence when possible.
+    A later call never replaces an existing directory or completed record.
+
+    These checks cannot make source observations and publication atomic, prevent
+    arbitrary external rewrites after validation, or guarantee power-loss recovery
+    after a failed filesystem sync. No completed result is returned on failure.
+    """
+    if validate_sources is not None and not callable(validate_sources):
+        raise PublicationError("Source validator must be callable")
+    current = record_publication_plan(
+        scratch_root=str(plan["scratch_root"]), record_directory=str(plan["record_directory"]),
+        sources=plan.get("protected_sources", ()), scratch_mount=plan.get("scratch_mount"),
+        filename=str(plan["filename"]),
+    )
+    if current != dict(plan):
+        raise PublicationError("Destination identities changed since resolution")
+    record_dir = Path(current["record_directory"])
+    record_path = Path(current["record_path"])
+    # Freeze nested caller data before writing or invoking a caller callback.
+    value = json.loads(canonical_json_bytes(dict(record)))
+    value.update(schema_version=1, publication_id=uuid4().hex,
+                 publication={"state": "intent", "kind": "record",
+                              "record_path": str(record_path),
+                              "scratch_root": current["scratch_root"],
+                              "created_at": datetime.now(timezone.utc).isoformat()})
+    pending_bytes = canonical_json_bytes(value)
+    acquired = False
+    directory_identity = None
+    completion_attempted = False
+    known_bytes: bytes | None = None
+    completed_bytes: bytes | None = None
+
+    def owned_directory() -> None:
+        _direct(record_dir)
+        if (_directory_identity(record_dir) != directory_identity
+                or _directory_identity(record_dir.parent) != current["record_parent_identity"]):
+            raise PublicationError("Scratch record directory ownership changed")
+
+    def owned_record() -> None:
+        owned_directory()
+        if set(path.name for path in record_dir.iterdir()) - {current["filename"]}:
+            raise PublicationError("Unexpected files appeared in the owned record directory")
+        if os.path.lexists(record_path):
+            _direct(record_path)
+            if (not record_path.is_file()
+                    or canonical_json_bytes(read_json(record_path)) not in {known_bytes, completed_bytes}):
+                raise PublicationError("Scratch record was replaced outside this publication")
+
+    try:
+        record_dir.mkdir(mode=0o700)
+        acquired = True
+        directory_identity = _directory_identity(record_dir)
+        owned_directory()
+        _sync_directory(record_dir.parent)
+        _write_candidate(record_path, pending_bytes)
+        known_bytes = pending_bytes
+        _sync_directory(record_dir)
+        owned_record()
+        if validate_sources is not None:
+            validation = validate_sources()
+            valid = (validation is None or validation is True
+                     or isinstance(validation, Mapping) and validation.get("valid") is True)
+            if not valid:
+                raise PublicationError("Source revalidation refused finalization")
+            if isinstance(validation, Mapping):
+                value["publication"]["source_revalidation"] = dict(validation)
+        owned_record()
+        value["publication"] = dict(value["publication"], state="complete",
+                                    completed_at=datetime.now(timezone.utc).isoformat())
+        completed_bytes = canonical_json_bytes(value)
+        completion_attempted = True
+        _write_record(record_path, value)
+        return value
+    except Exception as exc:
+        if acquired:
+            failed = dict(value, publication=dict(
+                value["publication"], state="incomplete" if completion_attempted else "failed",
+                error=str(exc),
+            ))
+            failed["publication"].pop("completed_at", None)
+            try:
+                owned_record()
+                _write_record(record_path, failed)
+            except (OSError, ValueError):
+                # Do not overwrite a changed owner. A failed sync can still leave
+                # a visible conservative record; the exception denies durability.
+                pass
+        raise PublicationError(str(exc),
+                               code="PUBLICATION_INCOMPLETE" if completion_attempted else "PUBLICATION_FAILED",
+                               record_path=str(record_path) if acquired else None,
+                               incomplete=completion_attempted) from exc
 
 
 def publish_preparation(files: Mapping[str, bytes], record: Mapping[str, object],

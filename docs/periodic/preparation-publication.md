@@ -83,3 +83,14 @@ destinations; it does not lock an entire filesystem against external modificatio
 
 Licensed potential bytes remain local inputs. Do not put real POTCARs, scientific
 runtime outputs, or private source data into public Git history or package fixtures.
+
+## Scratch-only finalization records
+
+`record_publication_plan` and `publish_record` reuse the same direct-path, mounted
+Scratch, exclusive ownership and synchronized JSON primitives for a single new
+record directory. There is no input destination. The caller protects its source
+directories and supplies a source-revalidation callback before completion. Only
+`finalization.json` is written: intent, then complete, or failed/incomplete evidence
+when publication cannot finish. Existing directories are never reused. Consumers
+must require a complete record and recheck its content bindings. This does not
+create an atomic snapshot across source files or prevent later external rewrites.
