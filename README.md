@@ -15,6 +15,8 @@ This repository currently contains:
 - strict XYZ parsing and stable geometry identity;
 - ASE-based molecular XYZ-to-POSCAR conversion with deterministic species
   grouping, atom mapping, vacuum validation, and provenance;
+- ordered, fully occupied CIF import with represented-cell preservation,
+  explicit symmetry expansion, immutable periodic geometry and site lineage;
 - local VASP POTCAR assembly, variant discovery, and species-order checking
   with explicit per-element overrides and no supplied licensed datasets;
 - bounded static/fixed-cell VASP preparation with exact four-file inputs,
@@ -172,6 +174,16 @@ See the [preparation guide](docs/periodic/vasp-preparation.md) for synthetic ins
 examples, required context, runtime distinctions and publication limits.
 `cmw structure embed-molecule` provides separate molecular embedding with its
 mapping in Scratch; legacy converter publication remains available.
+
+`cmw structure import-cif` imports one ordered, fully occupied CIF block through
+Gemmi and writes POSCAR through ASE. It preserves the represented cell and records
+source-site, symmetry-expansion and POSCAR ordering separately. Only POSCAR is
+published at the selected input location; the import record is stored in Scratch
+and can establish exact-byte lineage for `cmw vasp prepare`. See the
+[CIF import guide](docs/structure/cif-import.md) and
+[immutable periodic model](docs/structure/periodic-model.md). Slab construction,
+lattice matching, strain and interface assembly require separate scientific
+choices and are not implemented by this import command.
 
 Validated ORCA results can be consumed independently by the downstream FMO,
 ESP, and IGMH shell interfaces. Their source contract, explicit grid/fragment

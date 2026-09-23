@@ -131,8 +131,11 @@ def _handle(args: argparse.Namespace) -> int:
 
 
 def register(subcommands: argparse._SubParsersAction) -> None:
+    from .cif_import import register as register_cif_import
+
     structure = subcommands.add_parser("structure", help="explicit structure preparation")
     operations = structure.add_subparsers(dest="structure_operation", required=True)
+    register_cif_import(operations)
     parser = operations.add_parser(
         "embed-molecule", help="center and embed ordinary molecular XYZ in a periodic vacuum cell",
         description="Molecular embedding: creates a centered periodic vacuum cell and groups species. "

@@ -133,6 +133,15 @@ def preparation_surface(root, cli):
     molecule.write_text('2\ninvented molecule\nH 0 0 0\nH 0 0 0.75\n')
     periodic_xyz = sources/'periodic.xyz'
     periodic_xyz.write_text('1\nLattice="6 0 0 0 6 0 0 0 6" pbc="T T T"\nH 0 0 0\n')
+    cif = sources/'ordered.cif'
+    cif.write_text('data_synthetic\n_cell_length_a 6\n_cell_length_b 7\n_cell_length_c 8\n'
+                   '_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\n'
+                   "_space_group_name_H-M_alt 'P -1'\n_space_group_IT_number 2\n"
+                   'loop_\n_space_group_symop_id\n_space_group_symop_operation_xyz\n'
+                   "1 'x,y,z'\n2 '-x,-y,-z'\n"
+                   'loop_\n_atom_site_label\n_atom_site_type_symbol\n_atom_site_fract_x\n'
+                   '_atom_site_fract_y\n_atom_site_fract_z\n_atom_site_occupancy\n'
+                   'H1 H 0.1 0.2 0.3 1\n')
     profile = {
         'name': 'invented-smoke-profile',
         'incar': {'GGA': 'PE', 'ENCUT': 300, 'PREC': 'Normal', 'ISPIN': 1,
@@ -242,6 +251,45 @@ raise SystemExit(main(sys.argv[1:]))
             '--scratch-root', scratch, '--record-directory', 'periodic-unsupported', '--json'], expected=2)
     assert not (embedding_dir/'periodic.POSCAR').exists()
     assert not (scratch/'periodic-unsupported').exists()
+
+    import_dir = project/'cif-import'
+    import_dir.mkdir()
+    imported_poscar = import_dir/'POSCAR'
+    import_args = ['structure', 'import-cif', '--input', cif, '--output', imported_poscar,
+                   '--scratch-root', scratch, '--record-directory', 'cif-import',
+                   '--block', 'synthetic', '--json']
+    planned = invoke([*import_args, '--dry-run'])
+    assert planned['dry_run'] and not imported_poscar.exists() and not (scratch/'cif-import').exists()
+    imported = invoke(import_args, guarded=True)
+    assert {path.name for path in import_dir.iterdir()} == {'POSCAR'}
+    import_record = scratch/'cif-import'/'preparation.json'
+    assert {path.name for path in import_record.parent.iterdir()} == {'preparation.json'}
+    assert imported['record_kind'] == 'periodic-structure-import'
+    assert imported['publication']['state'] == 'complete'
+    assert imported['structure']['structure_id'] == planned['structure']['structure_id']
+    assert len(imported['structure']['atoms']) == 2
+    assert {item['source_site_index'] for item in imported['structure']['atoms']} == {0}
+    assert {item['expanded_index'] for item in imported['structure']['atoms']} == {0, 1}
+    assert imported['structure']['cell'][0] == [6.0, 0.0, 0.0]
+    invoke(import_args, expected=2)
+
+    # This specification is outside the calculation inputs and uses the
+    # previously accepted profile with a separately identified import record.
+    imported_spec = root/'imported-static.json'
+    imported_profile = {**profile, 'potentials': {**profile['potentials'], 'root': str(library)}}
+    imported_spec.write_text(json.dumps({'schema_version': 1, 'calculation': 'static',
+                                        'structure': str(imported_poscar), 'profile': imported_profile,
+                                        'source_record': str(import_record)}))
+    imported_bundle = project/'imported-static'
+    prepared = invoke(['vasp', 'prepare', '--spec', imported_spec, '--output', imported_bundle,
+                       '--scratch-root', scratch, '--record-directory', 'imported-static',
+                       '--json'], guarded=True)
+    assert {path.name for path in imported_bundle.iterdir()} == {'INCAR', 'KPOINTS', 'POSCAR', 'POTCAR'}
+    assert (imported_bundle/'POSCAR').read_bytes() == imported_poscar.read_bytes()
+    assert 'periodic_structure_import' in {source['role'] for source in prepared['sources']}
+    assert {path.name for path in (scratch/'imported-static').iterdir()} == {'preparation.json'}
+    assert invoke(['vasp', 'check-inputs', imported_bundle, '--preparation-record',
+                   scratch/'imported-static'/'preparation.json', '--json'])['status'] == 'valid'
     assert not list(project.rglob('preparation.json'))
     assert not list(project.rglob('atom_mapping.json'))
     assert not list(project.rglob('conversion_metadata.json'))
@@ -250,6 +298,7 @@ raise SystemExit(main(sys.argv[1:]))
     return {'potcar_identity_preview_build_check': 'PASS', 'input_checker': 'PASS',
             'static_and_fixed_cell': 'PASS', 'four_files_and_scratch_only_records': 'PASS',
             'molecular_embedding': 'PASS', 'invalid_and_unsupported': 'PASS',
+            'ordered_cif_import_and_preparation_lineage': 'PASS',
             'sources_unchanged': 'PASS', 'execution_and_jobs_guard': 'PASS',
             'pythonpath_removed': True}
 

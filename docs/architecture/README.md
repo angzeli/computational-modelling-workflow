@@ -74,6 +74,29 @@ Program-specific analysis adapters remain molecule agnostic. The
 wavefunction or density inputs through deterministic command and output
 contracts to typed analysis artifacts, including density-to-IGMH lineage.
 
+## Implemented periodic preparation
+
+The periodic branch currently implements ordered, fully occupied CIF import,
+an immutable cell/atom model, POSCAR publication, local POTCAR selection, and
+explicit static/fixed-cell VASP input preparation. Gemmi parses core CIF 1.1;
+the importer expands validated symmetry in the represented cell, records source
+and expanded-site identities, and uses ASE to write POSCAR. Molecular embedding
+shares stable species grouping but retains its separate cell-construction policy.
+
+Only requested inputs are published at the input destination. Import metadata,
+site mappings and full-bundle preparation provenance live in separate Scratch
+records through the shared no-clobber publication contract. A supplied import
+record can establish exact-byte structure lineage in later VASP preparation.
+This layer performs no engine execution, Jobs admission or scientific-result
+acceptance. See [CIF import](../structure/cif-import.md),
+[periodic geometry](../structure/periodic-model.md), and
+[VASP preparation](../periodic/vasp-preparation.md).
+
+Two imported periodic structures are suitable explicit inputs to a future
+interface-construction operation. That operation remains unimplemented; its
+required scientific choices are documented in the
+[future interface handoff](../structure/cif-import.md#future-interface-construction-handoff).
+
 ## Domain branches
 
 Finite and molecular systems follow this target path:
@@ -112,7 +135,8 @@ periodic / materials systems
         ├── crystallographic evidence
         └── shared structure modelling
                      │
-                ASE + pymatgen
+              Gemmi + ASE today
+             broader tools later
                      │
               structure validation
                      │
@@ -141,8 +165,9 @@ comparison.
 ## Package decomposition
 
 The implemented core, structure, ORCA, Multiwfn runtime, and downstream
-workflow directories establish the molecular decomposition. Periodic and
-general analysis layers remain future scope:
+workflow directories establish the molecular decomposition. Periodic preparation
+also exists; periodic execution, interface construction and general analysis
+remain future scope:
 
 ```text
 cmw
@@ -154,7 +179,7 @@ cmw
 │   └── stacking
 ├── periodic
 │   ├── vasp
-│   └── pymatgen
+│   └── pymatgen       (future; not installed or implemented)
 └── analysis
 ```
 

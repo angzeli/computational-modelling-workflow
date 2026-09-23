@@ -97,8 +97,10 @@ checker retains them as unassessed. The full typed tag set is in
   LDAUTYPE 1/2 and all three block-ordered LDAUL/LDAUU/LDAUJ arrays. Enabled LDIPOL
   requires explicit IDIPOL and DIPOL. Optional NELECT must be positive.
 - Hybrid, meta-GGA, SOC/noncollinear, nonlocal-vdW, hybrid-specific controls and
-  alternate IALGO selection are outside this MVP. CIF, periodic extxyz import,
+  alternate IALGO selection are outside this MVP. Periodic extxyz import,
   surface construction and scientific-result acceptance are also deferred.
+  Ordered CIF structures can first use `cmw structure import-cif` to prepare a
+  POSCAR and a separate Scratch provenance record.
 
 All k-point fields are explicit: mode `Gamma` or `Monkhorst-Pack`, three positive
 integer subdivisions, and three finite shifts in the regular-mesh convention.
@@ -201,7 +203,7 @@ supplied. No resource admission or observed utilization is inferred. A future
 runner must separately implement its declared overlay. `effective_inputs` remains
 `unobserved` with no invented execution evidence.
 
-## Baseline comparison and embedding lineage
+## Baseline comparison and structure lineage
 
 An optional specification field `"baseline": "project/static"` compares a bundle.
 Or use `"baseline": {"record": "scratch/static/preparation.json"}` to include a
@@ -225,8 +227,29 @@ mesh change prevents that result. It never claims effective-execution equality.
 the existing conversion algorithm. It publishes POSCAR only, with metadata and
 mapping in Scratch. See the [embedding guide](../structure/xyz-to-poscar.md).
 A later full preparation can use `"source_record": "scratch/embedding/preparation.json"`
-to establish exact-byte lineage to that completed embedding. The legacy converter
-retains documented overwrite and adjacent sidecar behavior.
+to establish exact-byte lineage to that completed embedding.
+
+`cmw structure import-cif` separately imports one ordered fully occupied periodic
+CIF structure into a POSCAR while keeping the represented cell basis. See the
+[ordered CIF import guide](../structure/cif-import.md) for its supported models,
+symmetry and occupancy rules. For example:
+
+```sh
+cmw structure import-cif --input ordered.cif --output project/imported.POSCAR \
+  --scratch-root scratch --record-directory cif-import --dry-run --json
+cmw structure import-cif --input ordered.cif --output project/imported.POSCAR \
+  --scratch-root scratch --record-directory cif-import --json
+```
+
+Multiple structural CIF blocks require explicit `--block NAME` selection. The
+import record stores source identity, cell, symmetry expansion and atom-order
+provenance only in Scratch. A VASP specification can then use `"structure": "project/imported.POSCAR"`
+and `"source_record": "scratch/cif-import/preparation.json"`. Preparation accepts
+only a completed, hash-matched molecular embedding or periodic structure import
+record. It copies the imported POSCAR bytes unchanged and records the exact source
+record identity with its provenance role; it performs no second CIF conversion.
+
+The legacy converter retains documented overwrite and adjacent sidecar behavior.
 
 ## Incomplete publication
 

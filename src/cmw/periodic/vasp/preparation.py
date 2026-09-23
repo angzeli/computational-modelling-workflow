@@ -383,12 +383,14 @@ def prepare(spec_path: str | Path, *, output: str | Path, scratch_root: str | Pa
         path = _source(spec.data["source_record"], spec.path.parent)
         raw = path.read_bytes()
         lineage = _decode(raw)
-        if lineage.get("record_kind") != "molecular-embedding" or inspect_publication(path, input_path=source)["status"] != "valid":
-            raise PreparationError("source_record must be a complete matching molecular embedding record")
+        record_roles = {"molecular-embedding": "embedding_record",
+                        "periodic-structure-import": "periodic_structure_import"}
+        if lineage.get("record_kind") not in record_roles or inspect_publication(path, input_path=source)["status"] != "valid":
+            raise PreparationError("source_record must be a complete matching molecular embedding or periodic structure import record")
         identities = list(lineage.get("prepared_inputs", {}).values())
         if identities != [content_identity(poscar)]:
-            raise PreparationError("Embedding record differs from the accepted source POSCAR bytes")
-        sources.append(_source_record("embedding_record", spec.data["source_record"], path, raw))
+            raise PreparationError("Structure preparation record differs from the accepted source POSCAR bytes")
+        sources.append(_source_record(record_roles[lineage["record_kind"]], spec.data["source_record"], path, raw))
         protected.append(path)
     differences = None
     if "baseline" in spec.data:
