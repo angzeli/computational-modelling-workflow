@@ -22,7 +22,7 @@ NUMBER = r"[+-]?(?:(?:\d+\.?\d*|\.\d+)(?:[EeDd][+-]?\d+)?|NaN|Inf(?:inity)?|\*+)
 NUM = re.compile(NUMBER, re.I)
 ITERATION = re.compile(r"\bIteration\s+(\d+)\(\s*(\d+)\)")
 BANNER = re.compile(r"^\s*vasp\.(\d+\.\d+\.\d+)\b", re.I)
-SETTINGS = set("EDIFF NELM NELMIN NELMDL EDIFFG IBRION ISIF NSW ISPIN IALGO ICHARG ISTART ENCUT ISMEAR SIGMA NELECT NCORE KPAR NPAR GGA METAGGA LHFCALC LSORBIT LNONCOLLINEAR ML_LMLFF ML_MODE IMAGES ICHAIN I_CONSTRAINED_M EFIELD EFIELD_PEAD LPEAD LEPSILON LCALCEPS LOPTICS LCHIMAG LORBMOM LATTICE_CONSTRAINTS EFIRST EFOR IVDW LDAU LDIPOL IDIPOL ALGO".split())
+SETTINGS = set("EDIFF NELM NELMIN NELMDL EDIFFG IBRION ISIF NSW ISPIN IALGO ICHARG ISTART ENCUT ISMEAR SIGMA NELECT NCORE KPAR NPAR GGA METAGGA LHFCALC LSORBIT LNONCOLLINEAR ML_LMLFF ML_MODE IMAGES ICHAIN I_CONSTRAINED_M EFIELD EFIELD_PEAD LPEAD LEPSILON LCALCEPS LOPTICS LCHIMAG LORBMOM LATTICE_CONSTRAINTS EFIRST EFOR LRPA LMP2 LMP2LT LSHIFT LVEL LTIME_EVOLUTION IVDW LDAU LDIPOL IDIPOL ALGO".split())
 SET_RE = re.compile(r"\b(" + "|".join(sorted(SETTINGS, key=len, reverse=True)) + r")\s*=\s*([^\s;]+)")
 POSITION_TOLERANCE = 2e-5  # Angstrom; OUTCAR position components printed to 5 decimals.
 CELL_TOLERANCE = 2e-6      # Angstrom; observed lattice components printed to 7 decimals.
@@ -153,6 +153,8 @@ def parse_outcar(path, *, max_bytes=None):
                 current["counts"] = [int(v) for v in text.split("=", 1)[1].split()]
             iteration = ITERATION.search(text)
             if iteration:
+                if current["ionic_stop"]:
+                    current["conflicts"].append({"code": "evaluation_after_ionic_stop", "reference": reference(line)})
                 if current["termination"]["footer_reference"]:
                     current["conflicts"].append({"code": "evaluation_after_footer", "reference": reference(line)})
                 ionic, electronic = map(int, iteration.groups())
@@ -174,9 +176,13 @@ def parse_outcar(path, *, max_bytes=None):
                 if re.search(r"\b(?:RMM-DIIS|RMM:)", text):
                     evaluation["iterations"][-1]["algorithm"] = "RMM"
                 if "aborting loop because EDIFF is reached" in text:
+                    if evaluation["native_convergence"] is False:
+                        current["conflicts"].append({"code": "opposing_native_convergence", "reference": reference(line)})
                     evaluation["native_convergence"] = True
                     evaluation["native_convergence_reference"] = reference(line)
                 elif "EDIFF was not reached" in text:
+                    if evaluation["native_convergence"] is True:
+                        current["conflicts"].append({"code": "opposing_native_convergence", "reference": reference(line)})
                     evaluation["native_convergence"] = False
                     evaluation["native_convergence_reference"] = reference(line)
                 if re.search(r"\b(?:trial:|trial-energy|ZBRENT:|curvature:)\b", text):
@@ -188,6 +194,8 @@ def parse_outcar(path, *, max_bytes=None):
                 block, rows, block_ref = "initial", [], reference(line)
                 continue
             if "POSITION" in text and "TOTAL-FORCE" in text:
+                if evaluation is not None and evaluation["force_block_complete"]:
+                    current["conflicts"].append({"code": "multiple_force_blocks_per_evaluation", "reference": reference(line)})
                 block, rows, block_ref = "force", [], reference(line)
                 if evaluation is None:
                     current["conflicts"].append({"code": "unassociated_force_block", "reference": reference(line)})
@@ -206,13 +214,16 @@ def parse_outcar(path, *, max_bytes=None):
                         if any(v is None for row in values for v in row):
                             current["conflicts"].append({"code": "nonfinite_geometry_or_force", "reference": block_ref})
                         elif block == "cell":
-                            current["cell"] = {"matrix": [r[:3] for r in values], "reference": block_ref}
+                            current["cell"] = {"matrix": [r[:3] for r in values], "reference": block_ref,
+                                               "component_half_last_place": max(v["half_last_place"] for r in rows for v in r[:3])}
                             current["cell_history"].append(current["cell"])
                         elif block == "initial":
-                            current["initial_positions"] = {"cartesian": values, "reference": block_ref, "cell": current["cell"]}
+                            current["initial_positions"] = {"cartesian": values, "reference": block_ref, "cell": current["cell"],
+                                                            "position_half_last_place": max(v["half_last_place"] for r in rows for v in r)}
                         elif evaluation is not None:
                             pending_geometry = {"cartesian": [r[:3] for r in values],
                                                 "forces": [r[3:] for r in values],
+                                                "position_half_last_place": max(v["half_last_place"] for r in rows for v in r[:3]),
                                                 "force_half_last_place": max(v["half_last_place"] for r in rows for v in r[3:]),
                                                 "reference": block_ref, "evaluation_index": evaluation["index"],
                                                 "cell": current["cell"]}
@@ -226,7 +237,8 @@ def parse_outcar(path, *, max_bytes=None):
                     continue
                 if rows:
                     if block == "initial" and current["nions"] is None:
-                        current["initial_positions"] = {"cartesian": [[v["value"] for v in r] for r in rows], "reference": block_ref, "cell": current["cell"]}
+                        current["initial_positions"] = {"cartesian": [[v["value"] for v in r] for r in rows], "reference": block_ref, "cell": current["cell"],
+                                                        "position_half_last_place": max(v["half_last_place"] for r in rows for v in r)}
                     else:
                         current["conflicts"].append({"code": "incomplete_" + block + "_block", "reference": block_ref})
                 block, rows = None, []
@@ -427,10 +439,12 @@ def _scope(segment):
             reasons.append("unsupported_mode:" + key)
     if values.get("IALGO") not in (38, 48) or values.get("ISPIN") not in (1, 2) or values.get("ICHARG") not in (0, 1, 2):
         reasons.append("unsupported_electronic_mode")
-    for key in ("ML_LMLFF", "ML_MODE", "IMAGES", "ICHAIN", "I_CONSTRAINED_M", "EFIELD", "EFIELD_PEAD", "LEPSILON", "LCALCEPS", "LOPTICS", "LCHIMAG", "EFOR", "LATTICE_CONSTRAINTS"):
+    for key in ("ML_LMLFF", "ML_MODE", "IMAGES", "ICHAIN", "I_CONSTRAINED_M", "EFIELD", "EFIELD_PEAD", "LEPSILON", "LCALCEPS", "LOPTICS", "LCHIMAG", "EFOR", "LATTICE_CONSTRAINTS", "LRPA", "LMP2", "LMP2LT", "LTIME_EVOLUTION"):
         v = values.get(key, echoed.get(key))
         if (key in {"EFIELD_PEAD", "EFOR", "LATTICE_CONSTRAINTS"} and (key in values or key in echoed)) or v not in (None, False, 0, "NONE"):
             reasons.append("unsupported_control:" + key)
+    if values.get("ALGO", echoed.get("ALGO")) not in (None, "N", "NORMAL", "F", "FAST", "V", "VERYFAST"):
+        reasons.append("unsupported_requested_algorithm")
     if values.get("METAGGA", echoed.get("METAGGA")) not in (None, "NONE", "--"):
         reasons.append("unsupported_meta_gga")
     if values.get("NSW") == 0 and values.get("IBRION") == -1:
@@ -514,7 +528,8 @@ def inspect_result(directory, *, segment=None, stdout=None, max_bytes=None):
             evaluation["nonfinite_findings"] = [{"field": key, "reference": it.get("oszicar", {}).get("reference")} for it in iterations for key, value in it.get("oszicar", {}).items() if isinstance(value, dict) and value.get("finding") == "nonfinite_or_overflow"]
             if evaluation["nonfinite_findings"]:
                 result["conflicts"].append({"code": "nonfinite_electronic_values", "evaluation_index": evaluation["index"]})
-            if numeric == "FAIL" and evaluation["native_convergence"] is True:
+            if ((numeric == "FAIL" and evaluation["native_convergence"] is True)
+                    or (numeric == "PASS" and evaluation["native_convergence"] is False)):
                 result["conflicts"].append({"code": "native_numeric_convergence_conflict", "evaluation_index": evaluation["index"]})
             if row.get("algorithm") not in (None, "DAV", "RMM"):
                 result["mode"]["supported"] = False
@@ -534,6 +549,10 @@ def inspect_result(directory, *, segment=None, stdout=None, max_bytes=None):
             geometry = {"cell": endpoint["cell"]["matrix"], "cartesian": endpoint["cartesian"], "species": species}
             geometry["fractional"] = (np.asarray(geometry["cartesian"]) @ np.linalg.inv(np.asarray(geometry["cell"]))).tolist()
             geometry["geometry_id"] = stable_hash(geometry)
+            geometry["printed_resolution"] = {
+                "position_component_half_last_place_angstrom": endpoint["position_half_last_place"],
+                "cell_component_half_last_place_angstrom": endpoint["cell"]["component_half_last_place"],
+            }
         comparisons = {"initial_poscar": compare_geometry(initial, poscar), "endpoint_poscar": compare_geometry(geometry, poscar),
                        "endpoint_contcar": compare_geometry(geometry, contcar), "fixed_cell": {"status": "unavailable"}}
         if geometry and initial:

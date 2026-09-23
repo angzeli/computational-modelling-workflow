@@ -30,6 +30,24 @@ class ResultEvidenceTests(unittest.TestCase):
     def codes(self, result):
         return {item["code"] for item in result["conflicts"]}
 
+    def test_repeated_force_block_and_stale_ionic_stop_are_conflicts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = write_run(Path(temporary).resolve(), relaxation=True)
+            original = (path / "OUTCAR").read_text()
+            start = original.index(" POSITION")
+            end = original.index(" FREE ENERGIE")
+            force_block = original[start:end]
+            (path / "OUTCAR").write_text(original[:end] + force_block + original[end:])
+            self.assertIn("multiple_force_blocks_per_evaluation", [c["code"] for c in inspect_result(path)["conflicts"]])
+            (path / "OUTCAR").write_text(original + " Iteration 2( 1)\n")
+            self.assertIn("evaluation_after_ionic_stop", [c["code"] for c in inspect_result(path)["conflicts"]])
+
+    def test_definite_numeric_success_cannot_override_native_nonconvergence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = write_run(Path(temporary).resolve(), native=False)
+            result = inspect_result(path)
+            self.assertTrue(any(c["code"] == "native_numeric_convergence_conflict" for c in result["conflicts"]))
+
     def test_static_complete_distinguishes_energy_roles_without_policy_or_exit(self):
         result = self.inspect()
         self.assertEqual(result["status"], "inspected", result)
@@ -48,6 +66,10 @@ class ResultEvidenceTests(unittest.TestCase):
         self.assertTrue(result["selected_segment"]["termination"]["normal_footer"])
         self.assertTrue(result["coverage"]["full_electronic_history"])
         self.assertEqual(result["endpoint"]["comparisons"]["endpoint_poscar"]["status"], "match")
+        self.assertEqual(result["endpoint"]["geometry"]["printed_resolution"], {
+            "position_component_half_last_place_angstrom": 5e-6,
+            "cell_component_half_last_place_angstrom": 5e-8,
+        })
 
     def test_convergence_at_nelm_is_not_failure_and_missing_native_stays_missing(self):
         result = self.inspect(nelm=3)
