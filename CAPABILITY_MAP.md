@@ -59,8 +59,9 @@ configuration is not proof that a particular commit passed remote CI.
 | Prepare fixed-cell relaxation | Same `cmw vasp prepare` — IMPLEMENTED | Spec `calculation: fixed-cell-relaxation`; bounded ionic controls and explicit required values. No variable-cell or general relaxation claim. | [Guide](docs/periodic/vasp-preparation.md), [preparer](src/cmw/periodic/vasp/preparation.py), [tests](tests/periodic/vasp/test_preparation.py) |
 | Check an existing four-file bundle | `cmw vasp check-inputs DIRECTORY` — IMPLEMENTED | Read-only bounded POSCAR/INCAR/KPOINTS/POTCAR checks; optional `--preparation-record`. Invalid and unsupported differ; a pass is not scientific validation. | [Dialect/exit contract](docs/periodic/vasp-input-checking.md), [checker](src/cmw/periodic/vasp/inputs.py), [tests](tests/periodic/vasp/test_inputs.py) |
 | Compare a baseline or retain structure lineage | Preparation spec `baseline` / `source_record`; `compare_inputs` API — IMPLEMENTED | Reuse category-aware differences and complete hash-matched import/embedding records. Declared runtime comparison needs record evidence; no observed effective inputs are invented. | [Guide](docs/periodic/vasp-preparation.md#baseline-comparison-and-structure-lineage), [API](src/cmw/periodic/vasp/preparation.py), [handoff tests](tests/structure/test_cif_import.py) |
-| Inspect native VASP result evidence | `cmw.periodic.vasp.results.inspect_result` API — IMPLEMENTED | Bounded 6.6.1 DAV/RMM static/fixed-cell evidence, explicit segments, endpoint and whole-atom force summaries. No policy means no acceptance. | [Contract](docs/periodic/vasp-result-evidence.md), [parser](src/cmw/periodic/vasp/results.py), [tests](tests/periodic/vasp/test_results.py) |
-| Execute prepared VASP inputs | Caller-supplied foreground runner, optionally through Jobs — EXTERNAL INTEGRATION | No native VASP launcher/result finalizer is registered. Review the runner's executable, MPI, resource, restart and output contracts separately. | [Runner integration](docs/cmw-jobs.md#integration-and-foreground-command-contract), [current CLI](src/cmw/cli.py) |
+| Inspect or assess native VASP result evidence | `cmw vasp inspect-result DIRECTORY [--policy …] [--spec …]`; `inspect_result` / `assess_result` APIs — IMPLEMENTED | Bounded 6.6.1 static/fixed-cell evidence, explicit segments, endpoint and whole-atom force summaries. DAV has native-sample evidence; RMM/collinear coverage is synthetic. No policy means no acceptance. | [Contract](docs/periodic/vasp-result-evidence.md), [parser](src/cmw/periodic/vasp/results.py), [policy](src/cmw/periodic/vasp/result_policy.py), [tests](tests/periodic/vasp/test_results.py) |
+| Finalize accepted VASP energies or periodic endpoint | `cmw vasp finalize-result DIRECTORY --policy … --spec …`; `verify-result-record RECORD` — IMPLEMENTED | Explicit retrospective source/segment/input binding and saved native Jobs completion; shared core artifact finalizer and new Scratch-only record. Reverify required sources before reuse. No wavefunction/charge-density finalization or source archiving. | [Contract](docs/periodic/vasp-result-evidence.md#commands-output-and-reuse), [adapter](src/cmw/periodic/vasp/result_finalization.py), [tests](tests/periodic/vasp/test_result_finalization.py) |
+| Execute prepared VASP inputs | Caller-supplied foreground runner, optionally through Jobs — EXTERNAL INTEGRATION | No native VASP launcher is registered. Review the runner's executable, MPI, resource, restart and output contracts separately; result finalization never launches it. | [Runner integration](docs/cmw-jobs.md#integration-and-foreground-command-contract), [current CLI](src/cmw/cli.py) |
 
 ### Molecular workflows
 
@@ -116,7 +117,7 @@ Low usage, a small expected job or a successful help command grants none of thes
 | --- | --- | --- | --- |
 | Prepare DOS/projection/band-path arrays | `cmw.analysis.electronic` APIs — IMPLEMENTED | Caller-supplied arrays, labels and conventions. Reuse energy shifting, explicit projection grouping and disconnected reciprocal segments; readers, spin interpretation and plotting remain caller-owned. | [Guide](docs/electronic-arrays.md), [API](src/cmw/analysis/electronic.py), [tests](tests/test_electronic_arrays.py) |
 | Normalize/join excited-state results | `normalize_tda_manifold`, `join_excited_state_tables` APIs — IMPLEMENTED | Explicit state identity and finalized NTO/HEA artifacts; reuse provenance-aware joins instead of matching labels/row positions by guess. | [State contract](docs/molecular/orca-6.1-tda-excited-states.md), [table API](src/cmw/molecular/excited_state_tables.py), [tests](tests/molecular/test_excited_state_tables.py) |
-| End-to-end periodic result reporting | Array preparation above — PARTIAL | No universal VASP result reader, scientific finalizer or report generator is established by those array helpers. | [Array boundary](docs/electronic-arrays.md), [periodic package](src/cmw/periodic/vasp/) |
+| End-to-end periodic result reporting | Bounded VASP evidence/finalization plus array preparation — PARTIAL | Reuse the separate supported result adapter for static/fixed-cell evidence. General output readers, comparability analysis and report generation remain outside these capabilities. | [Result contract](docs/periodic/vasp-result-evidence.md), [array boundary](docs/electronic-arrays.md) |
 
 ## Workflow boundaries at a glance
 
@@ -136,6 +137,9 @@ flowchart TD
     CONTRACT -. "optional authorized scheduling" .-> JOBS["CMW Jobs"]
     JOBS --> RUNNER["Existing foreground runner"]
     RUNNER --> ENGINE["Separately supplied engine"]
+    ENGINE -. "existing VASP output" .-> VE["Bounded native evidence"]
+    VE --> VA["Explicit policy and retrospective binding"]
+    VA --> VF["Core artifacts and Scratch-only finalization record"]
     EXT["External running computation"] -. "read-only" .-> OBS["Activity Guard and telemetry"]
     OBS -. "admission evidence only" .-> JOBS
     FUTURE["DEFERRED: interface or heterostructure construction"]
@@ -144,8 +148,9 @@ flowchart TD
 Solid arrows show preparation/data flow or the explicitly labelled execution
 branch. Dotted arrows show optional orchestration, external integration or
 read-only evidence. Preparation never starts that execution branch automatically.
-ORCA and Multiwfn retain their distinct program-specific finalizers; the shared
-artifact finalizer does not supply missing VASP scientific validation.
+ORCA, Multiwfn and the bounded VASP result adapter supply distinct program-specific
+validation to the shared artifact finalizer. VASP record publication requires its
+own policy and execution/input binding; preparation does not supply those facts.
 
 ## High-risk routing distinctions
 
@@ -235,7 +240,7 @@ behavior; do not transfer that convention to canonical structure preparation.
 | --- | --- |
 | Two CIFs into an interface or heterostructure | DEFERRED. Model construction, not concatenation or conversion. A separate scoped task must resolve slab/bulk status, Miller planes, termination/thickness, integer matching, twist, mismatch/strain, registry, separation, overlaps, vacuum/periodicity and A/B origin mapping. [Scientific handoff](docs/structure/cif-import.md#future-interface-construction-handoff). |
 | Disordered, magnetic, superspace or unsupported special CIF import | NOT FOUND IN CURRENT CHECKOUT as a supported canonical route. Ordered import rejects these; do not resolve the scientific model by selecting occupancies or bypassing the importer. |
-| Native VASP launch and scientific-result validation | NOT FOUND IN CURRENT CHECKOUT. External foreground-runner integration and bounded input checking do not provide either capability. |
+| Native VASP launch and general result validation | Native launch remains outside the implementation. Bounded static/fixed-cell result evidence, explicit policy acceptance and retrospective finalization exist; variable-cell, MD, general restart, wavefunction/charge-density validity and universal result validation remain unsupported. [Result scope](docs/periodic/vasp-result-evidence.md#native-dialect-and-modes). |
 | Cluster scheduling, cluster locks, arbitrary backfill or generic retry ladders | Outside implemented local contracts. Use the [Jobs limits](docs/cmw-jobs.md) and [ORCA lifecycle](docs/architecture/orca-runtime.md); a separate implementation/authorization decision is needed. |
 | Automatic CT-like state choice or general fragment-resolved HEA | DEFERRED beyond the explicit supported analysis contracts. The dedicated two-fragment IFCT runner does not make the older non-fragment HEA renderer universal. [Analysis boundary](docs/molecular/multiwfn-3.8-excited-state-analysis.md#unsupported-and-deferred-analysis). |
 

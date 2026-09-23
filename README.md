@@ -23,6 +23,8 @@ This repository currently contains:
   with explicit per-element overrides and no supplied licensed datasets;
 - bounded static/fixed-cell VASP preparation with exact four-file inputs,
   Scratch-only preparation records, and read-only input-bundle checks;
+- bounded VASP output evidence, explicit acceptance policies, and retrospective
+  energy/periodic-structure finalization into verified Scratch records;
 - factual ORCA output parsing with separate OPT/FREQ/SP/TDDFT validation;
 - versioned targets, attempts, artifacts, lineage, local locks, and fail-closed
   reuse;
@@ -174,6 +176,12 @@ contains only INCAR, KPOINTS, POSCAR and POTCAR; `preparation.json` lives only i
 explicit Scratch. `cmw vasp check-inputs` checks inputs without sidecars or writes.
 See the [preparation guide](docs/periodic/vasp-preparation.md) for synthetic installed
 examples, required context, runtime distinctions and publication limits.
+`cmw vasp inspect-result` separates native facts from a caller-selected policy.
+`cmw vasp finalize-result` additionally requires explicit retrospective input and
+saved Jobs binding, then publishes only `finalization.json` in Scratch.
+`cmw vasp verify-result-record` rechecks its required sources before reuse. See
+the [bounded result contract](docs/periodic/vasp-result-evidence.md) for supported
+modes, policy/specification examples and the synthetic demonstration.
 `cmw structure embed-molecule` provides separate molecular embedding with its
 mapping in Scratch; legacy converter publication remains available.
 

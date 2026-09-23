@@ -95,6 +95,16 @@ acceptance. See [CIF import](../structure/cif-import.md),
 [periodic geometry](../structure/periodic-model.md), and
 [VASP preparation](../periodic/vasp-preparation.md).
 
+Separate [VASP result evidence and finalization](../periodic/vasp-result-evidence.md)
+now reads bounded native static/fixed-cell output, applies an explicit policy,
+and binds selected energies or a periodic relaxation endpoint through the shared
+typed-artifact finalizer. Retrospective source declarations and supplied native
+Jobs completion evidence are required for finalization; input preparation itself
+still performs no result acceptance. Only a new Scratch `finalization.json` is
+published. Source revalidation before publication and reuse does not create an
+atomic cross-file snapshot or an authenticated pre-run receipt. Native VASP
+execution and general result analysis remain outside this adapter.
+
 Two imported periodic structures are suitable explicit inputs to a future
 interface-construction operation. That operation remains unimplemented; its
 required scientific choices are documented in the
@@ -169,8 +179,8 @@ comparison.
 
 The implemented core, structure, ORCA, Multiwfn runtime, and downstream
 workflow directories establish the molecular decomposition. Periodic preparation
-also exists; periodic execution, interface construction and general analysis
-remain future scope:
+and bounded policy-based result finalization also exist; native periodic execution,
+interface construction and general analysis remain future scope:
 
 ```text
 cmw

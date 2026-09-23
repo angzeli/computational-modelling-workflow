@@ -1,4 +1,4 @@
-"""Argparse presentation for local VASP POTCAR preparation."""
+"""Argparse presentation for VASP preparation and result evidence."""
 
 from __future__ import annotations
 
@@ -105,7 +105,7 @@ def _check(args: argparse.Namespace) -> int:
 
 
 def register(subcommands: argparse._SubParsersAction) -> None:
-    vasp = subcommands.add_parser("vasp", help="prepare local VASP inputs")
+    vasp = subcommands.add_parser("vasp", help="prepare VASP inputs and inspect existing result evidence")
     commands = vasp.add_subparsers(dest="vasp_command", required=True)
     checking = commands.add_parser("check-inputs", help="read-only checks of a four-file input bundle")
     checking.add_argument("directory", type=Path)
@@ -151,3 +151,6 @@ def register(subcommands: argparse._SubParsersAction) -> None:
         parser.add_argument("--library-release", help="separately caller-declared library release; never inferred from dates")
         parser.add_argument("--strict-identity", action="store_true", help="require parsed variant and family metadata")
     check.set_defaults(handler=_check)
+    from .result_cli import register as register_results
+
+    register_results(commands)
