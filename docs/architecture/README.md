@@ -1,5 +1,8 @@
 # Computational architecture
 
+For current task routing, use the root [capability map](../../CAPABILITY_MAP.md).
+The target architecture below also includes explicitly future work.
+
 This document describes the architecture the repository implements
 progressively. The first reusable molecular foundation now exists; other
 branches in the diagrams remain targets rather than implementation claims.

@@ -5,6 +5,8 @@ finite molecular systems and periodic materials systems. The project is intended
 to turn proven research workflows into inspectable Python infrastructure without
 erasing the scientific differences between molecular and periodic modelling.
 
+Find an existing workflow or API: [CAPABILITY_MAP.md](CAPABILITY_MAP.md).
+
 ## Current status
 
 This repository currently contains:

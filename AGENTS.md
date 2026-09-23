@@ -10,6 +10,26 @@ Default loop:
 
 These are defaults. More specific user, repository, directory, or task instructions take precedence.
 
+## CMW reuse-first routing (mandatory)
+
+Before carrying out or implementing a computational workflow/helper, consult the
+relevant task family in [CAPABILITY_MAP.md](CAPABILITY_MAP.md), read its linked
+contract, and verify the actual CLI/API/source entry point. For usage requests,
+use the existing supported capability; do not turn usage into CMW development
+without a concrete need and appropriate authorization.
+
+For development, extend the relevant implementation instead of duplicating a
+converter, potential builder, checker, materializer, runner, scheduler or
+provenance model. Establish the unsupported requirement or contract mismatch
+before proposing a new route. Small project adapters may compose existing APIs.
+Do not bypass established checks with unreviewed equivalent commands, silently
+choose scientific parameters, or infer execution authorization from availability.
+
+The map is a routing index, not a replacement for source or feature contracts;
+inspect and report drift. Read only relevant guidance and reuse established
+context until requirements/code change; no full census for a typo or reread
+before every command. Update the map with any actual capability boundary change.
+
 ## 1. Scope and planning
 
 - Identify the goal, constraints, likely affected files, and observable completion condition before editing.
