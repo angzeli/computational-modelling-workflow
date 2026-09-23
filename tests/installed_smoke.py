@@ -1,7 +1,7 @@
 """Copied outside the checkout to test a fresh installation and owned fake jobs.
 
-Only the test launcher accompanies this file. Its observers use fixture PIDs and
-fixed idle host samples; every cmw module comes from the installation under test.
+Only synthetic test helpers accompany this file. Its observers use fixture PIDs
+and fixed idle host samples; every cmw module comes from the installation under test.
 """
 import argparse
 import asyncio
@@ -303,6 +303,152 @@ raise SystemExit(main(sys.argv[1:]))
             'pythonpath_removed': True}
 
 
+def result_surface(root, cli):
+    """Exercise evidence, explicit policy and core finalization without a runner."""
+    from cmw.core.artifacts import EnergyArtifact, StructureArtifact, artifact_from_dict
+    from cmw.core.preparation_publication import PublicationError
+    from cmw.core.provenance import stable_hash
+    from cmw.periodic.vasp.result_finalization import finalize_result
+    from tests.periodic.vasp.result_case import make_case, write_json
+
+    root.mkdir()
+    cases = {'static': make_case(root/'static'),
+             'constrained': make_case(root/'constrained', relaxation=True, constrained=True)}
+    strict = make_case(root/'strict-force', relaxation=True, constrained=True)
+    strict['policy']['force'] = {'criterion': 'explicit', 'scope': 'free',
+                                'threshold_ev_per_angstrom': 0.001}
+    strict['spec']['policy_id'] = stable_hash(strict['policy'])
+    write_json(strict['policy_path'], strict['policy'])
+    write_json(strict['spec_path'], strict['spec'])
+    all_cases = [*cases.values(), strict]
+    protected = {path: path.read_bytes() for case in all_cases
+                 for path in case['root'].rglob('*') if path.is_file()}
+    queue = root/'unexpected-jobs-state'
+    child_env = dict(os.environ)
+    child_env.pop('PYTHONPATH', None)
+    child_env.update(PYTHONDONTWRITEBYTECODE='1', CMW_JOBS_STATE=str(queue))
+    guard = '''import sys
+def forbid(*args, **kwargs):
+    raise AssertionError("Result evidence attempted execution or mutable Jobs access")
+def audit(event, args):
+    if event in {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.fork"}:
+        forbid()
+sys.addaudithook(audit)
+from cmw.jobs.store import Store
+from cmw.jobs import runtime
+Store.__init__ = Store.add = forbid
+runtime.start = runtime.stop = forbid
+from cmw.cli import main
+raise SystemExit(main(sys.argv[1:]))
+'''
+
+    def invoke(arguments, expected=0, *, guarded=False, as_json=True):
+        prefix = [sys.executable, '-c', guard] if guarded else [cli]
+        result = subprocess.run([*prefix, *map(str, arguments)], cwd=root, env=child_env,
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == expected, (arguments, result.returncode,
+                                               result.stdout[-4000:], result.stderr[-4000:])
+        assert not queue.exists(), 'Result evidence unexpectedly created Jobs state'
+        if not as_json:
+            return result.stdout
+        def invalid_constant(value):
+            raise AssertionError('Nonfinite JSON literal: '+value)
+        return json.loads(result.stdout, parse_constant=invalid_constant)
+
+    for name, case in cases.items():
+        diagnostic = ['vasp', 'inspect-result', case['run']]
+        evidence = invoke([*diagnostic, '--json'], guarded=True)
+        assert evidence['status'] == 'inspected' and evidence['policy_assessment'] is None
+        assert evidence['execution']['exit_code'] is None
+        assert evidence['selected_segment']['termination']['normal_footer']
+        assert evidence['electronic_table_correspondence'] == 'matched'
+        assert evidence['coverage']['full_electronic_history']
+        human = invoke(diagnostic, as_json=False)
+        assert 'Process exit: unobserved' in human and 'Native electronic convergence:' in human
+        assert 'Numeric electronic convergence:' in human and 'Policy ' not in human
+        assessment_args = [*diagnostic, '--policy', case['policy_path'], '--spec', case['spec_path']]
+        accepted = invoke([*assessment_args, '--json'])
+        assert accepted['policy_assessment']['status'] == 'PASS'
+        assert accepted['binding']['valid']
+        assert accepted['binding']['execution']['status'] == 'eligible'
+        assert 'Policy '+case['policy']['name']+': PASS' in invoke(assessment_args, as_json=False)
+        if name == 'constrained':
+            forces = accepted['endpoint']['force_summary']
+            assert forces['free']['count'] == forces['fixed']['count'] == 1
+            assert forces['fixed']['maximum_norm'] == .5
+            assert forces['free']['maximum_norm'] < .02
+        finalize_args = ['vasp', 'finalize-result', case['run'], '--policy', case['policy_path'],
+                         '--spec', case['spec_path'], '--scratch-root', case['scratch'],
+                         '--record-directory', 'accepted', '--json']
+        preview = invoke([*finalize_args, '--dry-run'])
+        assert preview['publication']['state'] == 'preview'
+        assert list(case['scratch'].iterdir()) == []
+        record = invoke(finalize_args, guarded=True)
+        assert record['publication']['state'] == 'complete'
+        assert record['artifact_bundle']['status'] == 'FINALIZED'
+        assert record['artifact_bundle']['artifact_count'] == 1
+        artifact = artifact_from_dict(record['artifact_bundle']['artifacts'][0])
+        assert artifact.validation.passed
+        if name == 'static':
+            assert isinstance(artifact, EnergyArtifact)
+            assert artifact.metadata['energy_kind'] == 'sigma_to_zero'
+            assert artifact.metadata['energy']['value'] == -2.995
+        else:
+            assert isinstance(artifact, StructureArtifact)
+            assert artifact.charge is None and artifact.multiplicity is None
+            assert artifact.metadata['periodic_geometry']['constraints'] == [[True]*3, [False]*3]
+            assert artifact.metadata['periodic_geometry']['cartesian'][0][0] == .54
+        record_path = case['scratch']/'accepted'/'finalization.json'
+        assert {path.name for path in record_path.parent.iterdir()} == {'finalization.json'}
+        assert json.loads(record_path.read_text()) == record
+        checked = invoke(['vasp', 'verify-result-record', record_path, '--policy', case['policy_path'], '--json'])
+        assert checked['valid'] and checked['artifacts'][0]['artifact_id'] == artifact.artifact_id
+        invoke(finalize_args, expected=2)
+
+    unknown = invoke(['vasp', 'inspect-result', cases['static']['run'], '--policy',
+                      cases['static']['policy_path'], '--json'], expected=2)
+    assert unknown['policy_assessment']['status'] == 'UNKNOWN'
+    rejected = invoke(['vasp', 'inspect-result', strict['run'], '--policy', strict['policy_path'],
+                       '--spec', strict['spec_path'], '--json'], expected=1)
+    assert rejected['policy_assessment']['status'] == 'FAIL'
+    refusal = invoke(['vasp', 'finalize-result', strict['run'], '--policy', strict['policy_path'],
+                      '--spec', strict['spec_path'], '--scratch-root', strict['scratch'],
+                      '--record-directory', 'refused', '--json'], expected=2)
+    assert refusal['code'] == 'FINALIZATION_REFUSED' and not list(strict['scratch'].iterdir())
+
+    # A revalidation failure after Scratch intent must retain a failed record,
+    # never publish an accepted artifact bundle as a completed finalization.
+    case = cases['static']
+    with (patch('subprocess.Popen', side_effect=AssertionError('must not launch')),
+            patch('cmw.jobs.store.Store', side_effect=AssertionError('must not open Jobs')),
+            patch('cmw.periodic.vasp.result_finalization.revalidate_sources', return_value={'valid': False})):
+        try:
+            finalize_result(case['run'], policy_path=case['policy_path'], spec_path=case['spec_path'],
+                            scratch_root=case['scratch'], record_directory='failed-publication')
+        except PublicationError as error:
+            assert error.code == 'PUBLICATION_FAILED' and not error.incomplete
+        else:
+            raise AssertionError('Failed source revalidation unexpectedly finalized')
+    failed_path = case['scratch']/'failed-publication'/'finalization.json'
+    assert json.loads(failed_path.read_text())['publication']['state'] == 'failed'
+    assert not invoke(['vasp', 'verify-result-record', failed_path, '--json'], expected=2)['valid']
+
+    for case in all_cases:
+        assert {path.name for path in case['inputs'].iterdir()} == {'INCAR', 'KPOINTS', 'POSCAR', 'POTCAR'}
+        assert not list(case['run'].glob('*finalization*'))
+        assert not list(case['inputs'].glob('*finalization*'))
+        assert {path for path in case['state'].rglob('*') if path.is_file()} <= set(protected)
+    assert all(path.read_bytes() == data for path, data in protected.items())
+    new_files = {path for path in root.rglob('*') if path.is_file()} - set(protected)
+    assert new_files == {case['scratch']/'accepted'/'finalization.json' for case in cases.values()} | {failed_path}
+    assert not queue.exists()
+    return {'static_and_constrained_native_evidence': 'PASS', 'explicit_policy_pass_fail_unknown': 'PASS',
+            'core_energy_and_periodic_structure_artifacts': 'PASS', 'dry_run_and_scratch_only_finalization': 'PASS',
+            'record_reuse_and_no_clobber': 'PASS', 'failed_publication_semantics': 'PASS',
+            'sources_four_inputs_and_saved_jobs_unchanged': 'PASS', 'execution_and_jobs_guard': 'PASS',
+            'pythonpath_removed': True}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kind', choices=('core', 'jobs', 'sdist', 'editable'), required=True)
@@ -342,6 +488,7 @@ def main():
               'cli_json_asset_optional_boundary': 'PASS',
               'tui': 'not installed (expected)' if args.kind == 'core' else 'PASS',
               'vasp_preparation': preparation_surface(args.output/'vasp-preparation', cli),
+              'vasp_result_evidence': result_surface(args.output/'vasp-results', cli),
               'lifecycle': [lifecycle(args.output/mode, mode)
                             for mode in ('sequential', 'bounded-sharing')]}
     (args.output/'result.json').write_text(json.dumps(report, indent=2)+'\n')

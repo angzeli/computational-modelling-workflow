@@ -7,7 +7,7 @@ python_exe=${PYTHON_BIN:-python3}
 mkdir -m 700 "$check_root"
 check_root=$(cd "$check_root" && pwd -P)
 case "$check_root/" in "$source_root/"*) printf 'Artifact checks require a directory outside the checkout\n' >&2; exit 64;; esac
-mkdir -p "$check_root/dist" "$check_root/driver/tests/jobs" "$check_root/tmp"
+mkdir -p "$check_root/dist" "$check_root/driver/tests/jobs" "$check_root/driver/tests/periodic/vasp" "$check_root/tmp"
 export TMPDIR="$check_root/tmp" PYTHONDONTWRITEBYTECODE=1
 unset PYTHONPATH
 "$python_exe" -m build --outdir "$check_root/dist" "$source_root"
@@ -17,6 +17,9 @@ cp "$source_root/tests/installed_smoke.py" "$check_root/driver/smoke.py"
 : > "$check_root/driver/tests/__init__.py"
 : > "$check_root/driver/tests/jobs/__init__.py"
 cp "$source_root/tests/jobs/"{isolated_runtime,lifecycle_evidence}.py "$check_root/driver/tests/jobs/"
+: > "$check_root/driver/tests/periodic/__init__.py"
+: > "$check_root/driver/tests/periodic/vasp/__init__.py"
+cp "$source_root/tests/periodic/vasp/"{result_fixtures,result_case}.py "$check_root/driver/tests/periodic/vasp/"
 for kind in core jobs sdist editable; do
   env_root="$check_root/env-$kind"
   "$python_exe" -m venv "$env_root"
