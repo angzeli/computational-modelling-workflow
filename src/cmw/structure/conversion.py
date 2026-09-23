@@ -20,7 +20,7 @@ from ase.io import write as ase_write
 
 from cmw.core.provenance import atomic_write_json, file_hash
 
-from .xyz import ELEMENTS
+from .ordering import group_species
 
 
 RequestedCellMode = Literal["auto", "orthorhombic", "cubic"]
@@ -79,46 +79,6 @@ def _coordinate_bounds(
     maximum = tuple(float(value) for value in positions.max(axis=0))
     spans = tuple(upper - lower for lower, upper in zip(minimum, maximum, strict=True))
     return minimum, maximum, spans
-
-
-def _normalize_species_order(
-    symbols: tuple[str, ...], requested: Iterable[str] | None
-) -> tuple[str, ...]:
-    """Validate an explicit order or retain unique elements by first occurrence."""
-
-    present = tuple(dict.fromkeys(symbols))
-    if requested is None:
-        return present
-
-    normalized: list[str] = []
-    for raw_symbol in requested:
-        if not isinstance(raw_symbol, str) or not raw_symbol.strip():
-            raise ValueError("species order entries must be non-empty element symbols")
-        value = raw_symbol.strip()
-        symbol = value[0].upper() + value[1:].lower()
-        if symbol not in ELEMENTS:
-            raise ValueError(f"invalid species-order element symbol: {raw_symbol!r}")
-        normalized.append(symbol)
-
-    duplicates = sorted(
-        symbol for symbol, count in Counter(normalized).items() if count > 1
-    )
-    if duplicates:
-        raise ValueError(
-            "species order contains duplicate elements: " + ", ".join(duplicates)
-        )
-
-    absent = [symbol for symbol in normalized if symbol not in present]
-    omitted = [symbol for symbol in present if symbol not in normalized]
-    if absent:
-        raise ValueError(
-            "species order requests elements absent from the XYZ: " + ", ".join(absent)
-        )
-    if omitted:
-        raise ValueError(
-            "species order omits elements present in the XYZ: " + ", ".join(omitted)
-        )
-    return tuple(normalized)
 
 
 def _read_single_xyz(path: Path, *, ordinary_xyz_only: bool = False) -> tuple[Atoms, str, int]:
@@ -233,15 +193,7 @@ def _build_plan(
         input_path, ordinary_xyz_only=ordinary_xyz_only
     )
     original_symbols = tuple(source_atoms.get_chemical_symbols())
-    selected_species = _normalize_species_order(original_symbols, species_order)
-    poscar_to_original = tuple(
-        index
-        for element in selected_species
-        for index, symbol in enumerate(original_symbols)
-        if symbol == element
-    )
-    if sorted(poscar_to_original) != list(range(len(source_atoms))):
-        raise ValueError("species grouping did not produce a bijective atom mapping")
+    selected_species, poscar_to_original = group_species(original_symbols, species_order)
 
     minimum, maximum, spans = _coordinate_bounds(source_atoms)
     if resolved_mode == "orthorhombic":
