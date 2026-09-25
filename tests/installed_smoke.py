@@ -304,16 +304,21 @@ raise SystemExit(main(sys.argv[1:]))
 
 
 def result_surface(root, cli):
-    """Exercise evidence, explicit policy and core finalization without a runner."""
+    """Exercise native evidence and saved runner records without execution."""
     from cmw.core.artifacts import EnergyArtifact, StructureArtifact, artifact_from_dict
     from cmw.core.preparation_publication import PublicationError
     from cmw.core.provenance import stable_hash
     from cmw.periodic.vasp.result_finalization import finalize_result
     from tests.periodic.vasp.result_case import make_case, write_json
+    from tests.periodic.vasp.runner_case import add_runner
 
     root.mkdir()
     cases = {'static': make_case(root/'static'),
-             'constrained': make_case(root/'constrained', relaxation=True, constrained=True)}
+             'constrained': make_case(root/'constrained', relaxation=True, constrained=True),
+             'external-record': make_case(root/'external-record', relaxation=True, constrained=True)}
+    external = cases['external-record']
+    add_runner(external['root'], external['run'], external['spec']['execution'])
+    write_json(external['spec_path'], external['spec'])
     strict = make_case(root/'strict-force', relaxation=True, constrained=True)
     strict['policy']['force'] = {'criterion': 'explicit', 'scope': 'free',
                                 'threshold_ev_per_angstrom': 0.001}
@@ -371,6 +376,10 @@ raise SystemExit(main(sys.argv[1:]))
         assert accepted['policy_assessment']['status'] == 'PASS'
         assert accepted['binding']['valid']
         assert accepted['binding']['execution']['status'] == 'eligible'
+        if name == 'external-record':
+            execution = accepted['binding']['execution']
+            assert execution['binding']['wrapper_cwd'] != execution['binding']['payload_cwd']
+            assert set(execution['runner']['input_identities']) == {'INCAR', 'POSCAR', 'KPOINTS', 'POTCAR'}
         assert 'Policy '+case['policy']['name']+': PASS' in invoke(assessment_args, as_json=False)
         if name == 'constrained':
             forces = accepted['endpoint']['force_summary']
@@ -445,6 +454,7 @@ raise SystemExit(main(sys.argv[1:]))
     return {'static_and_constrained_native_evidence': 'PASS', 'explicit_policy_pass_fail_unknown': 'PASS',
             'core_energy_and_periodic_structure_artifacts': 'PASS', 'dry_run_and_scratch_only_finalization': 'PASS',
             'record_reuse_and_no_clobber': 'PASS', 'failed_publication_semantics': 'PASS',
+            'explicit_external_runner_binding': 'PASS',
             'sources_four_inputs_and_saved_jobs_unchanged': 'PASS', 'execution_and_jobs_guard': 'PASS',
             'pythonpath_removed': True}
 

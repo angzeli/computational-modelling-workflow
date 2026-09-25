@@ -19,7 +19,7 @@ cp "$source_root/tests/installed_smoke.py" "$check_root/driver/smoke.py"
 cp "$source_root/tests/jobs/"{isolated_runtime,lifecycle_evidence}.py "$check_root/driver/tests/jobs/"
 : > "$check_root/driver/tests/periodic/__init__.py"
 : > "$check_root/driver/tests/periodic/vasp/__init__.py"
-cp "$source_root/tests/periodic/vasp/"{result_fixtures,result_case}.py "$check_root/driver/tests/periodic/vasp/"
+cp "$source_root/tests/periodic/vasp/"{result_fixtures,result_case,runner_case}.py "$check_root/driver/tests/periodic/vasp/"
 for kind in core jobs sdist editable; do
   env_root="$check_root/env-$kind"
   "$python_exe" -m venv "$env_root"
