@@ -42,6 +42,8 @@ def inspect_execution(
     job_id: int,
     attempt_id: str,
     run_directory: Path | str,
+    runner_record: dict | None = None,
+    native_sources=(),
 ) -> dict:
     """Check a selected Jobs invocation and its native receipt, read-only.
 
@@ -49,7 +51,8 @@ def inspect_execution(
     not the scientific attempt ID carried by an optional execution layout.
     An exported snapshot may be anywhere. The receipt must still have its exact
     recorded ``state_directory/attempts/UUID/payload-exit.json`` location.
-    No queue discovery, process observation or state mutation is performed.
+    An explicit supported runner record can bind a wrapper input cwd to its
+    original payload output cwd. No queue discovery or state mutation occurs.
     """
     result = {
         "schema_version": 1,
@@ -154,8 +157,17 @@ def inspect_execution(
         "scientific_source_binding": "not_provided_by_jobs",
     }
     actual_run = _recorded_path(str(Path(run_directory).absolute()))
-    check("working_directory", actual_run is not None and _recorded_path(job.get("cwd")) == actual_run,
-          "The recorded working directory must match the inspected run directory")
+    if runner_record is None:
+        check("working_directory", actual_run is not None and _recorded_path(job.get("cwd")) == actual_run,
+              "The recorded working directory must match the inspected run directory")
+    else:
+        from .result_runner import inspect_runner
+        runner = inspect_runner(runner_record, job, receipt, run_directory, native_sources)
+        result["sources"].extend(runner["sources"])
+        result["runner"] = runner["facts"]
+        check("runner_association", runner["valid"], runner["error"] or "Runner association is invalid")
+        if runner["valid"]:
+            result["binding"].update({key: runner["facts"][key] for key in ("wrapper_cwd", "payload_cwd")})
     argv = job.get("argv")
     check("command", isinstance(argv, list) and bool(argv)
           and all(isinstance(arg, str) and "\0" not in arg for arg in argv) and bool(argv[0]),

@@ -59,7 +59,7 @@ def _validate_spec(value):
         raise ValueError("source_identities must explicitly map every native source role to SHA-256")
     execution = value["execution"]
     if (not isinstance(execution, dict)
-            or set(execution) != {"snapshot", "receipt", "job_id", "attempt_id", "source_identities"}
+            or set(execution) - {"runner_record"} != {"snapshot", "receipt", "job_id", "attempt_id", "source_identities"}
             or not all(_path(execution[name]) for name in ("snapshot", "receipt"))
             or type(execution["job_id"]) is not int or execution["job_id"] <= 0
             or not isinstance(execution["attempt_id"], str)
@@ -67,6 +67,9 @@ def _validate_spec(value):
             or not _identities(execution["source_identities"])
             or set(execution["source_identities"]) != {"jobs_snapshot", "jobs_receipt"}):
         raise ValueError("execution must select one exact native Jobs attempt and both source identities")
+    if "runner_record" in execution:
+        from .result_runner import validate_declaration
+        validate_declaration(execution["runner_record"])
     roles = value["artifact_roles"]
     if (not isinstance(roles, list) or not roles or not all(isinstance(role, str) for role in roles)
             or len(set(roles)) != len(roles) or set(roles) - ARTIFACT_ROLES):
@@ -102,6 +105,9 @@ def _resolved_spec(spec, base):
 
     for field in ("snapshot", "receipt"):
         resolved["execution"][field] = absolute(resolved["execution"][field])
+    if "runner_record" in resolved["execution"]:
+        declaration = resolved["execution"]["runner_record"]
+        declaration["path"] = absolute(declaration["path"])
     for parent in resolved.get("parents", []):
         parent["record"] = absolute(parent["record"])
     if "preparation_record" in resolved:
@@ -114,7 +120,8 @@ def inspect_binding(spec_path, evidence, policy_id):
 
     Parent declaration syntax is checked here; the artifact finalizer must verify
     the referenced parent records and required core artifact relationships.
-    No POTCAR, KPOINTS, queue database or source output is read by this adapter.
+    Only an explicit runner declaration reads and hashes POTCAR/KPOINTS. No
+    input payload text is retained, and no queue database is opened.
     """
     result = {"schema_version": 1, "kind": "vasp-retrospective-binding", "valid": False,
               "input_binding": False, "input_comparison_valid": False, "execution": None,
@@ -167,11 +174,13 @@ def inspect_binding(spec_path, evidence, policy_id):
         declared = resolved["execution"]
         execution = inspect_execution(declared["snapshot"], declared["receipt"],
                                       job_id=declared["job_id"], attempt_id=declared["attempt_id"],
-                                      run_directory=run_directory)
+                                      run_directory=run_directory,
+                                      runner_record=declared.get("runner_record"), native_sources=native)
         result["execution"] = execution
         result["sources"].extend(execution["sources"])
         result["findings"].extend(execution["findings"])
-        observed = {item["role"]: item["sha256"] for item in execution["sources"]}
+        observed = {item["role"]: item["sha256"] for item in execution["sources"]
+                    if item["role"] in {"jobs_snapshot", "jobs_receipt"}}
         check("execution_source_identities", observed == declared["source_identities"],
               "Saved Jobs snapshot or receipt content differs from its declared exact identity")
         check("execution", execution["status"] == "eligible",

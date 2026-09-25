@@ -112,8 +112,11 @@ def verify_finalization(path, *, policy_path=None, _ancestors=()):
         require(isinstance(execution, dict) and execution.get("status") == "eligible",
                 "Stored terminal execution evidence is not eligible")
         require(all(execution.get(key) == observed_binding["execution"].get(key) for key in (
-                    "status", "operational_success", "exit_code", "signal", "job", "checks", "binding")),
+                    "status", "operational_success", "exit_code", "signal", "job", "checks", "binding", "runner")),
                 "Stored execution facts differ from native saved Jobs evidence")
+        require([identity(s) for s in execution["sources"]]
+                == [identity(s) for s in observed_binding["execution"]["sources"]],
+                "Stored execution source closure differs from its exact source evidence")
         require(isinstance(binding.get("checks"), dict) and bool(binding["checks"])
                 and all(value is True for value in binding["checks"].values())
                 and isinstance(execution.get("checks"), dict) and bool(execution["checks"])
@@ -147,7 +150,9 @@ def verify_finalization(path, *, policy_path=None, _ancestors=()):
                 and job.get("status") == "Done" and type(job.get("exit_code")) is int
                 and job["exit_code"] == 0 and job.get("signal") is None
                 and job.get("cancel_requested") is False
-                and declared_execution["source_identities"] == {s["role"]: s["sha256"] for s in execution["sources"]},
+                and declared_execution["source_identities"] == {
+                    s["role"]: s["sha256"] for s in execution["sources"]
+                    if s["role"] in {"jobs_snapshot", "jobs_receipt"}},
                 "Selected Jobs invocation or execution source identity is inconsistent")
         native = evidence.get("sources")
         require(isinstance(native, list) and bool(native), "Native source observations are missing")
@@ -198,6 +203,8 @@ def verify_finalization(path, *, policy_path=None, _ancestors=()):
                     "source_snapshot_id": evidence["snapshot_id"], "segment_id": current["segment_id"],
                     "evaluation_index": evaluation["index"], "policy_id": assessment["policy_identity"]["policy_id"],
                     "effective_settings": {k: v["value"] for k, v in current["settings"].items()}}
+        if execution.get("runner") is not None:
+            protocol["runner_identity"] = stable_hash(execution["runner"])
         files = {s["role"]: s["resolved_path"] for s in native
                  if s["role"] in {"OUTCAR", "OSZICAR", "stdout", "POSCAR", "CONTCAR", "INCAR"}}
         bundle = record.get("artifact_bundle")
@@ -343,6 +350,8 @@ def finalize_result(directory, *, policy_path, spec_path, scratch_root, record_d
                 "source_snapshot_id": evidence["snapshot_id"], "segment_id": current["segment_id"],
                 "evaluation_index": evaluation["index"], "policy_id": assessment["policy_identity"]["policy_id"],
                 "effective_settings": settings}
+    if binding["execution"].get("runner") is not None:
+        protocol["runner_identity"] = stable_hash(binding["execution"]["runner"])
     validation = ArtifactValidation(ValidationStatus.PASSED,
         {c["code"]: True if c["status"] == "PASS" else False if c["status"] == "FAIL" else None for c in assessment["checks"]},
         "VASP_POLICY_ACCEPTED", "Accepted under the explicitly recorded policy and bounded dialect")
