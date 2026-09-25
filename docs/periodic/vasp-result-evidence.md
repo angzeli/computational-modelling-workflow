@@ -36,6 +36,8 @@ retain names, eV units and evaluation/source references. Native convergence,
 reconstructed dE **and** d eps comparisons, iteration budget, and history coverage
 remain separate. EDIFF=0 is fixed-count behavior. Reaching NELM can coincide with
 convergence; fewer iterations do not establish it. Missing rms(c) is preserved.
+An empty electronic table is unavailable evidence, not an observed contradiction;
+numeric acceptance remains unknown. A nonempty conflicting table is still refused.
 
 Printed numbers retain their tokens and half-last-place bounds. A threshold
 straddled by rounding stays unknown. No scientific tolerance is increased. See
@@ -73,6 +75,8 @@ resolution supports it. Static endpoints are compared with POSCAR; CONTCAR is
 not mandatory, and the `ionic.relaxation` check is `NOT_APPLICABLE`.
 Relaxations require the evaluated endpoint to match CONTCAR, with the fixed cell
 and whole-atom constraints retained.
+Missing POSCAR or CONTCAR leaves their constraint comparison unknown. Only an
+observed disagreement is reported as a mismatch.
 
 Force summaries retain raw vectors and all/free/fixed maxima, counts and zero-based
 indices. Fixed-atom forces are not silently zeroed. An empty free set does not
@@ -184,6 +188,7 @@ The evidence layers retain separate meanings:
 | Current POSCAR/INCAR and optional CONTCAR | Exact current bytes and parsed settings/geometry/constraints. Native initial geometry and endpoint comparisons are corroboration, not an execution receipt. |
 | Optional completed VASP preparation record | Exact recorded preparation and POSCAR identity; prepared/current INCAR differences. Potential payload and k-point comparability remain unassessed by result finalization. |
 | Explicit saved Jobs snapshot and native receipt | Selected operational invocation, working directory, command, timestamps, terminal state, exit and signal evidence. Jobs does not snapshot scientific inputs/outputs. |
+| Optional explicit external-runner record | Connects a recognized wrapper input directory to its original output directory, with staged/effective four-file identities and lifecycle corroboration. Native Jobs completion remains mandatory. |
 | Finalization specification | A retrospective caller declaration associating those exact observations, selected segment, policy and intended artifacts. It is not a pre-run plan or authenticated input receipt. |
 
 The execution adapter accepts an explicitly supplied native **Jobs schema-2
@@ -192,7 +197,9 @@ It requires one exact positive numeric Job ID and 32-character lowercase attempt
 UUID, matching run directory and attempt log paths, `Done`, zero exit in both
 records, explicit absent signal/cancellation, and ordered finite timestamps.
 A copied receipt at an unrelated path is insufficient. No Jobs store is opened
-or mutated, and unversioned runner `RUN_METADATA` is not promoted to this contract.
+or mutated. The default contract requires the Jobs working directory to equal
+the inspected output directory. The optional bounded runner association below
+handles an explicitly recorded wrapper with a separate payload directory.
 Saved local records remain caller-owned evidence, not tamper-proof authentication.
 
 The full specification shape is illustrated below. Angle-bracket values are
@@ -235,13 +242,62 @@ evidence. Do not manufacture a completion receipt for a real run.
 }
 ```
 
-Only `parents`, `expected_runtime_overlay` and `preparation_record` are optional.
+At the top level, only `parents`, `expected_runtime_overlay` and
+`preparation_record` are optional.
 Omit them when unused. `source_identities` must exactly cover the observed native
 source roles: omit absent CONTCAR for a static run; use `stdout` instead of
 `OSZICAR` when explicitly selected. It does not include the policy, specification
 or Jobs records. Specification and policy artifact-role sets must agree.
 Relative execution, preparation and parent paths resolve from the specification's
 directory; the original specification is retained separately from resolved paths.
+
+### Optional external-runner association
+
+For the observed external `run-vasp.sh` integration, `execution` additionally
+accepts the optional `runner_record` member below (the hash is a placeholder):
+
+```json
+{
+  "runner_record": {
+    "dialect": "vasp-run-metadata-text-v1",
+    "path": "/actual/original/run/RUN_METADATA.txt",
+    "sha256": "<exact runner-record SHA-256>"
+  }
+}
+```
+
+This dialect name versions CMW's interpretation of an unversioned text format;
+it does not claim the external file carries a native schema version. There is no
+automatic record discovery. The original Jobs snapshot and original receipt are
+still required; `execution.source_identities` still contains exactly those two
+Jobs identities. The additional runner record and runtime inputs enter the
+required source closure and artifact identity through the verified association.
+
+The supported invocation explicitly supplies `--input`, `--output`, `--binary std`,
+`--ranks`, `--ncore`, `--kpar`, `--mpi-mode`, `--restart none`, `--timeout`,
+`--stop-before` and `--managed-foreground`. Counts must satisfy the external
+runner's 1–8 rank range and decomposition rules. Both native and synthetic MPI
+topology modes are recognized; the latter names a topology setting, not fake
+scientific execution. Unknown/repeated options, restart modes and other wrappers
+are unsupported. Paths must remain absolute and canonical: Jobs cwd equals the
+input argument, and the inspected directory equals the output argument.
+
+Only the original `<output>/RUN_METADATA.txt` is accepted, with one ordered
+STAGING/RUNNING/FINISHED lifecycle, successful child/launcher status, no stop or
+timeout, and timestamps within the selected Jobs attempt. The record is bounded
+to 64 KiB and each input to 64 MiB. All four staged input hashes are required;
+runtime INCAR must match the effective INCAR hash, and other runtime inputs must
+match staged hashes and sizes. POSCAR/INCAR must also match the native inspection
+observations. Symlinks, incomplete reads, malformed or duplicate identities,
+copied metadata and relocated output paths refuse association. No input payload
+text is retained in the record.
+
+Runner metadata never supplies scientific convergence. This association does not
+authenticate historical runner code, dirty checkout state or local records, and
+does not validate potential choice, k-point adequacy or restart files. No launcher,
+relocation receipt or archive adoption capability is introduced.
+
+### Native source and input binding
 
 The policy ID is `cmw.core.provenance.stable_hash(policy)`, identifying canonical
 JSON content. Raw policy-file SHA-256 is separately retained, so whitespace edits
