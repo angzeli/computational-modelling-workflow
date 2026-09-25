@@ -55,9 +55,13 @@ A present STOPCAR cannot establish when it acted; see the
 ## Periodic endpoint and constraints
 
 The final complete geometry must belong to its force and evaluated-energy block.
-POSCAR/CONTCAR reuse the existing parser, extended here only for exact matching
-elemental row annotations and all-zero velocity tails emitted for non-MD runs.
-Other suffixes, velocities and predictor/corrector sections remain unsupported.
+POSCAR/CONTCAR reuse the same parser as input checking and preparation, including
+optional exact matching elemental row annotations and blank-separated all-zero
+Cartesian velocity tails with exactly one triple per atom. The zeros must be
+finite and exact in decimal representation; a tiny nonzero value is not zero.
+The source text, cell, atom order and selective-dynamics flags are preserved.
+Other suffixes, velocities and predictor/corrector sections remain unsupported;
+this syntax coverage adds no MD or restart support.
 The native OUTCAR species/counts determine the evaluated species identity.
 
 Comparisons preserve cell basis and atom order. ASE's general minimum-image

@@ -378,38 +378,6 @@ def compare_geometry(first, second, *, position_tolerance=POSITION_TOLERANCE, ce
         return dict(result, status="unsupported", reason="invalid cell or coordinates")
 
 
-def _parse_result_structure(raw):
-    """Reuse POSCAR semantics; permit only the documented all-zero velocity tail.
-
-    VASP writes this tail in static/relaxation CONTCAR too. It has no role in
-    the supported non-MD evidence. Nonzero velocities/other tails stay unsupported.
-    """
-    parsed = parse_poscar(raw)
-    suffixes = [f for f in parsed["findings"] if f["code"] == "poscar.coordinate_suffix"]
-    if suffixes and "atom_species" in parsed:
-        lines = raw.splitlines()
-        start = 9 if parsed["selective_dynamics"] is not None else 8
-        width = 6 if parsed["selective_dynamics"] is not None else 3
-        # Only one exact elemental row label is covered; arbitrary extra fields
-        # remain unsupported. Native species identity still comes from OUTCAR.
-        if all(lines[start+i].split()[width:] in ([], [element]) for i, element in enumerate(parsed["atom_species"])):
-            for i in range(parsed["atom_count"]):
-                lines[start+i] = " ".join(lines[start+i].split()[:width])
-            parsed = parse_poscar("\n".join(lines) + "\n")
-            parsed["row_label_annotations"] = "matching explicit elemental suffixes"
-    unsupported = [f for f in parsed["findings"] if f["severity"] == "unsupported"]
-    if parsed["status"] == "unsupported" and len(unsupported) == 1 and unsupported[0]["code"] == "poscar.extra_sections":
-        start = unsupported[0]["evidence"]["first_line"] - 1
-        tail = raw.splitlines()[start:]
-        nonempty = [line.split() for line in tail if line.strip()]
-        if tail and not tail[0].strip() and len(nonempty) == parsed["atom_count"] and all(len(row) == 3 and all(re.fullmatch(NUMBER, t, re.I) and number(t)["value"] == 0 for t in row) for row in nonempty):
-            parsed["findings"].remove(unsupported[0])
-            parsed["status"] = "valid"
-            parsed["exit_code"] = 0
-            parsed["unused_tail"] = "all-zero Cartesian velocities; non-MD only"
-    return parsed
-
-
 def _geometry(parsed):
     if not parsed or parsed.get("status") != "valid":
         return None
@@ -508,7 +476,7 @@ def inspect_result(directory, *, segment=None, stdout=None, max_bytes=None):
         for role in ("POSCAR", "CONTCAR", "INCAR"):
             if (root / role).exists():
                 raw = _read_small(root / role, role, result["sources"])
-                parsed[role] = parse_incar(raw) if role == "INCAR" else _parse_result_structure(raw)
+                parsed[role] = parse_incar(raw) if role == "INCAR" else parse_poscar(raw)
                 parsed[role].pop("raw_text", None)
         result["filesystem_inputs"] = parsed
         values = {k: v["value"] for k, v in current["settings"].items()}

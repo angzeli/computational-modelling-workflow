@@ -43,9 +43,16 @@ not presented as verified selection or comparability.
   preserved. Coordinates in the parser summary remain in the original declared
   representation; `cell` includes scaling and `cartesian_coordinates` exposes
   scaled positions in Angstrom for representation-independent comparison.
-  There is no sorting, regrouping,
-  wrapping, or centering. Implicit VASP 4 identities, coordinate suffix fields,
-  velocities, and other meaningful trailing sections are unsupported.
+  There is no sorting, regrouping, wrapping, or centering. An optional single
+  elemental suffix must exactly match the element already declared for that atom;
+  it does not define species identity. A blank-separated tail containing exactly
+  one triple of finite, exact decimal zeros per atom is retained as unused
+  Cartesian velocities for the supported non-MD calculations. Nonzero values,
+  including values too small for floating-point representation, remain
+  unsupported. Implicit VASP 4 identities, other suffixes, other velocity data,
+  and predictor/corrector sections are unsupported. This shared interpretation
+  also applies to result inspection and byte-preserving VASP preparation; it
+  adds no MD or restart support.
 - INCAR: case-insensitive keys, `#`/`!` comments, semicolon-separated assignments,
   quoted SYSTEM text, booleans, scientific notation including D exponents, and
   numeric repeated-value arrays. Identical duplicate assignments produce a

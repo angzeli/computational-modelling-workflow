@@ -14,7 +14,7 @@ from cmw.core.preparation_publication import inspect_publication
 from cmw.periodic.vasp.inputs import check_inputs, parse_incar
 from cmw.periodic.vasp.preparation import PreparationError, compare_inputs, prepare
 from cmw.structure.embedding import embed_molecule
-from tests.periodic.vasp.test_inputs import bundle, potential, structure
+from tests.periodic.vasp.test_inputs import annotated_structure, bundle, potential, structure
 
 
 class VaspPreparationTests(unittest.TestCase):
@@ -110,6 +110,26 @@ class VaspPreparationTests(unittest.TestCase):
         actual = self.call()
         self.assertNotEqual(preview["prepared_inputs"]["POTCAR"], actual["prepared_inputs"]["POTCAR"])
         self.assertIn(b"changed synthetic", (self.output / "POTCAR").read_bytes())
+
+    def test_annotated_structure_with_zero_tail_is_published_byte_for_byte(self):
+        species = ("H", "He", "Li") * 4
+        text = annotated_structure(species, selective=True) + "\n" + "0 -0.0 0D-4\n" * len(species)
+        source = text.replace("\n", "\r\n").encode()
+        self.source.write_bytes(source)
+        self.save()
+        before = self.snapshot()
+        preview = self.call(dry_run=True)
+        self.assertEqual(preview["validation"]["status"], "valid")
+        self.assertEqual(self.snapshot(), before)
+        result = self.call()
+        self.assertEqual((self.output / "POSCAR").read_bytes(), source)
+        self.assertEqual(self.source.read_bytes(), source)
+        self.assertEqual(result["structure"]["species"], list(species))
+        self.assertEqual(result["structure"]["selective_dynamics"], [[True, False, True]] * len(species))
+        self.assertEqual(result["atom_mapping"], "identity; source POSCAR bytes preserved")
+        self.assertEqual({path.name for path in self.output.iterdir()}, {"INCAR", "KPOINTS", "POSCAR", "POTCAR"})
+        self.assertEqual({path.name for path in (self.scratch / "case").iterdir()}, {"preparation.json"})
+        self.assertEqual(check_inputs(self.output)["status"], "valid")
 
     def test_static_type_origins_and_explicit_overrides(self):
         self.data["overrides"] = {"incar": {"NELM": 120}, "kpoints": {"mesh": [4, 5, 6]}}

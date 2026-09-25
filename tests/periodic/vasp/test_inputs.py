@@ -23,6 +23,16 @@ def structure(species=("H", "He", "Li"), counts=None, selective=False):
             + "".join(f"{index / (sum(counts) + 1):.8f} 0 0{flags}\n" for index in range(sum(counts))))
 
 
+def annotated_structure(species=("H", "He", "Li"), counts=None, selective=False):
+    counts = counts or [1] * len(species)
+    lines = structure(species, counts, selective).splitlines()
+    start = 9 if selective else 8
+    atoms = [element for element, count in zip(species, counts) for _ in range(count)]
+    for index, element in enumerate(atoms):
+        lines[start + index] += " " + element
+    return "\n".join(lines) + "\n"
+
+
 def potential(species=("H", "He", "Li")):
     # Invented metadata, never extracted from a licensed potential dataset.
     return "".join(f"TITEL = FAKE {symbol} 01Jan2099\nVRHFIN = {symbol}: synthetic\nEnd of Dataset\n" for symbol in species).encode()
@@ -100,6 +110,58 @@ class InputParserTests(unittest.TestCase):
         self.assertEqual(parse_poscar(structure() + "0 0 0\n")["status"], "unsupported")
         legacy = structure().replace("H He Li\n", "")
         self.assertEqual(parse_poscar(legacy)["status"], "unsupported")
+
+    def test_element_annotations_and_zero_tail_preserve_structure_and_raw_text(self):
+        species, counts = ("H", "He", "H", "Li"), [2, 0, 1, 1]
+        for selective in (False, True):
+            expected = parse_poscar(structure(species, counts, selective))
+            for annotations, zero_tail in ((True, False), (False, True), (True, True)):
+                with self.subTest(selective=selective, annotations=annotations, zero_tail=zero_tail):
+                    text = (annotated_structure if annotations else structure)(species, counts, selective)
+                    if zero_tail:
+                        text += "\n" + "0 -0.0 +0D-12\n" * sum(counts)
+                    text = text.replace("\n", "\r\n")
+                    parsed = parse_poscar(text.encode())
+                    self.assertEqual(parsed["status"], "valid", parsed)
+                    self.assertEqual(parsed["raw_text"], text)
+                    for key in ("species", "counts", "atom_species", "cell", "scale",
+                                "coordinate_mode", "coordinates", "cartesian_coordinates", "selective_dynamics"):
+                        self.assertEqual(parsed[key], expected[key], key)
+                    if annotations:
+                        self.assertEqual(parsed["row_label_annotations"], "matching explicit elemental suffixes")
+                    if zero_tail:
+                        self.assertEqual(parsed["unused_tail"], "all-zero Cartesian velocities; non-MD only")
+                    files = bundle(species=species, counts=counts)
+                    files["POSCAR"] = text.encode()
+                    self.assertEqual(check_input_bytes(files)["status"], "valid")
+
+    def test_annotations_are_optional_but_must_match_the_declared_element_exactly(self):
+        text = annotated_structure().replace("0.25000000 0 0 He", "0.25000000 0 0")
+        self.assertEqual(parse_poscar(text)["status"], "valid")
+        for suffix in ("He", "H1", "h", "H extra", "# H"):
+            with self.subTest(suffix=suffix):
+                bad = annotated_structure().replace("0.00000000 0 0 H", "0.00000000 0 0 " + suffix)
+                self.assertEqual(parse_poscar(bad)["status"], "unsupported")
+                self.assert_code(parse_poscar(bad), "poscar.coordinate_suffix")
+
+    def test_zero_tail_requires_exact_finite_zero_values_and_complete_rows(self):
+        tail = "0 0 0\n" * 3
+        invalid = ["\n" + tail.replace("0", value, 1)
+                   for value in ("1e-999", "-1D-999", "1e-6", "nan", "inf", "0_0", "zero")]
+        invalid += [tail, "\nCartesian\n" + tail, "\n" + "0 0 0\n" * 2,
+                    "\n" + "0 0 0\n" * 4, "\n0 0\n0 0 0\n0 0 0\n"]
+        for suffix in invalid:
+            with self.subTest(suffix=suffix):
+                parsed = parse_poscar(structure() + suffix)
+                self.assertEqual(parsed["status"], "unsupported")
+                self.assert_code(parsed, "poscar.extra_sections")
+
+    def test_zero_tail_does_not_expand_calculation_or_restart_scope(self):
+        for settings in ("NSW=10; IBRION=0; ISTART=0; ICHARG=2",
+                         "NSW=0; IBRION=-1; ISTART=1; ICHARG=2"):
+            files = bundle(settings)
+            files["POSCAR"] += b"\n0 0 0\n0 0 0\n0 0 0\n"
+            self.assertEqual(check_input_bytes(files)["status"], "unsupported")
 
     def test_incar_comments_case_booleans_arrays_duplicates(self):
         parsed = parse_incar('encut=4D2; LREAL=.FALSE. # comment\n'

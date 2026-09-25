@@ -6,6 +6,7 @@ runtime acceptance. POSCAR block boundaries and source text are retained.
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 import math
 import json
 from pathlib import Path
@@ -45,6 +46,17 @@ def _float(value: str) -> float:
     return value
 
 
+def _is_decimal_zero(value: str) -> bool:
+    # Float conversion would turn sufficiently small nonzero velocities into zero.
+    if not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[EeDd][+-]?[0-9]+)?", value):
+        return False
+    try:
+        parsed = Decimal(value.replace("D", "E").replace("d", "e"))
+        return parsed.is_finite() and parsed.is_zero()
+    except InvalidOperation:
+        return False
+
+
 def _determinant(cell: list[list[float]]) -> float:
     a, b, c = cell
     return (a[0] * (b[1] * c[2] - b[2] * c[1])
@@ -57,7 +69,8 @@ def parse_poscar(data: str | bytes) -> dict:
 
     One positive scale, a negative target volume, and three positive Cartesian
     scale factors are supported. Coordinates are not wrapped or reordered.
-    Velocity/predictor-corrector sections are reported as unsupported.
+    Exact elemental row annotations and blank-separated all-zero Cartesian
+    velocity tails are retained. Other extra sections remain unsupported.
     """
     result = {"findings": []}
     try:
@@ -107,6 +120,7 @@ def parse_poscar(data: str | bytes) -> dict:
         atom_count = sum(counts)
         if atom_count <= 0:
             raise ValueError("At least one atom must be declared")
+        atom_species = [symbol for symbol, count in zip(species, counts) for _ in range(count)]
         index = 7
         selective = lines[index].strip().lower().startswith("s")
         if selective:
@@ -135,10 +149,18 @@ def parse_poscar(data: str | bytes) -> dict:
                     raise ValueError(f"Coordinate row {offset + 1} has invalid selective-dynamics flags")
                 flags.append([value.upper() == "T" for value in tokens[3:6]])
             if len(tokens) > required:
-                result["findings"].append(finding("poscar.coordinate_suffix", "unsupported", "POSCAR", "Extra coordinate-row fields are not interpreted", line=index + offset + 1))
-        remaining = [line for line in lines[index + atom_count:] if line.strip()]
+                if tokens[required:] == [atom_species[offset]]:
+                    result["row_label_annotations"] = "matching explicit elemental suffixes"
+                else:
+                    result["findings"].append(finding("poscar.coordinate_suffix", "unsupported", "POSCAR", "Extra coordinate-row fields are not interpreted", line=index + offset + 1))
+        tail = lines[index + atom_count:]
+        remaining = [line.split() for line in tail if line.strip()]
         if remaining:
-            result["findings"].append(finding("poscar.extra_sections", "unsupported", "POSCAR", "Additional coordinates, velocities or predictor-corrector sections are not interpreted", first_line=index + atom_count + 1))
+            if (not tail[0].strip() and len(remaining) == atom_count
+                    and all(len(row) == 3 and all(_is_decimal_zero(value) for value in row) for row in remaining)):
+                result["unused_tail"] = "all-zero Cartesian velocities; non-MD only"
+            else:
+                result["findings"].append(finding("poscar.extra_sections", "unsupported", "POSCAR", "Additional coordinates, velocities or predictor-corrector sections are not interpreted", first_line=index + atom_count + 1))
         cartesian = [
             [sum(row[component] * cell[component][axis] for component in range(3))
              if coordinate_mode == "Direct" else row[axis] * factors[axis]
@@ -148,7 +170,7 @@ def parse_poscar(data: str | bytes) -> dict:
         if any(not math.isfinite(value) for row in cartesian for value in row):
             raise ValueError("Scaled Cartesian coordinates contain nonfinite values")
         result.update(species=species, counts=counts, atom_count=atom_count,
-                      atom_species=[symbol for symbol, count in zip(species, counts) for _ in range(count)],
+                      atom_species=atom_species,
                       cell=cell, scale=scales, coordinate_mode=coordinate_mode,
                       coordinates=coordinates, cartesian_coordinates=cartesian,
                       selective_dynamics=flags if selective else None)
