@@ -495,11 +495,12 @@ def inspect_result(directory, *, segment=None, stdout=None, max_bytes=None):
             tables, table_source = parse_oszicar(table_path, "stdout" if stdout else "OSZICAR", max_bytes=max_bytes)
             result["sources"].append(table_source)
             associated = len(tables) == len(segments) and _associate(current, tables[selected])
-            result["electronic_table_correspondence"] = "matched" if associated else "conflict"
+            empty_table = table_source["bytes_read"] == 0
+            result["electronic_table_correspondence"] = "unavailable" if empty_table else "matched" if associated else "conflict"
             if any(row["algorithm"] not in {"DAV", "RMM"} for table in tables for item in table for row in item["rows"]):
                 result["mode"]["supported"] = False
                 result["mode"]["reasons"].append("unsupported_table_algorithm")
-            if not associated:
+            if not associated and not empty_table:
                 result["conflicts"].append({"code": "electronic_table_correspondence", "reason": "native labels, evaluation boundaries, full per-iteration energies or segment counts differ"})
         else:
             result["electronic_table_correspondence"] = "unavailable"
@@ -559,7 +560,7 @@ def inspect_result(directory, *, segment=None, stdout=None, max_bytes=None):
             delta = max(float(np.max(np.abs(np.asarray(c["matrix"]) - np.asarray(initial["cell"])))) for c in current["cell_history"])
             comparisons["fixed_cell"] = {"status": "match" if delta <= CELL_TOLERANCE else "mismatch", "max_cell_difference_angstrom": delta}
         flags = poscar["constraints"] if poscar else None
-        constraint_match = poscar is not None and contcar is not None and flags == contcar["constraints"]
+        constraint_match = flags == contcar["constraints"] if poscar is not None and contcar is not None else None
         result["constraints"] = {"flags": flags, "source_role": "POSCAR", "input_binding": "unestablished",
                                  "contcar_flags_match": constraint_match, "partial": bool(flags and any(any(f) and not all(f) for f in flags))}
         if geometry:
