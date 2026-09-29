@@ -62,6 +62,9 @@ def group_members(pgid, *, pids=None, process_factory=psutil.Process, session=Fa
     members = []
     membership = os.getsid if session else os.getpgid
     for pid in psutil.pids() if pids is None else pids:
+        # POSIX PID 0 means the caller to getsid/getpgid, not the kernel row.
+        if pid <= 0:
+            continue
         try:
             if membership(pid) == pgid and process_factory(pid).status() != psutil.STATUS_ZOMBIE:
                 members.append(pid)
@@ -77,8 +80,13 @@ def group_members(pgid, *, pids=None, process_factory=psutil.Process, session=Fa
     return members
 
 
-def signal_session(owner, signum):
-    """Signal owned subgroups before the pinned leader; never adopt another session."""
+def signal_session(owner, signum, *, include_leader=True):
+    """Signal birth-verified groups in an explicitly owned session.
+
+    A trusted sole foreground payload may exclude the protected leader group
+    when draining its child subgroups. The caller must establish that exclusive
+    topology before launching children; this option grants no new ownership.
+    """
     sid = owner['pid']
 
     def verify_owner():
@@ -96,7 +104,7 @@ def signal_session(owner, signum):
             groups.setdefault(pgid, []).append(member)
         except (ProcessLookupError, psutil.NoSuchProcess):
             continue
-    for pgid in sorted(groups.keys() - {sid}) + [sid]:
+    for pgid in sorted(groups.keys() - {sid}) + ([sid] if include_leader else []):
         verify_owner()
         for member in groups[pgid]:
             if not owner_alive(member):

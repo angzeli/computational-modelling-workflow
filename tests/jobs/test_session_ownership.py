@@ -8,6 +8,15 @@ from cmw.jobs.store import JobsError
 
 
 class SessionOwnershipTests(unittest.TestCase):
+    def test_zero_pid_is_not_current_process_membership(self):
+        process = Mock()
+        process.status.return_value = 'running'
+        for session in (False, True):
+            with self.subTest(session=session), patch('os.getsid', return_value=10) as sid, \
+                 patch('os.getpgid', return_value=10) as pgid:
+                self.assertEqual(group_members(10, pids=[0, 10], process_factory=lambda pid: process, session=session), [10])
+                (sid if session else pgid).assert_called_once_with(10)
+
     def test_leaderless_subgroup_uses_surviving_member(self):
         def sid(pid):
             if pid == 11:
@@ -106,4 +115,28 @@ class SessionOwnershipTests(unittest.TestCase):
              patch('os.killpg') as kill:
             with self.assertRaisesRegex(JobsError, 'ownership lost'):
                 signal_session({'pid': 10}, signal.SIGKILL)
+            kill.assert_not_called()
+
+
+class ProtectedLeaderTests(unittest.TestCase):
+    def test_subgroup_cleanup_never_targets_protected_leader_group(self):
+        with patch('cmw.jobs.ownership.owner_alive', return_value=True), \
+             patch('cmw.jobs.ownership.identity', side_effect=lambda pid: {'pid': pid}), \
+             patch('cmw.jobs.ownership.group_members', return_value=[10, 12, 13]), \
+             patch('os.getsid', return_value=10), \
+             patch('os.getpgid', side_effect=lambda pid: 10 if pid in (10, 13) else 11), \
+             patch('os.killpg') as kill:
+            signal_session({'pid': 10}, signal.SIGTERM, include_leader=False)
+            self.assertEqual([call.args for call in kill.call_args_list], [(11, signal.SIGTERM)])
+
+    def test_subgroup_cleanup_refuses_replaced_member_without_signal(self):
+        with patch('cmw.jobs.ownership.owner_alive', side_effect=lambda owner: owner['pid'] == 10), \
+             patch('cmw.jobs.ownership.identity', side_effect=lambda pid: {'pid': pid, 'birth': 1}), \
+             patch('cmw.jobs.ownership.group_members', return_value=[12]), \
+             patch('cmw.jobs.ownership.group_exists', return_value=True), \
+             patch('os.getsid', return_value=10), \
+             patch('os.getpgid', side_effect=lambda pid: 10 if pid == 10 else 11), \
+             patch('os.killpg') as kill:
+            with self.assertRaises(JobsError):
+                signal_session({'pid': 10}, signal.SIGKILL, include_leader=False)
             kill.assert_not_called()
