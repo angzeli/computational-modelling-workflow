@@ -304,6 +304,10 @@ own trusted same-session subgroups. It does not adopt new-session escapes or
 external observations. The runner must preserve the agreed foreground/session
 contract and cancellation/drainage ownership. CMW's benign group/session tests
 exercise those CMW contracts, not actual OpenMPI behavior or standalone port cleanup.
+A sole foreground port may use `signal_session(..., include_leader=False)` to
+drain child subgroups while protecting the Jobs leader group. It must establish
+exclusive session topology before launch; the option grants no additional
+ownership and retains birth/session checks.
 
 Portable `test_handoff_contract` regressions prepare invented static/fixed-cell
 inputs, execute a benign protocol fixture through isolated Jobs, retain its native
@@ -346,7 +350,9 @@ input argument, and the inspected directory equals the output argument.
 
 Only the original `<output>/RUN_METADATA.txt` is accepted, with one ordered
 STAGING/RUNNING/FINISHED lifecycle, successful child/launcher status, no stop or
-timeout, and timestamps within the selected Jobs attempt. The record is bounded
+timeout, and timestamps within the selected Jobs attempt. `advance_stop: disabled`
+is accepted only with an explicit zero `--stop-before` budget; a nonzero budget
+requires `not reached`. The record is bounded
 to 64 KiB and each input to 64 MiB. All four staged input hashes are required;
 runtime INCAR must match the effective INCAR hash, and other runtime inputs must
 match staged hashes and sizes. POSCAR/INCAR must also match the native inspection

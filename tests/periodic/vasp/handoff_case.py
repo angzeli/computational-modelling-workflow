@@ -114,7 +114,7 @@ def bind_completed_case(case, snapshot):
     snapshot_path = case["root"] / "jobs-snapshot.json"
     write_json(snapshot_path, snapshot)
     receipt = Path(snapshot["state_directory"]) / "attempts" / job["attempt_id"] / "payload-exit.json"
-    record = case["scratch"] / "preparation" / "preparation.json"
+    record = case.get("preparation_record", case["scratch"] / "preparation" / "preparation.json")
     metadata = case["run"] / "RUN_METADATA.txt"
     wait_for_fixture_sources([*case["run"].iterdir(), case["policy_path"], snapshot_path, receipt, record])
     evidence = inspect_result(case["run"])

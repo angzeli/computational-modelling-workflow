@@ -168,8 +168,12 @@ def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
                  "Metadata source/output must match the exact Jobs argv paths")
         _require(scalar.get("managed_foreground") == "True" and scalar.get("restart_requested") == "none"
                  and scalar.get("requested_version") == "6.6.1", "Unsupported runner metadata mode")
+        stop_budget = float(job["argv"][job["argv"].index("--stop-before") + 1])
+        advance_stop = scalar.get("advance_stop")
+        _require(advance_stop == "not reached" or (advance_stop == "disabled" and stop_budget == 0),
+                 "Runner advance stop must be unreached, or disabled by explicit zero budget")
         for key, expected in (("status", "0"), ("launcher_status", "0"), ("reason", "completed"),
-                              ("advance_stop", "not reached")):
+                              ("advance_stop", advance_stop)):
             _require(scalar.get(key) == expected and running < positions[key][0] < finished,
                      "Runner must complete successfully without a stop or timeout")
         times = {key: _timestamp(scalar.get(key)) for key in ("staging_start_utc", "start_utc", "end_utc")}

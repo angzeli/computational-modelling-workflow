@@ -155,6 +155,18 @@ class RunnerBindingTests(unittest.TestCase):
         (self.run / "KPOINTS").unlink()
         self.assertNotEqual(self.inspect()["status"], "eligible")
 
+    def test_actual_disabled_advance_stop_requires_zero_argument_budget(self):
+        self.metadata.write_text(self.original.replace("advance_stop: not reached", "advance_stop: disabled"))
+        self.spec["execution"]["runner_record"]["sha256"] = sha(self.metadata)
+        self.assertEqual(self.inspect()["status"], "eligible")
+        path = self.root / self.spec["execution"]["snapshot"]
+        snapshot = json.loads(path.read_text())
+        argv = snapshot["jobs"][0]["argv"]
+        argv[argv.index("--stop-before") + 1] = "1"
+        path.write_text(json.dumps(snapshot))
+        self.spec["execution"]["source_identities"]["jobs_snapshot"] = sha(path)
+        self.assertNotEqual(self.inspect()["status"], "eligible")
+
     def test_missing_runner_metadata_cannot_use_native_receipt_alone(self):
         self.metadata.unlink()
         self.assertNotEqual(self.inspect()["status"], "eligible")
