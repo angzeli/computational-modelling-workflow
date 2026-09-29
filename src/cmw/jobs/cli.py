@@ -20,6 +20,11 @@ def safe_text(value):
     return "".join(c for c in text if c in "\n\t" or unicodedata.category(c) not in {"Cc", "Cf", "Cs"})
 
 
+def name_text(value):
+    """Literal single-line presentation; the persisted name remains unchanged."""
+    return " ".join(safe_text(value).replace("\t", " ").splitlines())
+
+
 def elapsed(value):
     if value is None:
         return "—"
@@ -221,12 +226,12 @@ def status_text(state):
     online = "Stale" if control["stale"] else "Online" if control["online"] else "Offline"
     lines = ["CMW / JOBS — local", f"Controller: {online}   Dispatch: {'ON' if control['dispatch'] else 'OFF'}   Mode: {state.get('mode', 'Sequential')}",
              machine_text(state.get("machine_usage")),
-             "ORDER  JOB ID      NAME                  ENGINE      STATUS       CPUS  CPU NOW  RAM NOW          ELAPSED     REASON"]
+             "ORDER  JOB ID      NAME  ENGINE      STATUS       CPUS  CPU NOW  RAM NOW          ELAPSED     REASON"]
     if sharing_text(state):
         lines.insert(3, sharing_text(state))
     for job in state["jobs"]:
         cpu_now, ram_now = usage_cells(job.get("usage"))
-        lines.append(f"{str(job['order'] or '—'):>5}  {job['display_id']:<10}  {safe_text(job['name'])[:20]:20}  {safe_text(job['engine'])[:10]:10}  "
+        lines.append(f"{str(job['order'] or '—'):>5}  {job['display_id']:<10}  {name_text(job['name'])}  {safe_text(job['engine'])[:10]:10}  "
                      f"{job['status']:11}  {str(job['resources']['cpus'] or '—'):>4}  {cpu_now:>7}  {ram_now:>15}  {elapsed(job['elapsed']):>10}  {safe_text(job['reason'])}  ROLE {job.get('scheduling', {}).get('role', 'primary')}")
     if not state["jobs"]:
         lines.append("No jobs. Add a prepared command with cmw jobs add, then explicitly start.")

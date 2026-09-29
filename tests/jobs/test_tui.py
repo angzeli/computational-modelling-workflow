@@ -70,7 +70,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 table=app.query_one(DataTable)
                 self.assertEqual(table.row_count,24)
-                self.assertEqual(len(table.columns),10)
+                self.assertEqual(list(table.columns), ['order', 'id', 'name', 'engine', 'status', 'cpus', 'cpu_now', 'ram_now', 'elapsed'])
                 await pilot.press('down','down','down','down')
                 selected=app.selected_id
                 self.assertEqual(selected,'J5.1')
@@ -91,7 +91,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.resize_terminal(64,28)
                 await pilot.pause()
                 self.assertEqual(app.selected_id,selected)
-                self.assertEqual(len(table.columns),5)
+                self.assertEqual(list(table.columns), ['id', 'name', 'status', 'elapsed'])
                 await pilot.press('pagedown')
                 self.assertGreater(table.cursor_row,4)
                 await pilot.press('home')

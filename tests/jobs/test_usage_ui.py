@@ -130,7 +130,7 @@ class UsageTuiTests(unittest.IsolatedAsyncioTestCase):
                     app.refresh_state()
                     self.assertIsNone(app.current_job(row['display_id'])['usage'])
                     self.assertNotIn(row['attempt_id'], app.job_usage)
-                    self.assertEqual(str(managed_table.get_cell(row['display_id'], 'cpu_now')), '—')
+                    self.assertNotIn('cpu_now', managed_table.columns)
                     self.assertEqual(app.current_job(row['display_id'])['resources']['cpus'], 8)
                     before = store.snapshot()['events']
                     for _ in range(5):

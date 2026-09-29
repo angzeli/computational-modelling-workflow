@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import time
+import unicodedata
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
+from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -14,12 +16,48 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 
-from .cli import elapsed, safe_text, tail, guard_text, external_detail, usage_cells, usage_detail, machine_text, sharing_text, job_sharing_detail, observation_sharing
+from .cli import elapsed, safe_text, name_text, tail, guard_text, external_detail, usage_cells, usage_detail, machine_text, sharing_text, job_sharing_detail, observation_sharing
 from .store import ACTIVE, PENDING, JobsError, Store
 
 
 def literal(value):
     return Text(safe_text(value))
+
+
+def table_name(value, width):
+    """Keep both ends of a literal name within the renderer's display-cell budget."""
+    text = name_text(value)
+    if cell_len(text) <= width:
+        return Text(text, no_wrap=True)
+    suffix_budget = (width - 1) // 2
+    suffix = ""
+    for char in reversed(text):
+        if cell_len(char + suffix) > suffix_budget:
+            break
+        suffix = char + suffix
+    # A cropped suffix must not begin with an orphan combining/variation mark.
+    suffix = suffix.lstrip(" ")
+    while suffix and unicodedata.category(suffix[0]).startswith("M"):
+        suffix = suffix[1:]
+    prefix = set_cell_size(text, width - 1 - cell_len(suffix)).rstrip()
+    return Text(prefix + "…" + suffix, no_wrap=True)
+
+
+def managed_columns(viewport_width, *, bounded=False):
+    """Keep identification stable across lifecycle changes; scroll below 52 columns."""
+    columns = [('id', 'ID P/A' if bounded and viewport_width < 128 else 'JOB ID', 8),
+               ('name', 'NAME', 12), ('status', 'STATUS', 10), ('elapsed', 'ELAPSED', 10)]
+    if viewport_width >= 108:
+        columns[-1:-1] = [('cpu_now', 'CPU NOW', 7), ('ram_now', 'RAM NOW', 15)]
+    if viewport_width >= 128:
+        columns.insert(0, ('order', 'ORDER', 5))
+        columns.insert(3, ('role', 'ROLE', 9) if bounded else ('engine', 'ENGINE', 7))
+        columns.insert(-3, ('cpus', 'CPUS', 4))
+    if viewport_width >= 168:
+        columns.append(('reason', 'REASON', 24))
+    # Each cell has one space either side; reserve the vertical scrollbar too.
+    remaining = viewport_width - 2 - sum(width + 2 for key, _, width in columns if key != 'name') - 2
+    return [(key, label, max(12, remaining) if key == 'name' else width) for key, label, width in columns]
 
 
 def timestamp(value):
@@ -35,7 +73,7 @@ def detail(job, *, narrow=False):
                  f"MPI: {resource['mpi_ranks'] or '—'} ranks × {resource['threads_per_rank'] or '—'} threads/rank\n" if narrow else
                  f"CPUs requested: {resource['cpus'] or '—'}    MPI ranks: {resource['mpi_ranks'] or '—'}    "
                  f"Threads/rank: {resource['threads_per_rank'] or '—'}    RAM requested: {resource['memory_gib'] or '—'} GiB\n")
-    return (f"SELECTED: {job['display_id']} / {job['name']}\n"
+    return (f"SELECTED: {job['display_id']} / {name_text(job['name'])}\n"
             f"Status: {job['status']}    Order: {job['order'] or '—'}    Engine: {job['engine']}\n"
             f"CPU NOW: {cpu_now}   RAM NOW: {ram_now}\n"
             f"{resources}"
@@ -435,14 +473,10 @@ class JobsApp(App):
         self.refresh_external(wide)
         self.query_one(Footer).display = wide
         self.query_one("#shortcuts", Static).display = not wide
-        columns = ([('order', 'ORDER', 5), ('id', 'JOB ID', 8), ('name', 'NAME', 16), ('engine', 'ENGINE', 7),
-                    ('status', 'STATUS', 10), ('cpus', 'CPUS', 4), ('cpu_now', 'CPU NOW', 7), ('ram_now', 'RAM NOW', 15), ('elapsed', 'ELAPSED', 10), ('reason', 'REASON', 28)] if wide else
-                   [('id', 'JOB ID', 8), ('status', 'STATUS', 9), ('cpu_now', 'CPU NOW', 7), ('ram_now', 'RAM NOW', 15), ('elapsed', 'ELAPSED', 10)])
-        if bounded:
-            columns = [(('role', 'ROLE', 9) if key == 'engine' else (key, 'ID P/A' if key == 'id' and not wide else label, width))
-                       for key, label, width in columns]
+        viewport_width = max(1, self.size.width - 2)
+        columns = managed_columns(viewport_width, bounded=bounded)
         # Rebuild only on layout/mode changes; refreshes update cells in place.
-        layout_mode = (wide, bounded)
+        layout_mode = tuple(columns)
         if layout_mode != self.columns_mode:
             table.clear(columns=True)
             for key, label, width in columns:
@@ -453,14 +487,14 @@ class JobsApp(App):
             key = job['display_id']
             cpu_now, ram_now = usage_cells(job.get('usage'))
             role = job.get('scheduling', {}).get('role', 'primary')
-            values = {'order': str(job['order'] or '—').rjust(5), 'id': key + (' A' if role == 'auxiliary' else ' P') if bounded and not wide else key, 'name': job['name'], 'engine': job['engine'],
+            values = {'order': str(job['order'] or '—').rjust(5), 'id': key + (' A' if role == 'auxiliary' else ' P') if bounded and viewport_width < 128 else key, 'name': job['name'], 'engine': job['engine'],
                       'role': role.title(),
                       'status': job['status'], 'cpus': str(job['resources']['cpus'] or '—').rjust(4),
                       'cpu_now': cpu_now, 'ram_now': ram_now,
                       'elapsed': elapsed(job['elapsed']).rjust(10), 'reason': job['reason'] or '—'}
             cells = []
-            for column, _, _ in columns:
-                cell = literal(values[column])
+            for column, _, width in columns:
+                cell = table_name(values[column], width) if column == 'name' else literal(values[column])
                 if column == 'status':
                     cell.stylize({'Run':'#86c6b0', 'Queue':'#b9c8dc', 'Hold':'#d9bc7e', 'Fail':'#ea9595',
                                   'Unknown':'bold #f3b875', 'Cancelling':'#e9ba94', 'Done':'#8baaa0'}.get(job['status'], '#a1afbc'))
@@ -552,7 +586,7 @@ class JobsApp(App):
         def submit(value):
             if value is not None:
                 self.apply(lambda: self.store.change(job['display_id'], 'move', position=int(value), expected=job['status']))
-        self.push_screen(Prompt(f"Move {job['display_id']} / {job['name']} to pending order:", order=True), submit)
+        self.push_screen(Prompt(f"Move {job['display_id']} / {name_text(job['name'])} to pending order:", order=True), submit)
 
     def action_cancel(self):
         if self.external_read_only():
@@ -563,4 +597,4 @@ class JobsApp(App):
         def submit(value):
             if value == 'CANCEL':
                 self.apply(lambda: self.store.change(job['display_id'], 'cancel', confirm=True, expected=job['status']))
-        self.push_screen(Prompt(f"Cancel {job['display_id']} / {job['name']}?\nRunning cancellation terminates its managed process group. Dispatch pauses."), submit)
+        self.push_screen(Prompt(f"Cancel {job['display_id']} / {name_text(job['name'])}?\nRunning cancellation terminates its managed process group. Dispatch pauses."), submit)

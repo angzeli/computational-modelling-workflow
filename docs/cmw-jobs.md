@@ -95,9 +95,20 @@ screen row order. The console keeps rows stable while ORDER changes.
 
 Console keys: Enter details, L logs, P toggle dispatch, H hold/release, O order,
 X cancellation confirmation, B read-only scheduling details, Q or Ctrl-C detach. Arrow/Page keys scroll. Narrow
-layouts prioritize ID, status/engine, current CPU/RSS and elapsed/process age;
-order, requested CPUs, names, engine and reason remain available in details. Very small
-terminals can scroll the table horizontally. Details and logs have scrollable
+layouts keep JOB ID, NAME, STATUS and ELAPSED visible at 77×24 and 80×24.
+NAME immediately follows JOB ID at every width. Names use literal single-line
+text and a display-cell-aware middle ellipsis, retaining both the beginning and
+distinguishing suffix; the saved name is never shortened. Enter/details and CLI
+`show` expose the complete name. Duplicate names do not merge jobs or change
+selection. Human `status` keeps the full name on each job line.
+
+At 110 columns, current CPU/RSS return to the managed table; at 130, order,
+engine (or Bounded Sharing role) and requested CPUs also fit. Wider layouts add
+reason. Compact Bounded Sharing marks the ID with P/A; full role and omitted
+resources remain available in selected details. Layout depends on width/mode,
+not whether jobs are running or terminal. Below approximately 52 columns, the
+four identification columns remain accessible by horizontal scrolling rather
+than dropping NAME. Details and logs have scrollable
 panels. Live log tails are bounded to 16 KiB per stream and unchanged logs are
 not reread. Control sequences are stripped and UI markup is rendered literally.
 
