@@ -68,7 +68,8 @@ def _timestamp(value):
     return result
 
 
-def _command(argv):
+def validate_runner_argv(argv):
+    """Validate the shared managed-port invocation contract without execution."""
     _require(isinstance(argv, list) and argv and all(isinstance(a, str) and "\0" not in a for a in argv),
              "Expected an explicit runner argv list")
     executable = _absolute(argv[0])
@@ -122,7 +123,7 @@ def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
 
     try:
         validate_declaration(declaration)
-        source, output = _command(job.get("argv"))
+        source, output = validate_runner_argv(job.get("argv"))
         _require(_absolute(job.get("cwd")) == source, "Jobs wrapper cwd must equal the runner's explicit input")
         _require(_absolute(str(run_directory)) == output, "Native run must occupy the exact recorded runner output")
         path = _absolute(declaration["path"])

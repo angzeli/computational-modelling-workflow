@@ -50,6 +50,15 @@ def _prepare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_runner(args: argparse.Namespace) -> int:
+    from .runner_compatibility import check_runner, format_check
+
+    argv = args.argv[1:] if args.argv[:1] == ['--'] else args.argv
+    result = check_runner(args.runner, argv, project_root=args.project_root)
+    print(json.dumps(result, indent=2, sort_keys=True) if args.json else format_check(result))
+    return result['exit_code']
+
+
 def _identity_options(args: argparse.Namespace) -> dict[str, object]:
     requirements = None
     if args.requirements is not None:
@@ -107,6 +116,14 @@ def _check(args: argparse.Namespace) -> int:
 def register(subcommands: argparse._SubParsersAction) -> None:
     vasp = subcommands.add_parser("vasp", help="prepare VASP inputs and inspect existing result evidence")
     commands = vasp.add_subparsers(dest="vasp_command", required=True)
+    runner = commands.add_parser('check-runner', help='read-only argument compatibility for the explicit managed run-vasp.sh route',
+        description='Inspect known wrapper and literal parser declarations without importing or executing runner code. '
+                    'Exit 0 means declared arguments match only; lifecycle and result binding remain NOT ESTABLISHED.')
+    runner.add_argument('--runner', type=Path, required=True, help='selected scripts/run-vasp.sh source entry point')
+    runner.add_argument('--project-root', type=Path, help='optional project source locator for read-only Git identity')
+    runner.add_argument('--json', action='store_true')
+    runner.add_argument('argv', nargs=argparse.REMAINDER, help='after --, the complete explicit intended port arguments; never executed')
+    runner.set_defaults(handler=_check_runner)
     checking = commands.add_parser("check-inputs", help="read-only checks of a four-file input bundle")
     checking.add_argument("directory", type=Path)
     checking.add_argument("--preparation-record", "--record", type=Path, help="optional external Scratch preparation.json")

@@ -253,6 +253,68 @@ directory; the original specification is retained separately from resolved paths
 
 ### Optional external-runner association
 
+#### Check a managed runner interface
+
+Before configuring this specific external-port handoff, inspect the selected
+source checkout and the complete intended arguments:
+
+```sh
+cmw vasp check-runner --runner /path/to/port/scripts/run-vasp.sh \
+  --project-root /path/to/project --json -- \
+  --input /path/to/prepared-inputs --output /path/to/new-output \
+  --binary std --ranks 2 --ncore 1 --kpar 1 --mpi-mode native \
+  --restart none --timeout 600 --stop-before 0 --managed-foreground
+```
+
+Replace the paths with absolute canonical paths. The input directory must exist;
+the output path must not exist. This check reads bounded source snapshots and
+Git identity metadata. It does not import, source or execute the runner, even for
+help; it does not inspect input contents, stage files or access Jobs state.
+Only the recognized shell delegation and straight-line literal argument parser
+are assessed. Other wrapper/parser forms are UNKNOWN, without a fallback probe.
+
+The JSON and readable summary separate argument compatibility, managed lifecycle
+qualification and result-binding qualification. Exit 0 means the declared
+argument interface matches; both qualifications remain `NOT_ESTABLISHED`.
+Exit 2 means incompatible or unknown. An absent `--managed-foreground` is reported
+explicitly; it is never removed or mapped to a standalone flag. A flag's help
+text identifies only a declared contract, not implementation of that contract.
+
+The source combination records available commits, relevant source dirty state,
+bounded source hashes, CMW module/distribution origin and the optional project
+identity. Whole-worktree dirty state and untracked files outside the known runner
+source set are not assessed. Relevant bytes are compared without Git filters,
+hooks or worktree diff commands that could execute repository configuration.
+Dirty support is a working-tree observation, not a committed compatibility result.
+Installed wheels can have no Git commit; package versions, editable paths and
+locators alone do not establish equivalence to another source tree. Preserve the
+checker output alongside the exact revisions and test evidence for a qualification;
+there is no permanent commit allowlist or automatic qualification of descendants.
+
+Jobs resource declarations do not prove actual ranks or threads. The selected
+route checks explicit ranks/NCORE/KPAR arguments; it has no `--threads` argument.
+Review thread environment propagation separately. Effective INCAR overlays and
+staged input identities are verified later by result binding, not by this check.
+The checker is an explicit VASP operation, never a generic Jobs admission rule or
+controller-tick probe.
+
+For runtime qualification, retain evidence for the exact CMW/port combination.
+Jobs owns its default process group; explicit owned-session mode can additionally
+own trusted same-session subgroups. It does not adopt new-session escapes or
+external observations. The runner must preserve the agreed foreground/session
+contract and cancellation/drainage ownership. CMW's benign group/session tests
+exercise those CMW contracts, not actual OpenMPI behavior or standalone port cleanup.
+
+Portable `test_handoff_contract` regressions prepare invented static/fixed-cell
+inputs, execute a benign protocol fixture through isolated Jobs, retain its native
+completion receipt, and finalize/reverify through the common core. Execution
+failure and failed scientific policy remain refusals. These tests qualify CMW's
+consumer contract; they do not qualify an incompatible committed external port.
+ZIS scientific analysis remains project-owned, and a ZIS consumer of finalized CMW
+artifacts is not implemented by this integration.
+
+#### Bind the original runner output
+
 For the observed external `run-vasp.sh` integration, `execution` additionally
 accepts the optional `runner_record` member below (the hash is a placeholder):
 
