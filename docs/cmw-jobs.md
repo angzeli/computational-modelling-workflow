@@ -93,7 +93,7 @@ head blocks later jobs. Move it explicitly, release it, fix its launch blocker,
 or cancel that pending job. The persistent ORDER is independent of job ID and
 screen row order. The console keeps rows stable while ORDER changes.
 
-Console keys: Enter details, L logs, P toggle dispatch, H hold/release, O order,
+Console keys: Enter details, N edit managed note, L logs, P toggle dispatch, H hold/release, O order,
 X cancellation confirmation, B read-only scheduling details, Q or Ctrl-C detach. Arrow/Page keys scroll. Narrow
 layouts keep JOB ID, NAME, STATUS and ELAPSED visible at 77×24 and 80×24.
 NAME immediately follows JOB ID at every width. Names use literal single-line
@@ -111,6 +111,86 @@ four identification columns remain accessible by horizontal scrolling rather
 than dropping NAME. Details and logs have scrollable
 panels. Live log tails are bounded to 16 KiB per stream and unchanged logs are
 not reread. Control sequences are stripped and UI markup is rendered literally.
+
+## Managed job notes
+
+A managed job may carry one optional plain-text `note`, stored only in the existing
+Jobs state. It is mutable human annotation, not execution or scientific evidence.
+It never changes the name, display ID, immutable job/attempt identity, command,
+queue order, hold/dispatch state, resource declarations, ownership or result.
+Words such as “converged” or “continue from J47” do not assert validation or create
+a dependency. External observations cannot receive notes.
+
+These examples use a separate synthetic held-job state. `add` does not execute the
+command, and `--note` must precede the argv separator:
+
+```sh
+cmw jobs --state /absolute/isolated-demo-state add --name synthetic-review \
+  --cwd /absolute/existing-demo-directory --hold \
+  --note "Inspect the synthetic example after lunch" -- /bin/echo synthetic
+cmw jobs --state /absolute/isolated-demo-state annotate J1.1 \
+  --note "Reviewed locally; awaiting the next decision"
+cmw jobs --state /absolute/isolated-demo-state show J1.1 --json
+cmw jobs --state /absolute/isolated-demo-state annotate J1.1 \
+  --note "Replacement based on revision 1" --expected-revision 1 --json
+cmw jobs --state /absolute/isolated-demo-state annotate J1.1 --clear-note
+cmw jobs --state /absolute/isolated-demo-state watch
+```
+
+Use the ID returned by `add`; normal managed-ID aliases also work. `annotate`
+requires exactly one of `--note TEXT` or `--clear-note`. A replacement without
+`--expected-revision` intentionally replaces the latest note atomically. Clients
+that first read a note should pass its `note_revision` to reject stale edits.
+Success (including an unchanged value) exits 0. Invalid edits, missing jobs,
+external IDs, permissions and revision conflicts exit 2; `--json` returns the
+existing `JOBS_ERROR` response for store errors. Annotating a missing job does not
+create a state directory or queue.
+
+Notes support multiline Unicode plain text, punctuation, quotes, brackets and
+meaningful whitespace, up to **4096 Unicode code points after newline
+normalization**. CRLF and CR become LF. Tabs and LF are allowed; NUL and other
+Unicode control, format or surrogate characters (categories Cc/Cf/Cs) are
+rejected. Over-limit values are rejected without truncation. Names and notes are
+rendered literally through the established safe-text filter; no Markdown, Rich
+markup, shell expansion or instruction interpretation occurs.
+
+Jobs without note fields read as `note=""`, `note_revision=0` and
+`note_updated_at=null`, without read-only backfilling. New jobs have those same
+revision/update defaults even when an initial note is supplied. A changed note
+increments the revision and records its update time; saving an unchanged note
+does neither and emits no event. Ordinary events contain only “Note updated” or
+“Note cleared”, never the note contents or a revision history. Full note text and
+metadata remain visible to readers of the private Jobs state and JSON; existing
+state ownership/privacy checks apply without changing directory permissions.
+
+The main table keeps NAME and has no NOTE column. The selected panel provides a
+bounded preview, while Enter/details shows the full scrollable name and note.
+**N** opens the note editor for the selected managed job. Type ordinary multiline
+text; **Ctrl-S** or Save commits, **Esc** or Cancel discards, and **Ctrl-C** detaches
+without saving. Inside the editor, Q, P, H, X, O, L, B and N are text, and Enter
+inserts a newline. Outside it, Q/Ctrl-C retain their detach behavior. No edit
+signals a controller or payload, and refresh/resize never saves or resets a
+buffer. Tab indents within the text; Shift-Tab moves focus to the editor controls.
+
+An editor captures the immutable internal job ID, attempt ID and note revision.
+A status transition or display-prefix change cannot redirect it. Two editors
+cannot silently overwrite each other: stale save reports a conflict and retains
+the buffer; explicit Reload loads the latest note/revision for a new decision.
+Validation, permission and missing-target failures also retain unsaved text.
+API clients use `Store.annotate(internal_id, text, expected_attempt_id=attempt_id,
+expected_revision=revision)` for the same identity-bound edit contract. The store
+rereads the row inside a short transaction; no transaction stays open while typing.
+
+Current-schema jobs can be annotated in every lifecycle state, including Run,
+Done and Unknown, even with the controller offline. This does not resolve Unknown
+or grant recovery authority. Current runtime lifecycle writes preserve the latest
+annotation even when supplied a stale job dictionary. Inspected pre-feature
+runtime paths generally reread whole records inside their transactions and retain
+unknown fields; that is not a guarantee for arbitrary mixed runtime versions.
+Already-running controllers and supervisors do not hot-reload this protection.
+Load the new runtime after existing work drains; do not restart live work merely
+to enable notes. Existing legacy-active migration safeguards remain authoritative,
+and the read-only NAME display remains usable.
 
 ## Status, resources and failure policy
 

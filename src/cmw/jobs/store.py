@@ -11,6 +11,7 @@ import sqlite3
 import stat
 import sys
 import time
+import unicodedata
 from uuid import uuid4
 
 from cmw.core.execution_layout import resolve_recorded_layout
@@ -18,6 +19,8 @@ from cmw.core.execution_layout import resolve_recorded_layout
 PENDING = {"Queue", "Hold"}
 ACTIVE = {"Starting", "Run", "Cancelling", "Unknown"}
 TERMINAL = {"Done", "Fail", "Cancelled"}
+NOTE_LIMIT = 4096
+NOTE_FIELDS = ("note", "note_revision", "note_updated_at")
 
 
 class JobsError(ValueError):
@@ -66,7 +69,23 @@ def _job_defaults(job):
     if 'cwd' in job:
         job.setdefault('scheduling', scheduling_defaults(job['cwd']))
         job.setdefault('sharing_anchor', None)
+    job.setdefault('note', '')
+    job.setdefault('note_revision', 0)
+    job.setdefault('note_updated_at', None)
     return job
+
+
+def validate_note(value):
+    """Plain text, with LF newlines and no unsupported terminal controls."""
+    if not isinstance(value, str):
+        raise JobsError('Note must be a string')
+    value = value.replace('\r\n', '\n').replace('\r', '\n')
+    if len(value) > NOTE_LIMIT:
+        raise JobsError(f'Note must contain at most {NOTE_LIMIT} Unicode code points')
+    if any(character not in '\n\t' and unicodedata.category(character) in {'Cc', 'Cf', 'Cs'}
+           for character in value):
+        raise JobsError('Note contains unsupported control characters; only tabs and newlines are allowed')
+    return value
 
 
 def _nonnegative(value, name):
@@ -108,10 +127,11 @@ class Store:
         self.root = Path(root).expanduser().resolve() if root is not None else default_state()
         self.path = self.root / "queue.sqlite3"
 
-    def ensure_private_root(self):
+    def ensure_private_root(self, *, create=True):
         if os.name != 'posix':
             raise JobsError('Jobs state mutation requires POSIX ownership and permissions')
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if create:
+            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         info = self.root.stat()
         mode = stat.S_IMODE(info.st_mode)
         if info.st_uid != os.geteuid() or mode & 0o077:
@@ -120,11 +140,16 @@ class Store:
                             'owned by your user with mode 0700 and use --state; existing permissions were not changed.')
 
     @contextmanager
-    def transaction(self):
-        self.ensure_private_root()
-        with open(self.path, 'ab', opener=private_opener):
-            pass
-        con = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+    def transaction(self, *, create=True):
+        self.ensure_private_root(create=create)
+        if create:
+            with open(self.path, 'ab', opener=private_opener):
+                pass
+        try:
+            con = sqlite3.connect(self.path.as_uri() + '?mode=rw', uri=True,
+                                  timeout=10, isolation_level=None)
+        except sqlite3.Error as exc:
+            raise JobsError(f"Queue database unavailable: {exc}") from exc
         con.row_factory = sqlite3.Row
         try:
             con.execute("PRAGMA busy_timeout=10000")
@@ -197,6 +222,13 @@ class Store:
 
     @staticmethod
     def save(con, job):
+        # Lifecycle callers may hold a dictionary across transactions. Human
+        # annotations are edited separately and the current row is authoritative.
+        row = con.execute("SELECT data FROM jobs WHERE id=?", (job['id'],)).fetchone()
+        current = json.loads(row[0]) if row is not None else {}
+        if 'id' in current:
+            current = _job_defaults(current)
+            job.update({key: current[key] for key in NOTE_FIELDS})
         con.execute("UPDATE jobs SET data=? WHERE id=?", (json.dumps(job), job["id"]))
 
     @staticmethod
@@ -212,7 +244,8 @@ class Store:
     def add(self, *, argv, cwd, name, engine="Command", cpus=None, memory_gib=None,
             mpi_ranks=None, threads_per_rank=None, env=None, hold=False,
             on_failure="pause", layout=None, role="primary", allow_auxiliary=False,
-            independent=False, resource_contract=None, write_scope=None):
+            independent=False, resource_contract=None, write_scope=None, note=''):
+        note = validate_note(note)
         argv = list(argv)
         if not argv or any(not isinstance(a, str) or "\0" in a for a in argv) or not argv[0]:
             raise JobsError("An explicit nonempty argv without NUL bytes is required")
@@ -250,6 +283,7 @@ class Store:
             pending = [j for j in self.rows(con) if j.get("status") in PENDING]
             job = {"id": number, "display_id": f"J{number}.1", "attempt_id": uuid4().hex,
                    "name": str(name), "engine": str(engine), "argv": argv, "cwd": str(directory),
+                   "note": note, "note_revision": 0, "note_updated_at": None,
                    "env": environment, "resources": resources, "layout": reference,
                    "status": "Hold" if hold else "Queue", "order": len(pending) + 1,
                    "on_failure": on_failure, "enqueued_at": time.time(), "started_at": None,
@@ -259,6 +293,30 @@ class Store:
             job["logs"] = {stream: str(self.root / "attempts" / job["attempt_id"] / f"{stream}.log") for stream in ("stdout", "stderr")}
             self.save(con, job)
             self.event(con, number, f"Enqueued at order {job['order']}")
+        return job
+
+    def annotate(self, job_id, note, *, expected_revision=None, expected_attempt_id=None):
+        """Replace only annotation metadata, optionally checking an editor token."""
+        note = validate_note(note)
+        if str(job_id).startswith('E'):
+            raise JobsError('External observations are read-only and cannot have notes')
+        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+            raise JobsError('Expected note revision must be a nonnegative integer')
+        if not self.path.is_file():
+            raise JobsError(f'No such job: {job_id}')
+        with self.transaction(create=False) as con:
+            job = self.get(con, job_id)
+            if expected_attempt_id is not None and job['attempt_id'] != expected_attempt_id:
+                raise JobsError('Attempt identity differs; close the editor and select the job again')
+            if expected_revision is not None and job['note_revision'] != expected_revision:
+                raise JobsError('Note changed since editing began; reload the current note before saving')
+            if job['note'] == note:
+                return job
+            job.update(note=note, note_revision=job['note_revision'] + 1, note_updated_at=time.time())
+            # This transaction reread the current row; save() deliberately keeps
+            # its annotation fields unchanged for every other kind of writer.
+            con.execute('UPDATE jobs SET data=? WHERE id=?', (json.dumps(job), job['id']))
+            self.event(con, job['id'], 'Note updated' if note else 'Note cleared')
         return job
 
     def rename_id(self, job_id, display_id):
@@ -412,7 +470,10 @@ class Store:
             control, jobs, events = empty, [], []
         else:
             # Read-only snapshots never create a database or acquire dispatch ownership.
-            con = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=10)
+            try:
+                con = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=10)
+            except sqlite3.Error as exc:
+                raise JobsError(f"Queue database unavailable: {exc}") from exc
             try:
                 con.execute("BEGIN")
                 tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}

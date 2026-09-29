@@ -256,11 +256,16 @@ def register(subcommands):
     operations = parser.add_subparsers(dest="jobs_operation", required=True)
     for name in ("status", "start", "stop", "pause", "resume", "watch"):
         command = operations.add_parser(name)
+        if name == "watch":
+            command.description = ("Observe Jobs without starting execution. Enter: details; N: edit a managed job note. "
+                "Editor: Ctrl-S saves, Esc cancels, Ctrl-C detaches without saving; Q inserts text. "
+                "Outside the editor Q or Ctrl-C detaches and execution continues.")
         if name != "watch":
             command.add_argument("--json", action="store_true")
         command.set_defaults(handler=handle)
     add = operations.add_parser("add", help="enqueue trusted foreground argv; never starts execution")
     add.add_argument("--name", required=True)
+    add.add_argument("--note", default="", help="optional plain-text human annotation (4096 Unicode code points); before --")
     add.add_argument("--engine", default="Command")
     add.add_argument("--cwd", required=True, type=Path)
     add.add_argument("--cpus", type=int)
@@ -291,6 +296,17 @@ def register(subcommands):
             command.add_argument("--stream", choices=("stdout", "stderr"), default="stdout")
             command.add_argument("--bytes", type=int, default=16384)
         command.set_defaults(handler=handle)
+
+    annotate = operations.add_parser("annotate", help="replace or clear a managed job note; never controls execution",
+        description="Atomic plain-text annotation replacement. Without --expected-revision, replaces the latest note. "
+                    "Use the revision from show/status JSON to reject a concurrent edit. Maximum 4096 Unicode code points.")
+    annotate.add_argument("job_id")
+    edit = annotate.add_mutually_exclusive_group(required=True)
+    edit.add_argument("--note", help="replacement note; CRLF and CR normalize to LF")
+    edit.add_argument("--clear-note", action="store_true", help="explicitly clear the note")
+    annotate.add_argument("--expected-revision", type=int, help="require this nonnegative note revision; conflicts exit 2")
+    annotate.add_argument("--json", action="store_true")
+    annotate.set_defaults(handler=handle)
 
     rename = operations.add_parser("rename-id", help="change an unstarted job's display prefix; preserves attempt identity")
     rename.add_argument("job_id")
@@ -348,6 +364,8 @@ def handle(args):
             current = store.snapshot()["scheduler"]
             result = (store.configure_sharing(args.mode or current["mode"], **values)
                       if args.mode is not None or any(value is not None for value in values.values()) else current)
+        elif operation == "annotate":
+            result = store.annotate(args.job_id, "" if args.clear_note else args.note, expected_revision=args.expected_revision)
         elif operation == "rename-id":
             result = store.rename_id(args.job_id, args.display_id)
         elif operation == "sharing":
@@ -372,7 +390,7 @@ def handle(args):
                 key, value = entry.split("=", 1)
                 environment[key] = value
             argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
-            result = store.add(argv=argv, cwd=args.cwd, name=args.name, engine=args.engine,
+            result = store.add(argv=argv, cwd=args.cwd, name=args.name, engine=args.engine, note=args.note,
                 cpus=args.cpus, memory_gib=args.memory_gib, mpi_ranks=args.mpi_ranks,
                 threads_per_rank=args.threads_per_rank, env=environment, hold=args.hold,
                 on_failure=args.on_failure, layout=args.layout, role=args.role, allow_auxiliary=args.allow_auxiliary,

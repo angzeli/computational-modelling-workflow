@@ -12,9 +12,9 @@ from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Footer, Input, Label, Static
+from textual.widgets import Button, DataTable, Footer, Input, Label, Static, TextArea
 
 from .cli import elapsed, safe_text, name_text, tail, guard_text, external_detail, usage_cells, usage_detail, machine_text, sharing_text, job_sharing_detail, observation_sharing
 from .store import ACTIVE, PENDING, JobsError, Store
@@ -155,12 +155,86 @@ class Inspect(ModalScreen):
             self.log_stamps = stamps
             text = "\n\n".join(f"{stream.upper()} · {path}\n{tail(path)}" for stream, path in job["logs"].items())
         else:
-            text = (detail(job) + "\n\n" + job_sharing_detail(job) + "\n\n" + usage_detail(job.get("usage")) + f"\n\nAttempt: {job['attempt_id']}\n"
+            text = (detail(job) + f"\n\nNote (human annotation):\n{job.get('note') or '—'}\n\n"
+                    + job_sharing_detail(job) + "\n\n" + usage_detail(job.get("usage")) + f"\n\nAttempt: {job['attempt_id']}\n"
                     f"Enqueued: {timestamp(job['enqueued_at'])}\nStarted: {timestamp(job['started_at'])}\n"
                     f"Finished: {timestamp(job['finished_at'])}\nExit code: {job['exit_code']}   Signal: {job['signal']}\n"
                     f"Failure policy: {job['on_failure']}\nCHECK: Not evaluated\n\n"
                     + json.dumps({key: job[key] for key in ("argv", "env", "cwd", "logs", "worker", "group", "layout")}, indent=2, ensure_ascii=False))
         self.query_one("#body", Static).update(literal(text))
+
+
+class NoteEditor(ModalScreen):
+    """An explicit save targets the captured attempt/revision, never a display label."""
+    BINDINGS = [Binding("ctrl+s", "save", "Save", priority=True),
+                Binding("escape", "dismiss(None)", "Cancel", priority=True),
+                Binding("ctrl+c", "detach", "Detach without saving", priority=True)]
+    DEFAULT_CSS = """
+    NoteEditor { align: center middle; background: $background 70%; }
+    NoteEditor > Vertical { width: 94%; height: 85%; border: round $accent; padding: 1 2; background: $surface; }
+    NoteEditor #note-title { height: 1; }
+    NoteEditor TextArea { height: 1fr; margin: 1 0; }
+    NoteEditor #note-error { height: auto; max-height: 3; color: $warning; }
+    NoteEditor Horizontal { height: 3; }
+    NoteEditor Button { min-width: 10; margin-right: 1; }
+    NoteEditor #note-help { height: auto; }
+    """
+
+    def __init__(self, store, job):
+        super().__init__()
+        self.store = store
+        self.job_id, self.attempt_id = job['id'], job['attempt_id']
+        self.revision = job.get('note_revision', 0)
+        self.initial_note = safe_text(job.get('note', ''))
+        self.display_id = job['display_id']
+
+    def compose(self):
+        with Vertical():
+            yield Label(literal(f"NOTE · {self.display_id} · human annotation"), id="note-title")
+            yield TextArea(self.initial_note, id="note-text", tab_behavior="indent")
+            yield Static("", id="note-error", markup=False)
+            with Horizontal():
+                yield Button("Save", id="note-save", variant="primary")
+                yield Button("Reload", id="note-reload")
+                yield Button("Cancel", id="note-cancel")
+            yield Label("Ctrl-S Save · Esc Cancel · Ctrl-C Detach without saving\n4096 characters · Reload replaces your buffer", id="note-help")
+
+    def on_mount(self):
+        self.query_one(TextArea).focus()
+
+    def action_save(self):
+        try:
+            self.store.annotate(self.job_id, self.query_one(TextArea).text,
+                                expected_revision=self.revision, expected_attempt_id=self.attempt_id)
+        except (ValueError, OSError) as exc:
+            self.query_one('#note-error', Static).update(literal(f"Not saved: {exc}. Your text is kept; Reload reads the saved note."))
+            return
+        self.dismiss(True)
+
+    def action_reload(self):
+        try:
+            job = next((job for job in self.store.snapshot()['jobs'] if job['id'] == self.job_id), None)
+            if job is None or job['attempt_id'] != self.attempt_id:
+                raise JobsError("The original job/attempt is no longer available")
+        except (ValueError, OSError) as exc:
+            self.query_one('#note-error', Static).update(literal(f"Not reloaded: {exc}. Your text is kept."))
+            return
+        self.revision = job.get('note_revision', 0)
+        self.query_one(TextArea).load_text(safe_text(job.get('note', '')))
+        self.query_one('#note-error', Static).update("")
+        self.query_one(TextArea).focus()
+
+    def action_detach(self):
+        self.app.exit()
+
+    def on_button_pressed(self, event):
+        event.stop()
+        if event.button.id == 'note-save':
+            self.action_save()
+        elif event.button.id == 'note-reload':
+            self.action_reload()
+        elif event.button.id == 'note-cancel':
+            self.dismiss(None)
 
 
 class ExternalInspect(ModalScreen):
@@ -247,7 +321,7 @@ class JobsApp(App):
     Footer { background: #22303d; }
     #shortcuts { height: auto; background: #22303d; color: #d7e0e8; padding: 0 1; }
     """
-    BINDINGS = [Binding("enter", "details", "Details"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
+    BINDINGS = [Binding("enter", "details", "Details"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
                 Binding("p", "dispatch", "Dispatch"), Binding("h", "hold", "Hold"),
                 Binding("o", "order", "Order"), Binding("x", "cancel", "Cancel"),
                 Binding("q", "quit", "Detach", priority=True), Binding("ctrl+c", "quit", "Detach", show=False, priority=True)]
@@ -282,7 +356,7 @@ class JobsApp(App):
         yield Static(id="selected", markup=False)
         yield Static(id="events", markup=False)
         yield Static("Best-effort guard; no machine-wide reservation. Q / Ctrl-C detaches; execution continues.", id="message", markup=False)
-        yield Static("Enter Details · L Logs · P Dispatch · H Hold\nO Order · X Cancel · B Scheduling · Q / Ctrl-C Detach", id="shortcuts", markup=False)
+        yield Static("Enter Details · N Note · L Logs · P Dispatch · H Hold\nO Order · X Cancel · B Scheduling · Q / Ctrl-C Detach", id="shortcuts", markup=False)
         yield Footer()
 
     def on_mount(self):
@@ -354,16 +428,26 @@ class JobsApp(App):
                     f"CPU NOW: {cpu_now}   RAM NOW: {ram_now}\n"
                     f"NPROC: {item.get('nproc', 1)} observed processes · Process age: {elapsed(item.get('age_seconds'))}\n"
                     f"Working directory: {item.get('cwd') or '—'}\nEnter: measurement quality and evidence")
-        text = detail(self.selected(), narrow=self.size.width < 110)
         job = self.selected()
-        if job and self.state.get('mode') == 'Bounded Sharing':
-            role = job.get('scheduling', {}).get('role', 'primary').title()
-            text = text.replace(f"SELECTED: {job['display_id']}", f"SELECTED: {job['display_id']} [{role}]")
-        return text
+        if not job:
+            return detail(None)
+        width = max(12, self.size.width - 6)
+        role = (f" [{job.get('scheduling', {}).get('role', 'primary').title()}]"
+                if self.state.get('mode') == 'Bounded Sharing' else '')
+        prefix = f"SELECTED: {job['display_id']}{role} / "
+        heading = prefix + table_name(job['name'], max(1, width - cell_len(prefix))).plain
+        lines = detail(job, narrow=self.size.width < 110).splitlines()
+        lines[0] = heading
+        if job.get('note'):
+            preview = 'Note: ' + table_name(job['note'], max(1, width - 6)).plain
+            if self.size.width < 110 or self.size.height < 36:
+                return '\n'.join((heading, preview, lines[2]))
+            lines.insert(1, preview)
+        return '\n'.join(lines)
 
     def external_read_only(self):
         if self.external_selected_id:
-            self.query_one("#message", Static).update("External observation is read-only: no logs, cancel, hold, or order actions.")
+            self.query_one("#message", Static).update("External observation is read-only: no notes, logs, cancel, hold, or order actions.")
             return True
         return False
 
@@ -550,6 +634,29 @@ class JobsApp(App):
 
     def action_scheduling(self):
         self.push_screen(SharingInspect(self.display_state))
+
+    def check_action(self, action, parameters):
+        # App priority bindings run before focused text widgets, including Q.
+        if isinstance(self.screen, NoteEditor) and action in {
+            'details', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit'
+        }:
+            return False
+        return super().check_action(action, parameters)
+
+    def action_note(self):
+        if self.external_read_only():
+            return
+        selected = self.selected()
+        if not selected:
+            return
+        try:
+            job = next((job for job in self.store.snapshot()['jobs'] if job['id'] == selected['id']), None)
+            if job is None or job['attempt_id'] != selected['attempt_id']:
+                raise JobsError("The selected job/attempt is no longer available")
+        except (ValueError, OSError) as exc:
+            self.query_one('#message', Static).update(literal(f"Cannot edit note: {exc}"))
+            return
+        self.push_screen(NoteEditor(self.store, job), lambda saved: self.refresh_state())
 
     def action_details(self):
         if self.external_selected():

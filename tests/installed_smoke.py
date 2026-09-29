@@ -39,6 +39,43 @@ def command(argv, expected=0):
     return result.stdout+result.stderr
 
 
+def annotation_surface(root):
+    """Exercise installed annotation commands against one held, inert job."""
+    root.mkdir()
+    state_root = root/'state'
+    cli = [sys.executable, '-m', 'tests.jobs.isolated_runtime', 'cli',
+           'jobs', '--state', str(state_root)]
+    refused = json.loads(command([*cli, 'annotate', 'J1.1', '--note', 'missing', '--json'], expected=2))
+    assert refused['code'] == 'JOBS_ERROR' and not state_root.exists()
+    name = 'Installed annotation fixture 備註 [literal]'
+    original = 'First line: q/p/h/x/o/l/b/n\n第二行 [literal]'
+    job = json.loads(command([*cli, 'add', '--name', name, '--cwd', str(root),
+                              '--hold', '--note', original, '--json', '--',
+                              sys.executable, '-c', 'raise AssertionError("held fixture must not run")']))
+    assert job['note'] == original and job['status'] == 'Hold'
+    job_id = job['display_id']
+    status = command([*cli, 'status'])
+    assert 'NAME' in status and name in status
+    saved = json.loads(command([*cli, 'show', job_id, '--json']))
+    assert saved['name'] == name and saved['note'] == original
+    assert json.loads(command([*cli, 'show', job_id]))['note'] == original
+    updated = json.loads(command([*cli, 'annotate', job_id, '--note', 'Updated\nUnicode 繁體',
+                                  '--expected-revision', str(saved['note_revision']), '--json']))
+    assert updated['note'] == 'Updated\nUnicode 繁體'
+    assert updated['note_revision'] == saved['note_revision']+1
+    stale = json.loads(command([*cli, 'annotate', job_id, '--note', 'stale',
+                                '--expected-revision', str(saved['note_revision']), '--json'], expected=2))
+    assert stale['code'] == 'JOBS_ERROR'
+    cleared = json.loads(command([*cli, 'annotate', job_id, '--clear-note', '--json']))
+    assert cleared['note'] == '' and cleared['note_revision'] == updated['note_revision']+1
+    final = json.loads(command([*cli, 'status', '--json']))
+    assert final['jobs'][0]['note'] == '' and final['jobs'][0]['status'] == 'Hold'
+    assert final['jobs'][0]['attempt_id'] == job['attempt_id']
+    assert not final['controller']['online'] and not final['controller']['dispatch']
+    return {'add_show_replace_clear': 'PASS', 'expected_revision_conflict': 'PASS',
+            'human_name_and_json': 'PASS', 'controller': 'offline', 'held_fixture_executed': False}
+
+
 def lifecycle(root, mode):
     root.mkdir()
     store = Store(root/'state')
@@ -74,6 +111,13 @@ def lifecycle(root, mode):
             else:
                 assert not (root/'1/ready').exists()
                 assert store.snapshot()['jobs'][1]['status'] == 'Queue'
+            running = store.snapshot()['jobs'][0]
+            note = 'Installed annotation while the same synthetic attempt runs'
+            store.annotate(running['id'], note, expected_revision=running['note_revision'],
+                           expected_attempt_id=running['attempt_id'])
+            after_note = store.snapshot()['jobs'][0]
+            assert after_note['status'] == 'Run' and after_note['group'] == running['group']
+            assert after_note['attempt_id'] == running['attempt_id']
             for gate in gates:
                 gate.touch()
             wait_for(lambda: all(job['status'] == 'Done' for job in store.snapshot()['jobs']))
@@ -81,6 +125,7 @@ def lifecycle(root, mode):
             if mode == 'sequential':
                 assert state['jobs'][0]['finished_at'] <= state['jobs'][1]['started_at']
             assert state['schema'] == 2
+            assert state['jobs'][0]['note'] == note
         except BaseException as exc:
             try:
                 capture(store, root/'failure', outcome=str(exc), started_at=started)
@@ -497,6 +542,7 @@ def main():
     report = {'kind': args.kind, 'python': sys.version, 'package_origin': str(origin),
               'cli_json_asset_optional_boundary': 'PASS',
               'tui': 'not installed (expected)' if args.kind == 'core' else 'PASS',
+              'annotations': annotation_surface(args.output/'annotations'),
               'vasp_preparation': preparation_surface(args.output/'vasp-preparation', cli),
               'vasp_result_evidence': result_surface(args.output/'vasp-results', cli),
               'lifecycle': [lifecycle(args.output/mode, mode)
