@@ -68,6 +68,19 @@ class MissingResultEvidenceTests(unittest.TestCase):
         evidence = inspect_result(run)
         self.assertEqual(evidence["electronic_table_correspondence"], "conflict")
 
+    def test_missing_evidence_does_not_mask_independent_native_failure(self):
+        run = write_run(self.root / "missing-and-failed", relaxation=True, native=False)
+        (run / "POSCAR").unlink()
+        (run / "OSZICAR").write_text("")
+        evidence = inspect_result(run)
+        self.assertIsNone(evidence["constraints"]["contcar_flags_match"])
+        self.assertEqual(evidence["electronic_table_correspondence"], "unavailable")
+        assessed = assess_result(evidence, policy(relaxation=True, strict=False))
+        self.assertEqual(assessed["status"], "FAIL")
+        checks = {c["code"]: c["status"] for c in assessed["checks"]}
+        self.assertEqual(checks["constraints.endpoint_flags"], "UNKNOWN")
+        self.assertEqual(checks["electronic.evaluation_0.native"], "FAIL")
+
 
 if __name__ == "__main__":
     unittest.main()

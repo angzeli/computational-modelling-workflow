@@ -504,6 +504,72 @@ raise SystemExit(main(sys.argv[1:]))
             'pythonpath_removed': True}
 
 
+def handoff_surface(root, cli):
+    """Installed producer/consumer composition with genuine owned fake-job receipts.
+
+    The compatible protocol fixture is not the external VASP port. Child runtime
+    helpers live beside this copied driver; scientific CLI calls remove PYTHONPATH.
+    """
+    from tests.periodic.vasp.handoff_case import bind_completed_case, prepare_case
+
+    root.mkdir()
+    child_env = dict(os.environ)
+    child_env.pop('PYTHONPATH', None)
+    rows = []
+    for name, relaxation in (('static', False), ('fixed-cell', True)):
+        case = prepare_case(root/name, relaxation=relaxation)
+        store = Store(case['root']/'state')
+        owners = []
+        with install():
+            try:
+                store.add(argv=case['argv'], cwd=case['inputs'], name='installed benign handoff',
+                          env={'OMP_NUM_THREADS': '1'})
+                runtime.start(store)
+                wait_for(lambda: all(j['status'] in {'Done', 'Fail'} for j in store.snapshot()['jobs']))
+                state = store.snapshot()
+                assert state['jobs'][0]['status'] == 'Done', state['jobs']
+                bind_completed_case(case, state)
+                arguments = ['vasp', 'finalize-result', str(case['run']), '--policy', str(case['policy_path']),
+                             '--spec', str(case['spec_path']), '--scratch-root', str(case['scratch']),
+                             '--record-directory', 'accepted', '--json']
+                finalized = subprocess.run([cli, *arguments], cwd=root, env=child_env,
+                                           capture_output=True, text=True, timeout=30)
+                assert finalized.returncode == 0, (finalized.stdout, finalized.stderr)
+                record = json.loads(finalized.stdout)
+                assert record['publication']['state'] == 'complete'
+                assert record['artifact_bundle']['artifact_count'] == (2 if relaxation else 1)
+                record_path = record['publication']['record_path']
+                verified = subprocess.run([cli, 'vasp', 'verify-result-record', record_path, '--json'],
+                                          cwd=root, env=child_env, capture_output=True, text=True, timeout=30)
+                assert verified.returncode == 0, (verified.stdout, verified.stderr)
+                assert json.loads(verified.stdout)['valid']
+                assert {p.name for p in case['inputs'].iterdir()} == {'INCAR', 'POSCAR', 'POTCAR', 'KPOINTS'}
+                rows.append({'case': name, 'job_id': state['jobs'][0]['id'],
+                             'attempt_id': state['jobs'][0]['attempt_id'], 'receipt': str(case['receipt']),
+                             'finalization_record': record_path, 'reverification': 'PASS'})
+            finally:
+                if store.path.exists():
+                    state = store.snapshot()
+                    owners.append(state['controller'].get('owner'))
+                    store.dispatch(False)
+                    for job in state['jobs']:
+                        owners.extend((job.get('worker'), job.get('group')))
+                        if job['status'] in {'Run', 'Starting'}:
+                            store.change(job['id'], 'cancel', confirm=True)
+                    try:
+                        wait_for(lambda: not any(j['status'] in ACTIVE for j in store.snapshot()['jobs']))
+                    finally:
+                        runtime.stop(store)
+                        for process in list(runtime._CHILDREN):
+                            process.wait(timeout=8)
+                        runtime.reap_detached()
+                    wait_for(lambda: not any(owner_alive(owner) for owner in owners if owner))
+                    assert not store.snapshot()['controller']['online'] and not runtime._CHILDREN
+    return {'compatible_fixture_only': True, 'actual_external_port_qualified': False,
+            'prepared_managed_finalized_reverified': rows, 'cli_pythonpath_removed': True,
+            'live_recorded_owners_after_cleanup': 0}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kind', choices=('core', 'jobs', 'sdist', 'editable'), required=True)
@@ -545,6 +611,7 @@ def main():
               'annotations': annotation_surface(args.output/'annotations'),
               'vasp_preparation': preparation_surface(args.output/'vasp-preparation', cli),
               'vasp_result_evidence': result_surface(args.output/'vasp-results', cli),
+              'vasp_composed_handoff': handoff_surface(args.output/'vasp-handoff', cli),
               'lifecycle': [lifecycle(args.output/mode, mode)
                             for mode in ('sequential', 'bounded-sharing')]}
     (args.output/'result.json').write_text(json.dumps(report, indent=2)+'\n')

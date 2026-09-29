@@ -116,6 +116,7 @@ class RunnerBindingTests(unittest.TestCase):
                    lambda j: j["argv"].__setitem__(j["argv"].index("--ranks") + 1, "64"),
                    lambda j: j["argv"].__setitem__(j["argv"].index("--timeout") + 1, "NaN"),
                    lambda j: j.__setitem__("cwd", str(self.run)),
+                   lambda j: j["argv"].__setitem__(j["argv"].index("--input") + 1, str(self.root / "other-inputs")),
                    lambda j: j["argv"].__setitem__(j["argv"].index("--output") + 1, str(self.root / "moved"))]
         snapshot = (self.root / self.spec["execution"]["snapshot"]).read_bytes()
         for change in changes:
@@ -152,6 +153,10 @@ class RunnerBindingTests(unittest.TestCase):
         self.assertFalse(inspect_binding(path, self.native, "c" * 64)["valid"])
         self.spec["execution"]["runner_record"]["sha256"] = sha(self.metadata)
         (self.run / "KPOINTS").unlink()
+        self.assertNotEqual(self.inspect()["status"], "eligible")
+
+    def test_missing_runner_metadata_cannot_use_native_receipt_alone(self):
+        self.metadata.unlink()
         self.assertNotEqual(self.inspect()["status"], "eligible")
 
     def test_staging_fields_cannot_be_moved_into_terminal_block(self):
