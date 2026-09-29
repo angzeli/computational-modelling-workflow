@@ -504,6 +504,44 @@ raise SystemExit(main(sys.argv[1:]))
             'pythonpath_removed': True}
 
 
+def runner_interface_surface(root, cli):
+    """Exercise installed static diagnostics without importing a runner."""
+    root.mkdir()
+    scripts = root/'port'/'scripts'
+    scripts.mkdir(parents=True)
+    runner = scripts/'run-vasp.sh'
+    runner.write_text('#!/usr/bin/env bash\nset -euo pipefail\n. "$(dirname -- "$0")/environment.sh"\nexec python3 -B "$PORT_ROOT/scripts/run_vasp.py" "$@"\n')
+    (scripts/'environment.sh').write_text('PORT_ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)\n')
+    for name in ('launch.py', 'observables.py'):
+        (scripts/name).write_text('# Inert synthetic source declaration\n')
+    options = ['--input', '--output', '--binary', '--ranks', '--ncore', '--kpar', '--mpi-mode', '--restart', '--timeout', '--stop-before']
+    source = 'import argparse\ndef parser():\n    p = argparse.ArgumentParser()\n'
+    source += ''.join('    p.add_argument('+repr(option)+')\n' for option in options)
+    managed = '    p.add_argument("--managed-foreground", action="store_true")\n'
+    module = scripts/'run_vasp.py'
+    inputs = root/'inputs'; inputs.mkdir()
+    output = root/'never-created'
+    arguments = ['--input',str(inputs),'--output',str(output),'--binary','std','--ranks','2','--ncore','1','--kpar','1','--mpi-mode','native','--restart','none','--timeout','60','--stop-before','0','--managed-foreground']
+    env = dict(os.environ); env.pop('PYTHONPATH',None)
+    state = root/'unexpected-jobs-state'; env['CMW_JOBS_STATE'] = str(state)
+    for declaration, expected, status in ((managed,0,'COMPATIBLE'),('',2,'INCOMPATIBLE')):
+        module.write_text(source+declaration+'    return p\n')
+        before = {path:path.read_bytes() for path in scripts.iterdir()}
+        result = subprocess.run([cli,'vasp','check-runner','--runner',str(runner),'--json','--',*arguments],env=env,cwd=root,capture_output=True,text=True,timeout=30)
+        assert result.returncode == expected, (result.stdout,result.stderr)
+        report = json.loads(result.stdout)
+        assert report['interface_compatibility']['status'] == status
+        if expected:
+            assert any('managed-foreground' in item for item in report['missing_requirements'])
+        assert not state.exists()
+        assert report['managed_lifecycle_qualification']['status'] == 'NOT_ESTABLISHED'
+        assert report['result_binding_qualification']['status'] == 'NOT_ESTABLISHED'
+        assert report['side_effects_performed'] == []
+        assert before == {path:path.read_bytes() for path in scripts.iterdir()}
+        assert not output.exists()
+    return {'declared_compatible_and_missing_option': 'PASS', 'qualified_runtime': False, 'pythonpath_removed': True}
+
+
 def handoff_surface(root, cli):
     """Installed producer/consumer composition with genuine owned fake-job receipts.
 
@@ -611,6 +649,7 @@ def main():
               'annotations': annotation_surface(args.output/'annotations'),
               'vasp_preparation': preparation_surface(args.output/'vasp-preparation', cli),
               'vasp_result_evidence': result_surface(args.output/'vasp-results', cli),
+              'vasp_runner_interface': runner_interface_surface(args.output/'vasp-runner-interface', cli),
               'vasp_composed_handoff': handoff_surface(args.output/'vasp-handoff', cli),
               'lifecycle': [lifecycle(args.output/mode, mode)
                             for mode in ('sequential', 'bounded-sharing')]}
