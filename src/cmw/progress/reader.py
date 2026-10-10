@@ -92,7 +92,7 @@ class RegularFileReader:
                 limitations=()):
         state = SourceState(
             role=self.source.role, path=self.source.path, generation=self._generation,
-            health=health, identity=self._identity, offset=self._offset,
+            health=health, identity=self._identity, file_version=self._signature, offset=self._offset,
             pending_bytes=len(self._partial) + (self.max_line_bytes + 1 if self._dropping_line else 0),
             has_more=has_more, last_success_at=self._last_success,
             last_growth_at=self._last_growth, last_change_at=self._last_change,

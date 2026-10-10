@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
 from typing import Protocol
 
 
@@ -95,6 +96,7 @@ class SourceState:
     total_bytes_read: int = 0
     limitations: tuple[str, ...] = ()
     identity: tuple[int, int] | None = None
+    file_version: tuple[int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +167,100 @@ class ProgressEvent:
 
 
 @dataclass(frozen=True)
+class Timing:
+    """An explicitly scoped duration, cumulative value or observation interval."""
+
+    timing_id: str
+    label: str
+    value: float | None = None
+    unit: str = 's'
+    clock: str = 'wall'
+    quantity: str = 'duration'
+    source: str = 'unavailable'
+    context: tuple[IterationLevel, ...] = ()
+    stage: str | None = None
+    segment: int = 1
+    completeness: str = 'UNAVAILABLE'
+    evidence: tuple[Evidence, ...] = ()
+    start_evidence: tuple[Evidence, ...] = ()
+    end_evidence: tuple[Evidence, ...] = ()
+    lower_bound: float | None = None
+    upper_bound: float | None = None
+    clock_id: str | None = None
+    reason: str = ''
+    precision: float | None = None
+
+    def __post_init__(self):
+        for name in ('value', 'lower_bound', 'upper_bound', 'precision'):
+            value = getattr(self, name)
+            if value is not None and (not math.isfinite(value) or value < 0):
+                raise ValueError(f'Timing {name} must be finite and nonnegative, or unavailable')
+        if (self.lower_bound is not None and self.upper_bound is not None
+                and self.lower_bound > self.upper_bound):
+            raise ValueError('Timing interval boundaries are reversed')
+        if self.source == 'unavailable' and self.value is not None:
+            raise ValueError('Unavailable timing cannot have a duration value')
+
+
+@dataclass(frozen=True)
+class HistoryColumn:
+    """Adapter-provided display descriptor; renderers do not dispatch on engine."""
+
+    key: str
+    label: str
+    metric_id: str | None = None
+    kind: str = 'text'
+    kinds: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class HistoryEntry:
+    """One stable chronological context, updated as later evidence arrives."""
+
+    entry_id: str
+    sequence: int
+    context: tuple[IterationLevel, ...] = ()
+    parent_id: str | None = None
+    kind: str = 'evaluation'
+    native_label: str = ''
+    state: str = 'PARTIAL'
+    coverage: str = 'PARTIAL'
+    metrics: tuple[Metric, ...] = ()
+    timings: tuple[Timing, ...] = ()
+    evidence: tuple[Evidence, ...] = ()
+    binding_id: str = ''
+    attempt_id: str | None = None
+    stage: str | None = None
+    segment: int = 1
+    child_count: int = 0
+    annotations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class HistoryPage:
+    """Bounded history window with explicit reconstruction and paging coverage."""
+
+    context: RunContext
+    entries: tuple[HistoryEntry, ...] = ()
+    columns: tuple[HistoryColumn, ...] = ()
+    status: str = 'PENDING'
+    coverage: str = 'PARTIAL'
+    cursor: str | None = None
+    next_cursor: str | None = None
+    previous_cursor: str | None = None
+    has_more: bool = False
+    total: int | None = None
+    retained: int = 0
+    source_revision: str = ''
+    boundaries: tuple[tuple[str | None, int], ...] = ()
+    messages: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = ()
+
+    def to_dict(self):
+        return {'schema': 1, **asdict(self)}
+
+
+@dataclass(frozen=True)
 class ProgressSnapshot:
     context: RunContext
     adapter: str
@@ -185,6 +281,8 @@ class ProgressSnapshot:
     messages: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     scientific_validation: str = 'not-assessed'
+    history_columns: tuple[HistoryColumn, ...] = ()
+    completed_durations: tuple[Timing, ...] = ()
 
     def to_dict(self):
         return {'schema': 1, **asdict(self)}

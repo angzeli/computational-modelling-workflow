@@ -100,6 +100,8 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
             lines.append(f'{metric.label}{unit}: {position(metric)} ← {position(item.previous)} target {target_text(metric, compact=True)}')
         if not series:
             lines.append(snapshot.messages[0] if snapshot.messages else f'{snapshot.status}: {snapshot.completeness}')
+        if snapshot.completed_durations and width >= 54:
+            lines[-1:] = ['Completed duration: ' + duration_pair(snapshot.completed_durations, compact=True)]
         lines.append((f'Evidence {age_text(snapshot.last_new_evidence_at, now)} · Enter details' if width < 54 else
                       f'Evidence {age_text(snapshot.last_new_evidence_at, now)} · {snapshot.read_health} · Enter: contexts / targets / sources'))
         if any(source.has_more for source in snapshot.sources):
@@ -110,6 +112,8 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
         metric = item.latest
         label = metric.label + (f' [{metric.unit}]' if metric.unit else '')
         lines.append(f'{label:<34} {metric_text(metric, concise=not detailed):<21} {metric_text(item.previous, concise=not detailed):<21} {target_text(metric)}')
+    if snapshot.completed_durations:
+        lines.append('Completed evaluation duration · latest ← previous: ' + duration_pair(snapshot.completed_durations))
     lines.extend(snapshot.messages if detailed else snapshot.messages[:1])
     lines.append(source)
     if any(state.has_more for state in snapshot.sources):
@@ -140,4 +144,125 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
             lines.append(f'Source {state.role}: {state.path}; {state.health}; generation {state.generation}; offset {state.offset}; '
                          f'pending bytes {state.pending_bytes}; catch-up {state.has_more}; poll bytes {state.bytes_read}')
         lines.extend('Limitation: ' + item for item in dict.fromkeys(context.limitations + snapshot.limitations))
+    return '\n'.join(lines)
+
+
+def timing_text(timing, *, compact=False):
+    """Keep measured clock, provenance and unavailable values explicit."""
+    if timing is None:
+        return 'unavailable'
+    if timing.value is None:
+        value = (f'≥{timing.lower_bound:g} {timing.unit} observed' if timing.lower_bound is not None
+                 else 'unavailable')
+    else:
+        value = f'{timing.value:.4g} {timing.unit}'
+    clock = 'CPU' if timing.clock == 'cpu' else timing.clock
+    if compact and timing.value is not None and timing.quantity == 'duration' and timing.completeness in ('COMPLETE', 'AVAILABLE'):
+        return f'{timing.value:.4g}{timing.unit} {clock}/{timing.source}'
+    suffix = f'{clock}, {timing.source}'
+    if timing.quantity != 'duration':
+        suffix += ', ' + timing.quantity
+    if timing.completeness not in ('COMPLETE', 'AVAILABLE'):
+        suffix += ', ' + timing.completeness.lower().replace('_', ' ')
+    return value + ' (' + suffix + ')'
+
+
+def duration_pair(timings, *, compact=False):
+    values = [timing_text(value, compact=compact) + (' @' + '/'.join(str(level.index) for level in value.context) if value.context else '')
+              for value in timings[:2]]
+    if len(values) == 1:
+        values.append('unavailable')
+    return ' ← '.join(values)
+
+
+def history_cell(entry, column):
+    """Adapter descriptors select fields; this function knows no engine grammar."""
+    if column.kind == 'metric' or column.metric_id is not None:
+        metric = next((value for value in entry.metrics if value.semantic_id == column.metric_id), None)
+        return value_text(metric, compact=True)
+    if column.kind == 'timing':
+        timing = next((value for value in entry.timings if value.timing_id == column.key), None)
+        if timing is None:
+            for quantity in ('duration', 'observation-interval', 'cumulative'):
+                timing = next((value for value in entry.timings if value.clock in ('wall', 'monotonic') and value.quantity == quantity), None)
+                if timing is not None:
+                    break
+        return timing_text(timing, compact=True)
+    if column.kind in ('count', 'children'):
+        return str(entry.child_count)
+    if column.kind == 'native':
+        return entry.native_label
+    if column.kind == 'context':
+        return context_text(entry.context)
+    if column.kind == 'state':
+        return entry.state
+    if column.kind == 'evidence':
+        return '; '.join(entry.annotations) or ', '.join(dict.fromkeys(value.source_role for value in entry.evidence)) or 'unavailable'
+    value = getattr(entry, column.key, None)
+    if value is None:
+        return '—'
+    if isinstance(value, (tuple, list)):
+        return '; '.join(str(part) for part in value) or '—'
+    return str(value)
+
+
+def history_columns(page):
+    if page.columns:
+        kinds = {entry.kind for entry in page.entries}
+        return tuple(column for column in page.columns if not kinds or not column.kinds or kinds.intersection(column.kinds))
+    from .models import HistoryColumn
+    return (HistoryColumn('native_label', 'CONTEXT'), HistoryColumn('state', 'STATE'),
+            HistoryColumn('child_count', 'CHILDREN', kind='count'))
+
+
+def history_entry_text(entry):
+    lines = [f'{entry.native_label or entry.kind} · {entry.state} / {entry.coverage}',
+             context_text(entry.context),
+             f'Kind: {entry.kind}; sequence: {entry.sequence}',
+             f'Entry: {entry.entry_id}; parent: {entry.parent_id or "root"}',
+             f'Attempt: {entry.attempt_id or "not a Jobs attempt"}; binding: {entry.binding_id}',
+             f'Stage: {entry.stage or "undeclared"}; run segment: {entry.segment}; children: {entry.child_count}',
+             'Observation only; scientific validation: not assessed.']
+    for metric in entry.metrics:
+        lines.extend((f'\n{metric.label}: {value_text(metric)} {metric.unit} · {metric.qualification}',
+                      f'{metric.semantic_id}: {metric.definition}',
+                      f'Criterion: {target_text(metric)}',
+                      f'Printed token: {metric.printed}; signed: {metric.signed_value}; precision: {metric.precision}'))
+        if metric.criterion:
+            lines.append(f'Criterion origin: {metric.criterion.origin}; {metric.criterion.definition}')
+        for target in metric.diagnostic_targets:
+            lines.append(f'Diagnostic target: {target.comparator} {target.value:g} {target.unit}; {target.origin}')
+    for timing in entry.timings:
+        lines.extend((f'\n{timing.label}: {timing_text(timing)}',
+                      f'{timing.timing_id}; scope: {context_text(timing.context)}',
+                      f'Clock identity: {timing.clock_id or "unavailable"}; bounds: {timing.lower_bound}–{timing.upper_bound}',
+                      'Timing qualification: ' + (timing.reason or timing.completeness)))
+        for label, evidence in (('start', timing.start_evidence), ('end', timing.end_evidence)):
+            for source in evidence:
+                lines.append(f'Timing {label}: {source.source_role} lines {source.line_start}–{source.line_end}')
+    evidence = tuple(dict.fromkeys((*entry.evidence,
+        *(source for metric in entry.metrics for source in metric.evidence),
+        *(source for timing in entry.timings for source in (*timing.evidence, *timing.start_evidence, *timing.end_evidence)))))
+    lines.append('\nSource references:')
+    for source in evidence:
+        lines.append(f'{source.source_role}: {source.path} · generation {source.generation} · '
+                     f'lines {source.line_start}–{source.line_end} · bytes {source.byte_start}–{source.byte_end}')
+    lines.extend(entry.annotations)
+    return '\n'.join(lines)
+
+
+def history_text(page):
+    columns = history_columns(page)
+    lines = [f'PROGRESS HISTORY · {page.status} / {page.coverage}',
+             ' | '.join(column.label for column in columns)]
+    for entry in page.entries:
+        lines.append(' | '.join(history_cell(entry, column) for column in columns)
+                     + f' [{entry.state}] · {entry.entry_id}')
+    if not page.entries:
+        lines.append('No history entries in this page; ' + ('bounded reconstruction is loading.' if page.status == 'LOADING' else 'await native evidence or choose another context.'))
+    lines.extend((f'Page entries: {len(page.entries)}; retained: {page.retained}; total: {page.total if page.total is not None else "unknown"}; coverage: {page.coverage}',
+                  f'Current cursor: {page.cursor or "start"}', f'Next cursor: {page.next_cursor or "none"}',
+                  f'Previous cursor: {page.previous_cursor or "none"}', 'Source revision: ' + page.source_revision))
+    lines.extend(page.messages)
+    lines.extend('Limitation: ' + message for message in page.limitations)
     return '\n'.join(lines)

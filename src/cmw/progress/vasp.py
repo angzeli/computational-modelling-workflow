@@ -19,12 +19,16 @@ from cmw.periodic.vasp.results import (
     parse_ionic_summary,
 )
 from .models import (Criterion, IterationLevel, Metric, MetricSeries,
-                     ProgressEvent, ProgressSnapshot, comparable)
+                     ProgressEvent, ProgressSnapshot, HistoryEntry, HistoryColumn, Timing, comparable)
 
 MAX_EVALUATIONS = 16
 MAX_ITERATIONS = 1024
 MAX_ATOMS = 10000
 MAX_POSCAR_BYTES = 1024 * 1024
+MAX_HISTORY_LINES = 2048
+MAX_PENDING_HISTORY = 2 * MAX_EVALUATIONS * (MAX_ITERATIONS + 1) + 2
+LOOP_TIMING = re.compile(r'^\s*(LOOP\+?)\s*:\s*cpu\s+time\s+(' + NUMBER +
+                         r')\s*:\s*real\s+time\s+(' + NUMBER + r')\s*$', re.I)
 
 
 def _batch_line(line):
@@ -76,8 +80,44 @@ class VaspAdapter:
         self.last_new = None
         self.issues = deque(maxlen=32)
         self.electronic_role = self._electronic_role()
+        self.pending_lines = {}
+        self.history_updates = {}
+        self.history_sequence = 0
+        self.history_dirty = set()
+        self.segment_dirty = False
+        self.out_serial = self.osz_serial = 0
+        self.observation = (None, True, None)
         self.duplicate_streams = sum(s.role.lower() in {'oszicar', 'stdout'}
                                      for s in context.sources) > 1
+
+    def set_observation(self, monotonic_now, *, historical, clock_id):
+        self.observation = (monotonic_now, historical, clock_id)
+
+    def read_roles(self):
+        if len(self.history_updates) >= MAX_PENDING_HISTORY:
+            return ()
+        return tuple(source.role for source in self.context.sources
+                     if not self.pending_lines.get(source.role.lower()))
+
+    @property
+    def has_pending_work(self):
+        return any(self.pending_lines.values())
+
+    def drain_history(self):
+        updates = tuple(sorted(self.history_updates.values(), key=lambda item: item.sequence))
+        self.history_updates.clear()
+        return updates
+
+    def _history_identity(self, record, line, kind):
+        self.history_sequence += 1
+        ref = line.evidence
+        record['history_id'] = ':'.join(map(str, (self.context.binding_id,
+            self.context.attempt_id, self.context.stage, ref.source_role,
+            ref.path, ref.generation, ref.file_identity, ref.byte_start, kind)))
+        record['history_sequence'] = self.history_sequence
+        record['observer_start'] = None
+        record['observer_end'] = None
+        record['observer_clock'] = None
 
     def _electronic_role(self):
         roles = {s.role.lower() for s in self.context.sources}
@@ -99,13 +139,18 @@ class VaspAdapter:
             self.issues.append(message)
 
     def _new_out(self, line, version=None):
+        if self.out and self.out['current']:
+            self._close_evaluation(self.out['current'], line)
+        self._publish_history()
         self.out_segment += 1
         self.out = {'version': version, 'settings': {}, 'echoed_incar': {},
                     'in_echo': False, 'nions': None, 'evaluations': deque(),
                     'next': 1, 'current': None, 'force': None,
                     'forces': deque(maxlen=2), 'conflicts': [], 'in_energy': False,
                     'fatal': False, 'interrupted': False, 'footer': False,
-                    'timing': set(), 'ionic_stop': False}
+                    'timing': set(), 'footer_timings': {}, 'line': line, 'ionic_stop': False}
+        self._history_identity(self.out, line, 'segment')
+        self.segment_dirty = True
         self._event('segment', line, 'Native run segment observed')
 
     def _out_conflict(self, message):
@@ -133,6 +178,8 @@ class VaspAdapter:
             self._new_out(line, banner[1] if banner else None)
         out = self.out
         evaluation = out['current']
+        if evaluation is not None:
+            self.history_dirty.add(evaluation['serial'])
         if 'INCAR:' in text:
             out['in_echo'] = True
         if 'POTCAR:' in text:
@@ -164,12 +211,22 @@ class VaspAdapter:
             if evaluation is None or electronic == 1 or ionic != evaluation['native']:
                 if out['force'] is not None:
                     self._out_conflict('force block interrupted by a new evaluation')
+                if evaluation is not None:
+                    self._close_evaluation(evaluation, line)
                 evaluation = {'index': out['next'], 'native': ionic, 'rows': [],
-                              'energies': {}, 'force': None, 'complete': False,
-                              'native_convergence': None}
+                              'energies': {}, 'energy_refs': {}, 'force': None, 'complete': False, 'closed': False,
+                              'native_convergence': None, 'line': line, 'end_line': None,
+                              'timings': (), 'timing_issue': None, 'trial': [], 'force_record': None}
+                self.out_serial += 1
+                evaluation['serial'] = self.out_serial
+                self.history_dirty.add(self.out_serial)
+                self._history_identity(evaluation, line, 'evaluation')
                 out['next'] += 1
                 if len(out['evaluations']) == MAX_EVALUATIONS:
-                    dropped = out['evaluations'].popleft()
+                    dropped = out['evaluations'][0]
+                    if dropped['serial'] in self.history_dirty:
+                        self._publish_evaluation(dropped)
+                    out['evaluations'].popleft()
                     if not any(item['segment'] == self.out_segment and item['index'] == dropped['index'] for item in self.osz):
                         self._issue('Native evaluation buffer evicted unmatched evidence; earlier correspondence unavailable')
                 out['evaluations'].append(evaluation)
@@ -181,12 +238,19 @@ class VaspAdapter:
             if len(evaluation['rows']) >= MAX_ITERATIONS:
                 self._out_conflict('electronic iteration buffer limit reached')
             else:
-                evaluation['rows'].append({'label': electronic, 'energy': None,
-                                           'algorithm': None, 'line': line})
+                row = {'label': electronic, 'energy': None, 'algorithm': None,
+                       'line': line, 'timings': (), 'timing_issue': None}
+                self._history_identity(row, line, 'electronic')
+                evaluation['rows'].append(row)
             out['force'] = None
             out['in_energy'] = False
             self._event('iteration', line, 'Native electronic iteration observed',
                         self._levels(evaluation, electronic))
+        if re.match(r'^\s*LOOP\+?\s*:', text, re.I):
+            self._read_loop_timing(line)
+        if evaluation and re.search(r'\b(?:trial:|trial-energy|ZBRENT:|curvature:)', text):
+            evaluation['trial'].append(line.evidence)
+            del evaluation['trial'][:-8]
         if evaluation and evaluation['rows']:
             row = evaluation['rows'][-1]
             if 'EDDAV:' in text:
@@ -249,16 +313,20 @@ class VaspAdapter:
             parsed = number(toten[1])
             if out['in_energy']:
                 evaluation['energies']['free_energy'] = parsed
+                evaluation['energy_refs']['free_energy'] = line.evidence
             else:
                 evaluation['rows'][-1]['energy'] = parsed
+                evaluation['rows'][-1]['energy_ref'] = line.evidence
             self.last_new = line.observed_at
         energies = re.search(r'energy\s+without entropy\s*=\s*(' + NUMBER + r').*energy\(sigma->0\)\s*=\s*(' + NUMBER + ')', text, re.I)
         if energies and evaluation and out['in_energy']:
+            evaluation['energy_refs'].update({key: line.evidence for key in ('without_entropy', 'sigma_to_zero')})
             evaluation['energies'].update(zip(('without_entropy', 'sigma_to_zero'),
                                               (number(t) for t in energies.groups())))
             evaluation['complete'] = (evaluation['force'] is not None and
                                       evaluation['energies'].get('free_energy', {}).get('value') is not None and
                                       all(v['value'] is not None for v in evaluation['energies'].values()))
+            evaluation['end_line'] = line
             out['in_energy'] = False
             self._event('evaluated-energy', line, 'Evaluated ionic energy observed', self._levels(evaluation))
         if 'reached required accuracy - stopping structural energy minimisation' in text:
@@ -270,6 +338,8 @@ class VaspAdapter:
         timing = re.search(r'(Total CPU time used|User time|System time|Elapsed time)\s*\(sec\):\s*(' + NUMBER + ')', text)
         if timing and out['footer'] and number(timing[2])['value'] is not None:
             out['timing'].add(timing[1])
+            out['footer_timings'][timing[1]] = (number(timing[2]), line)
+            self.segment_dirty = True
             if len(out['timing']) == 4:
                 self._event('native-footer', line, 'Complete native timing footer observed')
         if re.search(r'VERY BAD NEWS|internal error|ERROR FEXCP|ZHEGV failed|ERROR EDD|killed by signal', text, re.I):
@@ -278,6 +348,49 @@ class VaspAdapter:
         if re.search(r'LSTOP\s*=\s*T|LABORT\s*=\s*T|STOPCAR.*(?:stop|found)|soft stop', text, re.I):
             out['interrupted'] = True
             self._event('native-stop-request', line, 'Native stop-request text observed')
+
+    def _close_evaluation(self, evaluation, line):
+        evaluation['closed'] = True
+        if evaluation['end_line'] is None:
+            evaluation['end_line'] = line
+        self.history_dirty.add(evaluation['serial'])
+        # Freeze an observed interval at the observed structural boundary, even
+        # when native force/energy evidence for the old evaluation is missing.
+        mono, historical, _ = self.observation
+        if (not historical and evaluation['observer_start'] is not None
+                and evaluation['observer_end'] is None):
+            evaluation['observer_end'] = mono
+
+    def _read_loop_timing(self, line):
+        """Associate modern native timers only inside their structural interval."""
+        match = LOOP_TIMING.fullmatch(line.text)
+        outer = bool(re.match(r'^\s*LOOP\+', line.text, re.I))
+        out, evaluation = self.out, self.out['current']
+        if evaluation is None or not evaluation['rows'] or out['footer']:
+            self._issue('Unassociated LOOP timing: no open native evaluation')
+            return
+        record = evaluation if outer else evaluation['rows'][-1]
+        if outer and not evaluation['complete']:
+            record['timing_issue'] = 'LOOP+ lacks a completed native force/energy evaluation'
+            return
+        if not outer and (evaluation['force'] is not None or out['in_energy']):
+            record['timing_issue'] = 'LOOP occurs outside its electronic interval'
+            return
+        if match is None:
+            record['timing_issue'] = 'Unsupported or malformed native LOOP timing grammar'
+            return
+        parsed = tuple(number(value) for value in match.groups()[1:])
+        if any(value['value'] is None or value['value'] < 0 for value in parsed):
+            record['timing_issue'] = 'Native LOOP duration is negative or nonfinite'
+            return
+        if record['timings']:
+            record['timings'] = ()
+            record['timing_issue'] = 'Multiple timing records in one native interval are ambiguous'
+            return
+        if record['timing_issue']:
+            return
+        record['timings'] = tuple((kind, value, line) for kind, value in zip(('cpu', 'wall'), parsed))
+        self.last_new = line.observed_at
 
     def _finish_force(self, block, line):
         vectors = [[value['value'] for value in row[3:]] for row in block['rows']]
@@ -295,15 +408,23 @@ class VaspAdapter:
                   'evidence': _span(block['line'].evidence, line.evidence),
                   'at': line.observed_at, 'evaluation': {key: block['evaluation'][key] for key in ('index', 'native')}}
         block['evaluation']['force'] = True
+        block['evaluation']['force_record'] = record
         self.out['forces'].append(record)
         self._event('force', line, 'Complete atomic-vector force block observed',
                     self._levels(block['evaluation']))
 
     def _new_osz_evaluation(self):
-        item = {'index': self.osz_next, 'segment': self.osz_segment, 'rows': [], 'summary': None}
+        self.osz_serial += 1
+        item = {'index': self.osz_next, 'segment': self.osz_segment, 'rows': [], 'summary': None, 'serial': self.osz_serial}
         self.osz_next += 1
         if len(self.osz) >= MAX_EVALUATIONS:
-            dropped = self.osz.popleft()
+            dropped = self.osz[0]
+            if self.out is not None:
+                native = next((item for item in self.out['evaluations'] if item['serial'] == dropped['serial']), None)
+                if native is not None:
+                    self._publish_evaluation(native)
+            self.osz.popleft()
+            self.history_dirty.discard(dropped['serial'])
             if self.out is not None and self.out['current'] and dropped['segment'] >= self.out_segment and dropped['index'] >= self.out['current']['index']:
                 self._issue('Unmatched electronic evaluation buffer limit reached')
         self.osz.append(item)
@@ -329,18 +450,22 @@ class VaspAdapter:
                 return
             row['line'] = line
             item['rows'].append(row)
+            self.history_dirty.add(item['serial'])
             self.last_new = line.observed_at
         summary = parse_ionic_summary(_batch_line(line), line.evidence.source_role)
         if summary is not None:
             item = self.osz_current or self._new_osz_evaluation()
             # OSZICAR has no mandatory banner. Native summary resets establish
             # the batch parser's segment boundary only after that summary arrives.
-            if self.osz_last_native is not None and summary['native_ionic_label'] <= self.osz_last_native:
+            if (self.osz_last_native is not None
+                    and summary['native_ionic_label'] <= self.osz_last_native
+                    and self.osz_segment < self.out_segment):
                 self.osz_segment += 1
                 item['segment'] = self.osz_segment
                 item['index'] = 1
                 self.osz_next = 2
             item['summary'] = summary
+            self.history_dirty.add(item['serial'])
             self.osz_last_native = summary['native_ionic_label']
             self.osz_current = None
             self.last_new = line.observed_at
@@ -385,7 +510,7 @@ class VaspAdapter:
     def _correspondence(self, evaluation):
         if self.asymmetric_reset:
             return 'unresolved', [], 'Source generations changed independently; sibling correspondence is unestablished'
-        item = next((v for v in self.osz if v['segment'] == self.out_segment and v['index'] == evaluation['index']), None)
+        item = next((v for v in self.osz if v['serial'] == evaluation['serial']), None)
         if item is None and self.osz_segment > self.out_segment:
             return 'unresolved', [], 'Electronic source segment cannot be associated with the current native segment'
         if item is None:
@@ -467,12 +592,13 @@ class VaspAdapter:
             result.append(MetricSeries(latest, previous if previous is not None and comparable(latest, previous) else None))
         return result
 
-    def _force_metrics(self):
-        if not self.out['forces']:
+    def _force_metrics(self, records=None):
+        records = self.out['forces'] if records is None else records
+        if not records:
             return []
         result = []
         for scope, priority in (('all', 50), ('free', 10), ('fixed', 51)):
-            latest = self.out['forces'][-1]
+            latest = records[-1]
             group = latest['summary'].get(scope)
             if scope == 'all' and not (latest['summary'].get('free') or {}).get('count'):
                 priority = 10
@@ -505,17 +631,178 @@ class VaspAdapter:
                               self._targets(semantic_id), relation, priority,
                               comparison_context=(), comparison_scope=repr(record['flags_key']))
             previous = None
-            if len(self.out['forces']) > 1:
-                candidate = self.out['forces'][-2]
+            if len(records) > 1:
+                candidate = records[-2]
                 if candidate['flags_key'] == latest['flags_key'] and candidate['summary'].get(scope) and candidate['summary'][scope]['count']:
                     previous = metric(candidate)
             latest_metric = metric(latest)
             result.append(MetricSeries(latest_metric, previous if previous is not None and comparable(latest_metric, previous) else None))
         return result
 
+    @staticmethod
+    def _history_columns():
+        return (HistoryColumn('native_label', 'EVAL / NATIVE'),
+                HistoryColumn('child_count', 'SCF COUNT', kind='count', kinds=('evaluation', 'trial-evaluation')),
+                HistoryColumn('force', 'FMAX FREE', 'vasp.force.maximum_atomic_norm.free', 'metric', kinds=('evaluation', 'trial-evaluation')),
+                HistoryColumn('dE', '|dE| eV', 'vasp.electronic.dE', 'metric', kinds=('electronic',)),
+                HistoryColumn('d_eps', '|d eps| eV', 'vasp.electronic.d_eps', 'metric', kinds=('electronic',)),
+                HistoryColumn('rms_c', 'rms(c)', 'vasp.electronic.rms_c', 'metric', kinds=('electronic',)),
+                HistoryColumn('duration', 'DURATION / SOURCE', kind='timing'),
+                HistoryColumn('state', 'STATE'),
+                HistoryColumn('annotations', 'ELECTRONIC EVIDENCE', kind='evidence'))
+
+    def _record_timings(self, record, levels, *, finished):
+        timer = 'LOOP+' if len(levels) == 1 else 'LOOP'
+        prefix = 'vasp.' + ('evaluation' if len(levels) == 1 else 'electronic')
+        start = record['line'].evidence
+        scope = _scope(self.out)
+        if record['timings'] and not record['timing_issue'] and scope['supported']:
+            return tuple(Timing(prefix + '.' + kind, timer + ' ' + kind,
+                parsed['value'], clock=kind, source='native', context=levels,
+                stage=self.context.stage, segment=self.out_segment, completeness='COMPLETE',
+                evidence=(line.evidence,), start_evidence=(start,),
+                end_evidence=(line.evidence,), precision=parsed['half_last_place'],
+                reason=('Inclusive native outer-loop interval; do not add nested LOOP timers; '
+                        'preparation outside the interval is not measured' if timer == 'LOOP+' else
+                        'Native electronic-loop interval inside this Iteration header'))
+                for kind, parsed, line in record['timings'])
+        mono, historical, clock_id = self.observation
+        if not historical and mono is not None and not finished:
+            if record['observer_start'] is None:
+                record['observer_start'], record['observer_clock'] = mono, clock_id
+        first = record['observer_start']
+        if first is not None and finished and record['observer_end'] is None and not historical:
+            record['observer_end'] = mono
+        last = record['observer_end'] if finished else mono
+        if (not historical and first is not None and last is not None and last > first
+                and clock_id == record['observer_clock']):
+            return (Timing(prefix + '.observation', 'Observed context interval', last-first,
+                source='observer', quantity='observation-interval', context=levels,
+                stage=self.context.stage, segment=self.out_segment, completeness='BOUNDED',
+                start_evidence=(start,), end_evidence=((record.get('end_line') or record['line']).evidence,),
+                lower_bound=last-first, upper_bound=last-first, clock_id=clock_id,
+                reason=((record['timing_issue'] + '; ') if record['timing_issue'] else '') +
+                       'Within-session observation interval only; buffered output and an unknown start prevent an execution duration'),)
+        reason = record['timing_issue'] or ('Native timing unavailable; historical execution duration cannot be recovered'
+                  if finished else 'Native timing pending; execution start is unknown')
+        if first is not None and last is not None and (last < first or clock_id != record['observer_clock']):
+            reason += '; observer clock reset or changed scope makes the interval invalid'
+        if not scope['supported']:
+            reason = 'Native timing scope is outside supported ordinary static/fixed-cell VASP'
+        return (Timing(prefix + '.wall', timer + ' wall', context=levels,
+                       stage=self.context.stage, segment=self.out_segment, reason=reason,
+                       evidence=(start,)),)
+
+    def _put_history(self, record, *, levels=(), parent_id=None, kind='evaluation',
+                     native_label='', state='PARTIAL', coverage='PARTIAL', metrics=(),
+                     timings=(), evidence=(), child_count=0, annotations=()):
+        entry = HistoryEntry(record['history_id'], record['history_sequence'],
+            context=levels, parent_id=parent_id, kind=kind, native_label=str(native_label),
+            state=state, coverage=coverage, metrics=tuple(metrics), timings=tuple(timings),
+            evidence=tuple(evidence), binding_id=self.context.binding_id,
+            attempt_id=self.context.attempt_id, stage=self.context.stage,
+            segment=self.out_segment, child_count=child_count, annotations=tuple(annotations))
+        self.history_updates[entry.entry_id] = entry
+
+    def _publish_evaluation(self, evaluation):
+        self.history_dirty.discard(evaluation['serial'])
+        correspondence, matched, message = self._correspondence(evaluation)
+        supported = _scope(self.out)['supported']
+        coverage = ('UNRESOLVED' if self.out['conflicts'] or correspondence in {'conflict', 'unresolved'} else
+                    'COMPLETE' if correspondence == 'matched' and supported else 'PARTIAL')
+        levels = self._levels(evaluation)
+        notes = list(self.out['conflicts'])
+        if not supported:
+            notes.extend(_scope(self.out)['reasons'])
+        if message:
+            notes.append(message)
+        if evaluation['native_convergence'] is not None:
+            notes.append('Native EDIFF reached' if evaluation['native_convergence'] else 'Native EDIFF not reached')
+        if evaluation['trial']:
+            notes.append('Native trial/line-search text observed; no accepted optimizer step inferred')
+        notes.append('Accepted optimization step unestablished')
+        force = evaluation['force_record']
+        metrics = [item.latest for item in self._force_metrics((force,))] if force else []
+        if matched and correspondence not in {'conflict', 'unresolved', 'unsupported'}:
+            metrics.extend(item.latest for item in self._electronic_metrics(evaluation, matched))
+        for key, value in evaluation['energies'].items():
+            metrics.append(Metric('vasp.evaluation.' + key, key.replace('_', ' '),
+                'Native evaluated ionic energy; distinct from electronic iteration energy',
+                'eV', value['value'], levels, self.context.stage, self.out_segment,
+                value['half_last_place'], value['printed'], evidence=(evaluation['energy_refs'][key],)))
+        if not supported or self.out['conflicts'] or correspondence == 'conflict':
+            metrics = [replace(metric, qualification='provisional', criterion=None, relation=None) for metric in metrics]
+        complete = evaluation['complete']
+        self._put_history(evaluation, levels=levels,
+            kind='trial-evaluation' if evaluation['trial'] else 'evaluation',
+            native_label=f"{evaluation['index']} / {evaluation['native']}",
+            state='COMPLETE' if complete else 'INCOMPLETE' if evaluation['closed'] else 'PARTIAL', coverage=coverage,
+            metrics=metrics, timings=self._record_timings(evaluation, levels, finished=complete or evaluation['closed']),
+            evidence=(evaluation['line'].evidence, *((force['evidence'],) if force else ()),
+                      *evaluation['trial']), child_count=len(evaluation['rows']), annotations=notes)
+        by_position = {index: row for index, row in enumerate(matched)}
+        for index, row in enumerate(evaluation['rows']):
+            row_levels = self._levels(evaluation, row['label'])
+            native_energy = row['energy']
+            row_metrics = []
+            if native_energy is not None:
+                row_metrics.append(Metric('vasp.electronic.free_energy', 'Electronic energy',
+                    'Native electronic iteration free energy; not evaluated ionic energy', 'eV',
+                    native_energy['value'], row_levels, self.context.stage, self.out_segment,
+                    native_energy['half_last_place'], native_energy['printed'],
+                    evidence=(row['energy_ref'],)))
+            counterpart = by_position.get(index)
+            if counterpart is not None and correspondence not in {'conflict', 'unresolved', 'unsupported'}:
+                row_metrics.extend(item.latest for item in self._electronic_metrics(evaluation, (counterpart,)))
+            if not supported or self.out['conflicts'] or correspondence == 'conflict':
+                row_metrics = [replace(metric, qualification='provisional', criterion=None, relation=None) for metric in row_metrics]
+            finished = native_energy is not None or index < len(evaluation['rows']) - 1 or complete or evaluation['closed']
+            self._put_history(row, levels=row_levels, parent_id=evaluation['history_id'],
+                kind='electronic', native_label=row['label'], state='COMPLETE' if finished else 'PARTIAL',
+                coverage='COMPLETE' if counterpart is not None and supported and not self.out['conflicts'] and correspondence not in {'conflict', 'unresolved', 'unsupported'} else 'PARTIAL',
+                metrics=row_metrics, timings=self._record_timings(row, row_levels, finished=finished),
+                evidence=(row['line'].evidence,), annotations=((message,) if message else ()))
+
+    def _publish_history(self):
+        if self.out is None:
+            return
+        for evaluation in self.out['evaluations']:
+            if evaluation['serial'] in self.history_dirty or not (evaluation['complete'] or evaluation['closed']):
+                self._publish_evaluation(evaluation)
+                self.history_dirty.discard(evaluation['serial'])
+        if not self.segment_dirty:
+            return
+        self.segment_dirty = False
+        totals = []
+        for label, clock in (('Total CPU time used', 'cpu'), ('Elapsed time', 'wall')):
+            value_line = self.out['footer_timings'].get(label)
+            if value_line is not None:
+                value, line = value_line
+                valid = value['value'] is not None and value['value'] >= 0
+                totals.append(Timing('vasp.segment.' + clock, label,
+                    value['value'] if valid else None, clock=clock, quantity='cumulative',
+                    source='native' if valid else 'unavailable', stage=self.context.stage,
+                    segment=self.out_segment, completeness='COMPLETE' if valid else 'UNAVAILABLE',
+                    evidence=(line.evidence,), reason='Whole native run total; never apportioned to evaluations or added to LOOP/LOOP+'))
+        self._put_history(self.out, kind='segment-total', native_label=f'Segment {self.out_segment}',
+            state='COMPLETE' if len(self.out['timing']) == 4 else 'PARTIAL',
+            coverage='COMPLETE' if len(self.out['timing']) == 4 else 'PARTIAL',
+            timings=totals, evidence=(self.out['line'].evidence,),
+            annotations=('Native segment boundary; preparation/outside-loop duration unavailable',))
+
+    def _completed_durations(self):
+        if self.out is None:
+            return ()
+        evaluations = [item for item in self.out['evaluations'] if item['complete']][-2:]
+        result = []
+        for item in reversed(evaluations):
+            timings = self._record_timings(item, self._levels(item), finished=True)
+            result.append(next(value for value in timings if value.clock == 'wall'))
+        return tuple(result)
+
     def update(self, updates, now):
-        # Constraints are parsed before force blocks from the same observation,
-        # but never retroactively substituted into earlier force identities.
+        # Retain at most one bounded reader batch per source; structural
+        # lockstep prevents a short OSZICAR stream racing past OUTCAR history.
         for update in sorted(updates, key=lambda u: u.source.role.lower() != 'poscar'):
             role = update.source.role.lower()
             self.states[role] = update.state
@@ -523,6 +810,8 @@ class VaspAdapter:
             self.generations[role] = update.state.generation
             if update.reset and prior is not None and prior > 0 and role in {'outcar', 'oszicar', 'stdout'}:
                 self.asymmetric_reset = True
+                self.history_updates.clear()
+                self.pending_lines.clear()
                 if role == 'outcar':
                     self.out = None
                     self.out_segment = 0
@@ -534,12 +823,33 @@ class VaspAdapter:
                 self._issue('Source reset: ' + str(update.reason or role))
             if role == 'poscar':
                 self._read_poscar(update)
-                continue
-            for line in update.lines:
-                if role == 'outcar':
-                    self._read_out(line)
-                elif role == self.electronic_role:
-                    self._read_electronic(line)
+            elif role == 'outcar' or role == self.electronic_role:
+                self.pending_lines.setdefault(role, deque()).extend(update.lines)
+        poscar_pending = bool(self.states.get('poscar') and self.states['poscar'].has_more)
+        history_full = len(self.history_updates) >= MAX_PENDING_HISTORY
+        if history_full:
+            self._issue('History consumer must drain pending entries before reading more')
+        for _ in range(0 if poscar_pending or history_full else MAX_HISTORY_LINES):
+            out_lines = self.pending_lines.get('outcar')
+            electronic_lines = self.pending_lines.get(self.electronic_role)
+            if not out_lines and not electronic_lines:
+                break
+            out_ready = bool(out_lines)
+            electronic_ready = bool(electronic_lines)
+            if out_ready and electronic_ready:
+                role = 'outcar' if self.out_serial <= self.osz_serial else self.electronic_role
+            else:
+                role = 'outcar' if out_ready else self.electronic_role
+                sibling = self.electronic_role if out_ready else 'outcar'
+                ahead = self.out_serial > self.osz_serial if out_ready else self.osz_serial > self.out_serial
+                sibling_state = self.states.get(sibling)
+                if ahead and sibling_state and sibling_state.has_more:
+                    break
+            line = self.pending_lines[role].popleft()
+            if role == 'outcar':
+                self._read_out(line)
+            else:
+                self._read_electronic(line)
         if self.out is not None:
             # Late counterparts may prove a contradiction in an earlier retained
             # evaluation. A later valid evaluation cannot erase that evidence.
@@ -631,9 +941,12 @@ class VaspAdapter:
                 messages.append('Native optimizer stopping observed; no accepted-step count inferred')
         if self.flags is not None and any(any(row) and not all(row) for row in self.flags):
             limitations.append('Partial-direction constraints are not Cartesian masks; projected/free-force criterion unsupported')
+        self._publish_history()
         return ProgressSnapshot(self.context, 'vasp-live-6.6.1', status=status, phase=phase,
                                 calculation=calculation, segment=max(1, self.out_segment),
                                 iteration=iteration, metrics=tuple(sorted(metrics, key=lambda item: item.latest.priority)),
                                 events=tuple(self.events), completeness=completeness,
+                                history_columns=self._history_columns(),
+                                completed_durations=self._completed_durations(),
                                 last_new_evidence_at=self.last_new, messages=tuple(messages),
                                 limitations=tuple(dict.fromkeys(limitations)))

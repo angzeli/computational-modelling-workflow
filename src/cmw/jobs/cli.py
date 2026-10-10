@@ -311,6 +311,13 @@ def register(subcommands):
     progress.add_argument("--engine", help="explicit client-local adapter declaration for an opaque wrapper")
     progress.add_argument("--source", action="append", default=[], metavar="ROLE=ABSOLUTE_PATH",
                           help="explicit client-local observation source; repeat for additional roles")
+    progress.add_argument("--history", action="store_true", help="read a bounded native history page")
+    progress.add_argument("--limit", type=int, default=50, help="history entries per page (1–200)")
+    progress.add_argument("--cursor", help="opaque history page cursor")
+    progress.add_argument("--parent", help="history entry ID whose immediate children to show; * shows all levels")
+    progress.add_argument("--stage", help="history stage filter")
+    progress.add_argument("--segment", type=int, help="history run-segment filter")
+    progress.add_argument("--history-polls", type=int, default=32, help="maximum bounded reconstruction slices (1–4096)")
     progress.set_defaults(handler=handle)
 
     annotate = operations.add_parser("annotate", help="replace or clear a managed job note; never controls execution",
@@ -415,7 +422,7 @@ def inspect_files(store, args):
 
 
 def inspect_progress(store, args):
-    from cmw.progress.formatting import progress_text
+    from cmw.progress.formatting import history_text, progress_text
     from cmw.progress.models import SourceDescriptor
     from cmw.progress.service import ObservationService
     from .progress import resolve_context
@@ -429,13 +436,27 @@ def inspect_progress(store, args):
             raise JobsError("--source requires a nonempty role and absolute path")
         sources.append(SourceDescriptor(role, path, qualification="explicit-client-source"))
     context = resolve_context(store, args.job_id, sources=tuple(sources), engine=args.engine)
+    if args.history:
+        if not 1 <= args.limit <= 200 or not 1 <= args.history_polls <= 4096:
+            raise JobsError("History --limit must be 1–200 and --history-polls must be 1–4096")
+        if args.segment is not None and args.segment < 1:
+            raise JobsError("History --segment must be positive")
+    elif args.cursor or args.parent or args.stage or args.segment is not None:
+        raise JobsError("History filters require --history")
     observer = ObservationService()
     try:
-        snapshot = observer.poll(context)
+        if args.history:
+            for _ in range(args.history_polls):
+                snapshot = observer.history_page(context, cursor=args.cursor, limit=args.limit,
+                    parent_id=args.parent, stage=args.stage, segment=args.segment)
+                if snapshot.status != 'LOADING':
+                    break
+        else:
+            snapshot = observer.poll(context)
     finally:
         observer.close()
     print(json.dumps(snapshot.to_dict(), indent=2, ensure_ascii=True, allow_nan=False)
-          if args.json else safe_text(progress_text(snapshot, detailed=True)))
+          if args.json else safe_text(history_text(snapshot) if args.history else progress_text(snapshot, detailed=True)))
     return 0
 
 

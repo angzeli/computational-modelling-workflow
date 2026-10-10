@@ -152,7 +152,11 @@ finalization. No live-progress parsing is included.
 a controller. The console shows a compact progress card for the selected supported
 job; Enter Details exposes its cached evidence. The first adapter covers the
 existing bounded VASP native dialect. Unsupported engines retain Files navigation.
-Progress never changes job status, Guard, dispatch or scientific finalization.
+Progress never changes job status, Guard, dispatch or scientific finalization. G opens generic Progress History: Enter drills into children,
+D shows evidence, Backspace returns, `[` / `]` page, S/V select stage/segment.
+`cmw jobs progress JOB_ID --history --json` exposes bounded pages with explicit
+coverage and cursors. Native LOOP/LOOP+ timing remains separate from qualified
+observer intervals; missing historical timing stays unavailable.
 See the [live-progress and adapter contract](cmw-jobs-progress.md) for source
 overrides, metric meanings, incremental-read limits and extension examples.
 

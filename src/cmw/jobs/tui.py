@@ -21,6 +21,7 @@ from .cli import elapsed, safe_text, name_text, tail, guard_text, external_detai
 from .store import ACTIVE, PENDING, JobsError, Store
 from .locations import discover
 from .folder_opener import OpenResult, open_location, request_open
+from .history_ui import HistoryDetails, ProgressHistory
 
 
 def literal(value):
@@ -402,7 +403,7 @@ class JobsApp(App):
     Footer { background: #22303d; }
     #shortcuts { height: auto; background: #22303d; color: #d7e0e8; padding: 0 1; }
     """
-    BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
+    BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("g", "history", "Progress"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
                 Binding("p", "dispatch", "Dispatch"), Binding("h", "hold", "Hold"),
                 Binding("o", "order", "Order"), Binding("x", "cancel", "Cancel"),
                 Binding("q", "quit", "Detach", priority=True), Binding("ctrl+c", "quit", "Detach", show=False, priority=True)]
@@ -441,6 +442,7 @@ class JobsApp(App):
         self.progress_selection = None
         self.progress_snapshot = None
         self.progress_error = None
+        self.history_view = None
 
     def compose(self):
         yield Static("CMW / JOBS                                             LOCAL", id="heading")
@@ -455,7 +457,7 @@ class JobsApp(App):
         yield Static(id="progress", markup=False)
         yield Static(id="events", markup=False)
         yield Static("Best-effort guard; no machine-wide reservation. Q / Ctrl-C detaches; execution continues.", id="message", markup=False)
-        yield Static("Enter Details · F Files · N Note · L Logs · P Dispatch\nH Hold · O Order · X Cancel · B Scheduling · Q / Ctrl-C Detach", id="shortcuts", markup=False)
+        yield Static("Enter Details · F Files · G Progress · N Note · L Logs\nP Dispatch · H Hold · O Order · X Cancel · B Scheduling · Q Detach", id="shortcuts", markup=False)
         yield Footer()
 
     def on_mount(self):
@@ -486,6 +488,8 @@ class JobsApp(App):
     def sync_progress_selection(self):
         selection = self.progress_identity()
         if selection != self.progress_selection:
+            if self.history_view is not None and self.history_view.selection != selection:
+                self.history_view.invalidate()
             self.progress_generation += 1
             self.progress_selection = selection
             self.progress_snapshot = None
@@ -506,9 +510,13 @@ class JobsApp(App):
                 self.progress_service.retain(())
             return
         generation = self.progress_generation
+        history_view = self.history_view
+        history_request = ((history_view, history_view.request_generation, history_view.parameters())
+                           if history_view is not None and not history_view.closed and not history_view.expired
+                           and history_view.selection == selection else None)
         self.progress_busy = True
         def collect():
-            snapshot, error = None, None
+            snapshot, error, history_page = None, None, None
             try:
                 from cmw.progress.service import ObservationService
                 from .progress import resolve_context
@@ -519,12 +527,18 @@ class JobsApp(App):
                                    descriptors=self.location_descriptors, resolvers=self.location_resolvers,
                                    sources=self.progress_sources, engine=self.progress_engine)
                 self.progress_service.retain((context,))
-                snapshot = self.progress_service.poll(context)
+                if history_request:
+                    self.call_from_thread(history_request[0].bind_context, context)
+                    if not history_request[0].closed and not history_request[0].expired:
+                        history_page = self.progress_service.history_page(context, **history_request[2])
+                    snapshot = self.progress_service.snapshot(context)
+                else:
+                    snapshot = self.progress_service.poll(context)
             except Exception as exc:
                 error = f'{type(exc).__name__}: {exc}'
             try:
                 if not self.progress_closed:
-                    self.call_from_thread(self.accept_progress, selection, generation, snapshot, error)
+                    self.call_from_thread(self.accept_progress, selection, generation, snapshot, error, history_request, history_page)
             except RuntimeError:
                 pass  # Detached clients no longer own a visible request.
             finally:
@@ -532,7 +546,7 @@ class JobsApp(App):
                     self.progress_service.close()
         self.run_worker(collect, thread=True, group="live-progress", exit_on_error=False)
 
-    def accept_progress(self, selection, generation, snapshot, error):
+    def accept_progress(self, selection, generation, snapshot, error, history_request=None, history_page=None):
         self.progress_busy = False
         if self.progress_closed or generation != self.progress_generation or selection != self.progress_identity():
             # No replacement starts while an earlier underlying read is blocked.
@@ -544,7 +558,18 @@ class JobsApp(App):
             self.progress_snapshot = snapshot
         self.progress_error = error
         self.render_progress()
-        if snapshot is not None and any(source.has_more for source in snapshot.sources):
+        current_history = self.history_view
+        if history_request and history_page is not None:
+            view, request_generation, _ = history_request
+            if current_history is view and not view.closed:
+                view.accept_page(history_page.context, history_page, request_generation)
+            elif self.progress_service is not None:
+                self.progress_service.release_history(history_page.context)
+        history_pending = (current_history is not None and not current_history.closed and not current_history.expired
+                           and (history_request is None or current_history is not history_request[0]
+                                or current_history.request_generation != history_request[1]
+                                or history_page is not None and history_page.status == 'LOADING'))
+        if history_pending or snapshot is not None and (snapshot.completeness == 'CATCHING_UP' or any(source.has_more for source in snapshot.sources)):
             # Catch up once in bounded background slices, then return to 4s polls.
             self.set_timer(0.05, self.collect_progress)
 
@@ -823,6 +848,8 @@ class JobsApp(App):
         self.sync_progress_selection()
 
     def on_data_table_row_selected(self, event):
+        if event.data_table.id not in ("table", "external"):
+            return
         if event.data_table.id == "external":
             self.external_selected_id = event.row_key.value
         else:
@@ -831,6 +858,8 @@ class JobsApp(App):
         self.action_details()
 
     def on_data_table_row_highlighted(self, event):
+        if event.data_table.id not in ("table", "external"):
+            return
         previous = (self.selected_id, self.external_selected_id)
         if event.data_table.id == "external":
             if not event.data_table.has_focus:
@@ -859,8 +888,8 @@ class JobsApp(App):
 
     def check_action(self, action, parameters):
         # App priority bindings run before focused text widgets, including Q.
-        if isinstance(self.screen, (NoteEditor, FilesChooser)) and action in {
-            'details', 'files', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit'
+        if isinstance(self.screen, (NoteEditor, FilesChooser, ProgressHistory, HistoryDetails)) and action in {
+            'details', 'files', 'history', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit'
         }:
             return False
         return super().check_action(action, parameters)
@@ -976,6 +1005,13 @@ class JobsApp(App):
             self.query_one('#message', Static).update(literal(f"Cannot edit note: {exc}"))
             return
         self.push_screen(NoteEditor(self.store, job), lambda saved: self.refresh_state())
+
+    def action_history(self):
+        if self.external_read_only():
+            return
+        selection = self.progress_identity()
+        if selection is not None and self.selected_id:
+            self.push_screen(ProgressHistory(selection, self.selected_id))
 
     def action_details(self):
         if self.external_selected():

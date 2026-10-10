@@ -22,6 +22,22 @@ class ReaderTests(unittest.TestCase):
         self.addCleanup(reader.close)
         return reader
 
+    def test_file_version_metadata_tracks_appends_without_extra_reads(self):
+        self.path.write_text('first\n')
+        reader = self.reader()
+        initial = reader.poll(1)
+        info = self.path.stat()
+        self.assertEqual(initial.state.file_version, (info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+        unchanged = reader.poll(2)
+        self.assertEqual(unchanged.state.file_version, initial.state.file_version)
+        self.assertEqual(unchanged.state.bytes_read, 0)
+        with self.path.open('a') as handle:
+            handle.write('next\n')
+        appended = reader.poll(3)
+        self.assertNotEqual(appended.state.file_version, initial.state.file_version)
+        self.assertEqual(appended.state.generation, initial.state.generation)
+        self.assertLessEqual(appended.state.bytes_read, len('next\n') + 256)
+
     def test_arbitrary_chunking_split_utf8_and_partial_lines(self):
         reader = self.reader(byte_budget=7)
         self.path.write_bytes(b'')

@@ -102,7 +102,7 @@ evaluations only with the same constraint scope.
 
 Event identity includes binding/attempt, file generation, stage/segment, context
 path and native source position. Events retained in a snapshot are bounded recent
-evidence, not a full history API. The fictional three-level geometry → outer →
+evidence; the separate paged history view reconstructs older native contexts on demand. The fictional three-level geometry → outer →
 inner adapter test demonstrates generic CLI/card extension with another native
 unit; it is not CP2K support.
 
@@ -167,4 +167,140 @@ source position. These are client observation times, not reconstructed native
 write times. A healthy unchanged poll reports no new evidence and cannot refresh
 an old force's age or establish a stalled or completed calculation.
 
-Full history/timing presentation, ORCA parsing and CP2K parsing are deferred.
+ORCA parsing, CP2K parsing, ETA, prediction, automatic stopping and graph dashboards remain deferred.
+
+
+## History commands and navigation
+
+```sh
+cmw jobs progress J1.1 --history --json
+cmw jobs progress J1.1 --history --limit 25 --json
+cmw jobs progress J1.1 --history --cursor 'CURSOR_FROM_PREVIOUS_PAGE' --json
+cmw jobs progress J1.1 --history --parent 'ENTRY_ID_FROM_PAGE' --json
+cmw jobs progress J1.1 --history --parent '*' --stage relax --segment 2 --json
+cmw jobs progress J1.1 --history --history-polls 128 --json
+```
+
+`--parent` selects immediate children; `*` selects all depths. Each command starts
+an independent observation session and performs at most `--history-polls` bounded
+slices (default 32, range 1–4096). `--limit` bounds returned entries (default 50,
+maximum 200). If the work budget expires, `LOADING` / `PARTIAL` is returned with an
+unknown total. Increasing the budget reconstructs farther; a loading response does
+not persist a parser checkpoint between CLI invocations.
+
+In `watch`, G opens Progress History for the selected job. Enter opens children
+(or Details for a leaf), D opens full metrics/criteria/timing/source evidence,
+Backspace returns to the parent, `[` / `]` select older/newer pages, S cycles stages
+and V cycles segments. Esc/Q returns to the console; Ctrl-C detaches. P=Dispatch,
+O=Order, N=Note and F=Files retain their console meanings, and those letters remain
+ordinary text in the note editor. History reading shares the selected card's
+observation client and single background worker. Details uses cached entries.
+
+Entries have stable keys; updates preserve the selected older entry, scroll
+position and open Details. New output does not move selection to the tail.
+Queued/unsupported jobs show explicit empty states. Failure or cancellation does
+not invent terminal convergence. A source replacement invalidates navigation;
+earlier open Details is labelled as cached evidence rather than rebound silently.
+
+## Meaning of current, previous and complete history
+
+- **Current** is the latest supported structural context observed in the selected
+  binding, not necessarily the engine's instantaneous state. Catch-up is explicit.
+- **Latest / previous metrics** retain delivery 2's comparable context, source,
+  definition, constraint and criterion rules. A new SCF evaluation has no previous
+  residual inherited from the preceding evaluation.
+- **Latest / previous completed durations** refer to the two most recent complete
+  force/energy evaluations within the current native segment. Each retains its
+  evaluation label and timing source. Missing duration remains unavailable.
+- **Complete coverage** means the requested history query has been reconstructed
+  through the currently observed readable source horizon. It does not mean the
+  calculation finished, every timing exists, or all rows are returned in one page.
+  `total`, `next_cursor`, `previous_cursor`, `has_more` and `retained` distinguish
+  the filtered history from a bounded page. Missing/unreadable sources and pending
+  catch-up cannot claim complete coverage.
+
+Chronological evaluation identity is distinct from the native printed label.
+Repeated labels are retained. Explicit trial/line-search text is evidence of a
+trial evaluation; an accepted optimizer step is not inferred. Stages and native
+segments remain visible boundaries. Separate Jobs attempts are never joined from
+names, notes or a word such as “continuation”.
+
+## Timing evidence
+
+The supported modern OUTCAR grammar is `LOOP: cpu time ...: real time ...` and
+`LOOP+: cpu time ...: real time ...`, with shared numerical-token parsing,
+whitespace tolerance and complete newline records. CPU and real/wall values are
+separate observations. A LOOP is associated with its open native Iteration header;
+it may precede that iteration's energy. LOOP+ requires the corresponding complete
+native force/energy evaluation before the next header/segment/footer. Late timing
+updates the same entry. Duplicate, malformed, negative, unassociated or unsupported
+records leave timing unavailable while independent metrics remain usable.
+
+These structural rules are based on the [official-forum OUTCAR example](https://vasp.at/forum/viewtopic.php?p=27003)
+and [LOOP/LOOP+ comparison](https://vasp.at/forum/viewtopic.php?t=19225).
+Fixtures exercise scientific-notation tokens synthetically; they do not establish
+additional native-version support. Old VPU/CPU alias rows are unsupported.
+
+LOOP+ is inclusive outer-loop timing. It is never added to nested LOOP intervals.
+Final Total CPU/Elapsed footer values belong to the segment as cumulative totals;
+they never manufacture per-evaluation durations. Preparation and other work
+outside native measured intervals are not reconstructed. No CPU value substitutes
+for wall time, and no cumulative-clock subtraction or interpolation is used.
+
+An observer interval is explicitly `source=observer`,
+`quantity=observation-interval`, measured with an injected monotonic clock in one
+client session. It describes time between observations of that context, not its
+complete execution duration. Buffered output and an unknown execution start are
+stated qualifications. Several completed iterations arriving in one flush receive
+no artificial zero-length duration. Intervals freeze when the context closes;
+clock resets or changed clock identities are unavailable, never clamped to zero.
+A fresh client cannot reconstruct observer-only intervals that were never saved.
+Native timings remain reconstructible from native records. File modification
+times are used only for source-change guards, never for execution timing.
+
+## Adapter history extension and bounds
+
+The additive `HistoryEntry` contains binding/attempt identity, chronological
+sequence, arbitrary context path and parent key, native label, stage/segment,
+completion/coverage, metrics, timings and source references. Upserts preserve the
+entry key and sequence. `Timing` explicitly separates clock, quantity, source,
+value/unit, boundaries, completeness and uncertainty. `HistoryColumn` descriptors
+choose ordinary fields, metric IDs or timing; optional `kinds` selects columns for
+different context types. Neither the renderer nor the service dispatches on engine.
+
+An adapter may implement `drain_history()` to return bounded chronological entry
+upserts after each update. Optional `set_observation(monotonic_now, historical=...,
+clock_id=...)` supplies session timing qualification; replay is always historical.
+Optional `read_roles()` and `has_pending_work` provide bounded source backpressure.
+The VASP adapter uses this to align differently sized OUTCAR/OSZICAR streams;
+the fictional geometry → outer solver → inner solver fixture uses its own C/s
+metric and the same CLI, widgets, paging and details.
+
+`ObservationService.history(context, cursor=None, limit=50, parent_id=None,
+stage=None, segment=None)` (also `history_page`) returns a `HistoryPage`.
+`snapshot(context)` reads the cached live card; `release_history(context)` stops
+requesting replay work while retaining the card. Closing a view cooperatively
+releases replay resources after an outstanding read actually returns.
+
+Memory is bounded to eight cached contexts, 256 recent entries/context, four
+cached pages/context, 200 entries/page, 64 selectable stage/segment boundaries and
+one active reconstruction/context. Older segments remain accessible through all-
+segment paging or explicit CLI filters. An uncached old page reconstructs from
+the beginning using the existing reader/adapter in bounded slices; no unbounded
+in-memory index, telemetry database or durable observer history is created.
+
+Each history slice performs at most one live and one replay reader budget per
+source: 64 KiB each plus up to 256 sentinel bytes each. Unchanged cached pages do
+not reread source content. Global in-flight work remains bounded to two contexts,
+one operation per context; the console uses one worker. VASP processes at most
+2,048 queued lines/update, retaining one reader batch/source, 16 correspondence
+evaluations with at most 1,024 SCF rows each, and bounded pending history upserts
+(backpressure threshold 32,802). Existing force/atom and POSCAR limits still apply.
+
+Cursors bind query filters, attempt/source identity and file generation. Within
+one client, ordinary appends preserve navigation. Across clients, size/mtime/ctime
+must also remain unchanged; even an append conservatively requires restarting
+navigation with no cursor. This prevents a new reader's generation counter from
+accepting a cursor for an in-place rewritten file. Guards reuse existing stat
+metadata, not full-file hashes. Arbitrary unsampled interior rewrites still carry
+the reader's documented residual detection limits.
