@@ -6,6 +6,7 @@ import time
 import unicodedata
 from copy import deepcopy
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.cells import cell_len, set_cell_size
@@ -18,6 +19,8 @@ from textual.widgets import Button, DataTable, Footer, Input, Label, Static, Tex
 
 from .cli import elapsed, safe_text, name_text, tail, guard_text, external_detail, usage_cells, usage_detail, machine_text, sharing_text, job_sharing_detail, observation_sharing
 from .store import ACTIVE, PENDING, JobsError, Store
+from .locations import discover
+from .folder_opener import OpenResult, open_location, request_open
 
 
 def literal(value):
@@ -44,14 +47,14 @@ def table_name(value, width):
 
 
 def managed_columns(viewport_width, *, bounded=False):
-    """Keep identification stable across lifecycle changes; scroll below 52 columns."""
+    """Keep identification stable across lifecycle changes; scroll below 59 columns."""
     columns = [('id', 'ID P/A' if bounded and viewport_width < 128 else 'JOB ID', 8),
-               ('name', 'NAME', 12), ('status', 'STATUS', 10), ('elapsed', 'ELAPSED', 10)]
+               ('files', 'FILES', 5), ('name', 'NAME', 12), ('status', 'STATUS', 10), ('elapsed', 'ELAPSED', 10)]
     if viewport_width >= 108:
         columns[-1:-1] = [('cpu_now', 'CPU NOW', 7), ('ram_now', 'RAM NOW', 15)]
     if viewport_width >= 128:
         columns.insert(0, ('order', 'ORDER', 5))
-        columns.insert(3, ('role', 'ROLE', 9) if bounded else ('engine', 'ENGINE', 7))
+        columns.insert(4, ('role', 'ROLE', 9) if bounded else ('engine', 'ENGINE', 7))
         columns.insert(-3, ('cpus', 'CPUS', 4))
     if viewport_width >= 168:
         columns.append(('reason', 'REASON', 24))
@@ -290,14 +293,84 @@ class SharingInspect(ModalScreen):
         self.query_one("#sharing-body", Static).update(literal(text))
 
 
+@dataclass(frozen=True)
+class FilesRequest:
+    """A UI request is scoped to one state, immutable attempt and visible context."""
+    state_directory: str
+    job_id: int
+    attempt_id: str
+    context: tuple
+    generation: int
+
+
+class FilesChooser(ModalScreen):
+    BINDINGS = [("escape", "dismiss(None)", "Back"), ("q", "dismiss(None)", "Back"),
+                ("ctrl+c", "dismiss(None)", "Back")]
+    DEFAULT_CSS = """
+    FilesChooser { align: center middle; background: $background 70%; }
+    FilesChooser > Vertical { width: 94%; height: 90%; border: round $accent; padding: 1 2; background: $surface; }
+    FilesChooser VerticalScroll { height: 1fr; }
+    FilesChooser Static { height: auto; }
+    FilesChooser Button { margin-bottom: 1; }
+    FilesChooser #files-message { color: $warning; margin: 1 0; }
+    """
+
+    def __init__(self, request, result, message=""):
+        super().__init__()
+        self.request, self.result, self.message = request, result, message
+
+    def compose(self):
+        with Vertical():
+            yield Label(literal(f"FILES · {self.result.display_id} · read-only navigation"))
+            yield Static(literal(self.message or "Choose a declared location. Opening grants no process ownership."), id="files-message")
+            with VerticalScroll():
+                for index, location in enumerate(self.result.locations):
+                    stage = f" · Stage: {location.stage}" if location.stage else ""
+                    yield Static(literal(f"{location.role}{stage} · {location.accessibility}\n"
+                                         f"{location.path or location.declared_path or 'Location unknown'}\n"
+                                         f"{location.origin} · {location.qualification}"
+                                         + (f"\n{location.detail}" if location.detail else "")))
+                    yield Button("Open folder", id=f"files-location-{index}", disabled=location.path is None)
+            yield Label("Esc / Q: back · Tab: choose a folder button · full paths shown above")
+
+    def on_unmount(self):
+        self.app.files_generation += 1
+
+    def on_button_pressed(self, event):
+        event.stop()
+        index = int(event.button.id.removeprefix('files-location-'))
+        self.app.start_file_open(self.request, self.result, self.result.locations[index], chooser=self)
+
+
 class JobsTable(DataTable):
     BINDINGS = [Binding("enter", "select_cursor", "Details")]
 
+    async def _on_click(self, event):
+        if self.id != "table":
+            return
+        # Textual 6 uses rendered cell metadata, not RowSelected, for mouse hit tests.
+        row, column = event.style.meta.get("row"), event.style.meta.get("column")
+        if (isinstance(row, int) and isinstance(column, int) and 0 <= row < self.row_count
+                and 0 <= column < len(self.ordered_columns)
+                and self.ordered_columns[column].key.value == "files"):
+            key = self.ordered_rows[row].key.value
+            event.stop()
+            event.prevent_default()  # Do not also dispatch DataTable.RowSelected / Details.
+            self.move_cursor(row=row, column=column, animate=False)
+            if self.app.selected_id != key or self.app.external_selected_id:
+                self.app.files_generation += 1
+            self.app.external_selected_id = None
+            self.app.selected_id = key
+            self.app.action_files()
+
     def on_focus(self):
+        previous = self.app.external_selected_id
         if self.id == "external" and self.row_count:
             self.app.external_selected_id = self.app.external_rows[self.cursor_row]
         elif self.id == "table":
             self.app.external_selected_id = None
+        if previous != self.app.external_selected_id:
+            self.app.files_generation += 1
         self.app.query_one("#selected", Static).update(literal(self.app.selected_text()))
 
 
@@ -321,12 +394,13 @@ class JobsApp(App):
     Footer { background: #22303d; }
     #shortcuts { height: auto; background: #22303d; color: #d7e0e8; padding: 0 1; }
     """
-    BINDINGS = [Binding("enter", "details", "Details"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
+    BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
                 Binding("p", "dispatch", "Dispatch"), Binding("h", "hold", "Hold"),
                 Binding("o", "order", "Order"), Binding("x", "cancel", "Cancel"),
                 Binding("q", "quit", "Detach", priority=True), Binding("ctrl+c", "quit", "Detach", show=False, priority=True)]
 
-    def __init__(self, store=None, *, clock=None, observer=None, sampler=None):
+    def __init__(self, store=None, *, clock=None, observer=None, sampler=None,
+                 location_descriptors=(), location_resolvers=None, file_opener=None):
         super().__init__()
         self.store = store or Store()
         self.clock = clock
@@ -343,6 +417,11 @@ class JobsApp(App):
         self.job_usage = {}
         self.collecting = False
         self.empty_notice_shown = False
+        self.location_descriptors = tuple(location_descriptors)
+        self.location_resolvers = location_resolvers
+        self.file_opener = file_opener or request_open
+        self.files_busy = False
+        self.files_generation = 0
 
     def compose(self):
         yield Static("CMW / JOBS                                             LOCAL", id="heading")
@@ -356,7 +435,7 @@ class JobsApp(App):
         yield Static(id="selected", markup=False)
         yield Static(id="events", markup=False)
         yield Static("Best-effort guard; no machine-wide reservation. Q / Ctrl-C detaches; execution continues.", id="message", markup=False)
-        yield Static("Enter Details · N Note · L Logs · P Dispatch · H Hold\nO Order · X Cancel · B Scheduling · Q / Ctrl-C Detach", id="shortcuts", markup=False)
+        yield Static("Enter Details · F Files · N Note · L Logs · P Dispatch\nH Hold · O Order · X Cancel · B Scheduling · Q / Ctrl-C Detach", id="shortcuts", markup=False)
         yield Footer()
 
     def on_mount(self):
@@ -365,6 +444,9 @@ class JobsApp(App):
         self.set_interval(0.5, self.refresh_state)
         self.collect_activity()
         self.set_interval(2, self.collect_activity)
+
+    def on_unmount(self):
+        self.files_generation += 1
 
     def collect_activity(self):
         if self.collecting:
@@ -513,6 +595,7 @@ class JobsApp(App):
             table.move_cursor(row=self.external_rows.index(self.external_selected_id), animate=False, scroll=False)
 
     def on_resize(self):
+        self.files_generation += 1
         if self.is_mounted:
             self.call_after_refresh(self.refresh_state)
 
@@ -520,6 +603,8 @@ class JobsApp(App):
         return next((j for j in (self.state or {}).get("jobs", []) if j["display_id"] == self.selected_id), None)
 
     def refresh_state(self):
+        previous_job = self.selected()
+        previous_files_context = self.files_context(previous_job) if previous_job else None
         table = self.query_one(DataTable)
         # Cursor movement precedes its queued highlight event; preserve that newer identity.
         if table.has_focus and 0 <= table.cursor_row < len(self.row_ids):
@@ -571,7 +656,7 @@ class JobsApp(App):
             key = job['display_id']
             cpu_now, ram_now = usage_cells(job.get('usage'))
             role = job.get('scheduling', {}).get('role', 'primary')
-            values = {'order': str(job['order'] or '—').rjust(5), 'id': key + (' A' if role == 'auxiliary' else ' P') if bounded and viewport_width < 128 else key, 'name': job['name'], 'engine': job['engine'],
+            values = {'files': '[F]', 'order': str(job['order'] or '—').rjust(5), 'id': key + (' A' if role == 'auxiliary' else ' P') if bounded and viewport_width < 128 else key, 'name': job['name'], 'engine': job['engine'],
                       'role': role.title(),
                       'status': job['status'], 'cpus': str(job['resources']['cpus'] or '—').rjust(4),
                       'cpu_now': cpu_now, 'ram_now': ram_now,
@@ -604,6 +689,11 @@ class JobsApp(App):
         elif jobs:
             self.empty_notice_shown = False
 
+        current_job = self.selected()
+        current_files_context = self.files_context(current_job) if current_job else None
+        if previous_files_context != current_files_context:
+            self.files_generation += 1
+
     def on_data_table_row_selected(self, event):
         if event.data_table.id == "external":
             self.external_selected_id = event.row_key.value
@@ -613,6 +703,7 @@ class JobsApp(App):
         self.action_details()
 
     def on_data_table_row_highlighted(self, event):
+        previous = (self.selected_id, self.external_selected_id)
         if event.data_table.id == "external":
             if not event.data_table.has_focus:
                 return
@@ -622,6 +713,8 @@ class JobsApp(App):
                 return
             self.external_selected_id = None
             self.selected_id = event.row_key.value
+        if previous != (self.selected_id, self.external_selected_id):
+            self.files_generation += 1
         self.query_one("#selected", Static).update(literal(self.selected_text()))
 
     def apply(self, function):
@@ -637,11 +730,108 @@ class JobsApp(App):
 
     def check_action(self, action, parameters):
         # App priority bindings run before focused text widgets, including Q.
-        if isinstance(self.screen, NoteEditor) and action in {
-            'details', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit'
+        if isinstance(self.screen, (NoteEditor, FilesChooser)) and action in {
+            'details', 'files', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit'
         }:
             return False
         return super().check_action(action, parameters)
+
+    def files_context(self, job):
+        # No path probing here: discovery and the final accessibility check run in workers.
+        declarations = json.dumps({key: job.get(key) for key in ('argv', 'env', 'cwd', 'logs', 'layout')},
+                                  sort_keys=True)
+        rows = tuple((j['id'], j['attempt_id'], j.get('order')) for j in (self.state or {}).get('jobs', []))
+        return (self.selected_id, self.external_selected_id, tuple(self.size), rows, declarations)
+
+    def files_current(self, request):
+        job = self.selected()
+        screen_valid = (not isinstance(self.screen, ModalScreen)
+                        or isinstance(self.screen, FilesChooser) and self.screen.request == request)
+        return (screen_valid and job is not None and request.generation == self.files_generation
+                and str(self.store.root) == request.state_directory
+                and job['id'] == request.job_id and job['attempt_id'] == request.attempt_id
+                and self.files_context(job) == request.context)
+
+    def files_message(self, message, chooser=None):
+        target = chooser.query_one('#files-message', Static) if chooser and chooser.is_mounted else self.query_one('#message', Static)
+        target.update(literal(message))
+
+    def action_files(self):
+        if self.external_selected_id:
+            self.files_message("Files navigation is currently available for managed jobs only; external activity remains read-only.")
+            return
+        job = self.selected()
+        if job is None:
+            return
+        if self.files_busy:
+            self.files_message("A Files request is still being checked; try again when it finishes.")
+            return
+        request = FilesRequest(str(self.store.root), job['id'], job['attempt_id'],
+                               self.files_context(job), self.files_generation)
+        self.files_busy = True
+        self.files_message("Checking declared file locations…")
+        def collect():
+            try:
+                result = discover(self.store, request.job_id, expected_attempt_id=request.attempt_id,
+                                  descriptors=self.location_descriptors, resolvers=self.location_resolvers)
+            except (ValueError, OSError) as exc:
+                self.call_from_thread(self.accept_files, request, None, str(exc))
+            else:
+                self.call_from_thread(self.accept_files, request, result, None)
+        self.run_worker(collect, thread=True, group="files-navigation", exit_on_error=False)
+
+    def accept_files(self, request, result, error):
+        self.files_busy = False
+        if not self.files_current(request):
+            self.files_message("Files request expired after the selection, layout or job changed. Select Files again.")
+            return
+        if error:
+            self.files_message(f"Cannot inspect Files: {error}")
+            return
+        preferred = next((location for location in result.locations if location.key == result.preferred_key), None)
+        if preferred and preferred.accessibility == 'AVAILABLE':
+            self.start_file_open(request, result, preferred)
+        else:
+            message = (f"{preferred.accessibility}: {preferred.path or preferred.declared_path}. Choose an alternative below."
+                       if preferred else "No unique current output. Choose a role and stage below.")
+            self.push_screen(FilesChooser(request, result, message))
+
+    def start_file_open(self, request, result, location, chooser=None):
+        if not self.files_current(request):
+            self.files_message("Files selection expired. Close this chooser and select Files again.", chooser)
+            return
+        if self.files_busy:
+            self.files_message("A Files request is still being checked; try again when it finishes.", chooser)
+            return
+        self.files_busy = True
+        self.files_message(f"Checking {location.path or location.declared_path}…", chooser)
+        def guarded_opener(path):
+            try:
+                current = self.call_from_thread(self.files_current, request)
+            except RuntimeError:
+                current = False  # The application was detached while the worker checked paths.
+            if not current:
+                return OpenResult('LOCATION_CHANGED', 'Files selection changed before opening', path)
+            return self.file_opener(path)
+        def opening():
+            try:
+                opened = open_location(self.store, location, descriptors=self.location_descriptors,
+                                       resolvers=self.location_resolvers, opener=guarded_opener)
+            except (ValueError, OSError) as exc:
+                opened = OpenResult('OPEN_FAILED', str(exc), location.path)
+            self.call_from_thread(self.accept_file_open, request, result, opened, chooser)
+        self.run_worker(opening, thread=True, group="files-navigation", exit_on_error=False)
+
+    def accept_file_open(self, request, result, opened, chooser):
+        self.files_busy = False
+        if not self.files_current(request):
+            self.files_message("Files response expired after the selection, layout or job changed.", chooser)
+            return
+        message = f"{opened.status}: {opened.reason}" + (f"\n{opened.path}" if opened.path else "")
+        if opened.status != 'OPEN_REQUESTED' and chooser is None:
+            self.push_screen(FilesChooser(request, result, message))
+        else:
+            self.files_message(message, chooser)
 
     def action_note(self):
         if self.external_read_only():

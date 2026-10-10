@@ -93,10 +93,10 @@ head blocks later jobs. Move it explicitly, release it, fix its launch blocker,
 or cancel that pending job. The persistent ORDER is independent of job ID and
 screen row order. The console keeps rows stable while ORDER changes.
 
-Console keys: Enter details, N edit managed note, L logs, P toggle dispatch, H hold/release, O order,
+Console keys: Enter details, F files, N edit managed note, L logs, P toggle dispatch, H hold/release, O order,
 X cancellation confirmation, B read-only scheduling details, Q or Ctrl-C detach. Arrow/Page keys scroll. Narrow
 layouts keep JOB ID, NAME, STATUS and ELAPSED visible at 77×24 and 80×24.
-NAME immediately follows JOB ID at every width. Names use literal single-line
+A small FILES action immediately follows JOB ID, followed by NAME at every width. Names use literal single-line
 text and a display-cell-aware middle ellipsis, retaining both the beginning and
 distinguishing suffix; the saved name is never shortened. Enter/details and CLI
 `show` expose the complete name. Duplicate names do not merge jobs or change
@@ -106,11 +106,45 @@ At 110 columns, current CPU/RSS return to the managed table; at 130, order,
 engine (or Bounded Sharing role) and requested CPUs also fit. Wider layouts add
 reason. Compact Bounded Sharing marks the ID with P/A; full role and omitted
 resources remain available in selected details. Layout depends on width/mode,
-not whether jobs are running or terminal. Below approximately 52 columns, the
-four identification columns remain accessible by horizontal scrolling rather
+not whether jobs are running or terminal. Below approximately 59 columns, the
+five identification/navigation columns remain accessible by horizontal scrolling rather
 than dropping NAME. Details and logs have scrollable
 panels. Live log tails are bounded to 16 KiB per stream and unchanged logs are
 not reread. Control sequences are stripped and UI markup is rendered literally.
+
+## File locations and folder navigation
+
+```sh
+cmw jobs files J1.1
+cmw jobs files J1.1 --json
+cmw jobs files J1.1 --open --role output
+cmw jobs files J1.1 --open --key LOCATION_KEY_FROM_JSON
+```
+
+Listing is read-only and never opens Finder or starts/reconciles the controller.
+Use `--state DIRECTORY` immediately after `jobs` as usual. A Files cell beside each
+managed JOB ID, or **F**, requests navigation for that exact state/job/attempt.
+Enter still opens Details, O changes Order, and N edits Note; typing F in the note
+editor inserts text normally. Hover, highlighting and refresh never open folders.
+
+A unique declared output is the preferred target. Multiple stages, ambiguous or
+unknown output, and unavailable preferred paths show a chooser with roles, stages,
+full paths and diagnostics. Missing output does not silently fall back to inputs.
+The original working directory and Jobs logs remain separately labelled. Source
+file entries open their containing directory, never the file itself. Stale clicks
+and changed paths require a fresh selection. Slow location checks run in one
+bounded background worker; they do not block the console's event loop.
+
+macOS uses the system folder opener after an explicit action and immediate path
+revalidation. Success means **open requested**, not a visually verified Finder
+window. Other platforms retain full paths and report `UNSUPPORTED_DESKTOP`.
+External observations remain read-only; this delivery provides Files for managed
+jobs only and does not infer associations from similar names or elapsed times.
+
+See [the location contract](cmw-jobs-locations.md) for supported declarations,
+accessibility states, CLI results and the session-local resolver API for future
+engines. Location evidence is separate from process ownership and scientific
+finalization. No live-progress parsing is included.
 
 ## Managed job notes
 
@@ -167,7 +201,7 @@ The main table keeps NAME and has no NOTE column. The selected panel provides a
 bounded preview, while Enter/details shows the full scrollable name and note.
 **N** opens the note editor for the selected managed job. Type ordinary multiline
 text; **Ctrl-S** or Save commits, **Esc** or Cancel discards, and **Ctrl-C** detaches
-without saving. Inside the editor, Q, P, H, X, O, L, B and N are text, and Enter
+without saving. Inside the editor, F, Q, P, H, X, O, L, B and N are text, and Enter
 inserts a newline. Outside it, Q/Ctrl-C retain their detach behavior. No edit
 signals a controller or payload, and refresh/resize never saves or resets a
 buffer. Tab indents within the text; Shift-Tab moves focus to the editor controls.

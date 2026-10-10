@@ -257,7 +257,7 @@ def register(subcommands):
     for name in ("status", "start", "stop", "pause", "resume", "watch"):
         command = operations.add_parser(name)
         if name == "watch":
-            command.description = ("Observe Jobs without starting execution. Enter: details; N: edit a managed job note. "
+            command.description = ("Observe Jobs without starting execution. Enter: details; F: files; N: edit a managed job note. "
                 "Editor: Ctrl-S saves, Esc cancels, Ctrl-C detaches without saving; Q inserts text. "
                 "Outside the editor Q or Ctrl-C detaches and execution continues.")
         if name != "watch":
@@ -296,6 +296,14 @@ def register(subcommands):
             command.add_argument("--stream", choices=("stdout", "stderr"), default="stdout")
             command.add_argument("--bytes", type=int, default=16384)
         command.set_defaults(handler=handle)
+
+    files = operations.add_parser("files", help="inspect declared job locations; opens folders only with --open")
+    files.add_argument("job_id")
+    files.add_argument("--json", action="store_true")
+    files.add_argument("--open", action="store_true", help="explicitly request a desktop folder open")
+    files.add_argument("--role", help="select one location role, for example output or working-directory")
+    files.add_argument("--key", help="select the exact location key from files JSON")
+    files.set_defaults(handler=handle)
 
     annotate = operations.add_parser("annotate", help="replace or clear a managed job note; never controls execution",
         description="Atomic plain-text annotation replacement. Without --expected-revision, replaces the latest note. "
@@ -346,11 +354,65 @@ def register(subcommands):
     unreserve.set_defaults(handler=handle)
 
 
+def files_text(result):
+    """Readable location evidence; no terminal markup or inferred ownership."""
+    lines = [f"FILES {result['display_id']} — {result['status']}",
+             f"State: {result['state_directory']}", f"Attempt: {result['attempt_id']}"]
+    for location in result['locations']:
+        stage = f" / {location['stage']}" if location.get('stage') else ""
+        lines.append(f"{location['role']}{stage}: {location['accessibility']} — {location.get('path') or 'unknown'}")
+        lines.append(f"  {location['kind']}; {location['origin']}; {location['qualification']}; key={location['key']}")
+        if location.get('declared_path') and location.get('path') != location['declared_path']:
+            lines.append(f"  Declared: {location['declared_path']}")
+        if location.get('detail'):
+            lines.append(f"  {location['detail']}")
+    lines.extend(str(item) for item in result.get('diagnostics', ()))
+    if 'open' in result:
+        opened = result['open']
+        lines.append(f"{opened['status']}: {opened['reason']}")
+        if opened.get('path'):
+            lines.append(opened['path'])
+    return safe_text("\n".join(lines))
+
+
+def inspect_files(store, args):
+    from .locations import discover
+
+    found = discover(store, args.job_id)
+    result = found.to_dict()
+    code = 0
+    if args.open:
+        from .folder_opener import open_location
+
+        choices = list(found.locations)
+        if args.key:
+            choices = [item for item in choices if item.key == args.key]
+        if args.role:
+            choices = [item for item in choices if item.role == args.role]
+        if not args.key and not args.role:
+            choices = [item for item in choices if item.key == found.preferred_key]
+        if len(choices) == 1:
+            result['open'] = open_location(store, choices[0]).to_dict()
+        else:
+            result['open'] = {'status': 'AMBIGUOUS' if len(choices) > 1 or found.status == 'AMBIGUOUS' else 'LOCATION_UNKNOWN',
+                              'path': None, 'reason': 'No unique selected location. Inspect the roles and full paths, then use --role or --key.'}
+        code = 0 if result['open']['status'] == 'OPEN_REQUESTED' else 2
+    elif args.key or args.role:
+        # Filtering is a presentation choice, never a change to stored metadata.
+        result['locations'] = [item for item in result['locations']
+                               if (not args.key or item['key'] == args.key)
+                               and (not args.role or item['role'] == args.role)]
+    print(json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False) if args.json else files_text(result))
+    return code
+
+
 def handle(args):
     store = Store(args.state)
     operation = args.jobs_operation
     from .activity import project
     try:
+        if operation == "files":
+            return inspect_files(store, args)
         if operation == "watch":
             try:
                 from .tui import JobsApp
