@@ -284,40 +284,55 @@ def parse_outcar(path, *, max_bytes=None):
     return segments, reader.record
 
 
+def parse_electronic_row(line, role="OSZICAR"):
+    """Parse one complete native row with the batch parser's token semantics."""
+    text = line.text
+    electronic = re.match(r"\s*([A-Z][A-Z0-9 -]*?)\s*:\s*(\d+)\s+(.*)", text)
+    if electronic and electronic[1].strip() not in {"DAV", "RMM", "CG", "DMP"} and len(NUM.findall(electronic[3])) < 5:
+        electronic = None
+    if not electronic:
+        return None
+    tokens = NUM.findall(electronic[3])
+    # Adjacent signed Fortran fields are legal; omitted columns/trailing text are not.
+    residue = NUM.sub("", electronic[3]).strip()
+    row = {"label": int(electronic[2]), "algorithm": electronic[1].strip(), "reference": reference(line, role)}
+    if len(tokens) not in (5, 6) or residue:
+        row["malformed"] = True
+    else:
+        for key, token in zip(("energy", "dE", "d_eps", "ncg", "rms", "rms_c"), tokens):
+            row[key] = number(token)
+    return row
+
+
+def parse_ionic_summary(line, role="OSZICAR"):
+    """Parse the native evaluated-energy summary, separate from SCF energy."""
+    match = re.match(r"\s*(\d+)\s+F=\s*(" + NUMBER + r")\s+E0=\s*(" + NUMBER + r")\s+d\s*E\s*=\s*(" + NUMBER + ")", line.text, re.I)
+    if not match:
+        return None
+    return {"native_ionic_label": int(match[1]), "free_energy": number(match[2]),
+            "sigma_to_zero": number(match[3]), "ionic_dE": number(match[4]),
+            "reference": reference(line, role)}
+
+
 def parse_oszicar(path, role="OSZICAR", *, max_bytes=None):
     """Keep chronological evaluation groups, including unfinished trailing groups."""
     segments, evaluations, rows = [], [], []
     with SnapshotReader(path, role, max_bytes=max_bytes) as reader:
         for line in reader:
             text = line.text
-            electronic = re.match(r"\s*([A-Z][A-Z0-9 -]*?)\s*:\s*(\d+)\s+(.*)", text)
-            if electronic and electronic[1].strip() not in {"DAV", "RMM", "CG", "DMP"} and len(NUM.findall(electronic[3])) < 5:
-                electronic = None
-            if electronic:
-                label = int(electronic[2])
-                if label == 1 and rows:
+            row = parse_electronic_row(line, role)
+            if row:
+                if row["label"] == 1 and rows:
                     evaluations.append({"rows": rows, "summary": None})
                     rows = []
-                tokens = NUM.findall(electronic[3])
-                # Full token coverage permits adjacent signed Fortran fields but
-                # rejects omitted columns and unknown trailing text.
-                residue = NUM.sub("", electronic[3]).strip()
-                row = {"label": label, "algorithm": electronic[1].strip(), "reference": reference(line, role)}
-                if len(tokens) not in (5, 6) or residue:
-                    row["malformed"] = True
-                else:
-                    for key, token in zip(("energy", "dE", "d_eps", "ncg", "rms", "rms_c"), tokens):
-                        row[key] = number(token)
                 rows.append(row)
-            summary = re.match(r"\s*(\d+)\s+F=\s*(" + NUMBER + r")\s+E0=\s*(" + NUMBER + r")\s+d\s*E\s*=\s*(" + NUMBER + ")", text, re.I)
+            summary = parse_ionic_summary(line, role)
             if summary:
-                native = int(summary[1])
+                native = summary["native_ionic_label"]
                 if evaluations and evaluations[-1]["summary"] is not None and native <= evaluations[-1]["summary"]["native_ionic_label"]:
                     segments.append(evaluations)
                     evaluations = []
-                evaluations.append({"rows": rows, "summary": {"native_ionic_label": native,
-                                    "free_energy": number(summary[2]), "sigma_to_zero": number(summary[3]),
-                                    "ionic_dE": number(summary[4]), "reference": reference(line, role)}})
+                evaluations.append({"rows": rows, "summary": summary})
                 rows = []
     if rows:
         evaluations.append({"rows": rows, "summary": None})

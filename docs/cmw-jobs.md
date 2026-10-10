@@ -146,6 +146,16 @@ accessibility states, CLI results and the session-local resolver API for future
 engines. Location evidence is separate from process ownership and scientific
 finalization. No live-progress parsing is included.
 
+## Selected-job live progress
+
+`cmw jobs progress JOB_ID [--json]` provides bounded, read-only observation without
+a controller. The console shows a compact progress card for the selected supported
+job; Enter Details exposes its cached evidence. The first adapter covers the
+existing bounded VASP native dialect. Unsupported engines retain Files navigation.
+Progress never changes job status, Guard, dispatch or scientific finalization.
+See the [live-progress and adapter contract](cmw-jobs-progress.md) for source
+overrides, metric meanings, incremental-read limits and extension examples.
+
 ## Managed job notes
 
 A managed job may carry one optional plain-text `note`, stored only in the existing

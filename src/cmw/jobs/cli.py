@@ -305,6 +305,14 @@ def register(subcommands):
     files.add_argument("--key", help="select the exact location key from files JSON")
     files.set_defaults(handler=handle)
 
+    progress = operations.add_parser("progress", help="observe declared scientific progress; never controls execution")
+    progress.add_argument("job_id")
+    progress.add_argument("--json", action="store_true")
+    progress.add_argument("--engine", help="explicit client-local adapter declaration for an opaque wrapper")
+    progress.add_argument("--source", action="append", default=[], metavar="ROLE=ABSOLUTE_PATH",
+                          help="explicit client-local observation source; repeat for additional roles")
+    progress.set_defaults(handler=handle)
+
     annotate = operations.add_parser("annotate", help="replace or clear a managed job note; never controls execution",
         description="Atomic plain-text annotation replacement. Without --expected-revision, replaces the latest note. "
                     "Use the revision from show/status JSON to reject a concurrent edit. Maximum 4096 Unicode code points.")
@@ -406,6 +414,31 @@ def inspect_files(store, args):
     return code
 
 
+def inspect_progress(store, args):
+    from cmw.progress.formatting import progress_text
+    from cmw.progress.models import SourceDescriptor
+    from cmw.progress.service import ObservationService
+    from .progress import resolve_context
+
+    sources = []
+    for declaration in args.source:
+        if "=" not in declaration:
+            raise JobsError("--source requires ROLE=ABSOLUTE_PATH")
+        role, path = declaration.split("=", 1)
+        if not role or not Path(path).is_absolute():
+            raise JobsError("--source requires a nonempty role and absolute path")
+        sources.append(SourceDescriptor(role, path, qualification="explicit-client-source"))
+    context = resolve_context(store, args.job_id, sources=tuple(sources), engine=args.engine)
+    observer = ObservationService()
+    try:
+        snapshot = observer.poll(context)
+    finally:
+        observer.close()
+    print(json.dumps(snapshot.to_dict(), indent=2, ensure_ascii=True, allow_nan=False)
+          if args.json else safe_text(progress_text(snapshot, detailed=True)))
+    return 0
+
+
 def handle(args):
     store = Store(args.state)
     operation = args.jobs_operation
@@ -413,6 +446,8 @@ def handle(args):
     try:
         if operation == "files":
             return inspect_files(store, args)
+        if operation == "progress":
+            return inspect_progress(store, args)
         if operation == "watch":
             try:
                 from .tui import JobsApp

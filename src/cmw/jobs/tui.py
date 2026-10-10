@@ -122,11 +122,12 @@ class Inspect(ModalScreen):
     Inspect Static { height: auto; }
     """
 
-    def __init__(self, store, job_id, logs=False, job_provider=None):
+    def __init__(self, store, job_id, logs=False, job_provider=None, progress_provider=None):
         super().__init__()
         self.store, self.job_id, self.logs = store, job_id, logs
         self.log_stamps = None
         self.job_provider = job_provider
+        self.progress_provider = progress_provider
 
     def compose(self):
         with Vertical():
@@ -164,6 +165,11 @@ class Inspect(ModalScreen):
                     f"Finished: {timestamp(job['finished_at'])}\nExit code: {job['exit_code']}   Signal: {job['signal']}\n"
                     f"Failure policy: {job['on_failure']}\nCHECK: Not evaluated\n\n"
                     + json.dumps({key: job[key] for key in ("argv", "env", "cwd", "logs", "worker", "group", "layout")}, indent=2, ensure_ascii=False))
+        if self.progress_provider and not self.logs:
+            snapshot = self.progress_provider(job)
+            if snapshot is not None:
+                from cmw.progress.formatting import progress_text
+                text += "\n\n" + progress_text(snapshot, detailed=True)
         self.query_one("#body", Static).update(literal(text))
 
 
@@ -372,6 +378,7 @@ class JobsTable(DataTable):
         if previous != self.app.external_selected_id:
             self.app.files_generation += 1
         self.app.query_one("#selected", Static).update(literal(self.app.selected_text()))
+        self.app.sync_progress_selection()
 
 
 class JobsApp(App):
@@ -389,6 +396,7 @@ class JobsApp(App):
     #external-heading { height: 1; padding: 0 1; }
     #external { height: 5; margin: 0 1; }
     #selected { height: auto; max-height: 7; margin: 1 1 0 1; padding: 0 1; border-left: solid #5c8996; }
+    #progress { height: auto; max-height: 11; margin: 0 1; padding: 0 1; border-left: solid #5c8996; }
     #events { height: 5; margin: 1 1 0 1; color: #9caeba; }
     #message { height: auto; max-height: 3; padding: 0 1; color: #efbd82; }
     Footer { background: #22303d; }
@@ -400,7 +408,8 @@ class JobsApp(App):
                 Binding("q", "quit", "Detach", priority=True), Binding("ctrl+c", "quit", "Detach", show=False, priority=True)]
 
     def __init__(self, store=None, *, clock=None, observer=None, sampler=None,
-                 location_descriptors=(), location_resolvers=None, file_opener=None):
+                 location_descriptors=(), location_resolvers=None, file_opener=None,
+                 progress_sources=(), progress_engine=None, progress_service=None, progress_resolver=None):
         super().__init__()
         self.store = store or Store()
         self.clock = clock
@@ -422,6 +431,16 @@ class JobsApp(App):
         self.file_opener = file_opener or request_open
         self.files_busy = False
         self.files_generation = 0
+        self.progress_sources = tuple(progress_sources)
+        self.progress_engine = progress_engine
+        self.progress_service = progress_service
+        self.progress_resolver = progress_resolver
+        self.progress_busy = False
+        self.progress_closed = False
+        self.progress_generation = 0
+        self.progress_selection = None
+        self.progress_snapshot = None
+        self.progress_error = None
 
     def compose(self):
         yield Static("CMW / JOBS                                             LOCAL", id="heading")
@@ -433,6 +452,7 @@ class JobsApp(App):
         yield Static("EXTERNAL ACTIVITY — READ ONLY", id="external-heading", markup=False)
         yield JobsTable(id="external", cursor_type="row", zebra_stripes=True)
         yield Static(id="selected", markup=False)
+        yield Static(id="progress", markup=False)
         yield Static(id="events", markup=False)
         yield Static("Best-effort guard; no machine-wide reservation. Q / Ctrl-C detaches; execution continues.", id="message", markup=False)
         yield Static("Enter Details · F Files · N Note · L Logs · P Dispatch\nH Hold · O Order · X Cancel · B Scheduling · Q / Ctrl-C Detach", id="shortcuts", markup=False)
@@ -444,9 +464,112 @@ class JobsApp(App):
         self.set_interval(0.5, self.refresh_state)
         self.collect_activity()
         self.set_interval(2, self.collect_activity)
+        self.set_interval(4, self.collect_progress)
 
     def on_unmount(self):
         self.files_generation += 1
+        self.progress_closed = True
+        self.progress_generation += 1
+        # Cancelling a Textual worker cannot stop a filesystem thread. Keep the
+        # busy gate until its real return, and let that worker release readers.
+        if not self.progress_busy and self.progress_service is not None:
+            self.progress_service.close()
+
+    def progress_identity(self):
+        job = self.selected()
+        if self.external_selected_id or job is None or not hasattr(self.store, 'root'):
+            return None
+        declarations = json.dumps({key: job.get(key) for key in ('argv', 'cwd', 'layout', 'engine')}, sort_keys=True)
+        return (str(self.store.root), job['id'], job['attempt_id'], declarations,
+                self.progress_sources, self.progress_engine, self.location_descriptors)
+
+    def sync_progress_selection(self):
+        selection = self.progress_identity()
+        if selection != self.progress_selection:
+            self.progress_generation += 1
+            self.progress_selection = selection
+            self.progress_snapshot = None
+            self.progress_error = None
+            if not self.progress_busy:
+                self.collect_progress()
+        self.render_progress()
+
+    def collect_progress(self):
+        if self.progress_busy or self.progress_closed:
+            return
+        selection = self.progress_identity()
+        if selection != self.progress_selection:
+            self.sync_progress_selection()
+            return
+        if selection is None:
+            if self.progress_service is not None:
+                self.progress_service.retain(())
+            return
+        generation = self.progress_generation
+        self.progress_busy = True
+        def collect():
+            snapshot, error = None, None
+            try:
+                from cmw.progress.service import ObservationService
+                from .progress import resolve_context
+                if self.progress_service is None:
+                    self.progress_service = ObservationService()
+                resolver = self.progress_resolver or resolve_context
+                context = resolver(self.store, selection[1], expected_attempt_id=selection[2],
+                                   descriptors=self.location_descriptors, resolvers=self.location_resolvers,
+                                   sources=self.progress_sources, engine=self.progress_engine)
+                self.progress_service.retain((context,))
+                snapshot = self.progress_service.poll(context)
+            except Exception as exc:
+                error = f'{type(exc).__name__}: {exc}'
+            try:
+                if not self.progress_closed:
+                    self.call_from_thread(self.accept_progress, selection, generation, snapshot, error)
+            except RuntimeError:
+                pass  # Detached clients no longer own a visible request.
+            finally:
+                if self.progress_closed and self.progress_service is not None:
+                    self.progress_service.close()
+        self.run_worker(collect, thread=True, group="live-progress", exit_on_error=False)
+
+    def accept_progress(self, selection, generation, snapshot, error):
+        self.progress_busy = False
+        if self.progress_closed or generation != self.progress_generation or selection != self.progress_identity():
+            # No replacement starts while an earlier underlying read is blocked.
+            if self.progress_service is not None:
+                self.progress_service.retain(())
+            self.sync_progress_selection()
+            return
+        if snapshot is not None:
+            self.progress_snapshot = snapshot
+        self.progress_error = error
+        self.render_progress()
+        if snapshot is not None and any(source.has_more for source in snapshot.sources):
+            # Catch up once in bounded background slices, then return to 4s polls.
+            self.set_timer(0.05, self.collect_progress)
+
+    def selected_progress(self, job):
+        snapshot = self.progress_snapshot
+        if (snapshot is None or snapshot.context.attempt_id != job['attempt_id']
+                or snapshot.context.job_id != job['id']):
+            return None
+        return snapshot
+
+    def render_progress(self):
+        if not self.is_mounted:
+            return
+        widget = self.query_one('#progress', Static)
+        widget.display = self.progress_selection is not None
+        compact = self.size.width < 110 or self.size.height < 36
+        widget.styles.max_height = 3 if self.size.width < 60 else 5 if compact else 11
+        if self.progress_snapshot is not None:
+            from cmw.progress.formatting import progress_text
+            text = progress_text(self.progress_snapshot, compact=compact, width=max(20, self.size.width - 5))
+            if self.progress_error:
+                text = 'Read unavailable; cached evidence: ' + self.progress_error + '\n' + text
+        else:
+            text = 'Progress: ' + (self.progress_error or 'awaiting bounded observation…')
+        widget.update(literal(text))
 
     def collect_activity(self):
         if self.collecting:
@@ -633,9 +756,13 @@ class JobsApp(App):
                   f"Managed requested: CPUs {cpu}   RAM: {ram} GiB   {counts}")
         self.query_one("#controller", Static).update(literal(header))
         self.query_one("#events", Static).display = not compact
-        self.query_one("#guard", Static).styles.max_height = 3 if compact else 5
+        tiny = self.size.width < 60
+        self.query_one("#controller", Static).styles.max_height = 2 if tiny else None
+        self.query_one("#machine", Static).styles.max_height = 1 if tiny else 2
+        self.query_one("#message", Static).styles.max_height = 1 if tiny else 3
+        self.query_one("#guard", Static).styles.max_height = 1 if tiny else 3 if compact else 5
         self.query_one("#external", DataTable).styles.height = 4 if compact else 5
-        self.query_one("#selected", Static).styles.max_height = 3 if compact else 7
+        self.query_one("#selected", Static).styles.max_height = 2 if tiny else 3 if compact else 7
         table.styles.min_height = 3 if compact else 5
         table.display = bool(jobs)
         wide = self.size.width >= 110
@@ -693,6 +820,7 @@ class JobsApp(App):
         current_files_context = self.files_context(current_job) if current_job else None
         if previous_files_context != current_files_context:
             self.files_generation += 1
+        self.sync_progress_selection()
 
     def on_data_table_row_selected(self, event):
         if event.data_table.id == "external":
@@ -716,6 +844,7 @@ class JobsApp(App):
         if previous != (self.selected_id, self.external_selected_id):
             self.files_generation += 1
         self.query_one("#selected", Static).update(literal(self.selected_text()))
+        self.sync_progress_selection()
 
     def apply(self, function):
         try:
@@ -853,7 +982,7 @@ class JobsApp(App):
             self.push_screen(ExternalInspect(self.external_selected(), provider=self.external_observation))
             return
         if self.selected_id:
-            self.push_screen(Inspect(self.store, self.selected_id, job_provider=self.current_job))
+            self.push_screen(Inspect(self.store, self.selected_id, job_provider=self.current_job, progress_provider=self.selected_progress))
 
     def action_logs(self):
         if self.external_read_only():
