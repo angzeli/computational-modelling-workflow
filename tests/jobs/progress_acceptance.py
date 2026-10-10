@@ -300,6 +300,7 @@ async def console_surface(store, cases, *, renders=None):
 
 def progress_surface(root, *, console=False, renders=None):
     from cmw.progress.registry import _REGISTRY
+    root = root.resolve()
     with patch.dict(_REGISTRY):
         register()
         store, cases = make_cases(root)

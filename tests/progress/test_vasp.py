@@ -15,7 +15,8 @@ from tests.periodic.vasp.result_fixtures import native_texts, structure_text, wr
 class VaspProgressTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='cmw-live-vasp-')
-        self.root = Path(self.temp.name)
+        # The strict batch reader rejects symlink ancestors, including macOS temp aliases.
+        self.root = Path(self.temp.name).resolve()
         self.service = ObservationService()
         self.context = RunContext('synthetic-vasp', 'VASP', tuple(
             SourceDescriptor(role.lower(), str(self.root / role), optional=role == 'POSCAR')

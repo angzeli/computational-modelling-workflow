@@ -29,7 +29,8 @@ def timing_texts(*, evaluations=2, loops=True, outer=True, footer=False, **kwarg
 class VaspHistoryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='cmw-vasp-history-')
-        self.root = Path(self.temp.name)
+        # The strict batch reader rejects symlink ancestors, including macOS temp aliases.
+        self.root = Path(self.temp.name).resolve()
         self.context = RunContext('invented-history', 'VASP', tuple(
             SourceDescriptor(role.lower(), str(self.root / role), optional=role == 'POSCAR')
             for role in ('OUTCAR', 'OSZICAR', 'POSCAR')), stage='relax', attempt_id='attempt-one')
