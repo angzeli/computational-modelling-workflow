@@ -14,6 +14,7 @@ class SourceDescriptor:
     optional: bool = False
     root_path: str | None = None
     root_identity: tuple[int, int] | None = None
+    stage: str | None = None
 
 
 @dataclass(frozen=True)

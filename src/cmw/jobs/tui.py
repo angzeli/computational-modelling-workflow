@@ -860,6 +860,13 @@ class JobsApp(App):
     def on_data_table_row_highlighted(self, event):
         if event.data_table.id not in ("table", "external"):
             return
+        rows = self.external_rows if event.data_table.id == "external" else self.row_ids
+        # Layout rebuilds queue transient highlights before restoring the cursor.
+        # Only its current row may change the selected observation or open history.
+        if (event.cursor_row != event.data_table.cursor_row
+                or not 0 <= event.cursor_row < len(rows)
+                or rows[event.cursor_row] != event.row_key.value):
+            return
         previous = (self.selected_id, self.external_selected_id)
         if event.data_table.id == "external":
             if not event.data_table.has_focus:

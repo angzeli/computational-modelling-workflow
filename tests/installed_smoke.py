@@ -620,8 +620,27 @@ def main():
     assert origin.is_relative_to(expected), (origin, expected)
     assert not Path.cwd().resolve().is_relative_to(args.source_root.resolve())
     assert Path(runtime.__file__).with_name('payload.sh').is_file()
-    assert 'textual' not in sys.modules
+    assert 'textual' not in sys.modules and 'rich' not in sys.modules
     assert (importlib.util.find_spec('textual') is not None) == (args.kind != 'core')
+    assert (importlib.util.find_spec('rich') is not None) == (args.kind != 'core')
+    lazy_probe = """import importlib.abc, sys
+class NoConsole(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'textual', 'rich'}:
+            raise AssertionError('Core observation imported optional UI: '+fullname)
+sys.meta_path.insert(0, NoConsole())
+from cmw.progress.models import RunContext
+from cmw.progress.service import ObservationService
+service = ObservationService()
+try:
+    assert service.poll(RunContext('unknown-installed', 'UNKNOWN-INSTALLED')).status == 'ADAPTER_UNAVAILABLE'
+finally:
+    service.close()
+assert 'cmw.progress.orca' not in sys.modules
+assert 'cmw.molecular.orca.status' not in sys.modules
+print('Lazy non-ORCA core observation: PASS')
+"""
+    assert 'PASS' in command([sys.executable, '-c', lazy_probe])
     cli = str(Path(sys.executable).parent/'cmw')
     assert 'jobs' in command([cli, '--help'])
     assert 'Bounded Sharing' in command([cli, 'jobs', '--help'])
@@ -643,9 +662,12 @@ def main():
                     assert app.query_one('#table') is not None
         asyncio.run(tui())
         assert not missing.exists()
+    from tests.jobs.progress_acceptance import progress_surface
+    progress = progress_surface(args.output/'progress', console=args.kind != 'core')
     report = {'kind': args.kind, 'python': sys.version, 'package_origin': str(origin),
               'cli_json_asset_optional_boundary': 'PASS',
               'tui': 'not installed (expected)' if args.kind == 'core' else 'PASS',
+              'progress_locations_history': progress,
               'annotations': annotation_surface(args.output/'annotations'),
               'vasp_preparation': preparation_surface(args.output/'vasp-preparation', cli),
               'vasp_result_evidence': result_surface(args.output/'vasp-results', cli),

@@ -51,8 +51,10 @@ counted twice. Overrides never edit the queue, argv or scientific provenance.
 
 The job's declared engine selects the adapter. `--engine` is a session-local
 adapter choice for otherwise unsupported labels, not proof of a native dialect.
-The adapter must still qualify actual source evidence. Several declared workflow
-stages require an explicit independent run context rather than guessing a stage.
+The adapter must still qualify actual source evidence. Registered exact-file plans may retain ordered, explicitly recorded stage sources.
+The ORCA plan uses exact declared native output files; it never substitutes Jobs
+stdout, cwd or the newest file. See [ORCA scope and association](molecular/orca-live-progress.md).
+An ambiguous workflow root still requires explicit sources rather than guessing.
 
 ## Contract for other callers and adapters
 
@@ -86,7 +88,7 @@ A factory receives `RunContext` and returns an object implementing
 `update(tuple[SourceUpdate, ...], now) -> ProgressSnapshot`. Source updates contain
 complete lines, bounded byte/line evidence, file identity/generation, reset reason,
 health and offsets. Adapters have no Store, launcher, signal or widget dependency.
-`SourcePlan` entries map literal filenames to declared location roles. There is no
+`SourcePlan` entries map literal filenames or exact declared files to location roles. There is no
 dynamic plugin discovery, executable configuration or installation framework.
 
 Iteration context is an arbitrary tuple of `IterationLevel` values. Metric
@@ -167,7 +169,10 @@ source position. These are client observation times, not reconstructed native
 write times. A healthy unchanged poll reports no new evidence and cannot refresh
 an old force's age or establish a stalled or completed calculation.
 
-ORCA parsing, CP2K parsing, ETA, prediction, automatic stopping and graph dashboards remain deferred.
+ORCA ordinary SCF/geometry observations use the same service and widgets; their
+[native semantics and supported scope](molecular/orca-live-progress.md) are distinct
+from VASP. CP2K parsing, ETA, prediction, automatic stopping and graph dashboards
+remain deferred.
 
 
 ## History commands and navigation
@@ -304,3 +309,41 @@ navigation with no cursor. This prevents a new reader's generation counter from
 accepting a cursor for an in-place rewritten file. Guards reuse existing stat
 metadata, not full-file hashes. Arbitrary unsampled interior rewrites still carry
 the reader's documented residual detection limits.
+
+
+## Adding a bounded engine adapter
+
+1. Declare source roles/resolution through the existing location contract. A
+   `SourcePlan` with a literal filename resolves within a declared directory;
+   `filename=None` uses an exact declared file. `stages=True` retains ordered
+   recorded stage sources, with `SourceDescriptor.stage` carrying each label.
+2. Implement a bounded adapter and explicit dialect detection. Reuse the supplied
+   `SourceUpdate`/`SourceLine` stream; do not add a file scan, poller or UI thread.
+3. Emit shared contexts, metrics, criteria, timing and source evidence with native
+   semantic IDs, units, definitions and scope. Unknown values remain null; a
+   printed convergence flag and a numeric comparison are separate evidence.
+4. Register a lazy factory and its source plan in the small internal registry.
+   No executable plugin discovery or engine import in Store/scheduling is needed.
+5. Add positive, negative, chunking, parity and installed tests. Exercise a metric
+   without a target, unknown units, nested contexts, stages/resets and missing
+   timing through the generic card, history, details and JSON.
+6. Update CAPABILITY_MAP.md and the engine's scope documentation.
+
+For explicit CLI declarations, `--source ROLE@STAGE=/absolute/file` carries a stage
+and produces the distinct role `ROLE:STAGE`. Repeat in known workflow order;
+`--stage` remains a history filter. Plain `ROLE=/absolute/file` is unchanged.
+These declarations are session-local observation associations, never edits to the
+queue or scientific provenance.
+
+Delivery 4's shared adjustments are exact-file/staged source plans, additive
+source stage metadata, and this generic CLI syntax. Existing VASP directory plans
+remain intact; cross-engine binding and fictional-adapter tests cover the changes.
+The fictional fixture distinguishes maximum components from atomic vector norms,
+uses another native unit and a target-free metric, and traverses three levels,
+stages, resets and optional timing. It is not a CP2K parser.
+
+A future CP2K adapter could emit a FORCE_EVAL context above geometry and outer/inner
+SCF levels, each with its own metrics, source evidence and criterion scope. Multiple
+FORCE_EVAL identities would remain distinct contexts within declared stages and
+segments. The existing variable-depth model and descriptor-driven presentation
+already permit that shape; no CP2K output support is implemented here.

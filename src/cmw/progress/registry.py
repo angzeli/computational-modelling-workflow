@@ -7,9 +7,10 @@ from .models import ProgressAdapter, RunContext
 @dataclass(frozen=True)
 class SourcePlan:
     role: str
-    filename: str
+    filename: str | None
     location_role: str = 'output'
     optional: bool = False
+    stages: bool = False
 
 
 @dataclass(frozen=True)
@@ -23,9 +24,16 @@ def _vasp(context):
     return VaspAdapter(context)
 
 
+def _orca(context):
+    from .orca import OrcaAdapter
+    return OrcaAdapter(context)
+
+
 _REGISTRY = {'VASP': Registration(_vasp, (
     SourcePlan('outcar', 'OUTCAR'), SourcePlan('oszicar', 'OSZICAR'),
     SourcePlan('poscar', 'POSCAR', 'inputs', True),
+)), 'ORCA': Registration(_orca, (
+    SourcePlan('orca_output', None, 'orca-output', stages=True),
 ))}
 
 

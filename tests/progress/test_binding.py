@@ -71,8 +71,8 @@ class BindingTests(unittest.TestCase):
         self.assertFalse(result.sources)
 
     def test_unsupported_engine_keeps_no_default_source_plan(self):
-        result = resolve_context(self.store, self.job(engine='ORCA')['id'])
-        self.assertEqual(result.engine, 'ORCA')
+        result = resolve_context(self.store, self.job(engine='CP2K')['id'])
+        self.assertEqual(result.engine, 'CP2K')
         self.assertFalse(result.sources)
 
     def test_source_override_rejects_uri_relative_and_duplicate_roles_or_paths(self):

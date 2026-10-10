@@ -309,8 +309,8 @@ def register(subcommands):
     progress.add_argument("job_id")
     progress.add_argument("--json", action="store_true")
     progress.add_argument("--engine", help="explicit client-local adapter declaration for an opaque wrapper")
-    progress.add_argument("--source", action="append", default=[], metavar="ROLE=ABSOLUTE_PATH",
-                          help="explicit client-local observation source; repeat for additional roles")
+    progress.add_argument("--source", action="append", default=[], metavar="ROLE[@STAGE]=ABSOLUTE_PATH",
+                          help="explicit client-local source, optionally stage-qualified; repeat in stage order")
     progress.add_argument("--history", action="store_true", help="read a bounded native history page")
     progress.add_argument("--limit", type=int, default=50, help="history entries per page (1–200)")
     progress.add_argument("--cursor", help="opaque history page cursor")
@@ -434,7 +434,14 @@ def inspect_progress(store, args):
         role, path = declaration.split("=", 1)
         if not role or not Path(path).is_absolute():
             raise JobsError("--source requires a nonempty role and absolute path")
-        sources.append(SourceDescriptor(role, path, qualification="explicit-client-source"))
+        stage = None
+        if "@" in role:
+            role, stage = role.split("@", 1)
+            if (not role or not stage or "@" in stage or not stage.isprintable()
+                    or len(stage) > 256):
+                raise JobsError("--source stage must be a nonempty printable name (up to 256 characters)")
+            role = f"{role}:{stage}"
+        sources.append(SourceDescriptor(role, path, qualification="explicit-client-source", stage=stage))
     context = resolve_context(store, args.job_id, sources=tuple(sources), engine=args.engine)
     if args.history:
         if not 1 <= args.limit <= 200 or not 1 <= args.history_polls <= 4096:

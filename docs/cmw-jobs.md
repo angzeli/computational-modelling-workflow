@@ -150,8 +150,10 @@ finalization. No live-progress parsing is included.
 
 `cmw jobs progress JOB_ID [--json]` provides bounded, read-only observation without
 a controller. The console shows a compact progress card for the selected supported
-job; Enter Details exposes its cached evidence. The first adapter covers the
-existing bounded VASP native dialect. Unsupported engines retain Files navigation.
+job; Enter Details exposes its cached evidence. Adapters cover the existing bounded
+VASP dialect and [ordinary ORCA SCF/geometry output](molecular/orca-live-progress.md).
+Their metric definitions and criteria remain engine-specific. Unsupported engines
+and ORCA stages retain Files navigation and raw logs.
 Progress never changes job status, Guard, dispatch or scientific finalization. G opens generic Progress History: Enter drills into children,
 D shows evidence, Backspace returns, `[` / `]` page, S/V select stage/segment.
 `cmw jobs progress JOB_ID --history --json` exposes bounded pages with explicit

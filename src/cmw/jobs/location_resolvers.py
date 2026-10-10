@@ -165,6 +165,13 @@ def _orca_stage_locations(options, job, *, stage=None, origin='recognized-runner
             locations.append(_decl(role, path, stage=stage, origin=origin,
                                    expected_creation=key in {'--output', '--stderr', '--metadata'},
                                    detail=f'ORCA {key[2:]} declaration; scientific validation not assessed.'))
+            if key == '--output':
+                redirected = '--external-scratch-root' in options
+                locations.append(_decl('orca-output', None if redirected else path,
+                    stage=stage, origin=origin, expected_creation=not redirected,
+                    detail=('External Scratch redirects live ORCA output; declare its exact execution '
+                            'source explicitly. This output path is the copyback destination.' if redirected else
+                            'Exact declared ORCA text output; not a Jobs log or other artifact.')))
     for key, role in (('--artifact', 'output'), ('--execution-input', 'inputs')):
         for item in options.get(key, ()):
             label, separator, value = item.partition('=')
@@ -264,6 +271,8 @@ def orca_workflow_state_locations(job):
                         or not runner.get('target_id') or not runner.get('attempt_id')):
                     locations.append(_unknown('Workflow runner identity is inconsistent.',
                                               stage=stage, origin='workflow-metadata'))
+                    locations.append(_decl('orca-output', None, stage=stage, origin='workflow-metadata',
+                                           detail='Workflow runner identity is inconsistent.'))
                     continue
                 mapped = {f'--{key.replace("_", "-")}': runner[key]
                           for key in ('input', 'output', 'stderr', 'target', 'metadata',
@@ -272,12 +281,16 @@ def orca_workflow_state_locations(job):
                 if not runner.get('output'):
                     locations.append(_unknown('Stage output is not recorded.', stage=stage,
                                               origin='workflow-metadata'))
+                    locations.append(_decl('orca-output', None, stage=stage, origin='workflow-metadata',
+                                           detail='Recorded runner has no exact stage output.'))
             else:
                 artifacts = record.get('artifacts')
                 output = artifacts.get('output') if isinstance(artifacts, Mapping) else None
                 if isinstance(output, Mapping) and output.get('path'):
                     locations.append(_decl('output', _metadata_path(output['path'], job), stage=stage,
                                            origin='workflow-metadata', detail='Recorded source; validation not reassessed.'))
+                    locations.append(_decl('orca-output', _metadata_path(output['path'], job), stage=stage,
+                                           origin='workflow-metadata', detail='Exact recorded ORCA text output.'))
                 else:
                     locations.append(_unknown('Stage output has not been recorded.', stage=stage,
                                               origin='workflow-metadata'))
@@ -286,6 +299,8 @@ def orca_workflow_state_locations(job):
                                            origin='workflow-metadata'))
     except (OSError, KeyError, TypeError, ValueError) as exc:
         locations.append(_unknown(f'Unresolved ORCA workflow metadata: {exc}', origin='workflow-metadata'))
+        locations.append(_decl('orca-output', None, origin='workflow-metadata',
+                               detail=f'Unresolved ORCA workflow metadata: {exc}'))
     return tuple(locations)
 
 
