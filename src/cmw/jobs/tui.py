@@ -19,6 +19,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Label, Static, Tex
 
 from .cli import elapsed, safe_text, name_text, tail, guard_text, external_detail, usage_cells, usage_detail, machine_text, sharing_text, job_sharing_detail, observation_sharing
 from .store import ACTIVE, PENDING, JobsError, Store
+from .status_presentation import admission_presentation, scheduling_detail
 from .locations import discover
 from .folder_opener import OpenResult, open_location, request_open
 from .history_ui import HistoryDetails, ProgressHistory
@@ -295,10 +296,7 @@ class SharingInspect(ModalScreen):
 
     def refresh_content(self):
         state = self.provider()
-        text = (f"Mode: {state.get('mode', 'Sequential')}\n" + sharing_text(state) + "\n" + guard_text(state)
-                + "\n\nRequested resources, admission commitments and observed usage are separate.\n"
-                + "Declarations are not OS-enforced limits; external processes remain read-only.\n\n"
-                + json.dumps({'scheduler': state.get('scheduler'), 'admission': state.get('admission')}, indent=2, ensure_ascii=False))
+        text = scheduling_detail(state)
         self.query_one("#sharing-body", Static).update(literal(text))
 
 
@@ -402,8 +400,8 @@ class JobsApp(App):
     #progress { height: auto; max-height: 11; margin: 0 1; padding: 0 1; border-left: solid #5c8996; }
     #events { height: 5; margin: 1 1 0 1; color: #9caeba; }
     #message { height: auto; max-height: 3; padding: 0 1; color: #efbd82; }
-    Footer { background: #22303d; }
-    #shortcuts { height: auto; background: #22303d; color: #d7e0e8; padding: 0 1; }
+    Footer { dock: bottom; background: #22303d; }
+    #shortcuts { dock: bottom; height: auto; background: #22303d; color: #d7e0e8; padding: 0 1; }
     """
     BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("g", "history", "Progress"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
                 Binding("p", "dispatch", "Dispatch"), Binding("h", "hold", "Hold"),
@@ -458,7 +456,7 @@ class JobsApp(App):
         yield Static(id="selected", markup=False)
         yield Static(id="progress", markup=False)
         yield Static(id="events", markup=False)
-        yield Static("Best-effort guard; no machine-wide reservation. Q / Ctrl-C detaches; execution continues.", id="message", markup=False)
+        yield Static("Best-effort guard · Q / Ctrl-C detaches; execution continues.", id="message", markup=False)
         yield Static("Enter Details · F Files · G Progress · N Note · L Logs\nP Dispatch · H Hold · O Order · X Cancel · B Scheduling · Q Detach", id="shortcuts", markup=False)
         yield Footer()
 
@@ -588,7 +586,9 @@ class JobsApp(App):
         widget = self.query_one('#progress', Static)
         widget.display = self.progress_selection is not None
         compact = self.size.width < 110 or self.size.height < 36
-        line_budget = 3 if self.size.width < 60 else 5 if compact else 11
+        line_budget = 3 if self.size.width < 60 else 6 if compact else 11
+        if compact and self.query_one('#external', DataTable).display:
+            line_budget = 3
         if self.progress_error:
             line_budget = max(4, line_budget)
         widget.styles.max_height = line_budget
@@ -708,7 +708,11 @@ class JobsApp(App):
                 if job['status'] in PENDING and job['id'] == decision.get('candidate_id'):
                     job['reason'] = decision['reason']
         display_state = self.display_state()
-        self.query_one("#guard", Static).update(literal(guard_text(display_state)))
+        presentation = admission_presentation(display_state)
+        tones = {'neutral': '#a9b9c7', 'caution': '#efbd82', 'warning': '#ea9595'}
+        summary = self.query_one("#guard", Static)
+        summary.update(table_name(presentation.summary, max(12, self.size.width - 2)))
+        summary.styles.color = tones[presentation.tone]
         compact = self.size.width < 110 or self.size.height < 36
         sharing = self.query_one("#sharing", Static)
         sharing.display = self.state.get('mode') == 'Bounded Sharing'
@@ -716,8 +720,9 @@ class JobsApp(App):
         sharing.update(literal(sharing_text(display_state, compact=compact)))
         table = self.query_one("#external", DataTable)
         observations = (guard or {}).get("observations", [])
-        self.query_one("#external-heading", Static).update(literal(
-            f"EXTERNAL ACTIVITY — READ ONLY · {len(observations)} observations · {len((guard or {}).get('coverage', {}).get('warnings', []))} coverage warnings"))
+        external_heading = self.query_one("#external-heading", Static)
+        external_heading.update(table_name(presentation.external_summary, max(12, self.size.width - 2)))
+        external_heading.styles.color = tones[presentation.external_tone]
         table.display = bool(observations)
         columns = ([('id', 'OBS ID', 14), ('engine', 'ENGINE', 6), ('pid', 'PID', 7), ('nproc', 'NPROC', 5),
                     ('status', 'OS STATE', 9), ('cpu_now', 'CPU NOW', 7), ('ram_now', 'RAM NOW', 15), ('age', 'PROCESS AGE', 11), ('exe', 'EXECUTABLE', 32)] if wide else
@@ -795,7 +800,8 @@ class JobsApp(App):
         self.query_one("#message", Static).styles.max_height = 1 if tiny else 3
         self.query_one("#guard", Static).styles.max_height = 1 if tiny else 3 if compact else 5
         self.query_one("#external", DataTable).styles.height = 4 if compact else 5
-        self.query_one("#selected", Static).styles.max_height = 2 if tiny else 3 if compact else 7
+        self.query_one("#selected", Static).styles.max_height = 2 if tiny else 3
+        self.query_one("#selected", Static).styles.margin = (0 if compact else 1, 1, 0, 1)
         table.styles.min_height = 3 if compact else 5
         table.display = bool(jobs)
         wide = self.size.width >= 110
@@ -844,7 +850,7 @@ class JobsApp(App):
         self.query_one("#events", Static).update(literal("EVENTS\n" + "\n".join(
             f"{datetime.fromtimestamp(e['time']).strftime('%H:%M:%S')}  {'J'+str(e['job_id'])+'.1' if e['job_id'] else 'Controller'}  {e['message']}" for e in events)))
         if not jobs and not self.empty_notice_shown:
-            self.query_one("#message", Static).update("No managed jobs. Add, then start explicitly. Best-effort guard; no machine-wide reservation. Q detaches.")
+            self.query_one("#message", Static).update("No managed jobs. Add, then start explicitly. B: guard details; Q: detach.")
             self.empty_notice_shown = True
         elif jobs:
             self.empty_notice_shown = False

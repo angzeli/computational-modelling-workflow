@@ -97,11 +97,11 @@ class TerminalTests(unittest.TestCase):
                         rendered+=read_until(fd,b'ATTEMPT DETAILS')
                         os.write(fd,b'\x1b')
                         # Await dismissal so a delayed reader cannot combine Esc + L as Alt+L.
-                        rendered+=read_until(fd,b'EXTERNAL ACTIVITY')
+                        rendered+=read_until(fd,b'External:')
                         os.write(fd,b'l')
                         rendered+=read_until(fd,b'LOG TAIL')
                         os.write(fd,b'\x1b')
-                        rendered+=read_until(fd,b'EXTERNAL ACTIVITY')
+                        rendered+=read_until(fd,b'External:')
                         if exit_key is not None:
                             os.write(fd,exit_key)
                             deadline = time.monotonic() + 8

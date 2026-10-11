@@ -533,6 +533,27 @@ unconfirmed cancellation retain their existing effects. Resume does not bypass
 the guard. External activity appearing during managed execution produces a
 conflict warning; neither process is interrupted automatically.
 
+The dashboard uses a separate presentation classification. A fresh, complete
+NO_MATCH scan with one running Sequential Primary, an online non-stale controller
+and enabled dispatch shows **Scheduling: Sequential · Slot occupied by J…** in
+restrained styling, including the queued count when applicable. No pending work
+shows an idle summary. These summaries do not change `admission.permitted`, its
+original reason, CLI status/JSON, or any launch check. Offline/stale controllers,
+Unknown ownership, stale/unavailable/uncertain observations, overlap conflicts and
+Bounded Sharing refusals retain visible caution or warning styling. Dispatch ON
+is still intent, not permission to launch.
+
+With zero external rows, the dashboard collapses the external table and retains
+an observation summary with access to **B Scheduling**. An unavailable observer
+is labelled unavailable or stale, never a healthy zero. Coverage warnings remain
+visible even for NO_MATCH. Structured non-blocking scope limitations can coexist
+with ordinary slot occupancy; material or unclassified coverage uncertainty
+retains caution. Zero observed means no recognized computation was observed in
+the declared scope, not that the machine is idle. **B Scheduling** retains the
+complete original admission/guard diagnostic, every coverage warning, scan scope
+and source, and the separate controller observation. External rows remain
+read-only when present.
+
 Only verified ownership in the selected queue exempts a managed engine: its
 persisted, birth-verified pinned group/session, live supervisor and held worker
 lock. Equal names or working directories confer no ownership. Another queue's

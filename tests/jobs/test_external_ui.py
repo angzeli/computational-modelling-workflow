@@ -138,7 +138,7 @@ class ExternalTuiTests(unittest.IsolatedAsyncioTestCase):
                     stale['external_activity'].update(state='UNAVAILABLE', stale=True, reason='Fixture timeout')
                     app.accept_activity(stale)
                     self.assertEqual(table.row_count, 1)
-                    self.assertIn('STALE', str(app.query_one('#guard', Static).render()))
+                    self.assertIn('STALE', str(app.query_one('#external-heading', Static).render()))
                     cleared = projection()
                     cleared['external_activity'].update(state='NO_MATCH', reason='No recognized external computation observed', observations=[])
                     app.accept_activity(cleared)
