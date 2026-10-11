@@ -171,7 +171,7 @@ class HistoryCliTests(unittest.TestCase):
         page=observer.history_page(context)
         column=next(column for column in page.columns if column.kind=='timing')
         value=history_cell(next(entry for entry in page.entries if entry.kind=='evaluation'),column)
-        self.assertIn('3 s',value)
+        self.assertIn('~00:00:03',value)
         self.assertIn('observer',value)
         self.assertIn('observation-interval',value)
 
@@ -188,7 +188,7 @@ class HistoryCliTests(unittest.TestCase):
         self.assertIn('unavailable',text)
         snapshot=ProgressSnapshot(RunContext('test','FICTIONAL'),'fixture',completed_durations=(replace(cpu,clock='wall',context=(IterationLevel('evaluation',2,'evaluation'),)),
                                                                                     replace(cpu,clock='wall',context=(IterationLevel('evaluation',1,'evaluation'),))))
-        self.assertIn('7s wall/native @2 ← 7s wall/native @1',progress_text(snapshot,compact=True,width=80))
+        self.assertIn('~00:00:07 wall/native @2 ← ~00:00:07 wall/native @1',progress_text(snapshot,compact=True,width=80))
         from cmw.progress.formatting import history_cell
         observed=Timing('different-id','Observed presence',1.25,clock='wall',source='observer',
                         quantity='observation-interval',completeness='PARTIAL')

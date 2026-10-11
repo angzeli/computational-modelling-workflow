@@ -100,6 +100,29 @@ class ProgressUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.store.snapshot()['controller']['online'])
         self.assertTrue(all(job['status']=='Hold' for job in self.store.snapshot()['jobs']))
 
+    async def test_cached_read_error_keeps_freshness_and_full_details(self):
+        app = self.app()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.finish(app, pilot)
+            snapshot = app.progress_snapshot
+            series = snapshot.metrics[0]
+            app.progress_snapshot = replace(snapshot, metrics=tuple(
+                replace(series, latest=replace(series.latest, semantic_id=f'fixture.{i}'), previous=None)
+                for i in range(8)))
+            message = 'Synthetic disconnected source ' + 'detail ' * 30
+            app.progress_error = message
+            app.render_progress()
+            await pilot.pause()
+            widget = app.query_one('#progress', Static)
+            card = str(widget.render())
+            self.assertIn('Read unavailable; cached evidence:', card)
+            self.assertIn('Evidence', card.splitlines()[-1])
+            self.assertLessEqual(len(card.splitlines()), widget.size.height)
+            self.assertLessEqual(widget.region.bottom, app.query_one('#shortcuts').region.y)
+            await pilot.press('enter')
+            self.assertIn(message, str(app.screen.query_one('#body', Static).render()))
+            await pilot.press('escape', 'q')
+
     async def test_delayed_selection_and_binding_results_are_discarded_without_replacement_threads(self):
         for change in ('selection', 'selection-back', 'binding', 'attempt'):
             with self.subTest(change=change):

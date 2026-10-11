@@ -171,6 +171,8 @@ class Inspect(ModalScreen):
             if snapshot is not None:
                 from cmw.progress.formatting import progress_text
                 text += "\n\n" + progress_text(snapshot, detailed=True)
+                if self.app.progress_error:
+                    text += "\nObservation read unavailable; cached evidence: " + self.app.progress_error
         self.query_one("#body", Static).update(literal(text))
 
 
@@ -586,12 +588,18 @@ class JobsApp(App):
         widget = self.query_one('#progress', Static)
         widget.display = self.progress_selection is not None
         compact = self.size.width < 110 or self.size.height < 36
-        widget.styles.max_height = 3 if self.size.width < 60 else 5 if compact else 11
+        line_budget = 3 if self.size.width < 60 else 5 if compact else 11
+        if self.progress_error:
+            line_budget = max(4, line_budget)
+        widget.styles.max_height = line_budget
         if self.progress_snapshot is not None:
             from cmw.progress.formatting import progress_text
-            text = progress_text(self.progress_snapshot, compact=compact, width=max(20, self.size.width - 5))
+            width = max(20, self.size.width - 5)
+            text = progress_text(self.progress_snapshot, compact=compact, width=width,
+                                 max_lines=line_budget - bool(self.progress_error))
             if self.progress_error:
-                text = 'Read unavailable; cached evidence: ' + self.progress_error + '\n' + text
+                error = table_name('Read unavailable; cached evidence: ' + self.progress_error, width).plain
+                text = error + '\n' + text
         else:
             text = 'Progress: ' + (self.progress_error or 'awaiting bounded observation…')
         widget.update(literal(text))

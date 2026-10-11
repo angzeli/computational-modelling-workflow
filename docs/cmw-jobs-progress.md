@@ -26,8 +26,33 @@ Unknown engines report `ADAPTER_UNAVAILABLE`; ambiguous declarations report
 
 The main console observes only the selected managed job, approximately every four
 seconds after catch-up. It never changes selection to follow another active job.
-The card uses adapter-defined metric priorities; compact layouts show a few lines,
-and Enter Details exposes the cached full evidence without another reader. Files,
+The card uses adapter-defined priorities within the active context, followed by
+recent historical evidence. For example, current SCF observations take precedence
+while the latest complete force remains labelled with its own evaluation. A new
+context with no matching observations says that current metrics are pending; it
+does not promote the preceding cycle's residuals. A completed geometry context
+again uses its adapter's geometry priorities. No engine-specific metric names or
+threshold rules are built into the widget.
+
+Wide cards show a small **LATEST / PREVIOUS / TARGET / DELTA** table. Compact cards
+use `L:`, `P:` and `T:` labels and retain evaluation/iteration references after
+`@`. The bounded card reserves room for the job table and safety warnings; Details
+and History retain omitted metrics. `*` means provisional evidence or a provisional
+target as labelled in the card, `?` means a precision-uncertain target relation,
+and other qualifications remain explicit. These are evidence qualifications, not
+scientific outcome badges. SOURCE_CONFLICT and UNSUPPORTED remain visible even
+when cached numerical observations are available.
+
+Arrows and signed deltas describe only latest/previous pairs accepted by the
+existing comparison contract. An equal pair shows `= 0`; a change within the
+supplied printed resolutions shows `≈ Δ…` without a directional arrow. Small
+nonzero changes are not rounded to a false zero. Display precision expands when
+necessary to distinguish an otherwise identically rounded pair. Increasing force
+is not failure, and decreasing force is not convergence. No trend is inferred
+across incompatible definitions, units, criteria, constraints, stages, segments or
+comparison contexts. Details explains unavailable comparisons.
+
+Enter Details exposes the cached full evidence without another reader. Files,
 Name, Note, Status, Elapsed and existing controls retain their purposes. No overall
 convergence percentage, ETA, scientific-validity badge or automatic stop is shown.
 
@@ -262,6 +287,18 @@ clock resets or changed clock identities are unavailable, never clamped to zero.
 A fresh client cannot reconstruct observer-only intervals that were never saved.
 Native timings remain reconstructible from native records. File modification
 times are used only for source-change guards, never for execution timing.
+
+Progress durations use `HH:MM:SS` with unbounded hours: `75 s` becomes `00:01:15`,
+`6444 s` becomes `01:47:24`, and `90061 s` becomes `25:01:01`. Supported fractional
+precision remains fractional; unknown or coarser-than-second source resolution,
+or additional display rounding, receives `~` rather than implying exact seconds.
+Unavailable or invalid values never become a negative duration or zero. Native
+wall and native CPU labels remain distinct. Observer values retain their observer,
+interval and completeness qualification; they are not execution-duration estimates.
+The original numeric value, unit, clock/source, printed resolution, context and
+evidence remain in Details, History details and JSON. Formatting does not change
+native association, accumulate CPU into wall time, read extra history or introduce
+another polling service.
 
 ## Adapter history extension and bounds
 

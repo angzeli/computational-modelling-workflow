@@ -127,7 +127,8 @@ class ProgressFormattingTests(unittest.TestCase):
         snapshot = ProgressSnapshot(RunContext('fictional-format', 'FICTIONAL'), 'fixture', metrics=(MetricSeries(metric),))
         compact = progress_text(snapshot, compact=True, width=120, now=1)
         self.assertIn('uncertain', compact)
-        self.assertIn('target provisional uncertain <', compact)
+        self.assertIn('T:<0.01*?', compact)
+        self.assertIn('provisional target', compact)
         full = progress_text(snapshot, detailed=True, now=1)
         self.assertIn('signed value -0.01', full)
         self.assertIn('Caller diagnostic target: < 0.005 C/s; caller policy', full)
@@ -142,7 +143,7 @@ class ProgressFormattingTests(unittest.TestCase):
                                     metrics=(MetricSeries(metric),))
         text = progress_text(snapshot, compact=True, width=80, now=1)
         self.assertIn('— @4/2/9', text)
-        self.assertIn('target —', text)
+        self.assertIn('T:—', text)
         self.assertTrue(all(len(line) <= 80 for line in text.splitlines()))
 
 

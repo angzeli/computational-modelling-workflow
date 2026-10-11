@@ -70,7 +70,7 @@ class HistoryUiTests(unittest.IsolatedAsyncioTestCase):
         before=self.store.path.read_bytes()
         async with app.run_test(size=(80,24)) as pilot:
             await self.settled(app,pilot)
-            self.assertIn('2.5s wall/native',str(app.query_one('#progress',Static).render()))
+            self.assertIn('~00:00:02 wall/native',str(app.query_one('#progress',Static).render()))
             await pilot.press('g')
             await self.settled(app,pilot)
             view=app.screen

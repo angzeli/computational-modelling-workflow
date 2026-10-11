@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import math
 import time
+import unicodedata
 
-from .models import ProgressSnapshot
+from .models import ProgressSnapshot, comparable
 
 
 def context_text(levels, *, budget=True):
@@ -69,7 +70,226 @@ def metric_text(metric, *, concise=False):
     return value_text(metric) + (' @' + position if metric.context else '')
 
 
-def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, width=120, now=None):
+def cell_width(text):
+    """Terminal columns without importing the optional console dependencies."""
+    return sum(0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in ('W', 'F') else 1
+               for char in str(text))
+
+
+def fit_text(text, width):
+    if cell_width(text) <= width:
+        return text
+    used, result = 0, []
+    for char in text:
+        size = cell_width(char)
+        if used + size > max(0, width - 1):
+            break
+        result.append(char)
+        used += size
+    return ''.join(result) + ('…' if width > 0 else '')
+
+
+def comparison_reason(latest, previous):
+    if previous is None:
+        return 'No comparable previous observation in this snapshot.'
+    if not comparable(latest, previous):
+        return 'Not comparable: definition, unit, stage, segment, criterion, source or context differs.'
+    if any(value.value is None or not math.isfinite(value.value) for value in (latest, previous)):
+        return 'Trend unavailable: a numeric observation is unavailable.'
+    return 'Descriptive delta within the adapter comparison scope; no scientific acceptance decision.'
+
+
+def trend_text(latest, previous):
+    """Describe only an already comparable pair; source resolution tempers direction."""
+    if previous is None or not comparable(latest, previous):
+        return ''
+    if any(value.value is None or not math.isfinite(value.value) for value in (latest, previous)):
+        return ''
+    delta = latest.value - previous.value
+    if not math.isfinite(delta):
+        return ''
+    if delta == 0:
+        return '= 0'
+    uncertainty = sum(value.precision or 0 for value in (latest, previous))
+    if abs(delta) <= uncertainty:
+        return f'≈ Δ{delta:+.3g}'
+    return ('↑ ' if delta > 0 else '↓ ') + f'{delta:+.3g}'
+
+
+def _context_key(levels):
+    # Display labels and budgets can become more informative without changing identity.
+    return tuple((level.kind, level.index) for level in levels)
+
+
+def _current(metric, snapshot):
+    levels, active = _context_key(metric.context), _context_key(snapshot.iteration)
+    return (metric.segment == snapshot.segment and metric.stage in (None, snapshot.context.stage, snapshot.calculation)
+            and bool(levels) and levels == active[:len(levels)])
+
+
+def card_series(snapshot, limit):
+    """Use adapter priority within current contexts, retaining one historical summary."""
+    ordered = sorted(snapshot.metrics, key=lambda item: (item.latest.priority, item.latest.semantic_id))
+    current = [item for item in ordered if _current(item.latest, snapshot)]
+    historical = [item for item in ordered if item not in current]
+    if current and historical and limit > 1:
+        return current[:limit - 1] + historical[:1]
+    return (current + historical)[:limit]
+
+
+def _metric_mark(metric):
+    if metric is None:
+        return ''
+    if metric.qualification == 'provisional' or 'PROVISIONAL' in (metric.relation or ''):
+        return '*'
+    if metric.qualification not in ('observed', 'derived') and not metric.qualification.startswith('native-'):
+        return '!'
+    return ''
+
+
+def _position(metric, digits=3):
+    value = value_text(metric, compact=True)
+    if metric is not None and metric.value is not None and math.isfinite(metric.value):
+        value = f'{metric.value:.{digits}g}'
+    return value + _metric_mark(metric) + (' @' + '/'.join(str(level.index) for level in metric.context)
+                    if metric is not None and metric.context else '')
+
+
+def _pair_positions(item):
+    digits = 3
+    latest, previous = item.latest, item.previous
+    if (previous is not None and latest.value is not None and previous.value is not None
+            and math.isfinite(latest.value) and math.isfinite(previous.value) and latest.value != previous.value):
+        while digits < 16 and f'{latest.value:.{digits}g}' == f'{previous.value:.{digits}g}':
+            digits += 1
+    return _position(latest, digits), _position(previous, digits)
+
+
+
+def _target_cell(metric):
+    if metric.criterion is None:
+        return '—'
+    criterion = metric.criterion
+    text = f'{criterion.comparator}{criterion.value:g}'
+    if criterion.unit != metric.unit:
+        text += ' ' + criterion.unit
+    if metric.qualification == 'provisional' or 'PROVISIONAL' in (metric.relation or ''):
+        text += '*'
+    if 'UNCERTAIN' in (metric.relation or ''):
+        text += '?'
+    if criterion.kind != 'engine-stopping':
+        text += ' ' + criterion.kind
+    if metric.qualification not in ('observed', 'derived', 'provisional') and not metric.qualification.startswith('native-'):
+        text += '!'
+    return text
+
+
+def _metric_label(metric, width=None):
+    unit = metric.unit.replace('Angstrom', 'Å')
+    suffix = f' [{unit}]' if unit else ''
+    label = metric.label if width is None else fit_text(metric.label, max(0, width - cell_width(suffix)))
+    return label + suffix
+
+
+
+def _compact_metric(item, width):
+    metric = item.latest
+    latest, previous = _pair_positions(item)
+    tail = f'L:{latest} P:{previous}'
+    target = f' T:{_target_cell(metric)}'
+    trend = trend_text(metric, item.previous)
+    # Keep values, context and targets before the optional descriptive trend.
+    for delta in (' ' + trend if trend else '', ''):
+        label_space = width - cell_width(tail + delta + target) - 2
+        if label_space >= min(cell_width(_metric_label(metric)), 18):
+            return _metric_label(metric, label_space) + ': ' + tail + delta + target
+    return fit_text(_metric_label(metric) + ': ' + tail + target, width)
+
+
+def _card_duration(timings, width):
+    prefix = 'Completed: ' if all(timing.quantity == 'duration' for timing in timings[:2]) else 'Timing: '
+    pair = prefix + duration_pair(timings, compact=True)
+    if cell_width(pair) <= width:
+        return pair
+    timing = timings[0]
+    position = '@' + '/'.join(str(level.index) for level in timing.context) + ' ' if timing.context else ''
+    text = duration_text(timing.value, precision=timing.precision, unit=timing.unit)
+    if timing.value is None and timing.lower_bound is not None:
+        text = '≥' + duration_text(timing.lower_bound, precision=timing.precision, unit=timing.unit) + ' observed'
+    clock = 'CPU' if timing.clock == 'cpu' else timing.clock
+    label = 'Completed' if timing.quantity == 'duration' else 'Timing'
+    qualification = '' if timing.quantity == 'duration' else ' interval' if timing.quantity == 'observation-interval' else ' ' + timing.quantity
+    if timing.completeness not in ('COMPLETE', 'AVAILABLE'):
+        qualification += ' (' + timing.completeness.lower().replace('_', ' ') + ')'
+    return f'{label}: {position}{text} {clock}/{timing.source}{qualification}'
+
+
+def _card_text(snapshot, *, compact, width, now, max_lines):
+    limit = max(3, max_lines)
+    active = 'ACTIVE: ' + (context_text(snapshot.iteration) if snapshot.iteration else snapshot.phase)
+    # Phase is retained where it adds context and space permits.
+    if snapshot.iteration:
+        with_phase = f'ACTIVE: {snapshot.phase} · ' + context_text(snapshot.iteration)
+        if not compact or cell_width(with_phase) <= width:
+            active = with_phase
+    lines = [active]
+    current_present = any(_current(item.latest, snapshot) and _context_key(item.latest.context) == _context_key(snapshot.iteration)
+                          for item in snapshot.metrics)
+    pending = bool(snapshot.iteration and not current_present and
+                   not any(_current(item.latest, snapshot) for item in snapshot.metrics))
+    if pending:
+        if limit >= 5:
+            lines.append('Current metrics: — (pending / unavailable)')
+        else:
+            suffix = ' · metrics pending'
+            lines[0] = fit_text(lines[0], max(0, width - cell_width(suffix))) + suffix
+    duration = bool(snapshot.completed_durations and limit >= 5)
+    header = not compact and width >= 110
+    count = max(1, limit - len(lines) - 1 - int(duration) - int(header))
+    selected = card_series(snapshot, count)
+    if header:
+        # The table is intentionally small; Details retains full descriptors and precision.
+        label_width = max(24, min(38, width - 85))
+        widths = (label_width, 19, 19, 17, max(8, width - label_width - 63))
+        def row(values):
+            cells = [fit_text(str(value), size) for value, size in zip(values, widths)]
+            return '  '.join(value + ' ' * (size - cell_width(value)) for value, size in zip(cells, widths)).rstrip()
+        lines.append(row(('METRIC / UNIT', 'LATEST', 'PREVIOUS', 'TARGET', 'DELTA')))
+        for item in selected:
+            latest, previous = _pair_positions(item)
+            lines.append(row((_metric_label(item.latest, label_width), latest, previous,
+                              _target_cell(item.latest), trend_text(item.latest, item.previous) or '—')))
+    else:
+        lines.extend(_compact_metric(item, width) for item in selected)
+    if not selected:
+        lines.append(snapshot.messages[0] if snapshot.messages else f'{snapshot.status}: {snapshot.completeness}')
+    if duration:
+        lines.append(_card_duration(snapshot.completed_durations, width))
+    qualifications = []
+    provisional = [item.latest for item in selected if _metric_mark(item.latest) == '*']
+    if provisional:
+        qualifications.append('* provisional ' + ('target' if all(value.criterion for value in provisional) else 'evidence'))
+    if any('?' in _target_cell(item.latest) for item in selected):
+        qualifications.append('? uncertain')
+    qualifications.extend(dict.fromkeys('! ' + item.latest.qualification for item in selected
+                          if _metric_mark(item.latest) == '!'))
+    parts = qualifications + [f'Evidence {age_text(snapshot.last_new_evidence_at, now)}', snapshot.read_health]
+    if snapshot.status not in ('OBSERVED', 'OBSERVING', 'PENDING', 'READY'):
+        parts.insert(0, snapshot.status)
+    if any(source.has_more for source in snapshot.sources):
+        parts.insert(0, 'CATCHING UP')
+    if not qualifications:
+        parts.append('Enter details')
+    evidence = ' · '.join(parts)
+    if cell_width(evidence) > width and qualifications:
+        parts = [part.replace('* provisional target', '* provisional').replace('* provisional evidence', '* provisional')
+                 for part in parts]
+        evidence = ' · '.join(parts)
+    lines.append(evidence)
+    return '\n'.join(fit_text(line, width) for line in lines[:-1][:limit-1] + [lines[-1]])
+
+
+def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, width=120, now=None, max_lines=None):
     """Render adapter descriptors without engine-specific metric names or rules."""
     now = time.time() if now is None else now
     context = snapshot.context
@@ -78,6 +298,9 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
     if snapshot.status == 'SOURCE_UNRESOLVED':
         reason = '; '.join(snapshot.messages or context.limitations or snapshot.limitations)
         return 'Progress: SOURCE_UNRESOLVED' + (f' — {reason}' if reason else '')
+    if not detailed:
+        return _card_text(snapshot, compact=compact, width=width, now=now,
+                          max_lines=max_lines or (3 if width < 54 else 6 if compact else 11))
     heading = f'PROGRESS · {snapshot.phase}'
     if snapshot.calculation:
         heading += f' · {snapshot.calculation}'
@@ -88,33 +311,14 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
     series = sorted(snapshot.metrics, key=lambda item: (item.latest.priority, item.latest.semantic_id))
     source = (f'Source: {context.association}; new evidence {age_text(snapshot.last_new_evidence_at, now)}; '
               f'{snapshot.read_health} / {snapshot.completeness}')
-    if compact and not detailed:
-        active = (snapshot.phase + ': ' + context_text(snapshot.iteration) if snapshot.iteration else heading)
-        # Keep the main table and annotations visible. Enter retains every metric,
-        # previous value, criterion and source location from this same snapshot.
-        lines = ['Progress: ' + snapshot.phase if width < 54 else active]
-        for item in series[:1 if width < 54 else 3]:
-            metric = item.latest
-            unit = f' [{metric.unit}]' if metric.unit else ''
-            position = lambda value: value_text(value, compact=True) + (' @' + '/'.join(str(level.index) for level in value.context) if value and value.context else '')
-            lines.append(f'{metric.label}{unit}: {position(metric)} ← {position(item.previous)} target {target_text(metric, compact=True)}')
-        if not series:
-            lines.append(snapshot.messages[0] if snapshot.messages else f'{snapshot.status}: {snapshot.completeness}')
-        if snapshot.completed_durations and width >= 54:
-            lines[-1:] = ['Completed duration: ' + duration_pair(snapshot.completed_durations, compact=True)]
-        lines.append((f'Evidence {age_text(snapshot.last_new_evidence_at, now)} · Enter details' if width < 54 else
-                      f'Evidence {age_text(snapshot.last_new_evidence_at, now)} · {snapshot.read_health} · Enter: contexts / targets / sources'))
-        if any(source.has_more for source in snapshot.sources):
-            lines[-1] = 'CATCHING UP · bounded historical reads · Enter: sources'
-        return '\n'.join(line if len(line) <= width else line[:max(1, width - 1)] + '…' for line in lines)
     lines = [heading, 'METRIC / NATIVE UNIT                 LATEST                PREVIOUS              TARGET']
-    for item in series if detailed else series[:6]:
+    for item in series:
         metric = item.latest
         label = metric.label + (f' [{metric.unit}]' if metric.unit else '')
         lines.append(f'{label:<34} {metric_text(metric, concise=not detailed):<21} {metric_text(item.previous, concise=not detailed):<21} {target_text(metric)}')
     if snapshot.completed_durations:
-        lines.append('Completed evaluation duration · latest ← previous: ' + duration_pair(snapshot.completed_durations))
-    lines.extend(snapshot.messages if detailed else snapshot.messages[:1])
+        lines.append('Completed evaluation timing · latest ← previous: ' + duration_pair(snapshot.completed_durations))
+    lines.extend(snapshot.messages)
     lines.append(source)
     if any(state.has_more for state in snapshot.sources):
         lines.insert(0, 'CATCHING UP · bounded historical reads; current evidence may be newer')
@@ -134,10 +338,17 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
                 for evidence in value.evidence:
                     lines.append(f'  {evidence.source_role}: {evidence.path} · generation {evidence.generation} · '
                                  f'lines {evidence.line_start}–{evidence.line_end} · bytes {evidence.byte_start}–{evidence.byte_end}')
+            lines.append('Comparison: ' + comparison_reason(metric, item.previous))
             if metric.criterion:
                 lines.append(f'Engine criterion: {target_text(metric)}; {metric.criterion.origin}; {metric.criterion.definition}')
             for target in metric.diagnostic_targets:
                 lines.append(f'Caller diagnostic target: {target.comparator} {target.value:g} {target.unit}; {target.origin}; {target.definition}')
+        for timing in snapshot.completed_durations:
+            lines.append(f'Timing {timing.label}: {timing_text(timing)}; raw value {timing.value} {timing.unit}; '
+                         f'printed resolution {timing.precision}; source {timing.source}; {timing.reason}')
+            for evidence in dict.fromkeys((*timing.evidence, *timing.start_evidence, *timing.end_evidence)):
+                lines.append(f'  {evidence.source_role}: {evidence.path} · generation {evidence.generation} · '
+                             f'lines {evidence.line_start}–{evidence.line_end} · bytes {evidence.byte_start}–{evidence.byte_end}')
         for event in snapshot.events:
             lines.append(f'Evidence: {event.kind}: {event.message} ({context_text(event.context, budget=False)})')
         for state in snapshot.sources:
@@ -147,18 +358,42 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
     return '\n'.join(lines)
 
 
+def duration_text(value, *, precision=None, unit='s'):
+    """Format elapsed values with unbounded hours; unknown/coarse precision is approximate."""
+    if value is None:
+        return 'unavailable'
+    if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return 'unavailable (invalid duration)'
+    if unit != 's':
+        return f'{value:g} {unit}'
+    known = precision is not None and math.isfinite(precision) and precision > 0
+    digits = 0
+    # Source precision conventions include both a last place and a half-last-place.
+    # Never print more fractional digits than either convention supports.
+    if known:
+        digits = min(6, max(0, int(-math.log10(precision))))
+    rounded = round(value, digits)
+    whole = int(rounded)
+    hours, rest = divmod(whole, 3600)
+    minutes, seconds = divmod(rest, 60)
+    fractional = f'{rounded - whole:.{digits}f}'[1:] if digits else ''
+    text = f'{hours:02d}:{minutes:02d}:{seconds:02d}' + fractional
+    approximate = not known or precision > 1 or abs(rounded - value) > max(1e-12, abs(value) * 1e-15)
+    return ('~' if approximate else '') + text
+
+
 def timing_text(timing, *, compact=False):
     """Keep measured clock, provenance and unavailable values explicit."""
     if timing is None:
         return 'unavailable'
     if timing.value is None:
-        value = (f'≥{timing.lower_bound:g} {timing.unit} observed' if timing.lower_bound is not None
-                 else 'unavailable')
+        value = (f'≥{duration_text(timing.lower_bound, precision=timing.precision, unit=timing.unit)} observed'
+                 if timing.lower_bound is not None else 'unavailable')
     else:
-        value = f'{timing.value:.4g} {timing.unit}'
+        value = duration_text(timing.value, precision=timing.precision, unit=timing.unit)
     clock = 'CPU' if timing.clock == 'cpu' else timing.clock
     if compact and timing.value is not None and timing.quantity == 'duration' and timing.completeness in ('COMPLETE', 'AVAILABLE'):
-        return f'{timing.value:.4g}{timing.unit} {clock}/{timing.source}'
+        return f'{value} {clock}/{timing.source}'
     suffix = f'{clock}, {timing.source}'
     if timing.quantity != 'duration':
         suffix += ', ' + timing.quantity
@@ -235,6 +470,7 @@ def history_entry_text(entry):
     for timing in entry.timings:
         lines.extend((f'\n{timing.label}: {timing_text(timing)}',
                       f'{timing.timing_id}; scope: {context_text(timing.context)}',
+                      f'Raw timing: {timing.value} {timing.unit}; source {timing.source}; printed resolution {timing.precision}',
                       f'Clock identity: {timing.clock_id or "unavailable"}; bounds: {timing.lower_bound}–{timing.upper_bound}',
                       'Timing qualification: ' + (timing.reason or timing.completeness)))
         for label, evidence in (('start', timing.start_evidence), ('end', timing.end_evidence)):
