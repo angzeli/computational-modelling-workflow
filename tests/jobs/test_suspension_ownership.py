@@ -16,11 +16,13 @@ class ControlledAbsenceProbeTests(unittest.TestCase):
         def kill(pgid, signum):
             calls.append((pgid, signum))
             self.assertEqual((pgid, signum), (11, 0))
-            if len(calls) == 1 or outcome == 'denied':
-                if lose_owner:
-                    lost[0] = True
+            observed = (outcome[min(len(calls)-1, len(outcome)-1)] if isinstance(outcome, list)
+                        else 'denied' if len(calls) == 1 or outcome == 'denied' else outcome)
+            if lose_owner and len(calls) == 1:
+                lost[0] = True
+            if observed == 'denied':
                 raise PermissionError('modeled transient zombie group')
-            if outcome == 'absent':
+            if observed == 'absent':
                 raise ProcessLookupError()
         with ExitStack() as stack:
             stack.enter_context(patch('cmw.jobs.ownership.owner_alive',
@@ -57,11 +59,42 @@ class ControlledAbsenceProbeTests(unittest.TestCase):
         self.assertIn('absence cannot be verified', error)
 
     def test_live_unwitnessed_group_never_authorizes_numeric_signal(self):
-        calls, _, error = self.observe('exists')
-        self.assertEqual(calls, [(11, 0), (11, 0)])
+        calls, elapsed, error = self.observe('exists')
+        self.assertTrue(all(signum == 0 for _, signum in calls))
+        self.assertEqual(elapsed, .5)
         self.assertIn('no verified surviving member', error)
 
     def test_owner_loss_between_observations_refuses_immediately(self):
         calls, _, error = self.observe('absent', lose_owner=True)
         self.assertEqual(calls, [(11, 0)])
         self.assertIn('ownership lost', error)
+
+    def test_transient_positive_then_absence_sends_no_signal(self):
+        calls, elapsed, error = self.observe(['exists', 'exists', 'absent'])
+        self.assertEqual(calls, [(11, 0)]*3)
+        self.assertLessEqual(elapsed, .5)
+        self.assertIsNone(error)
+
+    def test_persistent_positive_still_refuses_after_bounded_observation(self):
+        calls, elapsed, error = self.observe(['exists'])
+        self.assertGreater(len(calls), 1)
+        self.assertTrue(all(signum == 0 for _, signum in calls))
+        self.assertEqual(elapsed, .5)
+        self.assertIn('no verified surviving member', error)
+
+    def test_positive_and_denial_share_one_absence_deadline(self):
+        calls, elapsed, error = self.observe(['exists']*5+['denied']*5+['absent'])
+        self.assertTrue(all(signum == 0 for _, signum in calls))
+        self.assertLessEqual(elapsed, .5)
+        self.assertIsNone(error)
+
+    def test_owner_loss_after_positive_probe_refuses_without_further_probe(self):
+        calls, _, error = self.observe(['exists', 'absent'], lose_owner=True)
+        self.assertEqual(calls, [(11, 0)])
+        self.assertIn('ownership lost', error)
+
+    def test_legacy_default_refuses_first_positive_probe(self):
+        calls, elapsed, error = self.observe(['exists', 'absent'], grace=0)
+        self.assertEqual(calls, [(11, 0)])
+        self.assertEqual(elapsed, 0)
+        self.assertIn('no verified surviving member', error)

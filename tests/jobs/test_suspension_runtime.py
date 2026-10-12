@@ -15,11 +15,13 @@ from cmw.jobs import runtime, sharing, suspension
 from cmw.jobs.ownership import identity, owner_alive, group_members
 from cmw.jobs.store import Store, JobsError
 from tests.jobs.isolated_runtime import install
+from tests.jobs.lifecycle_evidence import capture, retain_lifecycle_evidence
 from tests.jobs.test_jobs import wait_for
 
 
 class SuspensionRuntimeTests(unittest.TestCase):
     def setUp(self):
+        self.started_at = time.time()
         self.isolation = install()
         self.temp = tempfile.TemporaryDirectory(prefix='cmw-suspension-')
         self.root = Path(self.temp.name)
@@ -40,6 +42,19 @@ class SuspensionRuntimeTests(unittest.TestCase):
                 self.sentinel.terminate(); self.sentinel.wait(timeout=5)
             wait_for(lambda: not any(owner_alive(owner) for owner in self.owners), timeout=5)
             runtime.reap_detached()
+        except BaseException as exc:
+            # Retain the failing state before TemporaryDirectory removes it.
+            try:
+                evidence_root = os.environ.get('CMW_TEST_EVIDENCE_DIR')
+                if evidence_root:
+                    Path(evidence_root).mkdir(parents=True, exist_ok=True, mode=0o700)
+                destination = Path(tempfile.mkdtemp(prefix=self._testMethodName+'-teardown-', dir=evidence_root))
+                capture(self.store, destination, outcome=f'TEARDOWN {type(exc).__name__}: {exc}',
+                        started_at=self.started_at)
+                print(f'Teardown lifecycle evidence: {destination}', flush=True)
+            except Exception as evidence_error:
+                print(f'Teardown evidence unavailable: {type(evidence_error).__name__}', file=sys.stderr)
+            raise
         finally:
             self.isolation.close()
             self.temp.cleanup()
@@ -95,6 +110,7 @@ root=Path(sys.argv[1]); seq=0; sentinel=17391
     def counter(self):
         return json.loads((self.root/'counter.json').read_text())
 
+    @retain_lifecycle_evidence
     def test_same_memory_repeat_retained_resources_dispatch_and_controller_detach(self):
         self.launch(threads=True,tree=True)
         self.sentinel = subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
@@ -131,6 +147,7 @@ root=Path(sys.argv[1]); seq=0; sentinel=17391
         self.assertGreater(final['unsuspended_elapsed'],0)
         self.assertEqual(self.store.snapshot(now=time.time()+100)['jobs'][0]['suspension']['unsuspended_elapsed'],final['unsuspended_elapsed'])
 
+    @retain_lifecycle_evidence
     def test_cancel_stopped_tree_drains_before_commitments_released(self):
         self.launch(tree=True)
         suspension.submit(self.store,1,'suspend'); stopped=self.phase('Suspended')
@@ -140,6 +157,7 @@ root=Path(sys.argv[1]); seq=0; sentinel=17391
         wait_for(lambda: self.job()['status']=='Cancelled')
         self.assertFalse(group_members(sid,session=True))
 
+    @retain_lifecycle_evidence
     def test_external_continue_invalidates_without_corrective_stop(self):
         self.launch()
         suspension.submit(self.store,1,'suspend'); stopped=self.phase('Suspended')
@@ -148,7 +166,17 @@ root=Path(sys.argv[1]); seq=0; sentinel=17391
         unverified=self.phase('Unverified')
         self.assertTrue(unverified['suspension']['inhibited'])
         with self.assertRaises(JobsError): suspension.submit(self.store,1,'continue')
+        self.store.change(1,'cancel',confirm=True)
+        def terminal():
+            state = self.store.snapshot()
+            job = state['jobs'][0]
+            if job['status'] == 'Unknown':
+                raise AssertionError('Cancellation lost ownership: '+json.dumps(state, indent=2))
+            return job if job['status'] in {'Done', 'Fail', 'Cancelled'} else None
+        finished = wait_for(terminal)
+        self.assertEqual(finished['status'], 'Cancelled', json.dumps(self.store.snapshot(), indent=2))
 
+    @retain_lifecycle_evidence
     def test_pause_aware_budget_excludes_only_confirmed_interval(self):
         self.launch(budget=2)
         suspension.submit(self.store,1,'suspend'); self.phase('Suspended')
@@ -159,6 +187,7 @@ root=Path(sys.argv[1]); seq=0; sentinel=17391
         (self.root/'finish').touch()
         wait_for(lambda:self.job()['status']=='Done')
 
+    @retain_lifecycle_evidence
     def test_hard_deadline_while_suspended_is_failure_not_continue(self):
         self.launch(hard=3)
         suspension.submit(self.store,1,'suspend'); self.phase('Suspended')

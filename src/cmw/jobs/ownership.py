@@ -123,21 +123,22 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
             except ProcessLookupError:
                 continue
         else:
-            # TERM propagation can reap a subgroup before its turn in this
-            # snapshot. macOS may briefly report EPERM for its absence probe.
+            # A subgroup can briefly outlive its last live snapshot witness
+            # while being reaped; its absence probe may be positive or EPERM.
             # Retry only that observation; never retry or broaden a signal.
             deadline = time.monotonic()+absence_grace
             while True:
                 verify_owner()
                 try:
-                    exists = group_exists(pgid)
-                    break
+                    if not group_exists(pgid):
+                        break
                 except JobsError as exc:
                     if not isinstance(exc.__cause__, PermissionError) or time.monotonic() >= deadline:
                         raise
-                    time.sleep(min(0.05, max(0, deadline-time.monotonic())))
-            if exists:
-                raise JobsError('Session subgroup has no verified surviving member; no signal sent')
+                else:
+                    if time.monotonic() >= deadline:
+                        raise JobsError('Session subgroup has no verified surviving member; no signal sent')
+                time.sleep(min(0.05, max(0, deadline-time.monotonic())))
 
 
 def group_exists(pgid):
