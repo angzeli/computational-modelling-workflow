@@ -1,5 +1,6 @@
 """Kernel locks and birth identity; never identify ownership by engine name."""
 from contextlib import contextmanager
+import errno
 import fcntl
 import os
 from pathlib import Path
@@ -94,6 +95,36 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
         if not owner_alive(owner) or os.getsid(sid) != sid or os.getpgid(sid) != sid:
             raise JobsError('Dedicated session ownership lost; no signal sent')
 
+    def await_absence(pgid):
+        # Observation only: a reaping group can briefly be positive or denied.
+        deadline = time.monotonic()+absence_grace
+        while True:
+            verify_owner()
+            try:
+                if not group_exists(pgid):
+                    return
+            except JobsError as exc:
+                if not isinstance(exc.__cause__, PermissionError) or time.monotonic() >= deadline:
+                    raise
+            else:
+                if time.monotonic() >= deadline:
+                    raise JobsError('Session subgroup has no verified surviving member; no signal sent')
+            time.sleep(min(0.05, max(0, deadline-time.monotonic())))
+
+    def witness_exited(member):
+        # owner_alive(False) also includes access denial and cannot prove exit.
+        try:
+            if identity(member['pid']) != member:
+                return False
+            return (psutil.Process(member['pid']).status() == psutil.STATUS_ZOMBIE
+                    and identity(member['pid']) == member)
+        except psutil.ZombieProcess:
+            return False  # An unreadable zombie is not a birth-verified zombie.
+        except (ProcessLookupError, psutil.NoSuchProcess):
+            return True
+        except (PermissionError, psutil.AccessDenied):
+            return False
+
     verify_owner()
     groups = {sid: [owner]}
     for pid in group_members(sid, session=True):
@@ -116,29 +147,24 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
                 verify_owner()
                 if not owner_alive(member):
                     continue
-                # A current birth-verified member witnesses a leaderless group.
-                # Numeric PGID alone never authorizes a signal.
-                os.killpg(pgid, signum)
-                break
             except ProcessLookupError:
                 continue
+            # A current birth-verified member witnesses a leaderless group.
+            # Numeric PGID alone never authorizes a signal.
+            try:
+                os.killpg(pgid, signum)
+            except ProcessLookupError:
+                continue
+            except PermissionError as exc:
+                if exc.errno != errno.EPERM or absence_grace <= 0 or not witness_exited(member):
+                    raise
+                # A denied send is not retried. Only subsequently proven group
+                # absence permits moving on; live or ambiguous groups refuse.
+                await_absence(pgid)
+            break
         else:
-            # A subgroup can briefly outlive its last live snapshot witness
-            # while being reaped; its absence probe may be positive or EPERM.
-            # Retry only that observation; never retry or broaden a signal.
-            deadline = time.monotonic()+absence_grace
-            while True:
-                verify_owner()
-                try:
-                    if not group_exists(pgid):
-                        break
-                except JobsError as exc:
-                    if not isinstance(exc.__cause__, PermissionError) or time.monotonic() >= deadline:
-                        raise
-                else:
-                    if time.monotonic() >= deadline:
-                        raise JobsError('Session subgroup has no verified surviving member; no signal sent')
-                time.sleep(min(0.05, max(0, deadline-time.monotonic())))
+            await_absence(pgid)
+
 
 
 def group_exists(pgid):

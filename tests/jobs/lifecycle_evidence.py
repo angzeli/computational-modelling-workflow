@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+import traceback
 from unittest.mock import patch
 
 import psutil
@@ -172,6 +173,7 @@ def trace_runtime(root):
 
     def uncertain(store, con, job, reason):
         record('unknown', job_id=job['id'], claim=job['claim'], reason=reason,
+               traceback=traceback.format_exc(),
                members=members(job['group']['pid']) if job.get('group') else [])
         return unknown(store, con, job, reason)
 

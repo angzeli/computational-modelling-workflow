@@ -140,3 +140,120 @@ class ProtectedLeaderTests(unittest.TestCase):
             with self.assertRaises(JobsError):
                 signal_session({'pid': 10}, signal.SIGKILL, include_leader=False)
             kill.assert_not_called()
+
+
+class SendTimeDisappearanceTests(unittest.TestCase):
+    def observe(self, witness, probes, *, grace=.5, lose_anchor=False,
+                send_error=None, include_leader=False):
+        from contextlib import ExitStack
+        import psutil
+        calls, now, sent, lost, checks = [], [0.0], [False], [False], [0]
+        owners = {pid: {'pid': pid, 'birth': 1, 'host': 'fixture', 'boot': 1}
+                  for pid in (10, 12, 13)}
+        def identify(pid):
+            if sent[0] and pid == 12:
+                checks[0] += 1
+                if witness == 'missing':
+                    raise psutil.NoSuchProcess(pid)
+                if witness == 'lookup':
+                    raise ProcessLookupError()
+                if witness == 'unbound-zombie':
+                    raise psutil.ZombieProcess(pid)
+                if witness == 'identity-denied':
+                    raise psutil.AccessDenied(pid)
+                if witness == 'identity-permission':
+                    raise PermissionError()
+                if witness == 'replaced' or (witness == 'zombie-replaced' and checks[0] > 1):
+                    return {**owners[pid], 'birth': 2}
+            return owners[pid]
+        process = Mock()
+        if witness == 'status-denied':
+            process.status.side_effect = psutil.AccessDenied(12)
+        else:
+            process.status.return_value = psutil.STATUS_ZOMBIE if witness.startswith('zombie') else 'running'
+        def kill(pgid, signum):
+            calls.append((pgid, signum))
+            if signum:
+                if pgid == 11:
+                    sent[0] = True
+                    raise send_error if send_error is not None else PermissionError(1, 'modeled denied send')
+                return
+            self.assertEqual(pgid, 11)
+            count = sum(sig == 0 for _, sig in calls)
+            observed = probes[min(count-1, len(probes)-1)]
+            if lose_anchor:
+                lost[0] = True
+            if observed == 'absent':
+                raise ProcessLookupError()
+            if observed == 'denied':
+                raise PermissionError(1, 'modeled observation denial')
+        error = None
+        with ExitStack() as stack:
+            stack.enter_context(patch('cmw.jobs.ownership.owner_alive',
+                                      side_effect=lambda item: not (item['pid'] == 10 and lost[0])))
+            stack.enter_context(patch('cmw.jobs.ownership.identity', side_effect=identify))
+            factory = stack.enter_context(patch('cmw.jobs.ownership.psutil.Process', return_value=process))
+            membership = stack.enter_context(patch('cmw.jobs.ownership.group_members', return_value=[12, 13]))
+            stack.enter_context(patch('os.getsid', return_value=10))
+            stack.enter_context(patch('os.getpgid', side_effect=lambda pid: 10 if pid == 10 else 11))
+            stack.enter_context(patch('os.killpg', side_effect=kill))
+            stack.enter_context(patch('cmw.jobs.ownership.time.monotonic', side_effect=lambda: now[0]))
+            stack.enter_context(patch('cmw.jobs.ownership.time.sleep', side_effect=lambda seconds: now.__setitem__(0, now[0]+seconds)))
+            try:
+                signal_session(owners[10], signal.SIGTERM, absence_grace=grace, include_leader=include_leader)
+            except Exception as exc:
+                error = exc
+            membership.assert_called_once_with(10, session=True)
+            inspected = factory.call_count
+        return calls, now[0], error, inspected
+
+    def test_strict_disappearance_allows_only_kernel_absence_observation(self):
+        for witness in ('missing', 'lookup', 'zombie'):
+            with self.subTest(witness=witness):
+                calls, elapsed, error, _ = self.observe(witness, ['exists', 'denied', 'absent'])
+                self.assertIsNone(error)
+                self.assertEqual(calls, [(11, signal.SIGTERM), (11, 0), (11, 0), (11, 0)])
+                self.assertLessEqual(elapsed, .5)
+
+    def test_alive_inaccessible_or_replaced_witness_refuses_without_retry(self):
+        for witness in ('live', 'identity-denied', 'identity-permission', 'status-denied',
+                        'replaced', 'zombie-replaced', 'unbound-zombie'):
+            with self.subTest(witness=witness):
+                calls, elapsed, error, _ = self.observe(witness, ['absent'])
+                self.assertIsInstance(error, PermissionError)
+                self.assertEqual(calls, [(11, signal.SIGTERM)])
+                self.assertEqual(elapsed, 0)
+
+    def test_persistent_group_presence_or_denial_refuses_after_one_grace(self):
+        for probes in (['exists'], ['denied'], ['exists', 'denied']):
+            with self.subTest(probes=probes):
+                calls, elapsed, error, _ = self.observe('missing', probes)
+                self.assertIsInstance(error, JobsError)
+                self.assertEqual([item for item in calls if item[1]], [(11, signal.SIGTERM)])
+                self.assertEqual(elapsed, .5)
+
+    def test_anchor_loss_during_absence_wait_prevents_further_probes(self):
+        calls, _, error, _ = self.observe('missing', ['exists', 'absent'], lose_anchor=True)
+        self.assertIsInstance(error, JobsError)
+        self.assertIn('ownership lost', str(error))
+        self.assertEqual(calls, [(11, signal.SIGTERM), (11, 0)])
+
+    def test_legacy_zero_grace_preserves_original_send_failure(self):
+        original = PermissionError(1, 'original legacy denial')
+        calls, elapsed, error, inspected = self.observe('missing', ['absent'], grace=0, send_error=original)
+        self.assertIs(error, original)
+        self.assertEqual(calls, [(11, signal.SIGTERM)])
+        self.assertEqual((elapsed, inspected), (0, 0))
+
+    def test_other_send_error_is_not_reclassified_or_retried(self):
+        for original in (OSError(5, 'unrelated I/O error'), PermissionError(13, 'different permission error')):
+            with self.subTest(error=original):
+                calls, elapsed, error, inspected = self.observe('missing', ['absent'], send_error=original)
+                self.assertIs(error, original)
+                self.assertEqual(calls, [(11, signal.SIGTERM)])
+                self.assertEqual((elapsed, inspected), (0, 0))
+
+    def test_proven_absence_may_advance_to_original_pinned_group(self):
+        calls, _, error, _ = self.observe('zombie', ['absent'], include_leader=True)
+        self.assertIsNone(error)
+        self.assertEqual(calls, [(11, signal.SIGTERM), (11, 0), (10, signal.SIGTERM)])
