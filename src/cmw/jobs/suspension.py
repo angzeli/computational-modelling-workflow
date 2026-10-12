@@ -29,6 +29,10 @@ class DomainPending(JobsError):
     """A known MPI launch is still forming; it is not yet signal-ready."""
 
 
+class RequestSuperseded(JobsError):
+    """A newer accepted request requires the worker's next observation."""
+
+
 BINDING = ('protocol', 'backend', 'job_id', 'attempt_id', 'claim', 'worker',
            'anchor', 'state_identity', 'nonce', 'directory_identity', 'clock')
 
@@ -464,9 +468,10 @@ class Coordinator:
     def update(self, job, **changes):
         with self.store.transaction(create=False) as con:
             latest = self.store.get(con, self.job_id)
-            if (latest['claim'] != self.claim or latest['worker'] != self.context['worker'] or
-                    latest['suspension']['revision'] != job['suspension']['revision']):
-                raise JobsError('Suspension request or authority changed before acknowledgement')
+            if latest['claim'] != self.claim or latest['worker'] != self.context['worker']:
+                raise JobsError('Suspension authority changed before acknowledgement')
+            if latest['suspension']['revision'] != job['suspension']['revision']:
+                raise RequestSuperseded('Suspension request changed before acknowledgement')
             if latest['status'] not in ACTIVE:
                 return
             latest['suspension'].update(changes)
@@ -612,6 +617,14 @@ class Coordinator:
         raise JobsError('Runner termination preparation unacknowledged; refusing ambiguous continuation')
 
     def tick(self, job):
+        try:
+            self._tick(job)
+        except RequestSuperseded:
+            # A client may commit intent during a routine observation or error
+            # report. Preserve that intent and re-read it on the next pass.
+            return
+
+    def _tick(self, job):
         from .suspension_protocol import now_clock
         now = now_clock()
         phase = job['suspension']['phase']
@@ -741,6 +754,8 @@ class Coordinator:
                                 intervals=ack.get('intervals', []), suspended_seconds=ack.get('suspended_seconds'),
                                 unsuspended_elapsed=ack.get('unsuspended_elapsed'))
                     self.pending = None
+        except RequestSuperseded:
+            raise
         except (JobsError, OSError, ValueError, KeyError, psutil.Error) as exc:
             if isinstance(exc, DomainPending) and phase == 'Run':
                 self.domain_pending_since = self.domain_pending_since or time.monotonic()

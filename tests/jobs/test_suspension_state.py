@@ -233,6 +233,53 @@ class StateTests(unittest.TestCase):
             coordinator.update(before, phase='Suspended')
         self.assertEqual(self.current()['suspension']['phase'], 'Suspending')
 
+    def test_new_request_supersedes_inflight_verification_and_invalidation(self):
+        for invalidation in (False, True):
+            with self.subTest(invalidation=invalidation):
+                before = self.phase('Run', revision=0, request=None, inhibited=False,
+                                    evidence={'checked_clock': 100, 'computational': [MEMBER]})
+                coordinator = self.coordinator()
+                accepted = []
+                def verification():
+                    accepted.append(control.submit(self.store, before['id'], 'suspend', reason='Concurrent user request'))
+                    if invalidation:
+                        raise JobsError('Observation failed after client submitted')
+                    return control.Domain((MEMBER,), (ANCHOR, RUNNER), ())
+                coordinator._validate.side_effect = verification
+                with patch.object(control, '_stopped', return_value=False):
+                    coordinator.tick(before)
+                current = self.current()
+                self.assertEqual(accepted[0]['result'], 'ACCEPTED')
+                self.assertEqual(current['status'], 'Run')
+                self.assertEqual(current['suspension']['phase'], 'Suspending')
+                self.assertEqual(current['suspension']['revision'], 1)
+                self.assertTrue(current['suspension']['inhibited'])
+                self.assertEqual(current['suspension']['reason'], 'Concurrent user request')
+                self.assertEqual(current['worker'], before['worker'])
+                coordinator.channel.write.assert_not_called()
+                coordinator.tick(current)
+                self.assertEqual(coordinator._validate.call_count, 1)
+                command = coordinator.channel.write.call_args.args[1]
+                self.assertEqual(command['operation'], 'prepare_suspend')
+                self.assertEqual(command['revision'], 1)
+                self.assertEqual(command['request_id'], current['suspension']['request']['id'])
+                self.assertEqual(coordinator.pending['id'], command['request_id'])
+        self.send.assert_not_called()
+
+    def test_authority_change_during_verification_is_not_a_superseded_request(self):
+        coordinator = self.coordinator()
+        before = self.current()
+        def replaced_worker():
+            self.change(worker=OTHER)
+            return control.Domain((MEMBER,), (ANCHOR, RUNNER), ())
+        coordinator._validate.side_effect = replaced_worker
+        with patch.object(control, '_stopped', return_value=False), self.assertRaises(JobsError) as raised:
+            coordinator.tick(before)
+        self.assertNotIsInstance(raised.exception, control.RequestSuperseded)
+        self.assertEqual(self.current()['worker'], OTHER)
+        coordinator.channel.write.assert_not_called()
+        self.send.assert_not_called()
+
     def test_external_continue_or_member_change_invalidates_suspension(self):
         for stopped, member in ((False, MEMBER), (True, OTHER)):
             self.phase('Suspended', inhibited=True)

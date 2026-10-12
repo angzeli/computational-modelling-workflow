@@ -80,7 +80,7 @@ class SharingStoreTests(unittest.TestCase):
                     pass
         self.assertEqual(self.raw(), before)
         with closing(sqlite3.connect(self.store.path)) as con, con:
-            con.execute("UPDATE meta SET value=? WHERE key='control'", (json.dumps({'schema': 3}),))
+            con.execute("UPDATE meta SET value=? WHERE key='control'", (json.dumps({'schema': 4}),))
         future = self.raw()
         with self.assertRaisesRegex(JobsError, 'Unsupported'):
             self.store.snapshot()
