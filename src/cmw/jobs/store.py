@@ -159,7 +159,7 @@ class Store:
             con.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, time REAL, job_id INTEGER, message TEXT)")
             con.execute("INSERT OR IGNORE INTO meta VALUES ('control', ?)", (json.dumps({"schema": 2, "dispatch": False, "stop": False, "reason": "Not started", "heartbeat": None, "owner": None, "scheduler": scheduler_defaults()}),))
             raw_control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
-            if type(raw_control.get('schema')) is not int or raw_control['schema'] not in {1, 2}:
+            if type(raw_control.get('schema')) is not int or raw_control['schema'] not in {1, 2, 3}:
                 raise JobsError("Unsupported Jobs state schema")
             if raw_control['schema'] == 1:
                 # Old supervisors reject schema 2 on their next receipt/finalize
@@ -187,9 +187,9 @@ class Store:
     @staticmethod
     def control(con):
         control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
-        if type(control.get('schema')) is not int or control['schema'] not in {1, 2}:
+        if type(control.get('schema')) is not int or control['schema'] not in {1, 2, 3}:
             raise JobsError('Unsupported Jobs state schema')
-        control['schema'] = 2
+        control['schema'] = max(2, control['schema'])
         control['scheduler'] = {**scheduler_defaults(), **control.get('scheduler', {})}
         return control
 
@@ -244,8 +244,12 @@ class Store:
     def add(self, *, argv, cwd, name, engine="Command", cpus=None, memory_gib=None,
             mpi_ranks=None, threads_per_rank=None, env=None, hold=False,
             on_failure="pause", layout=None, role="primary", allow_auxiliary=False,
-            independent=False, resource_contract=None, write_scope=None, note=''):
+            independent=False, resource_contract=None, write_scope=None, note='', suspension_backend=None):
         note = validate_note(note)
+        if suspension_backend is not None:
+            from .suspension import BACKENDS
+            if suspension_backend not in BACKENDS:
+                raise JobsError('Unsupported suspension backend')
         argv = list(argv)
         if not argv or any(not isinstance(a, str) or "\0" in a for a in argv) or not argv[0]:
             raise JobsError("An explicit nonempty argv without NUL bytes is required")
@@ -264,6 +268,10 @@ class Store:
         for key, value in environment.items():
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or not isinstance(value, str) or "\0" in value:
                 raise JobsError("Environment overrides require NAME=VALUE without NUL bytes")
+        if 'CMW_SUSPENSION_CONTEXT' in environment:
+            raise JobsError('Suspension context is reserved for the execution worker')
+        if suspension_backend:
+            environment['CMW_JOBS_OWN_SESSION'] = '1'
         reference = None
         if layout:
             location = Path(layout).expanduser().resolve(strict=True)
@@ -279,6 +287,9 @@ class Store:
             independent=independent, resource_contract=resource_contract,
             write_scope=str(directory) if write_scope is None else write_scope), resources, directory)
         with self.transaction() as con:
+            if suspension_backend:
+                from .suspension import enroll_state
+                enroll_state(self, con)
             number = con.execute("INSERT INTO jobs(data) VALUES ('{}')").lastrowid
             pending = [j for j in self.rows(con) if j.get("status") in PENDING]
             job = {"id": number, "display_id": f"J{number}.1", "attempt_id": uuid4().hex,
@@ -290,6 +301,9 @@ class Store:
                    "finished_at": None, "exit_code": None, "signal": None, "reason": "",
                    "worker": None, "group": None, "claim": None, "claimed_at": None,
                    "cancel_requested": False, "scheduling": scheduling, "sharing_anchor": None}
+            if suspension_backend:
+                from .suspension import initial_state
+                job['suspension'] = initial_state(suspension_backend)
             job["logs"] = {stream: str(self.root / "attempts" / job["attempt_id"] / f"{stream}.log") for stream in ("stdout", "stderr")}
             self.save(con, job)
             self.event(con, number, f"Enqueued at order {job['order']}")
@@ -511,8 +525,11 @@ class Store:
                     job["reason"] = f"Queue order; behind {pending[0]['display_id']}"
                 elif not job["reason"]:
                     job["reason"] = "Next in queue"
+            if job.get("suspension"):
+                from .suspension import project_timing
+                project_timing(job)
             job["check"] = None
-        return {"schema": 2, "state_directory": str(self.root), "controller_log": str(self.root / "controller.log"),
+        return {"schema": control["schema"], "state_directory": str(self.root), "controller_log": str(self.root / "controller.log"),
                 "controller": {**control, "online": online, "stale": stale, "age_seconds": age},
                 "mode": "Bounded Sharing" if control["scheduler"]["mode"] == "bounded-sharing" else "Sequential",
                 "scheduler": control["scheduler"], "observed_at": now, "jobs": jobs, "events": events}

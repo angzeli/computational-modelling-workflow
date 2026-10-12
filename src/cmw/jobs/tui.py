@@ -23,6 +23,8 @@ from .status_presentation import admission_presentation, scheduling_detail
 from .locations import discover
 from .folder_opener import OpenResult, open_location, request_open
 from .history_ui import HistoryDetails, ProgressHistory
+from .suspension_ui import SuspensionConfirm
+from .suspension_presentation import effective_status, intended_action, suspension_summary, suspension_detail, submission_text
 
 
 def literal(value):
@@ -79,7 +81,7 @@ def detail(job, *, narrow=False):
                  f"CPUs requested: {resource['cpus'] or '—'}    MPI ranks: {resource['mpi_ranks'] or '—'}    "
                  f"Threads/rank: {resource['threads_per_rank'] or '—'}    RAM requested: {resource['memory_gib'] or '—'} GiB\n")
     return (f"SELECTED: {job['display_id']} / {name_text(job['name'])}\n"
-            f"Status: {job['status']}    Order: {job['order'] or '—'}    Engine: {job['engine']}\n"
+            f"Status: {effective_status(job)}    Order: {job['order'] or '—'}    Engine: {job['engine']}\n"
             f"CPU NOW: {cpu_now}   RAM NOW: {ram_now}\n"
             f"{resources}"
             f"Working directory: {job['cwd']}\n{job['reason'] or '—'}")
@@ -167,6 +169,8 @@ class Inspect(ModalScreen):
                     f"Finished: {timestamp(job['finished_at'])}\nExit code: {job['exit_code']}   Signal: {job['signal']}\n"
                     f"Failure policy: {job['on_failure']}\nCHECK: Not evaluated\n\n"
                     + json.dumps({key: job[key] for key in ("argv", "env", "cwd", "logs", "worker", "group", "layout")}, indent=2, ensure_ascii=False))
+        if not self.logs and job.get("suspension"):
+            text += "\n\n" + suspension_detail(job)
         if self.progress_provider and not self.logs:
             snapshot = self.progress_provider(job)
             if snapshot is not None:
@@ -366,6 +370,7 @@ class JobsTable(DataTable):
             self.move_cursor(row=row, column=column, animate=False)
             if self.app.selected_id != key or self.app.external_selected_id:
                 self.app.files_generation += 1
+                self.app.suspension_selection_generation += 1
             self.app.external_selected_id = None
             self.app.selected_id = key
             self.app.action_files()
@@ -378,6 +383,7 @@ class JobsTable(DataTable):
             self.app.external_selected_id = None
         if previous != self.app.external_selected_id:
             self.app.files_generation += 1
+            self.app.suspension_selection_generation += 1
         self.app.query_one("#selected", Static).update(literal(self.app.selected_text()))
         self.app.sync_progress_selection()
 
@@ -400,12 +406,17 @@ class JobsApp(App):
     #progress { height: auto; max-height: 11; margin: 0 1; padding: 0 1; border-left: solid #5c8996; }
     #events { height: 5; margin: 1 1 0 1; color: #9caeba; }
     #message { height: auto; max-height: 3; padding: 0 1; color: #efbd82; }
-    Footer { dock: bottom; background: #22303d; }
-    #shortcuts { dock: bottom; height: auto; background: #22303d; color: #d7e0e8; padding: 0 1; }
+    #command-bar { dock: bottom; height: auto; }
+    Footer { dock: none; background: #22303d; }
+    #execution-controls { dock: none; height: 1; padding: 0 1; background: #22303d; }
+    #suspension-action { height: 1; min-height: 1; width: 23; min-width: 23; border: none; padding: 0; }
+    #suspension-summary { height: 1; width: 1fr; padding-left: 1; color: #b7d8dd; }
+    #shortcuts { dock: none; height: auto; background: #22303d; color: #d7e0e8; padding: 0 1; }
     """
     BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("g", "history", "Progress"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
                 Binding("p", "dispatch", "Dispatch"), Binding("h", "hold", "Hold"),
                 Binding("o", "order", "Order"), Binding("x", "cancel", "Cancel"),
+                Binding("u", "suspension", "Suspend/Continue", show=False),
                 Binding("q", "quit", "Detach", priority=True), Binding("ctrl+c", "quit", "Detach", show=False, priority=True)]
 
     def __init__(self, store=None, *, clock=None, observer=None, sampler=None,
@@ -443,6 +454,8 @@ class JobsApp(App):
         self.progress_snapshot = None
         self.progress_error = None
         self.history_view = None
+        self.suspension_busy = False
+        self.suspension_selection_generation = 0
 
     def compose(self):
         yield Static("CMW / JOBS                                             LOCAL", id="heading")
@@ -456,9 +469,13 @@ class JobsApp(App):
         yield Static(id="selected", markup=False)
         yield Static(id="progress", markup=False)
         yield Static(id="events", markup=False)
-        yield Static("Best-effort guard · Q / Ctrl-C detaches; execution continues.", id="message", markup=False)
-        yield Static("Enter Details · F Files · G Progress · N Note · L Logs\nP Dispatch · H Hold · O Order · X Cancel · B Scheduling · Q Detach", id="shortcuts", markup=False)
-        yield Footer()
+        yield Static("Best-effort guard · Q / Ctrl-C detaches; execution state unchanged.", id="message", markup=False)
+        with Vertical(id="command-bar"):
+            with Horizontal(id="execution-controls"):
+                yield Button(literal("[U] Suspend job"), id="suspension-action")
+                yield Static("", id="suspension-summary", markup=False)
+            yield Static("Enter Details · F Files · G Progress · N Note · L Logs\nP Dispatch · H Hold · O Order · X Cancel · B Scheduling · Q Detach", id="shortcuts", markup=False)
+            yield Footer()
 
     def on_mount(self):
         self.refresh_state()
@@ -602,6 +619,10 @@ class JobsApp(App):
                 text = error + '\n' + text
         else:
             text = 'Progress: ' + (self.progress_error or 'awaiting bounded observation…')
+        job = self.selected()
+        if job and effective_status(job) == 'Suspended':
+            text = 'Suspended: output inactivity is expected; source age remains actual.\n' + text
+            widget.styles.max_height = line_budget + 1
         widget.update(literal(text))
 
     def collect_activity(self):
@@ -780,7 +801,7 @@ class JobsApp(App):
         control = self.state["controller"]
         status = "STALE — needs attention" if control["stale"] else "Online" if control["online"] else "Offline"
         jobs = self.state["jobs"]
-        active = [j for j in jobs if j["status"] in {"Starting", "Run", "Cancelling", "Unknown"}]
+        active = [j for j in jobs if j["status"] in ACTIVE]
         cpu = sum(j["resources"]["cpus"] or 0 for j in active) or "—"
         ram = sum(j["resources"]["memory_gib"] or 0 for j in active) or "—"
         age = "never" if control["age_seconds"] is None else f"{int(control['age_seconds'])}s ago"
@@ -824,7 +845,7 @@ class JobsApp(App):
             role = job.get('scheduling', {}).get('role', 'primary')
             values = {'files': '[F]', 'order': str(job['order'] or '—').rjust(5), 'id': key + (' A' if role == 'auxiliary' else ' P') if bounded and viewport_width < 128 else key, 'name': job['name'], 'engine': job['engine'],
                       'role': role.title(),
-                      'status': job['status'], 'cpus': str(job['resources']['cpus'] or '—').rjust(4),
+                      'status': effective_status(job), 'cpus': str(job['resources']['cpus'] or '—').rjust(4),
                       'cpu_now': cpu_now, 'ram_now': ram_now,
                       'elapsed': elapsed(job['elapsed']).rjust(10), 'reason': job['reason'] or '—'}
             cells = []
@@ -832,7 +853,8 @@ class JobsApp(App):
                 cell = table_name(values[column], width) if column == 'name' else literal(values[column])
                 if column == 'status':
                     cell.stylize({'Run':'#86c6b0', 'Queue':'#b9c8dc', 'Hold':'#d9bc7e', 'Fail':'#ea9595',
-                                  'Unknown':'bold #f3b875', 'Cancelling':'#e9ba94', 'Done':'#8baaa0'}.get(job['status'], '#a1afbc'))
+                                  'Unknown':'bold #f3b875', 'Cancelling':'#e9ba94', 'Done':'#8baaa0',
+                                  'Suspended':'#b7d8dd', 'Suspending':'#e9ba94', 'Resuming':'#e9ba94', 'Unverified':'bold #f3b875'}.get(effective_status(job), '#a1afbc'))
                 cells.append(cell)
             if key not in self.row_ids:
                 table.add_row(*cells, key=key)
@@ -855,6 +877,7 @@ class JobsApp(App):
         elif jobs:
             self.empty_notice_shown = False
 
+        self.refresh_suspension_controls()
         current_job = self.selected()
         current_files_context = self.files_context(current_job) if current_job else None
         if previous_files_context != current_files_context:
@@ -893,7 +916,9 @@ class JobsApp(App):
             self.selected_id = event.row_key.value
         if previous != (self.selected_id, self.external_selected_id):
             self.files_generation += 1
+            self.suspension_selection_generation += 1
         self.query_one("#selected", Static).update(literal(self.selected_text()))
+        self.refresh_suspension_controls()
         self.sync_progress_selection()
 
     def apply(self, function):
@@ -909,8 +934,8 @@ class JobsApp(App):
 
     def check_action(self, action, parameters):
         # App priority bindings run before focused text widgets, including Q.
-        if isinstance(self.screen, (NoteEditor, FilesChooser, ProgressHistory, HistoryDetails)) and action in {
-            'details', 'files', 'history', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit'
+        if isinstance(self.screen, (NoteEditor, FilesChooser, ProgressHistory, HistoryDetails, SuspensionConfirm)) and action in {
+            'details', 'files', 'history', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'suspension'
         }:
             return False
         return super().check_action(action, parameters)
@@ -1011,6 +1036,113 @@ class JobsApp(App):
             self.push_screen(FilesChooser(request, result, message))
         else:
             self.files_message(message, chooser)
+
+    @staticmethod
+    def suspension_target(job):
+        record = job.get('suspension') or {}
+        return (job['id'], job['attempt_id'], job['status'], record.get('phase', 'Run'),
+                record.get('revision', 0), deepcopy(job.get('worker')))
+
+    def refresh_suspension_controls(self):
+        button = self.query_one('#suspension-action', Button)
+        job = self.selected() if not self.external_selected_id else None
+        phase = effective_status(job) if job else None
+        action = intended_action(job) if job else 'suspend'
+        button.label = literal('[U] ' + action.title() + ' job')
+        button.disabled = (job is None or job.get('status') != 'Run'
+                           or phase in {'Suspending', 'Resuming', 'Unverified'} or self.suspension_busy)
+        summary = suspension_summary(job, compact=self.size.width < 110) if job else ''
+        self.query_one('#suspension-summary', Static).update(table_name(summary, max(10, self.size.width - 27)))
+
+    def suspension_current(self, request):
+        job = self.selected()
+        screen_valid = (not isinstance(self.screen, ModalScreen)
+                        or isinstance(self.screen, SuspensionConfirm) and self.screen.request == request)
+        return (screen_valid and not self.external_selected_id and job is not None
+                and self.suspension_target(job) == request['target']
+                and str(self.store.root) == request['state_directory']
+                and request['generation'] == self.suspension_selection_generation)
+
+    def action_suspension(self):
+        if isinstance(self.screen, ModalScreen) or self.suspension_busy:
+            return
+        if self.external_read_only():
+            return
+        job = self.selected()
+        if job is None:
+            return
+        if effective_status(job) in {'Suspending', 'Resuming', 'Unverified'}:
+            self.query_one('#message', Static).update('Execution transition is pending or unverified; inspect Details. Confirmed cancellation remains available with X.')
+            return
+        request = dict(target=self.suspension_target(job), state_directory=str(self.store.root),
+                       job_id=job['id'], attempt_id=job['attempt_id'], action=intended_action(job),
+                       generation=self.suspension_selection_generation)
+        self.suspension_busy = True
+        self.refresh_suspension_controls()
+        def inspect():
+            from .suspension import readiness
+            try:
+                result = readiness(self.store, request['job_id'], request['action'])
+            except (ValueError, OSError) as exc:
+                self.call_from_thread(self.accept_suspension_readiness, request, None, str(exc))
+            else:
+                self.call_from_thread(self.accept_suspension_readiness, request, result, None)
+        self.run_worker(inspect, thread=True, group='execution-control', exit_on_error=False)
+
+    def accept_suspension_readiness(self, request, result, error):
+        self.suspension_busy = False
+        self.refresh_suspension_controls()
+        if not self.suspension_current(request):
+            self.query_one('#message', Static).update('Execution selection changed; open U again for a fresh confirmation.')
+            return
+        if error:
+            self.query_one('#message', Static).update(literal('Readiness unavailable: ' + error))
+            return
+        if (result.get('attempt_id') != request['attempt_id']
+                or result.get('revision') != request['target'][4]
+                or result.get('phase') != request['target'][3]):
+            self.query_one('#message', Static).update('Execution state changed while checking readiness; open U again.')
+            return
+        request = {**request, 'revision': result['revision'], 'phase': result['phase'],
+                   'authority': deepcopy(result.get('authority'))}
+        self.push_screen(SuspensionConfirm(request, result))
+
+    def submit_suspension(self, screen, reason):
+        request = screen.request
+        if screen.busy:
+            return
+        if not self.suspension_current(request):
+            screen.message('This confirmation is stale after the selection or execution state changed. Close it and open U again.')
+            screen.query_one('#suspension-confirm', Button).disabled = True
+            return
+        screen.busy = True
+        screen.query_one('#suspension-confirm', Button).disabled = True
+        screen.message('Submitting the captured request; completion requires worker verification…')
+        def submitting():
+            from .suspension import submit
+            try:
+                result = submit(self.store, request['job_id'], request['action'], reason=reason,
+                                expected_attempt_id=request['attempt_id'], expected_revision=request['revision'],
+                                expected_phase=request['phase'], expected_authority=request['authority'])
+            except (ValueError, OSError) as exc:
+                self.call_from_thread(self.accept_suspension_submission, screen, None, str(exc))
+            else:
+                self.call_from_thread(self.accept_suspension_submission, screen, result, None)
+        self.run_worker(submitting, thread=True, group='execution-control', exit_on_error=False)
+
+    def accept_suspension_submission(self, screen, result, error):
+        if screen is not self.screen or not screen.is_mounted:
+            return
+        if error:
+            screen.message('Not applied: ' + error + '. Close and reopen U to recheck readiness.')
+            return
+        screen.dismiss(None)
+        self.refresh_state()
+        self.query_one('#message', Static).update(literal(submission_text(result)))
+
+    def on_button_pressed(self, event):
+        if event.button.id == 'suspension-action':
+            self.action_suspension()
 
     def action_note(self):
         if self.external_read_only():

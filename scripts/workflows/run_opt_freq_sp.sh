@@ -14,6 +14,8 @@ forwarded=()
 plan=0
 json_plan=0
 new_attempt=0
+controlled_suspension=0
+selected_mode=""
 output=""
 
 usage() {
@@ -21,12 +23,14 @@ usage() {
     "Usage: run_opt_freq_sp.sh --mode MODE --structure FILE --config FILE --output DIR" \
     "       [--orca-exe FILE] [--nprocs N] [--maxcore MB]" \
     "       [--require-minimum|--no-require-minimum] [--imaginary-tolerance CM-1]" \
-    "       [--new-attempt] [--plan [--json]]" >&2
+    "       [--new-attempt] [--plan [--json]] [--controlled-suspension (opt only)]" >&2
 }
 
 while (($#)); do
   case "$1" in
+    --controlled-suspension) controlled_suspension=1; shift ;;
     --mode|--structure|--config|--orca-exe|--nprocs|--maxcore|--imaginary-tolerance)
+      [[ "$1" != --mode ]] || selected_mode=${2:?missing mode}
       forwarded+=("$1" "${2:?missing value for $1}")
       shift 2
       ;;
@@ -49,6 +53,11 @@ while (($#)); do
     *) printf 'Unknown argument: %s\n' "$1" >&2; usage; exit 64 ;;
   esac
 done
+
+if ((controlled_suspension == 1)) && [[ "$selected_mode" != opt ]]; then
+  printf 'Controlled suspension supports the single OPT stage only; multi-stage/frequency workflows are unqualified\n' >&2
+  exit 64
+fi
 
 if ((plan)); then
   if ((new_attempt)); then
@@ -117,6 +126,7 @@ while true; do
     "$ORCA_RUNNER" --input "$input" --target "$target" --metadata "$metadata"
     --output "$stage_output" --stderr "$stage_stderr"
   )
+  ((controlled_suspension == 0)) || runner+=(--controlled-suspension)
   [[ -z "$layout" ]] || runner+=(--layout "$layout")
   [[ -z "$geometry_contract" ]] || runner+=(--geometry-contract "$geometry_contract")
   [[ -z "$final_geometry" ]] || runner+=(--artifact "final_geometry=$final_geometry")

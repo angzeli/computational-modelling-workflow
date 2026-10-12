@@ -662,12 +662,14 @@ print('Lazy non-ORCA core observation: PASS')
                     assert app.query_one('#table') is not None
         asyncio.run(tui())
         assert not missing.exists()
+    from tests.jobs.suspension_acceptance import suspension_surface
     from tests.jobs.progress_acceptance import progress_surface
     progress = progress_surface(args.output/'progress', console=args.kind != 'core')
     report = {'kind': args.kind, 'python': sys.version, 'package_origin': str(origin),
               'cli_json_asset_optional_boundary': 'PASS',
               'tui': 'not installed (expected)' if args.kind == 'core' else 'PASS',
               'progress_locations_history': progress,
+              'controlled_suspension': suspension_surface(args.output/'controlled-suspension', console=args.kind != 'core'),
               'annotations': annotation_surface(args.output/'annotations'),
               'vasp_preparation': preparation_surface(args.output/'vasp-preparation', cli),
               'vasp_result_evidence': result_surface(args.output/'vasp-results', cli),

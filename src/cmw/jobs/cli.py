@@ -229,10 +229,13 @@ def status_text(state):
              "ORDER  JOB ID      NAME  ENGINE      STATUS       CPUS  CPU NOW  RAM NOW          ELAPSED     REASON"]
     if sharing_text(state):
         lines.insert(3, sharing_text(state))
+    from .suspension_presentation import effective_status, suspension_summary
     for job in state["jobs"]:
         cpu_now, ram_now = usage_cells(job.get("usage"))
         lines.append(f"{str(job['order'] or '—'):>5}  {job['display_id']:<10}  {name_text(job['name'])}  {safe_text(job['engine'])[:10]:10}  "
-                     f"{job['status']:11}  {str(job['resources']['cpus'] or '—'):>4}  {cpu_now:>7}  {ram_now:>15}  {elapsed(job['elapsed']):>10}  {safe_text(job['reason'])}  ROLE {job.get('scheduling', {}).get('role', 'primary')}")
+                     f"{effective_status(job):11}  {str(job['resources']['cpus'] or '—'):>4}  {cpu_now:>7}  {ram_now:>15}  {elapsed(job['elapsed']):>10}  {safe_text(job['reason'])}  ROLE {job.get('scheduling', {}).get('role', 'primary')}")
+        if suspension_summary(job):
+            lines.append("       " + suspension_summary(job))
     if not state["jobs"]:
         lines.append("No jobs. Add a prepared command with cmw jobs add, then explicitly start.")
     lines.append(guard_text(state))
@@ -259,7 +262,7 @@ def register(subcommands):
         if name == "watch":
             command.description = ("Observe Jobs without starting execution. Enter: details; F: files; N: edit a managed job note. "
                 "Editor: Ctrl-S saves, Esc cancels, Ctrl-C detaches without saving; Q inserts text. "
-                "Outside the editor Q or Ctrl-C detaches and execution continues.")
+                "U opens selected-job Suspend/Continue readiness and confirmation. Outside text input Q or Ctrl-C detaches with execution state unchanged.")
         if name != "watch":
             command.add_argument("--json", action="store_true")
         command.set_defaults(handler=handle)
@@ -267,6 +270,8 @@ def register(subcommands):
     add.add_argument("--name", required=True)
     add.add_argument("--note", default="", help="optional plain-text human annotation (4096 Unicode code points); before --")
     add.add_argument("--engine", default="Command")
+    add.add_argument("--suspension-backend", choices=("local-command-v1", "vasp-port-v1", "orca-local-v1"),
+                     help="opt in to a qualified local suspension runtime handshake; backend registration may refuse")
     add.add_argument("--cwd", required=True, type=Path)
     add.add_argument("--cpus", type=int)
     add.add_argument("--memory-gib", type=float)
@@ -295,6 +300,19 @@ def register(subcommands):
         if name == "logs":
             command.add_argument("--stream", choices=("stdout", "stderr"), default="stdout")
             command.add_argument("--bytes", type=int, default=16384)
+        command.set_defaults(handler=handle)
+
+    for name in ("suspend", "continue"):
+        command = operations.add_parser(name, help=f"request {name} of a supported original managed attempt",
+            description="Submit an asynchronous execution request to its existing worker. Accepted does not mean completed. "
+                        "Use --preview for non-mutating readiness; show/status reports worker verification. "
+                        "Memory, storage and admission commitments remain held; continuation is manual.")
+        command.add_argument("job_id")
+        command.add_argument("--preview", action="store_true", help="inspect readiness without creating or migrating Jobs state")
+        command.add_argument("--reason", default="", help="optional literal operational reason; does not replace the job note")
+        command.add_argument("--expected-revision", type=int, help="reject a request if suspension revision changed")
+        command.add_argument("--expected-attempt-id", help="require this immutable attempt identity")
+        command.add_argument("--json", action="store_true")
         command.set_defaults(handler=handle)
 
     files = operations.add_parser("files", help="inspect declared job locations; opens folders only with --open")
@@ -472,6 +490,16 @@ def handle(args):
     operation = args.jobs_operation
     from .activity import project
     try:
+        if operation in {"suspend", "continue"}:
+            from .suspension import readiness, submit
+            from .suspension_presentation import readiness_text, submission_text
+            result = (readiness(store, args.job_id, operation) if args.preview else
+                      submit(store, args.job_id, operation, reason=args.reason,
+                             expected_attempt_id=args.expected_attempt_id,
+                             expected_revision=args.expected_revision))
+            print(json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False) if args.json else
+                  safe_text(readiness_text(result) if args.preview else submission_text(result)))
+            return 0
         if operation == "files":
             return inspect_files(store, args)
         if operation == "progress":
@@ -518,6 +546,7 @@ def handle(args):
             result = store.add(argv=argv, cwd=args.cwd, name=args.name, engine=args.engine, note=args.note,
                 cpus=args.cpus, memory_gib=args.memory_gib, mpi_ranks=args.mpi_ranks,
                 threads_per_rank=args.threads_per_rank, env=environment, hold=args.hold,
+                suspension_backend=args.suspension_backend,
                 on_failure=args.on_failure, layout=args.layout, role=args.role, allow_auxiliary=args.allow_auxiliary,
                 independent=args.independent, resource_contract="trusted-declared" if args.trust_resources else None, write_scope=args.write_scope)
         elif operation in {"start", "stop"}:

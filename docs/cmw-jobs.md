@@ -94,7 +94,7 @@ or cancel that pending job. The persistent ORDER is independent of job ID and
 screen row order. The console keeps rows stable while ORDER changes.
 
 Console keys: Enter details, F files, N edit managed note, L logs, P toggle dispatch, H hold/release, O order,
-X cancellation confirmation, B read-only scheduling details, Q or Ctrl-C detach. Arrow/Page keys scroll. Narrow
+X cancellation confirmation, U selected-job Suspend/Continue confirmation, B read-only scheduling details, Q or Ctrl-C detach. Arrow/Page keys scroll. Narrow
 layouts keep JOB ID, NAME, STATUS and ELAPSED visible at 77×24 and 80×24.
 A small FILES action immediately follows JOB ID, followed by NAME at every width. Names use literal single-line
 text and a display-cell-aware middle ellipsis, retaining both the beginning and
@@ -111,6 +111,158 @@ five identification/navigation columns remain accessible by horizontal scrolling
 than dropping NAME. Details and logs have scrollable
 panels. Live log tails are bounded to 16 KiB per stream and unchanged logs are
 not reread. Control sequences are stripped and UI markup is rendered literally.
+
+## Controlled suspension of an enrolled local attempt
+
+`pause` / `resume` control future dispatch. `hold` / `release` control pending
+jobs. `suspend` / `continue` request execution control of the **same living
+attempt** through its existing detached worker. Suspension is not termination,
+checkpointing, STOPCAR, re-execution or a scientific restart. Continuation is
+always explicit; there is no timed or automatic Continue.
+
+```sh
+cmw jobs suspend J1.1 --preview --json
+cmw jobs suspend J1.1 --reason meeting
+cmw jobs show J1.1 --json
+cmw jobs continue J1.1 --preview
+cmw jobs continue J1.1
+```
+
+Preview is read-only: it does not create/migrate the Jobs state, start a
+controller, launch a probe, or signal a process. It reports the exact attempt,
+backend/protocol, computational and protected scopes, retained RAM/CPU
+commitments, attached storage, deadline policy and qualification limits.
+Unsupported inspection is still a successful inspection; `ready: false` and
+`reasons` explain the refusal. The submission itself rejects unavailable or
+stale targets with the existing Jobs error/exit-2 convention.
+
+Submission has an asynchronous contract. `ACCEPTED` means that the worker request
+was recorded; it does **not** mean that computation has stopped. `PENDING`
+remains incomplete; `COMPLETED` reflects recorded worker verification. Inspect
+`show` or the portal for current evidence. The canonical lifecycle remains
+active while orthogonal suspension metadata records Run → Suspending →
+Suspended → Resuming → Run, or an unverified transition needing attention.
+Repeated Suspend remains Suspend, and repeated Continue does not launch a job.
+Scripts may supply `--expected-attempt-id` and `--expected-revision` to reject a
+changed target. Reasons are private plain text, distinct from the job name,
+Note and command.
+
+New attempts can explicitly request `add --suspension-backend BACKEND` before
+`--`. Registered backend names are `local-command-v1`, `vasp-port-v1` and
+`orca-local-v1`; registration alone does not establish support. The exact
+runner, ownership domain, versioned worker handshake and deadline contract must
+succeed. An arbitrary command, engine label or supplied environment variable
+cannot enroll an already-running legacy attempt. Such an attempt reports:
+“Suspension unavailable for this attempt's runtime. Start a future job with the
+qualified suspension contract.” Backend-specific launch contracts and
+qualification evidence apply in addition to this control interface.
+
+The visible **[U] Suspend job** button opens a confirmation for the selected
+immutable attempt. A verified suspended attempt offers **[U] Continue job**.
+The confirmation captures the intended action, worker authority, phase and
+request revision. A changed selection or target requires a fresh confirmation;
+a key repeat or double click cannot toggle suspension into continuation. The
+reason field treats ordinary letters, including U/C/P/X/Q, literally. Enter in
+the reason moves focus to the confirmation button; it does not submit. Escape
+closes the view; Ctrl-C detaches. Notes retain their existing literal text keys.
+
+During Suspending/Resuming/unverified transitions the execution button is
+disabled. X still opens the separate existing cancellation confirmation after
+closing any modal. Cancellation means termination; it is never a hidden
+Continue. Closing/reopening the portal or stopping the dispatch controller does
+not change suspension intent. Q/Ctrl-C detach leaves execution state unchanged.
+
+Suspended work retains its CPU/RAM admission commitments, write scope, owned
+slot, memory and original processes. New dispatch is inhibited while suspension
+is pending, confirmed or unresolved, without replacing persistent dispatch
+intent. Continue does not clear a later dispatch pause. An already-running
+auxiliary or another application remains separate and may still compute; the
+confirmation lists other known active jobs rather than claiming a quiet host.
+
+The table exposes the operational phase. A stored suspension whose worker
+evidence is stale appears as `Suspended?` with a fresh-verification notice; it
+does not imply the processes remain stopped. Details retains the complete
+request, verification, clock, deadline and interval evidence. CPU/RSS remain measured
+telemetry, never hardcoded zero. Native progress, incomplete blocks, source age,
+read errors and scientific values are unchanged. Output inactivity while
+suspended is expected, and does not establish a hang or scientific failure.
+Operational suspension intervals are distinct from native engine wall/CPU time.
+
+Memory, open files, Scratch and source/runtime storage must remain available.
+Suspension grants no permission to eject storage, upgrade the active runtime,
+log out or reboot. Unknown/replaced storage, missing control authority, changed
+identities and incomplete verification refuse continued execution rather than
+repairing paths or launching replacement ranks. A configured fixed hard wall
+deadline remains fixed; pause-aware accounting applies only to its explicitly
+selected execution budget. Real-engine and physical sleep/wake qualification
+are separate gates. Synthetic or native-MPI evidence alone does not qualify a
+scientific engine or make closing the lid safe.
+
+### Runtime compatibility and operational limits
+
+Enrollment upgrades the state to schema 3 only when no legacy active/unresolved
+worker or legacy controller remains. New workers identify runtime protocol 3.
+Old runtimes reject this schema; do not point an old installation at enrolled
+state. Preview never upgrades it. Existing unenrolled schema-2 queues and v1
+VASP result records retain their existing behavior.
+
+The worker persists an attempt/claim/revision request before signaling. A private
+inode-bound runner channel separately acknowledges deadline preparation,
+confirmed stop accounting, accounting restoration and final release. The
+computational domain is distinct from the protected anchor, worker, runner and
+MPI controls. Same-session descendants are enumerated again after stopping
+producers; two unchanged stopped observations are required. This is a bounded
+protocol, not an atomic OS freeze. Escaped sessions, unknown/leaderless ancestry,
+multiple concurrent MPI launchers and unobservable members refuse verification.
+Partial delivery retains identities and inhibition; there is no automatic
+SIGCONT rollback or replacement process. An unresolved transition requires
+inspection and, if appropriate, the existing confirmed cancellation operation.
+
+During cancellation the worker establishes termination intent and obtains the
+runner's producer-inhibition acknowledgement before TERM plus identity-verified
+CONT needed to deliver pending termination. That CONT is termination delivery,
+not a user continuation. Commitments release only after genuine exit/receipt and
+complete owned-session drainage. Worker loss uses existing Unknown recovery;
+restarting a controller never adopts or resumes stopped processes.
+
+Durations use `mach_continuous_time` on macOS and `CLOCK_BOOTTIME` on Linux,
+including sleep in both total and confirmed-suspension intervals. Boot/clock
+changes and stale evidence make operational elapsed time uncertain. Transition
+time counts toward unsuspended elapsed; only a verified stopped interval is
+excluded from the new execution budget. Unsuspended elapsed is not CPU time.
+Unenrolled port runs keep their original monotonic `--timeout` basis. The
+explicit controlled protocol declares a continuous-clock hard `--timeout` and
+a separately selected pause-aware `--execution-budget`; both use the same clock. No
+physical sleep behavior is qualified by clock simulation.
+
+`local-command-v1` is the bounded generic/fictional qualification route. Use its
+coordinated foreground wrapper for a reviewed local command with no other
+watchdog or stage producer, for example:
+
+```sh
+cmw jobs add --name benign --cwd /existing/private/test-directory \
+  --suspension-backend local-command-v1 -- \
+  python -m cmw.jobs.suspension_protocol --execution-budget 60 --hard-timeout 90 \
+  -- python harmless_local_fixture.py
+```
+
+An arbitrary outer wrapper or unregistered watchdog is outside this contract.
+The VASP port requires its managed controlled flag and positive execution budget;
+advance STOPCAR and awake/power assertion routes are refused. ORCA initially
+supports an ordinary rendered SP/OPT stage, including qualified local module
+transitions; frequency task farms, compound jobs and multi-stage workflows are
+refused. Neither engine name alone establishes eligibility.
+
+MPI qualification is exact-runtime evidence, not a general MPI guarantee.
+The local tested adapters select launcher-mediated TSTP/CONT for Open MPI 4.1.6
+and Open MPI 5.0.9 with PRRTE 4.1.0; serial producers use direct STOP/CONT. MPI
+controls remain runnable and ranks must be observed OS-stopped. The applicable
+primary references are [POSIX signal semantics](https://pubs.opengroup.org/onlinepubs/9799919799/functions/V2_chap02.html),
+[Open MPI job control](https://docs.open-mpi.org/en/main/launching-apps/gridengine.html),
+and [current forwarding options](https://docs.open-mpi.org/en/main/man-openmpi/man1/mpirun.1.html).
+Installed runtime behavior and native communication tests take precedence over
+historical documentation examples. The qualification report separately records
+software tests, native MPI, pending engine/sleep gates and deployment status.
 
 ## File locations and folder navigation
 

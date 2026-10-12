@@ -195,6 +195,8 @@ then charged once through the same candidate admission calculation.
         return refuse(control.get('reason') or 'Dispatch intent paused')
     if any(j['status'] in {'Unknown', 'Cancelling'} for j in active_all):
         return refuse('Unknown or Cancelling attempt blocks new admission')
+    if any((j.get('suspension') or {}).get('inhibited') for j in active_all):
+        return refuse('Controlled suspension retains commitments and inhibits new admission')
     if not guard_fresh(guard, now):
         return refuse('External observation stale, unavailable or uncertain')
     if not bounded:

@@ -48,6 +48,13 @@ class JobsExecutionEvidenceTests(unittest.TestCase):
     def codes(self, result):
         return {item["code"] for item in result["findings"]}
 
+    def test_schema3_preserves_exact_terminal_evidence_requirements(self):
+        snapshot = {**self.snapshot, "schema": 3}
+        self.assertEqual(self.inspect(snapshot=snapshot)["status"], "eligible")
+        snapshot["jobs"] = [{**self.snapshot["jobs"][0], "status": "Run",
+                             "suspension": {"phase": "Suspended"}}]
+        self.assertNotEqual(self.inspect(snapshot=snapshot)["status"], "eligible")
+
     def test_native_terminal_receipt_and_saved_snapshot_are_eligible(self):
         # No Store object or process observation is needed, even for generic runners.
         with patch("cmw.jobs.store.Store", side_effect=AssertionError("must not access Jobs state")):

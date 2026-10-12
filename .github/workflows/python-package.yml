@@ -41,6 +41,8 @@ jobs:
           printf '%s\n' "CMW_TEST_EVIDENCE_DIR=$RUNNER_TEMP/cmw-lifecycle-evidence" >> "$GITHUB_ENV"
       - name: Install test and build dependencies
         run: python -m pip install -e '.[jobs]' build
+      # Discovery includes controlled suspension state, worker, runner, portal
+      # and PTY regressions. Native MPI/engine/sleep qualification is separate.
       - name: Full deterministic offline suite (synthetic engines only)
         run: python -m unittest discover -s tests
       - name: Build, inspect and test fresh installations outside checkout

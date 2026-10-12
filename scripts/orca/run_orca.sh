@@ -28,6 +28,7 @@ geometry_contract=""
 runtime_contract=""
 runtime_launch_manifest=""
 require_runtime_contract=0
+controlled_suspension=0
 minimum_free_disk_gb=""
 disk_check_path=""
 replace_stale=0
@@ -41,7 +42,7 @@ usage() {
     "                   [--layout FILE]" \
     "                   [--geometry-contract FILE]" \
     "                   [--runtime-contract FILE]" \
-    "                   [--require-runtime-contract]" \
+    "                   [--require-runtime-contract] [--controlled-suspension]" \
     "                   [--minimum-free-disk-gb NUMBER --disk-check-path DIR]" \
     "                   [--external-scratch-root DIR --external-scratch-mount DIR]" \
     "                   [--external-scratch-minimum-free-gib NUMBER]" \
@@ -61,6 +62,7 @@ while (($#)); do
     --geometry-contract) geometry_contract=${2:?}; shift 2 ;;
     --runtime-contract) runtime_contract=${2:?}; shift 2 ;;
     --require-runtime-contract) require_runtime_contract=1; shift ;;
+    --controlled-suspension) controlled_suspension=1; shift ;;
     --minimum-free-disk-gb) minimum_free_disk_gb=${2:?}; shift 2 ;;
     --disk-check-path) disk_check_path=${2:?}; shift 2 ;;
     --external-scratch-root) external_scratch_root=${2:?}; shift 2 ;;
@@ -234,6 +236,19 @@ if [[ -n "$runtime_contract" ]]; then
   resolved_artifacts+=("runtime_contract=$runtime_contract")
 fi
 
+if ((controlled_suspension == 1)); then
+  if [[ -z ${CMW_SUSPENSION_CONTEXT:-} ]]; then
+    printf 'Controlled ORCA requires a newly enrolled CMW Jobs attempt\n' >&2
+    exit 69
+  fi
+  suspension_preflight=(
+    "$PYTHON_BIN" -m cmw.molecular.orca.suspension describe
+    --input "$input" --target "$target" --orca-exe "$orca_command" --nprocs "$NPROCS"
+  )
+  [[ -z "$runtime_contract" ]] || suspension_preflight+=(--runtime-contract "$runtime_contract")
+  "${suspension_preflight[@]}" >/dev/null || exit 69
+fi
+
 lock_path="${target}.lock"
 lock_json=""
 lock_token=""
@@ -377,6 +392,12 @@ orca_version=""
 
 input_name=$(basename "$run_input")
 launch=("$orca_command" "$input_name")
+if ((controlled_suspension == 1)); then
+  launch=("$PYTHON_BIN" -m cmw.molecular.orca.suspension run
+          --input "$run_input" --target "$target" --orca-exe "$orca_command" --nprocs "$NPROCS"
+          --storage "$input_directory")
+  [[ -z "$runtime_contract" ]] || launch+=(--runtime-contract "$runtime_contract")
+fi
 if [[ ${CMW_CAFFEINATE:-0} == 1 ]] && command -v caffeinate >/dev/null 2>&1; then
   launch=(caffeinate -i "${launch[@]}")
 fi
@@ -389,6 +410,10 @@ set +e
 child_pid=$!
 wait "$child_pid"
 process_status=$?
+while kill -0 "$child_pid" 2>/dev/null; do
+  wait "$child_pid"
+  process_status=$?
+done
 child_pid=""
 set -e
 

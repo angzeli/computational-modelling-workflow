@@ -319,6 +319,17 @@ artifacts is not implemented by this integration.
 
 #### Bind the original runner output
 
+New explicitly enrolled managed suspension attempts use the paired
+`vasp-run-metadata-text-v2` dialect. They record protocol 1, the independent hard
+deadline and pause-aware execution budget, a boot-bound continuous clock, and
+closed ordered suspension intervals. The consumer verifies these fields and
+requires the matching `--controlled-suspension --execution-budget` invocation;
+it preserves every original source, receipt, input, location and scientific
+acceptance check. An unfinished interval, timeout, cancellation or missing
+scientific evidence cannot become a successful result. Legacy unversioned records
+continue to use v1; the runtime handshake itself is not retrospectively
+authenticated by a text record.
+
 For the observed external `run-vasp.sh` integration, `execution` additionally
 accepts the optional `runner_record` member below (the hash is a placeholder):
 

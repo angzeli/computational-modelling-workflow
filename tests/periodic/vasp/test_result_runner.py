@@ -183,3 +183,46 @@ class RunnerBindingTests(unittest.TestCase):
         self.assertTrue(revalidate_sources(result["sources"])["valid"])
         (self.run / "POTCAR").write_text("changed synthetic potential\n")
         self.assertFalse(revalidate_sources(result["sources"])["valid"])
+
+
+class ControlledRunnerBindingTests(unittest.TestCase):
+    """The v2 contract retains every original binding and scientific check."""
+    inspect = RunnerBindingTests.inspect
+    edit_job = RunnerBindingTests.edit_job
+    replace_metadata = RunnerBindingTests.replace_metadata
+    test_missing_native_receipt_and_nonzero_completion_remain_ineligible = RunnerBindingTests.test_missing_native_receipt_and_nonzero_completion_remain_ineligible
+    test_copied_metadata_location_and_symlinked_inputs_are_rejected = RunnerBindingTests.test_copied_metadata_location_and_symlinked_inputs_are_rejected
+
+    def setUp(self):
+        RunnerBindingTests.setUp(self)
+        self.edit_job(lambda job: job["argv"].extend(["--controlled-suspension", "--execution-budget", "30"]))
+        self.spec["execution"]["runner_record"]["dialect"] = "vasp-run-metadata-text-v2"
+        staging = ["runner_metadata_version: 2", "controlled_suspension_protocol: cmw-suspension-v1",
+                   "deadline_policy: pause-aware-execution-v1", "execution_budget_seconds: 30",
+                   'deadline_clock: {"kind":"CLOCK_BOOTTIME","boot":1}', "power_assertion: none",
+                   "hard_budget_seconds: 60"]
+        terminal = ['suspension_intervals: [{"start":5,"end":5.5,"request_id":"one","revision":1}]',
+                    "confirmed_suspended_seconds: 0.5", "unsuspended_elapsed_seconds: 1.1", "elapsed_s: 1.6"]
+        self.original = self.original.replace("advance_stop: not reached", "advance_stop: disabled")
+        self.original = self.original.replace("state: RUNNING", "\n".join(staging) + "\nstate: RUNNING")
+        self.original = self.original.replace("launcher_status: 0", "\n".join(terminal) + "\nlauncher_status: 0")
+        self.replace_metadata(self.original)
+
+    def test_controlled_dialect_and_argv_cannot_be_mixed(self):
+        self.assertEqual(self.inspect()["status"], "eligible")
+        self.spec["execution"]["runner_record"]["dialect"] = "vasp-run-metadata-text-v1"
+        self.assertNotEqual(self.inspect()["status"], "eligible")
+
+    def test_malformed_or_open_accounting_fails_closed(self):
+        cases = [('confirmed_suspended_seconds: 0.5', 'confirmed_suspended_seconds: -0.5'),
+                 ('"end":5.5', '"end":null'), ('"end":5.5', '"end":4'),
+                 ('"revision":1', '"revision":true'), ('"request_id":"one"', '"request_id":""'),
+                 ('execution_budget_seconds: 30', 'execution_budget_seconds: 20'),
+                 ('hard_budget_seconds: 60', 'hard_budget_seconds: 50'),
+                 ('"CLOCK_BOOTTIME"', '"unknown"'), ('"boot":1', '"boot":null'),
+                 ('runner_metadata_version: 2', 'runner_metadata_version: 3'),
+                 ('elapsed_s: 1.6', 'elapsed_s: NaN')]
+        for before, after in cases:
+            with self.subTest(after=after):
+                self.replace_metadata(self.original.replace(before, after))
+                self.assertNotEqual(self.inspect()["status"], "eligible")

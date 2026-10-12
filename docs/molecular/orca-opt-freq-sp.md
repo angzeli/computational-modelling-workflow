@@ -111,3 +111,18 @@ This milestone does not implement FMO or ESP cubes, IGMH, Multiwfn,
 interaction-energy decomposition, dimer generation or selection, catalytic
 pathway energetics, VASP, pymatgen, ASE, SLURM, cluster locking, or generic
 retry ladders.
+
+### Controlled suspension boundary
+
+A newly enrolled Jobs attempt using backend `orca-local-v1` may pass
+`--controlled-suspension` for the single `opt` mode. The ordinary SP/OPT input,
+local serial/PAL runtime and exact worker/attempt handshake must satisfy the
+[runner contract](../architecture/orca-runtime.md#explicit-controlled-suspension-enrollment).
+The same ORCA process continues after an explicit Continue; this is neither
+`.gbw` restart nor a new attempt. The synchronous runner does not advance,
+finalize or clean scratch while its computational child is stopped.
+
+Multi-stage and frequency modes refuse this new option up front. Their original
+CLI and execution behavior remain unchanged. Retain storage, memory and runtime
+files during suspension. Native ORCA and physical sleep qualification require
+separate disposable acceptance runs.

@@ -92,6 +92,8 @@ def admission_presentation(state):
         return blocked(decision['warnings'][0])
     if any(job.get('status') == 'Cancelling' for job in active):
         return blocked('Managed cancellation is not confirmed')
+    if any((job.get('suspension') or {}).get('inhibited') for job in active):
+        return result('WAITING', 'caution', 'Scheduling: Suspension retains commitments; new dispatch inhibited · B details')
     if control.get('stop'):
         return blocked(control.get('reason') or 'Controller stop requested')
     if control.get('dispatch') is not True:

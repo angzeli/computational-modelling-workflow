@@ -337,6 +337,8 @@ def admission(state, guard):
               'Controller stale' if control['stale'] else 'Dispatch intent paused' if not control['dispatch'] else
               'Managed execution occupies slot' if active else 'No pending job' if not pending else
               'User hold' if pending[0]['status']=='Hold' else 'Guard permits remaining queue/preflight checks')
+    if any((j.get('suspension') or {}).get('inhibited') for j in state['jobs'] if j['status'] in ACTIVE):
+        reason = 'Controlled suspension retains commitments and inhibits new admission'
     ready = bool(allowed and control['online'] and not control['stale'] and control['dispatch'] and not active and pending and pending[0]['status']=='Queue')
     if ready:
         from .runtime import launch_blocker

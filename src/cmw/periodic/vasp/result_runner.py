@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import math
+import json
 from pathlib import Path
 import re
 
@@ -16,6 +17,7 @@ from .result_sources import SnapshotReader, SourceSnapshotError
 
 
 DIALECT = "vasp-run-metadata-text-v1"
+CONTROLLED_DIALECT = "vasp-run-metadata-text-v2"
 _INPUTS = ("INCAR", "POSCAR", "POTCAR", "KPOINTS")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _STAGED = re.compile(
@@ -31,12 +33,15 @@ _KEYS = frozenset({
     "observed_version", "normal_footer", "scientific_convergence", "restart_observed", "energy_eV",
     "nelect", "finite_observables", "checkpoint", "launcher_status",
 })
+_CONTROLLED_KEYS = frozenset({"runner_metadata_version", "controlled_suspension_protocol",
+    "deadline_policy", "execution_budget_seconds", "deadline_clock", "power_assertion",
+    "suspension_intervals", "confirmed_suspended_seconds", "unsuspended_elapsed_seconds"})
 _REPEATED = {"state", "child_status", "staged_file", "checkpoint"}
 
 
 def validate_declaration(value):
     if (not isinstance(value, dict) or set(value) != {"dialect", "path", "sha256"}
-            or value.get("dialect") != DIALECT
+            or value.get("dialect") not in {DIALECT, CONTROLLED_DIALECT}
             or not isinstance(value.get("path"), str) or not value["path"].strip()
             or "\0" in value["path"] or not isinstance(value.get("sha256"), str)
             or _DIGEST.fullmatch(value["sha256"]) is None):
@@ -76,19 +81,22 @@ def validate_runner_argv(argv):
     _require(executable.name == "run-vasp.sh", "Only the explicit run-vasp.sh invocation is supported")
     pairs = {"--input", "--output", "--binary", "--ranks", "--ncore", "--kpar", "--mpi-mode",
              "--restart", "--timeout", "--stop-before"}
+    controlled = "--controlled-suspension" in argv
+    if controlled:
+        pairs = pairs | {"--execution-budget"}
     options = {}
     index = 1
     while index < len(argv):
         name = argv[index]
         _require(name not in options, "Repeated runner arguments are ambiguous")
-        if name == "--managed-foreground":
+        if name in {"--managed-foreground", "--controlled-suspension"}:
             options[name] = True
             index += 1
         else:
             _require(name in pairs and index + 1 < len(argv), "Unsupported runner argument format")
             options[name] = argv[index + 1]
             index += 2
-    _require(set(options) == pairs | {"--managed-foreground"}, "Runner invocation must explicitly record supported options")
+    _require(set(options) == pairs | {"--managed-foreground"} | ({"--controlled-suspension"} if controlled else set()), "Runner invocation must explicitly record supported options")
     _require(options["--restart"] == "none" and options["--binary"] == "std"
              and options["--mpi-mode"] in {"synthetic", "native"}, "Unsupported runner mode")
     for key in ("--ranks", "--ncore", "--kpar"):
@@ -100,7 +108,55 @@ def validate_runner_argv(argv):
     timeout, stop = float(options["--timeout"]), float(options["--stop-before"])
     _require(math.isfinite(timeout) and math.isfinite(stop) and 0 <= stop < timeout,
              "Runner budgets must be finite and ordered")
+    if controlled:
+        budget = float(options["--execution-budget"])
+        _require(math.isfinite(budget) and budget > 0 and stop == 0,
+                 "Controlled runner requires a positive execution budget and disabled advance stop")
     return _absolute(options["--input"]), _absolute(options["--output"])
+
+
+def _validate_controlled_metadata(scalar, positions, running, finished, argv):
+    """Require the coordinated record without relaxing native result evidence."""
+    _require(_CONTROLLED_KEYS <= scalar.keys(), "Incomplete controlled runner metadata")
+    _require(scalar["runner_metadata_version"] == "2"
+             and scalar["controlled_suspension_protocol"] == "cmw-suspension-v1"
+             and scalar["deadline_policy"] == "pause-aware-execution-v1"
+             and scalar["power_assertion"] == "none" and scalar.get("advance_stop") == "disabled",
+             "Unsupported controlled runner contract")
+    terminal = {"suspension_intervals", "confirmed_suspended_seconds", "unsuspended_elapsed_seconds"}
+    _require(all(0 < positions[key][0] < running for key in _CONTROLLED_KEYS - terminal)
+             and all(running < positions[key][0] < finished for key in terminal),
+             "Controlled runner metadata must occupy its staging or terminal block")
+    budget = float(scalar["execution_budget_seconds"])
+    hard = float(scalar["hard_budget_seconds"])
+    suspended = float(scalar["confirmed_suspended_seconds"])
+    unsuspended = float(scalar["unsuspended_elapsed_seconds"])
+    elapsed = float(scalar["elapsed_s"])
+    _require(all(math.isfinite(v) and v >= 0 for v in (budget, hard, suspended, unsuspended, elapsed))
+             and budget == float(argv[argv.index("--execution-budget") + 1])
+             and hard == float(argv[argv.index("--timeout") + 1])
+             and abs(elapsed - suspended - unsuspended) <= .05,
+             "Controlled runner deadline/accounting evidence is inconsistent")
+    clock = json.loads(scalar["deadline_clock"])
+    intervals = json.loads(scalar["suspension_intervals"])
+    _require(isinstance(clock, dict) and set(clock) == {"kind", "boot"}
+             and clock["kind"] in {"mach_continuous_time", "CLOCK_BOOTTIME"}
+             and type(clock["boot"]) in (int, float) and math.isfinite(clock["boot"]) and clock["boot"] > 0
+             and isinstance(intervals, list), "Controlled runner requires explicit clock and interval records")
+    previous_end, previous_revision, total, seen = 0.0, 0, 0.0, set()
+    for interval in intervals:
+        _require(isinstance(interval, dict) and set(interval) == {"start", "end", "request_id", "revision"},
+                 "Malformed controlled suspension interval")
+        start, end = interval["start"], interval["end"]
+        revision, request = interval["revision"], interval["request_id"]
+        _require(all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in (start, end))
+                 and previous_end <= start <= end and type(revision) is int and revision > previous_revision
+                 and isinstance(request, str) and bool(request) and request not in seen,
+                 "Controlled suspension intervals must be closed, ordered and nonduplicated")
+        previous_end, previous_revision = end, revision
+        seen.add(request)
+        total += end - start
+    _require(abs(total - suspended) <= .05, "Controlled suspension total differs from its intervals")
 
 
 def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
@@ -124,6 +180,10 @@ def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
     try:
         validate_declaration(declaration)
         source, output = validate_runner_argv(job.get("argv"))
+        controlled = "--controlled-suspension" in job["argv"]
+        _require((declaration["dialect"] == CONTROLLED_DIALECT) == controlled,
+                 "Runner metadata dialect must match the explicit invocation contract")
+        allowed_keys = _KEYS | (_CONTROLLED_KEYS if controlled else frozenset())
         _require(_absolute(job.get("cwd")) == source, "Jobs wrapper cwd must equal the runner's explicit input")
         _require(_absolute(str(run_directory)) == output, "Native run must occupy the exact recorded runner output")
         path = _absolute(declaration["path"])
@@ -134,7 +194,7 @@ def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
         lines = content.splitlines()
         for index, line in enumerate(lines):
             key, separator, value = line.partition(": ")
-            _require(separator and key in _KEYS, "Unsupported runner metadata line or key")
+            _require(separator and key in allowed_keys, "Unsupported runner metadata line or key")
             _require(key in _REPEATED or key not in values, "Repeated runner metadata identity or terminal key")
             values.setdefault(key, []).append(value)
             positions.setdefault(key, []).append(index)
@@ -181,6 +241,8 @@ def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
                  times["end_utc"], receipt.get("recorded_at"), job.get("finished_at")]
         _require(all(type(t) in (int, float) and math.isfinite(t) and t >= 0 for t in chain)
                  and chain == sorted(chain), "Runner lifecycle must lie within the exact Jobs attempt and receipt")
+        if controlled:
+            _validate_controlled_metadata(scalar, positions, running, finished, job["argv"])
         effective = scalar.get("effective_incar_sha256")
         _require(isinstance(effective, str) and _DIGEST.fullmatch(effective) is not None
                  and scalar.get("original_incar_sha256") == staged["INCAR"]["sha256"],
@@ -205,16 +267,16 @@ def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
                          and native[0].get("bytes_read") == identities[name]["bytes"],
                          "Runner input identity differs from consumed native " + name)
         result["facts"] = {
-            "dialect": DIALECT, "metadata_sha256": record["sha256"], "wrapper_cwd": str(source),
+            "dialect": declaration["dialect"], "metadata_sha256": record["sha256"], "wrapper_cwd": str(source),
             "payload_cwd": str(output), "input_identities": identities,
             "original_incar_sha256": scalar["original_incar_sha256"], "staged_input_identities": staged,
             "lifecycle": values["state"], "times": times,
             "launcher_repository": scalar.get("launcher_repository"),
-            "limitations": ["Local unversioned runner text and retrospective declarations are not authenticated.",
+            "limitations": ["Local runner text and retrospective declarations are not authenticated.",
                             "Runner code at execution, including dirty changes, is not authenticated by a current source checkout.",
                             "Input byte identity does not validate potentials, k-point adequacy or scientific convergence."],
         }
         result["valid"] = True
-    except (SourceSnapshotError, ValueError, TypeError, OverflowError, OSError) as exc:
+    except (SourceSnapshotError, ValueError, TypeError, KeyError, OverflowError, OSError) as exc:
         result["error"] = str(exc)
     return result

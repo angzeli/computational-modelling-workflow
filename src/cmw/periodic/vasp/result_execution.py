@@ -1,7 +1,7 @@
 """Read explicitly supplied native Jobs execution evidence without opening Jobs state.
 
 Jobs records foreground completion, not scientific output identities. This adapter
-checks an exported schema-2 snapshot against its original payload-exit receipt;
+checks an exported schema-2 or schema-3 snapshot against its original payload-exit receipt;
 the finalization specification must separately bind the scientific snapshot.
 """
 
@@ -118,9 +118,9 @@ def inspect_execution(
     snapshot = documents["jobs_snapshot"]
     receipt = documents["jobs_receipt"]
     snapshot_shape = (isinstance(snapshot, dict) and type(snapshot.get("schema")) is int
-                      and snapshot["schema"] == 2 and isinstance(snapshot.get("jobs"), list)
+                      and snapshot["schema"] in {2, 3} and isinstance(snapshot.get("jobs"), list)
                       and all(isinstance(item, dict) for item in snapshot["jobs"]))
-    check("snapshot_schema", snapshot_shape, "Expected an exported native Jobs schema-2 snapshot")
+    check("snapshot_schema", snapshot_shape, "Expected an exported native Jobs schema-2 or schema-3 snapshot")
     receipt_shape = (isinstance(receipt, dict) and set(receipt) == {"exit_code", "recorded_at"}
                      and type(receipt.get("exit_code")) is int and 0 <= receipt["exit_code"] <= 255
                      and _timestamp(receipt.get("recorded_at")))

@@ -77,7 +77,7 @@ def start(store):
 def stop(store):
     with store.transaction() as con:
         control = store.control(con)
-        control.update(stop=True, dispatch=False, reason="Controller stop requested; active execution continues")
+        control.update(stop=True, dispatch=False, reason="Controller stop requested; active execution state unchanged")
         store.set_control(con, control)
         store.event(con, None, control["reason"])
 
@@ -219,7 +219,7 @@ def controller(store):
     with exclusive(store.root / "controller.lock"):
         with store.transaction() as con:
             control = store.control(con)
-            control.update(owner=identity(), heartbeat=time.time())
+            control.update(owner=identity(), heartbeat=time.time(), runtime_protocol=3)
             store.set_control(con, control)
             store.event(con, None, "Controller online")
         print("CMW Jobs controller online", flush=True)
@@ -246,6 +246,9 @@ def finish(store, job_id, claim, status, code, reason, *, termination_signal=Non
             status, reason = "Cancelled", "Managed process group termination confirmed"
         job.update(status=status, exit_code=code, signal=termination_signal,
                    finished_at=time.time(), reason=reason)
+        if job.get('suspension'):
+            from .suspension import finalize_timing
+            finalize_timing(job)
         store.save(con, job)
         control = store.control(con)
         if status == "Unknown" or status == "Cancelled" or (status == "Fail" and job["on_failure"] == "pause"):
@@ -288,10 +291,15 @@ def worker(store, job_id, claim):
             if job["claim"] != claim or job["status"] not in {"Starting", "Cancelling"} or job["worker"]:
                 raise JobsError("Worker launch admission rejected")
             job["worker"] = identity()
+            job["worker_protocol"] = 3
             store.save(con, job)
         receipt = attempt / "payload-exit.json"
         env = runtime_environment()
         env.update(job["env"])
+        env.pop('CMW_SUSPENSION_CONTEXT', None)
+        coordinator = None
+        if job.get('suspension'):
+            env['CMW_SUSPENSION_CONTEXT'] = str(attempt/'suspension'/'context.json')
         try:
             # A pipe carries only GO/RELEASE, never computational output.
             leader = subprocess.Popen(["/bin/bash", str(Path(__file__).with_name("payload.sh")),
@@ -353,6 +361,9 @@ def worker(store, job_id, claim):
                     job["status"] = "Run"
                 store.save(con, job)
                 store.event(con, job["id"], "Execution started; group ownership persisted")
+            if job.get('suspension'):
+                from .suspension import Coordinator
+                coordinator = Coordinator(store, job, group)
             leader.stdin.write(b"GO\n")
             leader.stdin.flush()
             cancel_at = None
@@ -362,14 +373,24 @@ def worker(store, job_id, claim):
                 with store.transaction() as con:
                     job = store.get(con, job_id)
                 members = group_members(leader.pid, session=True) if session else group_members(leader.pid)
-                if job["cancel_requested"]:
+                if coordinator and not job.get('cancel_requested') and not job.get('termination_requested'):
+                    coordinator.tick(job)
+                    job = coordinator.current()
+                terminating = job['cancel_requested'] or job.get('termination_requested')
+                if terminating:
                     # The unreaped direct child pins this PID/group; birth identity
                     # additionally protects signalling from corrupted stale metadata.
                     if cancel_at is None:
                         if not owner_alive(group):
                             raise JobsError("Group leader lost before cancellation; no signal sent")
+                        if coordinator:
+                            coordinator.prepare_cancel(job)
                         if session:
-                            signal_session(group, signal.SIGTERM)
+                            signal_session(group, signal.SIGTERM, absence_grace=0.5 if coordinator else 0)
+                            if coordinator:
+                                # Termination intent and producer inhibition are
+                                # established before delivering pending TERM.
+                                signal_session(group, signal.SIGCONT, absence_grace=0.5)
                         else:
                             os.killpg(leader.pid, signal.SIGTERM)
                         cancel_at = time.monotonic()
@@ -377,12 +398,13 @@ def worker(store, job_id, claim):
                         if not owner_alive(group):
                             raise JobsError("Group ownership lost during cancellation")
                         if session:
-                            signal_session(group, signal.SIGKILL)
+                            signal_session(group, signal.SIGKILL, absence_grace=0.5 if coordinator else 0)
                         else:
                             os.killpg(leader.pid, signal.SIGKILL)
                         leader.wait(timeout=5)
                         _wait_for_group_end(leader.pid, session=session)
-                        finish(store, job_id, claim, "Cancelled", 137, "Termination confirmed", termination_signal=signal.SIGKILL)
+                        finish(store, job_id, claim, "Cancelled" if job['cancel_requested'] else "Fail",
+                               137 if job['cancel_requested'] else 124, "Termination confirmed", termination_signal=signal.SIGKILL)
                         return
                 if receipt.exists():
                     evidence = json.loads(receipt.read_text())
@@ -394,6 +416,8 @@ def worker(store, job_id, claim):
                         _wait_for_group_end(leader.pid, session=session)
                         if job['cancel_requested']:
                             finish(store, job_id, claim, 'Cancelled', code, 'Termination confirmed')
+                        elif job.get('termination_requested'):
+                            finish(store, job_id, claim, 'Fail', 124, 'Declared execution deadline expired')
                         else:
                             finish(store, job_id, claim, "Done" if code == 0 else "Fail", code,
                                    "Execution contract completed; scientific checks not evaluated" if code == 0 else f"Exit code {code}")

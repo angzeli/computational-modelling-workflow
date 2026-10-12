@@ -21,7 +21,7 @@ fi
 cp "$source_root/tests/installed_smoke.py" "$check_root/driver/smoke.py"
 : > "$check_root/driver/tests/__init__.py"
 : > "$check_root/driver/tests/jobs/__init__.py"
-cp "$source_root/tests/jobs/"{isolated_runtime,lifecycle_evidence,progress_acceptance,progress_extension_fixture}.py "$check_root/driver/tests/jobs/"
+cp "$source_root/tests/jobs/"{isolated_runtime,lifecycle_evidence,progress_acceptance,progress_extension_fixture,suspension_acceptance}.py "$check_root/driver/tests/jobs/"
 : > "$check_root/driver/tests/periodic/__init__.py"
 : > "$check_root/driver/tests/periodic/vasp/__init__.py"
 cp "$source_root/tests/periodic/vasp/"{result_fixtures,result_case,runner_case,handoff_case,fake_handoff_runner}.py "$check_root/driver/tests/periodic/vasp/"

@@ -4,6 +4,7 @@ import fcntl
 import os
 from pathlib import Path
 import socket
+import time
 
 import psutil
 
@@ -80,7 +81,7 @@ def group_members(pgid, *, pids=None, process_factory=psutil.Process, session=Fa
     return members
 
 
-def signal_session(owner, signum, *, include_leader=True):
+def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
     """Signal birth-verified groups in an explicitly owned session.
 
     A trusted sole foreground payload may exclude the protected leader group
@@ -122,7 +123,20 @@ def signal_session(owner, signum, *, include_leader=True):
             except ProcessLookupError:
                 continue
         else:
-            if group_exists(pgid):
+            # TERM propagation can reap a subgroup before its turn in this
+            # snapshot. macOS may briefly report EPERM for its absence probe.
+            # Retry only that observation; never retry or broaden a signal.
+            deadline = time.monotonic()+absence_grace
+            while True:
+                verify_owner()
+                try:
+                    exists = group_exists(pgid)
+                    break
+                except JobsError as exc:
+                    if not isinstance(exc.__cause__, PermissionError) or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(min(0.05, max(0, deadline-time.monotonic())))
+            if exists:
                 raise JobsError('Session subgroup has no verified surviving member; no signal sent')
 
 
