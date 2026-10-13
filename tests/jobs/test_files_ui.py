@@ -204,7 +204,7 @@ class FilesUiTests(unittest.IsolatedAsyncioTestCase):
             self.opener.assert_not_called()
             index = next(i for i, loc in enumerate(chooser.result.locations) if loc.path == str(self.output))
             button = chooser.query_one(f'#files-location-{index}')
-            button.scroll_visible(immediate=True)
+            button.scroll_visible(animate=False, immediate=True)
             await pilot.pause()
             await pilot.click(f'#files-location-{index}')
             await self.finished(app, pilot)
