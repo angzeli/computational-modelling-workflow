@@ -377,20 +377,20 @@ def worker(store, job_id, claim):
                     coordinator.tick(job)
                     job = coordinator.current()
                 terminating = job['cancel_requested'] or job.get('termination_requested')
-                if terminating:
+                if coordinator and terminating:
+                    # A completed runner may have exited before a concurrent
+                    # cancel request. Genuine receipt/drain permits normal release.
+                    if not (receipt.exists() and coordinator.ready_to_release()):
+                        coordinator.cancel_step(job, CANCEL_GRACE)
+                    job = coordinator.current()
+                elif terminating:
                     # The unreaped direct child pins this PID/group; birth identity
                     # additionally protects signalling from corrupted stale metadata.
                     if cancel_at is None:
                         if not owner_alive(group):
                             raise JobsError("Group leader lost before cancellation; no signal sent")
-                        if coordinator:
-                            coordinator.prepare_cancel(job)
                         if session:
-                            signal_session(group, signal.SIGTERM, absence_grace=0.5 if coordinator else 0)
-                            if coordinator:
-                                # Termination intent and producer inhibition are
-                                # established before delivering pending TERM.
-                                signal_session(group, signal.SIGCONT, absence_grace=0.5)
+                            signal_session(group, signal.SIGTERM)
                         else:
                             os.killpg(leader.pid, signal.SIGTERM)
                         cancel_at = time.monotonic()
@@ -398,7 +398,7 @@ def worker(store, job_id, claim):
                         if not owner_alive(group):
                             raise JobsError("Group ownership lost during cancellation")
                         if session:
-                            signal_session(group, signal.SIGKILL, absence_grace=0.5 if coordinator else 0)
+                            signal_session(group, signal.SIGKILL)
                         else:
                             os.killpg(leader.pid, signal.SIGKILL)
                         leader.wait(timeout=5)
@@ -409,11 +409,19 @@ def worker(store, job_id, claim):
                 if receipt.exists():
                     evidence = json.loads(receipt.read_text())
                     code = int(evidence["exit_code"])
-                    if members == [leader.pid] or set(members) == {leader.pid}:
+                    drained = coordinator.ready_to_release() if coordinator else set(members) == {leader.pid}
+                    if drained:
+                        if coordinator:
+                            job = coordinator.current()
                         leader.stdin.write(b"RELEASE\n")
                         leader.stdin.flush()
-                        leader.wait(timeout=5)
-                        _wait_for_group_end(leader.pid, session=session)
+                        if leader.wait(timeout=5) != 0 and coordinator:
+                            raise JobsError('Protected anchor did not acknowledge normal RELEASE')
+                        if coordinator:
+                            coordinator.verify_released()
+                            job = coordinator.current()
+                        else:
+                            _wait_for_group_end(leader.pid, session=session)
                         if job['cancel_requested']:
                             finish(store, job_id, claim, 'Cancelled', code, 'Termination confirmed')
                         elif job.get('termination_requested'):

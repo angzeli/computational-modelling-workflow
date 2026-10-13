@@ -76,6 +76,7 @@ class StateTests(unittest.TestCase):
         job = self.current()
         coordinator.store, coordinator.job_id, coordinator.claim = self.store, job['id'], job['claim']
         coordinator.anchor = ANCHOR
+        coordinator.directory = self.store.root/'attempts'/job['attempt_id']/'suspension'
         coordinator.context = {'worker': WORKER, 'clock': CLOCK,
                                'state_identity': control._file_identity(self.store.path)}
         coordinator.registration = {'runner': RUNNER, 'root': MEMBER, 'strategy': 'direct-tree',

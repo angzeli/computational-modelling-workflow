@@ -22,7 +22,7 @@ from uuid import uuid4
 
 import psutil
 
-from .ownership import group_members, identity, owner_alive
+from .ownership import group_exists, identity, owner_alive, snapshot_owned_session
 
 PROTOCOL = 1
 BINDING_FIELDS = ('protocol', 'backend', 'job_id', 'attempt_id', 'claim', 'worker',
@@ -241,6 +241,27 @@ class RunnerControl:
         protected = [identity(pid) for pid in protected_pids]
         if any(item['pid'] == root_pid for item in protected):
             raise SuspensionProtocolError('Computational root cannot be protected')
+        # Retain original witnesses through root exit; SID lookup failure alone
+        # must not let the runner finalize while an exiting child still exists.
+        anchor = self.context['anchor']
+        controls = [anchor, self.runner, *protected]
+        reached_anchor = False
+        for parent in psutil.Process().parents():
+            if os.getsid(parent.pid) != anchor['pid']:
+                break
+            controls.append(identity(parent.pid))
+            if parent.pid == anchor['pid']:
+                reached_anchor = True
+                break
+        if not reached_anchor:
+            raise SuspensionProtocolError('Runner ancestry no longer reaches its anchor')
+        self._drain_protected = {item['pid']: item for item in controls}
+        self._drain_known = {item['pid']: item for item in [*controls, root]}
+        self._drain_groups = set()
+        root_group = os.getpgid(root_pid)
+        if root_group == anchor['pid']:
+            raise SuspensionProtocolError('Computational root shares the protected group')
+        self._drain_groups.add(root_group)
         self.clock_started = now_clock()
         self._write('registration.json', {**self.binding, 'backend': self.context['backend'],
                     'runner': self.runner, 'root': root, 'strategy': strategy,
@@ -248,26 +269,31 @@ class RunnerControl:
                     'runtime': self.runtime, 'clock': self.clock, 'clock_started': self.clock_started})
         self._registered = True
 
+    def _observe_domain(self):
+        snapshot = snapshot_owned_session(self.context['anchor'], self._drain_known.values())
+        for item in [*snapshot['members'], *snapshot['pending']]:
+            member = item['identity']
+            self._drain_known[member['pid']] = member
+        for item in snapshot['members']:
+            if item['identity']['pid'] not in self._drain_protected:
+                self._drain_groups.add(item['pgid'])
+        return snapshot
+
     def domain_drained(self):
-        """Read-only finalization gate after the computational root really exits."""
+        """Require strict original/current domain absence before finalization."""
         try:
-            self._check_directory()
-            if self._read('context.json') != self.context:
-                raise SuspensionProtocolError('Suspension context changed')
-            anchor = self.context['anchor']
-            if not owner_alive(anchor) or os.getsid(os.getpid()) != anchor['pid']:
-                raise SuspensionProtocolError('Owned session cannot be verified for drainage')
-            protected = {os.getpid(), anchor['pid']}
-            for parent in psutil.Process().parents():
-                if os.getsid(parent.pid) != anchor['pid']:
-                    break
-                protected.add(parent.pid)
-                if parent.pid == anchor['pid']:
-                    break
-            remaining = group_members(anchor['pid'], session=True)
-            # MPI modules may outlive their serial driver or group leader. Only
-            # the existing anchor-to-runner control chain may remain at return.
-            return not set(remaining).difference(protected) and owner_alive(anchor)
+            self._check_authority(check_storage=False)
+            snapshot = self._observe_domain()
+            if snapshot['pending']:
+                return False
+            if any(item['identity']['pid'] not in self._drain_protected for item in snapshot['members']):
+                return False
+            # A launcher may exit before a group has ceased to exist. Probes
+            # here authorize no signal and denial cannot release finalization.
+            if any(group_exists(pgid) for pgid in self._drain_groups):
+                return False
+            self._check_authority(check_storage=False)
+            return True
         except (OSError, ValueError, psutil.Error) as exc:
             self.last_error = str(exc)
             return False
@@ -383,6 +409,8 @@ class RunnerControl:
                 self._check_storage()
             if command is not None:
                 self._apply(command)
+            if self._registered:
+                self._observe_domain()
             self.last_error = ''
             return self._state
         except (OSError, ValueError, psutil.Error) as exc:

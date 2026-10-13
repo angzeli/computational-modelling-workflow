@@ -218,12 +218,26 @@ Partial delivery retains identities and inhibition; there is no automatic
 SIGCONT rollback or replacement process. An unresolved transition requires
 inspection and, if appropriate, the existing confirmed cancellation operation.
 
-During cancellation the worker establishes termination intent and obtains the
-runner's producer-inhibition acknowledgement before TERM plus identity-verified
-CONT needed to deliver pending termination. That CONT is termination delivery,
-not a user continuation. Commitments release only after genuine exit/receipt and
-complete owned-session drainage. Worker loss uses existing Unknown recovery;
-restarting a controller never adopts or resumes stopped processes.
+During enrolled cancellation the worker establishes termination intent and
+obtains the runner's producer-inhibition acknowledgement. A qualified MPI
+launcher initiates rank shutdown; the worker observes drainage before one
+bounded, freshly identity-verified KILL fallback for surviving computation.
+Serial computational producers receive TERM before termination-only CONT so
+pending termination can be delivered while stopped. This is not user Continue.
+The protected anchor, runner and wrapper chain stay runnable; their shared
+control group is never a computational TERM/CONT/KILL target.
+
+Launcher exit or a successful signal is not drainage. Original birth identities,
+current owned members and recorded computational groups must be verified gone;
+zombies, readable identities with unavailable topology, and denied observations
+remain unresolved. EPERM is never equivalent to exit, and SID lookup ESRCH is
+not independent absence proof. A denied nonzero signal is not blindly retried.
+Genuine payload receipt and complete computational drainage precede normal
+anchor RELEASE and verified control-domain drainage. A receipt that wins a
+cancellation race uses that same completion gate. Only then may commitments be
+released. Missing authority/evidence retains Unknown/Unverified and resources;
+restarting a controller never adopts or resumes stopped processes. Legacy
+unenrolled Jobs retain their existing cancellation contract.
 
 Durations use `mach_continuous_time` on macOS and `CLOCK_BOOTTIME` on Linux,
 including sleep in both total and confirmed-suspension intervals. Boot/clock

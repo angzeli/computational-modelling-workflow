@@ -17,7 +17,8 @@ from uuid import uuid4
 
 import psutil
 
-from .ownership import identity, owner_alive, lock_held, group_members
+from .ownership import (identity, owner_alive, lock_held, group_members,
+                        snapshot_owned_session, group_exists)
 from .store import ACTIVE, JobsError, validate_note
 
 BACKENDS = ('local-command-v1', 'vasp-port-v1', 'orca-local-v1')
@@ -451,6 +452,14 @@ class Coordinator:
         self.domain_pending_since = None
         self.completion_pending_since = None
         self.deadline_termination = False
+        self.last_domain = None
+        self.fallback_signalled = set()
+        self.observed = {}
+        self.observed_groups = set()
+        self.cancellation_started = None
+        self.cancellation_prepared = False
+        self.cancellation_escalated = False
+        self.denied_signals = []
 
     @property
     def context_path(self):
@@ -511,6 +520,8 @@ class Coordinator:
         _storage(record.get('storage'))
         domain = bind_domain(record, self.anchor)
         self.registration = record
+        self.last_domain = domain
+        self.observe_session()
         from .suspension_protocol import clock_descriptor
         if not job['suspension'].get('capability'):
             self.update(job, clock=clock_descriptor(), clock_started=record.get('clock_started'), capability={
@@ -533,7 +544,10 @@ class Coordinator:
         _storage(self.registration['storage'])
         if not owner_alive(self.registration['runner']) or _stopped(self.registration['runner']):
             raise JobsError('Runnable runner authority lost')
-        return bind_domain(self.registration, self.anchor)
+        domain = bind_domain(self.registration, self.anchor)
+        self.last_domain = domain
+        self.observe_session()
+        return domain
 
     def _cancel_pending(self):
         job = self.current()
@@ -593,7 +607,8 @@ class Coordinator:
             return True
         with self.store.transaction(create=False) as con:
             latest = self.store.get(con, self.job_id)
-            if latest['claim'] != self.claim or not (latest.get('cancel_requested') or latest.get('termination_requested')):
+            if (latest['claim'] != self.claim or latest['worker'] != self.context['worker']
+                    or not (latest.get('cancel_requested') or latest.get('termination_requested'))):
                 raise JobsError('Termination authority changed')
             state = latest['suspension']
             if (state.get('request') or {}).get('action') != 'cancel':
@@ -607,6 +622,9 @@ class Coordinator:
         self.command(job, 'cancel')
         limit = time.monotonic()+2
         while time.monotonic() < limit:
+            self.current()
+            if (self.directory.parent/'payload-exit.json').exists() and self.ready_to_release():
+                return False  # Receipt won the request/ACK race; release normally.
             acknowledged = self.ack(job, 'cancel', 'cancel_prepared')
             if acknowledged:
                 self.update(job, intervals=acknowledged.get('intervals', []),
@@ -615,6 +633,187 @@ class Coordinator:
                 return True
             time.sleep(0.05)
         raise JobsError('Runner termination preparation unacknowledged; refusing ambiguous continuation')
+
+    def observe_session(self):
+        """Retain original identities across launcher exit and reparenting."""
+        self.current()
+        snapshot = snapshot_owned_session(self.anchor, self.observed.values())
+        previous = set(self.observed)
+        rows = {row['identity']['pid']: row for row in snapshot['members']}
+        for pid, row in rows.items():
+            if self.cancellation_prepared and pid not in previous and row['pgid'] != self.anchor['pid']:
+                # Late descendants must still join through an observed owner;
+                # an unknown orphan in the SID is insufficient signal authority.
+                parent, seen = row['ppid'], {pid}
+                while parent not in previous and parent in rows and parent not in seen:
+                    seen.add(parent)
+                    parent = rows[parent]['ppid']
+                if parent not in previous or parent == self.anchor['pid']:
+                    raise JobsError('Unregistered late computational member during cancellation')
+            self.observed[pid] = row['identity']
+            self.observed_groups.add(row['pgid'])
+        for item in snapshot['pending']:
+            self.observed[item['identity']['pid']] = item['identity']
+        return snapshot
+
+    def _groups_absent(self):
+        for pgid in self.observed_groups - {self.anchor['pid']}:
+            try:
+                if group_exists(pgid):
+                    return False
+            except JobsError as exc:
+                if not isinstance(exc.__cause__, PermissionError):
+                    raise
+                return False  # Observation only; denial never means absence.
+        return True
+
+    def ready_to_release(self):
+        if self.registration is None or self.last_domain is None:
+            raise JobsError('Payload receipt lacks a previously verified coordinated domain')
+        snapshot = self.observe_session()
+        return (not snapshot['pending']
+                and {row['identity']['pid'] for row in snapshot['members']} == {self.anchor['pid']}
+                and self._groups_absent())
+
+    def _cancel_send(self, member, signum):
+        snapshot = self.observe_session()
+        rows = {row['identity']['pid']: row for row in snapshot['members']}
+        row = rows.get(member['pid'])
+        if member in snapshot['absent']:
+            return True
+        if any(item['identity'] == member for item in snapshot['pending']):
+            return False  # No syscall; observe the original until fresh or absent.
+        if row is None or row['identity'] != member:
+            raise JobsError('Termination target cannot be freshly verified')
+        if row['pgid'] == self.anchor['pid'] or member == self.registration['runner']:
+            raise JobsError('Protected control cannot be a termination target')
+        if row['status'] in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+            return False  # Observe original reaping; never signal an exiting witness.
+        self.current()
+        event = {'identity': member, 'signal': int(signum), 'delivered': False,
+                 'operation': 'identity-verification'}
+        try:
+            # Individual identities avoid signalling co-grouped runner controls.
+            if identity(member['pid']) != member or os.getsid(member['pid']) != self.anchor['pid'] or os.getpgid(member['pid']) != row['pgid']:
+                raise JobsError('Termination target changed before signal delivery')
+            event['operation'] = 'signal-delivery'
+            os.kill(member['pid'], signum)
+            event['delivered'] = True
+        except (ProcessLookupError, PermissionError, psutil.NoSuchProcess) as exc:
+            event['errno'] = getattr(exc, 'errno', None)
+            # No retry of the denied signal. Only independent original absence
+            # AND kernel group absence can discharge this obligation.
+            self.denied_signals.append((member, row['pgid'], time.monotonic(), exc))
+        current = self.current()
+        self.update(current, signal_history=[*current['suspension'].get('signal_history', []), event])
+        return True
+
+    def cancel_step(self, job, grace):
+        """One primary initiator, then one bounded handoff to surviving members."""
+        self.current()
+        now = time.monotonic()
+        if self.cancellation_started is None:
+            self.cancellation_started = now
+        if not self.cancellation_prepared:
+            if self.registration is None:
+                try:
+                    if not self._registration(job):
+                        if now-self.cancellation_started >= TRANSITION_TIMEOUT:
+                            raise JobsError('Termination requires the coordinated runner handshake')
+                        return
+                except DomainPending:
+                    if now-self.cancellation_started >= TRANSITION_TIMEOUT:
+                        raise JobsError('Termination domain did not become verifiable')
+                    return
+            snapshot = self.observe_session()
+            root = self.registration['root']
+            root_exiting = (root in snapshot['absent'] or any(
+                item['identity'] == root for item in snapshot['pending']) or any(
+                row['identity'] == root and row['status'] in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}
+                for row in snapshot['members']))
+            domain = self.last_domain if root_exiting else self._validate()
+            if domain is None:
+                raise JobsError('No verified computational domain precedes root exit')
+            prepared = self.prepare_cancel(job)
+            self.current()
+            self.cancellation_prepared = True
+            self.cancellation_started = time.monotonic()
+            if not prepared:
+                return
+            # MPI controls receive TERM once and own initial rank shutdown.
+            # A stopped serial producer requires termination-only CONT after TERM.
+            root = self.registration['root']
+            for launcher in domain.launchers:
+                self._cancel_send(launcher, signal.SIGTERM)
+                if self.denied_signals:
+                    return
+            if root not in domain.launchers:
+                delivered = self._cancel_send(root, signal.SIGTERM)
+                if delivered and not self.denied_signals:
+                    self._cancel_send(root, signal.SIGCONT)
+            return
+        snapshot = self.observe_session()
+        for member, pgid, started, error in list(self.denied_signals):
+            absent = member in snapshot['absent']
+            try:
+                gone = absent and not group_exists(pgid)
+            except JobsError as exc:
+                if not isinstance(exc.__cause__, PermissionError):
+                    raise
+                gone = False
+            if gone:
+                self.denied_signals.remove((member, pgid, started, error))
+            elif time.monotonic()-started >= .5:
+                raise JobsError('Denied termination signal lacks verified original and group absence') from error
+        if self.denied_signals:
+            return
+        if now-self.cancellation_started > grace:
+            # Explicit fallback after the primary grace, never a second TERM
+            # traversal racing MPI's initial shutdown. Preserve the receipt chain.
+            protected = [self.registration['runner'], *self.registration.get('protected', [])]
+            for row in snapshot['members']:
+                member = row['identity']
+                key = (member['pid'], member['birth'])
+                if (row['pgid'] != self.anchor['pid'] and member not in protected
+                        and key not in self.fallback_signalled):
+                    if self._cancel_send(member, signal.SIGKILL):
+                        self.fallback_signalled.add(key)
+                    if self.denied_signals:
+                        break
+            self.cancellation_escalated = True
+        if now-self.cancellation_started > grace+TRANSITION_TIMEOUT:
+            raise JobsError('Termination lacks complete owned drainage and a genuine payload receipt')
+
+    def verify_released(self):
+        """After normal RELEASE/reap, require all retained originals and groups gone."""
+        limit = time.monotonic()+5
+        while True:
+            self.current()
+            pending = False
+            for member in self.observed.values():
+                try:
+                    current = identity(member['pid'])
+                except psutil.ZombieProcess:
+                    pending = True
+                except psutil.NoSuchProcess:
+                    continue
+                except ProcessLookupError:
+                    pending = True
+                else:
+                    if current != member:
+                        raise JobsError('Released process identity was reused before final verification')
+                    pending = True
+            try:
+                pending = any(group_exists(group) for group in self.observed_groups) or pending
+            except JobsError as exc:
+                if not isinstance(exc.__cause__, PermissionError):
+                    raise
+                pending = True
+            if not pending:
+                return
+            if time.monotonic() >= limit:
+                raise JobsError('Protected control release remains unverified')
+            time.sleep(.05)
 
     def tick(self, job):
         try:

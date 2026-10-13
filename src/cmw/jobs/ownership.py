@@ -82,6 +82,103 @@ def group_members(pgid, *, pids=None, process_factory=psutil.Process, session=Fa
     return members
 
 
+def snapshot_owned_session(owner, known=()):
+    """Observe an anchored session without equating exit races with drainage.
+
+    ``known`` contains original birth identities retained by the cancellation
+    coordinator. A readable original whose topology is disappearing remains
+    pending; zombies remain members. This function never sends a signal.
+    """
+    sid = owner['pid']
+    originals = {}
+    for member in known:
+        if member['pid'] in originals and originals[member['pid']] != member:
+            raise JobsError('Conflicting original session identities')
+        originals[member['pid']] = member
+    if sid in originals and originals[sid] != owner:
+        raise JobsError('Protected session identity differs from original evidence')
+    originals[sid] = owner
+    result = {'members': [], 'absent': [], 'pending': []}
+
+    def verify_anchor():
+        try:
+            if (identity(sid) != owner or os.getsid(sid) != sid or os.getpgid(sid) != sid
+                    or psutil.Process(sid).status() in
+                    {psutil.STATUS_STOPPED, psutil.STATUS_TRACING_STOP,
+                     psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}
+                    or identity(sid) != owner):
+                raise JobsError('Protected session authority is unavailable')
+        except (OSError, psutil.Error) as exc:
+            raise JobsError('Protected session authority is unavailable') from exc
+
+    def pending(member, reason):
+        result['pending'].append({'identity': member, 'reason': reason})
+
+    def disappearance(pid, member):
+        # A failed getsid/getpgid is not independently verified process exit.
+        try:
+            current = identity(pid)
+        except psutil.ZombieProcess:
+            pending(member, 'Original process has unreadable zombie metadata')
+        except psutil.NoSuchProcess:
+            if pid in originals:
+                result['absent'].append(originals[pid])
+        except ProcessLookupError:
+            pending(member, 'Original identity query returned ESRCH without independent absence')
+        except (PermissionError, psutil.AccessDenied) as exc:
+            raise JobsError('Original session member is not fully observable') from exc
+        else:
+            if current != member:
+                raise JobsError('Original session member identity changed')
+            pending(member, 'Original birth identity remains readable while topology is unavailable')
+
+    verify_anchor()
+    for pid in sorted(set(psutil.pids()) | originals.keys()):
+        if pid <= 0:
+            continue
+        original = originals.get(pid)
+        if original is None:
+            # Do not inspect or adopt an unrelated process merely because its
+            # PID appeared in the system enumeration.
+            try:
+                if os.getsid(pid) != sid:
+                    continue
+            except ProcessLookupError:
+                continue
+            except PermissionError as exc:
+                raise JobsError('Session membership is not fully observable') from exc
+        member = original
+        try:
+            current = identity(pid)
+            if original is not None and current != original:
+                raise JobsError('Original session member identity changed')
+            member = current
+            if os.getsid(pid) != sid:
+                raise JobsError('Original session member escaped its owned session')
+            pgid = os.getpgid(pid)
+            process = psutil.Process(pid)
+            status, ppid = process.status(), process.ppid()
+            if identity(pid) != member:
+                raise JobsError('Session member identity changed during observation')
+            if os.getsid(pid) != sid or os.getpgid(pid) != pgid:
+                raise JobsError('Session member topology changed during observation')
+        except psutil.ZombieProcess:
+            if member is None:
+                raise JobsError('Session zombie identity cannot be verified')
+            pending(member, 'Original process has unreadable zombie metadata')
+        except (ProcessLookupError, psutil.NoSuchProcess):
+            if member is None:
+                continue
+            disappearance(pid, member)
+        except (PermissionError, psutil.AccessDenied) as exc:
+            raise JobsError('Original session member is not fully observable') from exc
+        else:
+            result['members'].append({'identity': member, 'pgid': pgid,
+                                      'status': status, 'ppid': ppid})
+    verify_anchor()
+    return result
+
+
 def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
     """Signal birth-verified groups in an explicitly owned session.
 
