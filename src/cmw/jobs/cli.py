@@ -146,6 +146,18 @@ def inspect_lifecycle(store, args):
     return 0
 
 
+def inspect_reconciliation(store, args):
+    if args.apply:
+        raise JobsError('Reconciliation --apply is not implemented; deferred until serial P2 integration. Use --preview.')
+    from .reconciliation import preview_reconciliation, preview_text
+
+    job, control = _managed_job(store, args.job_id)
+    result = preview_reconciliation(store, job, state={'schema': control['schema'], 'controller': control}).to_dict()
+    print(json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False)
+          if args.json else safe_text(preview_text(result)))
+    return 0
+
+
 def guard_text(state):
     guard = state.get("external_activity")
     if not guard:
@@ -293,6 +305,15 @@ def register(subcommands):
     observe.add_argument("job_id")
     observe.add_argument("--json", action="store_true")
     observe.set_defaults(handler=handle)
+
+    reconcile = operations.add_parser("reconcile", help="preview conservative recovery; persistent apply is deferred",
+        description="Read-only reconciliation preview. Does not start a controller, signal, update state or release resources.")
+    reconcile.add_argument("job_id")
+    mode = reconcile.add_mutually_exclusive_group()
+    mode.add_argument("--preview", action="store_true", help="read-only preview (the default)")
+    mode.add_argument("--apply", action="store_true", help="not supported until serial P2 integration; always rejected")
+    reconcile.add_argument("--json", action="store_true")
+    reconcile.set_defaults(handler=handle)
 
     files = operations.add_parser("files", help="inspect declared job locations; opens folders only with --open")
     files.add_argument("job_id")
@@ -471,6 +492,8 @@ def handle(args):
     try:
         if operation == "observe":
             return inspect_lifecycle(store, args)
+        if operation == "reconcile":
+            return inspect_reconciliation(store, args)
         if operation == "files":
             return inspect_files(store, args)
         if operation == "progress":

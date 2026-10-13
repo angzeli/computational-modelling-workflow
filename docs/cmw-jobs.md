@@ -183,6 +183,19 @@ only a successful scientific-output read. Selected observations run in one
 background worker; selection/attempt changes discard delayed results. Detaching
 changes no jobs. Full observation evidence is available in Details.
 
+`cmw jobs reconcile JOB_ID --preview [--json]` describes a read-only conditional
+recovery proposal. Missing worker plus an existing unheld lock and no controller
+authority can propose a future conservative Unknown transition with dispatch
+disabled and all commitments retained. Inaccessible or active authority blocks
+that proposal. A changed lifecycle/controller binding rejects stale proposals.
+No proposal grants mutation or terminal authority.
+
+**Persistent apply is deferred.** `--apply` is rejected before observation or
+mutation. Integrate against the final controlled-suspension/P2 schema and
+protocol before implementing conflict-aware recovery. Observation and preview
+never signal, adopt, cancel, restart, release reservations, enable dispatch or
+write scientific files. No native MPI, engine or sleep qualification is implied.
+
 ## Selected-job live progress
 
 `cmw jobs progress JOB_ID [--json]` provides bounded, read-only observation without
