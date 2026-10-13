@@ -108,7 +108,7 @@ def prepare_case(root, *, relaxation=False, exit_code=0, converged=True):
             "prepared": prepared, "policy": selected_policy, "policy_path": policy_path}
 
 
-def bind_completed_case(case, snapshot):
+def bind_completed_case(case, snapshot, *, quiet_seconds=.25, timeout=3):
     """Save an unmodified native snapshot and reference its original receipt."""
     job, = snapshot["jobs"]
     snapshot_path = case["root"] / "jobs-snapshot.json"
@@ -116,7 +116,8 @@ def bind_completed_case(case, snapshot):
     receipt = Path(snapshot["state_directory"]) / "attempts" / job["attempt_id"] / "payload-exit.json"
     record = case.get("preparation_record", case["scratch"] / "preparation" / "preparation.json")
     metadata = case["run"] / "RUN_METADATA.txt"
-    wait_for_fixture_sources([*case["run"].iterdir(), case["policy_path"], snapshot_path, receipt, record])
+    sources = [*case["run"].iterdir(), case["policy_path"], snapshot_path, receipt, record]
+    wait_for_fixture_sources(sources, quiet_seconds=quiet_seconds, timeout=timeout)
     evidence = inspect_result(case["run"])
     spec = {
         "schema_version": 1, "intent": "retrospective", "producing_calculation": "invented-composed-handoff",
@@ -133,6 +134,6 @@ def bind_completed_case(case, snapshot):
     }
     path = case["root"] / "finalize.json"
     write_json(path, spec)
-    wait_for_fixture_sources([path])
+    wait_for_fixture_sources([*sources, path], quiet_seconds=quiet_seconds, timeout=timeout)
     case.update(spec=spec, spec_path=path, receipt=receipt, snapshot=snapshot_path)
     return case

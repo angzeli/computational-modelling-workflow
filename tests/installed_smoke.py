@@ -566,7 +566,7 @@ def handoff_surface(root, cli):
                 wait_for(lambda: all(j['status'] in {'Done', 'Fail'} for j in store.snapshot()['jobs']))
                 state = store.snapshot()
                 assert state['jobs'][0]['status'] == 'Done', state['jobs']
-                bind_completed_case(case, state)
+                bind_completed_case(case, state, quiet_seconds=2, timeout=5)
                 arguments = ['vasp', 'finalize-result', str(case['run']), '--policy', str(case['policy_path']),
                              '--spec', str(case['spec_path']), '--scratch-root', str(case['scratch']),
                              '--record-directory', 'accepted', '--json']

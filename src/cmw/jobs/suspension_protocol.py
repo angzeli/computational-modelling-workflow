@@ -130,6 +130,7 @@ class RunnerControl:
             self._last_ack_clock = None
             self._last_ack_status = None
             self._state = 'run'
+            self.cancel_requested = False
             self.last_error = ''
             self.accounting_uncertain = False
             self._registered = False
@@ -379,6 +380,7 @@ class RunnerControl:
             if self.intervals and self.intervals[-1].get('end') is None:
                 self.intervals[-1]['end'] = now_clock()
             self._state = 'cancel'
+            self.cancel_requested = True
         self._last_command = dict(command)
         self._ack(command, status)
 
@@ -421,6 +423,7 @@ class RunnerControl:
     def request_termination(self, reason, exit_code=124):
         self._check_authority(check_storage=False)
         self._state = 'cancel'
+        self.cancel_requested = True
         self._write('deadline_expired.json', {**self.binding, 'runner': self.runner,
                     'reason': str(reason), 'exit_code': int(exit_code), 'clock': self.clock,
                     'recorded_clock': now_clock(), 'intervals': self.intervals})
@@ -522,7 +525,8 @@ def mpi_runtime_identity(launcher, ranks):
 
 
 def controlled_driver(command, *, backend, execution_budget=None, hard_timeout=None,
-                      mpi_launcher=None, mpi_ranks=2, storage=(), runtime=None, strategy=None):
+                      mpi_launcher=None, mpi_ranks=2, storage=(), runtime=None, strategy=None,
+                      completion_details=False):
     """Launch one foreground domain; only its bound worker can stop or cancel it."""
     deadline = {'protocol': PROTOCOL, 'clock': clock_descriptor(),
                 'execution_budget_seconds': execution_budget, 'hard_timeout_seconds': hard_timeout,
@@ -564,7 +568,13 @@ def controlled_driver(command, *, backend, execution_budget=None, hard_timeout=N
             state = control.poll()
             result = child.poll()  # Popen waits for termination, never WUNTRACED stops.
             if result is not None and control.domain_drained():
-                return result if result >= 0 else 128 - result
+                exit_code = result if result >= 0 else 128 - result
+                if completion_details:
+                    return {**control.binding, 'runner': control.runner,
+                            'root': control._drain_known[child.pid], 'exit_code': exit_code,
+                            'source': 'cmw-controlled-driver-drained-v1',
+                            'disposition': 'cancelled' if control.cancel_requested else 'completed'}
+                return exit_code
             if not terminating and ((hard_timeout is not None and control.elapsed >= hard_timeout) or
                                     control.execution_budget_exhausted(execution_budget)):
                 try:

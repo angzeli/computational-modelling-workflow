@@ -239,6 +239,15 @@ released. Missing authority/evidence retains Unknown/Unverified and resources;
 restarting a controller never adopts or resumes stopped processes. Legacy
 unenrolled Jobs retain their existing cancellation contract.
 
+The controlled ORCA shell verifies a private, exact-attempt completion record
+and live worker/anchor authority before scientific copy-back or finalization.
+Authenticated cancellation, including a cancel already pending when that gate
+is checked, preserves external scratch and skips scientific attempt metadata.
+The shell still emits its genuine payload exit receipt and releases operational
+locks. Ordinary nonzero engine exits retain failed-attempt metadata; an exit
+code such as 137 or 143 alone is never cancellation evidence. Missing or
+inconsistent completion records withhold scientific finalization.
+
 Durations use `mach_continuous_time` on macOS and `CLOCK_BOOTTIME` on Linux,
 including sleep in both total and confirmed-suspension intervals. Boot/clock
 changes and stale evidence make operational elapsed time uncertain. Transition

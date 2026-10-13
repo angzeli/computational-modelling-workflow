@@ -395,7 +395,7 @@ launch=("$orca_command" "$input_name")
 if ((controlled_suspension == 1)); then
   launch=("$PYTHON_BIN" -m cmw.molecular.orca.suspension run
           --input "$run_input" --target "$target" --orca-exe "$orca_command" --nprocs "$NPROCS"
-          --storage "$input_directory")
+          --storage "$input_directory" --completion-record "$local_scratch_dir/controlled-completion.json")
   [[ -z "$runtime_contract" ]] || launch+=(--runtime-contract "$runtime_contract")
 fi
 if [[ ${CMW_CAFFEINATE:-0} == 1 ]] && command -v caffeinate >/dev/null 2>&1; then
@@ -414,8 +414,23 @@ while kill -0 "$child_pid" 2>/dev/null; do
   wait "$child_pid"
   process_status=$?
 done
+completed_runner_pid="$child_pid"
 child_pid=""
 set -e
+
+if ((controlled_suspension == 1)); then
+  if ! completion_disposition=$("$PYTHON_BIN" -m cmw.molecular.orca.suspension verify-completion \
+    --completion-record "$local_scratch_dir/controlled-completion.json" \
+    --process-status "$process_status" --runner-pid "$completed_runner_pid")
+  then
+    printf 'Controlled ORCA completion could not be verified; scientific finalization withheld\n' >&2
+    exit 69
+  fi
+  if [[ "$completion_disposition" == cancelled ]]; then
+    ((process_status != 0)) || process_status=143
+    exit "$process_status"
+  fi
+fi
 
 if ((external_configured == 1)); then
   if ! "$PYTHON_BIN" -m cmw.core.external_scratch_cli copy-back \

@@ -99,7 +99,7 @@ print('ORCA TERMINATED NORMALLY')
         self.temporary.cleanup()
 
     def current(self):
-        return self.store.snapshot()['jobs'][0]
+        return next(job for job in self.store.snapshot()['jobs'] if job['id'] == self.job['id'])
 
     @retain_lifecycle_evidence
     def test_two_module_transitions_preserve_process_and_finalize_only_after_continue(self):
@@ -144,6 +144,9 @@ print('ORCA TERMINATED NORMALLY')
 
     @retain_lifecycle_evidence
     def test_cancel_suspended_driver_does_not_advance_or_finalize(self):
+        self._cancel_without_finalization()
+
+    def _cancel_without_finalization(self):
         runtime.start(self.store)
         wait_for(lambda: suspension.readiness(self.store, self.job['id'])['ready'])
         wait_for((self.root / 'module-0.json').exists)
@@ -157,6 +160,70 @@ print('ORCA TERMINATED NORMALLY')
         self.assertFalse(self.metadata.exists())
         self.assertFalse((self.root / 'module-1.json').exists())
         self.assertEqual(self.current()['attempt_id'], self.job['attempt_id'])
+        self.assertTrue((self.store.root / 'attempts' / self.job['attempt_id'] / 'payload-exit.json').is_file())
+
+
+    def _failed_driver_keeps_metadata(self, code):
+        self.fake.write_text(f"""#!{sys.executable}
+import pathlib,time
+root=pathlib.Path({str(self.root)!r})
+while not (root/'exit-now').exists(): time.sleep(.025)
+print('Program Version 1.0.0')
+raise SystemExit({code})
+""")
+        runtime.start(self.store)
+        wait_for(lambda: suspension.readiness(self.store, self.job['id'])['ready'])
+        (self.root / 'exit-now').touch()
+        wait_for(lambda: self.current()['status'] == 'Fail')
+        record = json.loads(self.metadata.read_text())
+        self.assertEqual(record['execution']['process_exit_code'], code)
+        self.assertFalse(record['reusable'])
+
+    @retain_lifecycle_evidence
+    def test_ordinary_exit_137_keeps_failed_attempt_metadata(self):
+        self._failed_driver_keeps_metadata(137)
+
+    @retain_lifecycle_evidence
+    def test_ordinary_exit_143_keeps_failed_attempt_metadata(self):
+        self._failed_driver_keeps_metadata(143)
+
+    @retain_lifecycle_evidence
+    def test_cancel_with_external_scratch_does_not_copy_back_or_finalize(self):
+        from cmw.core.execution_layout import ExecutionLayout
+        from cmw.core.provenance import atomic_write_json
+        from cmw.molecular.orca.job import load_target
+        target, _ = load_target(self.target)
+        layout = ExecutionLayout(project_root=self.root, system_identifier='synthetic',
+            workflow_node_identifier='sp', target_identifier=target.target_id,
+            attempt_identifier='attempt_001')
+        layout.create_working_directory()
+        atomic_write_json(layout.layout_path, layout.to_dict())
+        self.input = layout.working_directory / 'stage.inp'
+        self.target = layout.target_directory / 'target.json'
+        prepared = subprocess.run([sys.executable, '-m', 'cmw.molecular.orca.cli', 'prepare',
+            '--stage', 'SP', '--structure', str(self.root/'geometry.xyz'), '--charge', '0',
+            '--multiplicity', '1', '--keywords', 'HF STO-3G', '--nprocs', '1', '--maxcore', '64',
+            '--input', str(self.input), '--target', str(self.target)],
+            env={**os.environ, 'PYTHONPATH': str(ROOT/'src'), 'PYTHONDONTWRITEBYTECODE': '1'},
+            check=True, capture_output=True, text=True)
+        self.metadata = layout.working_directory / 'attempt.json'
+        self.store.change(self.job['id'], 'cancel', confirm=True)
+        self.job = self.store.add(argv=[str(ROOT/'scripts/orca/run_orca.sh'), '--input', str(self.input),
+            '--target', str(self.target), '--metadata', str(self.metadata),
+            '--output', str(layout.working_directory/'stage.out'), '--stderr', str(layout.working_directory/'stage.err'),
+            '--controlled-suspension', '--layout', str(layout.layout_path), '--geometry-contract',
+            json.loads(prepared.stdout)['geometry_contract'], '--external-scratch-root', str(self.root/'scratch'),
+            '--external-scratch-mount', '/', '--external-scratch-minimum-free-gib', '0.000001'],
+            cwd=self.root, name='fictional cancelled external scratch driver', engine='ORCA', cpus=1, memory_gib=.1,
+            suspension_backend='orca-local-v1', env={'ORCA_EXE': str(self.fake), 'PYTHON_BIN': sys.executable,
+            'NPROCS': '1', 'MAXCORE_MB': '64', 'CMW_CAFFEINATE': '0'})
+        self._cancel_without_finalization()
+        scratch = json.loads((layout.working_directory/'external-scratch.json').read_text())
+        self.assertFalse(scratch.get('copyback'))
+        self.assertEqual(scratch['status'], 'FAILED')
+        self.assertTrue(Path(scratch['execution_directory']).is_dir())
+        self.assertFalse((layout.working_directory/'stage.out').exists())
+        self.assertFalse((layout.working_directory/'stage.err').exists())
 
     @retain_lifecycle_evidence
     def test_surviving_module_delays_copyback_and_finalization_after_driver_exit(self):
