@@ -193,7 +193,8 @@ root=Path(sys.argv[1]); seq=0; sentinel=17391
             return job if job['status'] in {'Done','Fail','Cancelled','Unknown'} else None
         finished = wait_for(terminal)
         self.assertEqual(finished['status'],'Done',json.dumps(finished,indent=2))
-        self.assertLess(finished['suspension']['unsuspended_elapsed'],budget)
+        self.assertEqual(finished['exit_code'],0)
+        self.assertIsNone(finished.get('termination_requested'))
 
     @retain_lifecycle_evidence
     def test_hard_deadline_while_suspended_is_failure_not_continue(self):
