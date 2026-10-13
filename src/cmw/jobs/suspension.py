@@ -27,7 +27,7 @@ TRANSITION_TIMEOUT = 6.0
 VERIFY_CADENCE = 1.0
 
 class DomainPending(JobsError):
-    """A known MPI launch is still forming; it is not yet signal-ready."""
+    """An enrolled computational domain is changing; it is not signal-ready."""
 
 
 class RequestSuperseded(JobsError):
@@ -319,8 +319,42 @@ def _descends(pid, ancestor):
         raise JobsError('Process ancestry cannot be observed') from exc
 
 
-def _check_identity(member, anchor):
-    if not owner_alive(member) or os.getsid(member['pid']) != anchor['pid']:
+def _observed_exit(pid, expected=None, anchor=None):
+    """Distinguish absence or an owned matching zombie from lost visibility."""
+    try:
+        current = identity(pid)
+        return (expected is not None and current == expected
+                and os.getsid(pid) == anchor['pid']
+                and psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+                and identity(pid) == expected)
+    except psutil.ZombieProcess:
+        return False  # An unreadable birth identity is not verified absence.
+    except (psutil.NoSuchProcess, ProcessLookupError):
+        try:
+            identity(pid)
+        except psutil.ZombieProcess:
+            return False
+        except psutil.NoSuchProcess:
+            return True
+        except (psutil.Error, OSError):
+            return False
+        return False
+    except (psutil.Error, OSError):
+        return False
+
+
+def _check_identity(member, anchor, *, allow_exit=False):
+    if not owner_alive(member):
+        if allow_exit and _observed_exit(member['pid'], member, anchor):
+            raise DomainPending('Computational member exited during domain observation')
+        raise JobsError('Computational identity lost or escaped its owned session')
+    try:
+        session = os.getsid(member['pid'])
+    except ProcessLookupError as exc:
+        if allow_exit and _observed_exit(member['pid'], member, anchor):
+            raise DomainPending('Computational member exited during domain observation') from exc
+        raise
+    if session != anchor['pid']:
         raise JobsError('Computational identity lost or escaped its owned session')
 
 
@@ -338,7 +372,7 @@ def bind_domain(registration, anchor):
     if not owner_alive(anchor) or os.getsid(anchor['pid']) != anchor['pid']:
         raise JobsError('Protected ownership anchor is unavailable')
     runner, root = registration['runner'], registration['root']
-    _check_identity(runner, anchor); _check_identity(root, anchor)
+    _check_identity(runner, anchor); _check_identity(root, anchor, allow_exit=True)
     if not _descends(runner['pid'], anchor['pid']) or not _descends(root['pid'], runner['pid']):
         raise JobsError('Runtime handshake is not bound to the owned payload ancestry')
     if os.getpgid(root['pid']) == anchor['pid']:
@@ -357,8 +391,15 @@ def bind_domain(registration, anchor):
     for record in [*launcher_records, *control_records, *([runtime['driver']] if runtime.get('driver') else [])]:
         if _file_identity(record['path']) != {key: record[key] for key in ('device', 'inode')}:
             raise JobsError('Registered runtime executable was replaced')
-    descendants = psutil.Process(root['pid']).children(recursive=True)
-    members = [root, *(identity(p.pid) for p in descendants if p.status() != psutil.STATUS_ZOMBIE)]
+    try:
+        descendants = psutil.Process(root['pid']).children(recursive=True)
+        members = [root, *(identity(p.pid) for p in descendants if p.status() != psutil.STATUS_ZOMBIE)]
+    except psutil.ZombieProcess:
+        raise
+    except psutil.NoSuchProcess as exc:
+        if _observed_exit(exc.pid):
+            raise DomainPending('Computational member exited during domain enumeration') from exc
+        raise
     protected = [anchor, runner, *registration.get('protected', [])]
     for member in protected:
         _check_identity(member, anchor)
@@ -367,10 +408,10 @@ def bind_domain(registration, anchor):
     computational, launchers = [], []
     protected_ids = {p['pid'] for p in protected}
     for member in members:
-        _check_identity(member, anchor)
         pid = member['pid']
         if pid in protected_ids:
             raise JobsError('Computational subtree overlaps protected runner controls')
+        _check_identity(member, anchor, allow_exit=True)
         is_launcher = launcher_record and _executable_matches(pid, launcher_records)
         if is_launcher:
             launchers.append(member); protected.append(member)
@@ -394,7 +435,7 @@ def bind_domain(registration, anchor):
             # must subsequently observe an unchanged identity set twice.
             if _descends(pid, root['pid']):
                 member = identity(pid)
-                _check_identity(member, anchor)
+                _check_identity(member, anchor, allow_exit=True)
                 if launcher_record and _executable_matches(pid, launcher_records):
                     launchers.append(member); protected.append(member)
                 elif control_records and _executable_matches(pid, control_records):

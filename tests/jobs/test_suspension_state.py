@@ -85,6 +85,7 @@ class StateTests(unittest.TestCase):
         coordinator.channel.read.return_value = None
         coordinator.last_check, coordinator.started, coordinator.pending = 0, 100, None
         coordinator.completion_pending_since = None
+        coordinator.domain_pending_since = None
         coordinator._validate = Mock(return_value=control.Domain((MEMBER,), (ANCHOR, RUNNER), ()))
         return coordinator
 
@@ -279,6 +280,53 @@ class StateTests(unittest.TestCase):
         self.assertNotIsInstance(raised.exception, control.RequestSuperseded)
         self.assertEqual(self.current()['worker'], OTHER)
         coordinator.channel.write.assert_not_called()
+        self.send.assert_not_called()
+
+    def test_root_exit_during_post_continue_validation_waits_for_completion(self):
+        job = self.phase('Run', revision=4, request={'id': 'continued', 'action': 'continue'})
+        coordinator = self.coordinator()
+        del coordinator._validate
+        root_probes = 0
+
+        def alive(member):
+            nonlocal root_probes
+            if member == MEMBER:
+                root_probes += 1
+                return root_probes == 1
+            return True
+
+        with patch.object(control, 'owner_alive', side_effect=alive), \
+                patch.object(control, 'identity', side_effect=control.psutil.NoSuchProcess(MEMBER['pid'])), \
+                patch.object(control.os, 'getsid', return_value=ANCHOR['pid']), \
+                patch.object(control, '_stopped', return_value=False), \
+                patch.object(control.time, 'monotonic', return_value=1):
+            coordinator.tick(job)
+        current = self.current()
+        self.assertEqual(current['status'], 'Run')
+        self.assertEqual(current['suspension']['phase'], 'Run')
+        self.assertEqual(current['suspension']['revision'], 4)
+        self.assertIsNone(current['suspension']['evidence'])
+        self.assertIsNone(current['suspension']['verified_at'])
+        self.assertEqual(current['resources'], job['resources'])
+        self.assertEqual(coordinator.domain_pending_since, 1)
+        coordinator.channel.write.assert_not_called()
+        self.send.assert_not_called()
+
+    def test_incomplete_running_domain_expires_without_resetting_deadline(self):
+        job = self.phase('Run', revision=4, request={'id': 'continued', 'action': 'continue'})
+        coordinator = self.coordinator()
+        coordinator._validate.side_effect = control.DomainPending('Computational member exited during observation')
+        with patch.object(control.time, 'monotonic', return_value=1):
+            coordinator.tick(job)
+        with patch.object(control.time, 'monotonic', return_value=1 + control.TRANSITION_TIMEOUT):
+            coordinator.tick(self.current())
+        current = self.current()
+        self.assertEqual(coordinator.domain_pending_since, 1)
+        self.assertEqual(current['status'], 'Run')
+        self.assertEqual(current['suspension']['phase'], 'Unverified')
+        self.assertTrue(current['suspension']['inhibited'])
+        self.assertEqual(current['resources'], job['resources'])
+        self.assertEqual(coordinator.channel.write.call_args.args[1]['operation'], 'invalidate')
         self.send.assert_not_called()
 
     def test_external_continue_or_member_change_invalidates_suspension(self):
@@ -539,10 +587,75 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(domain.protected, (ANCHOR, RUNNER))
         self.signal.assert_not_called()
 
+    def test_absent_or_zombie_computational_members_are_pending(self):
+        for member in (MEMBER, OTHER):
+            self.children = [self.child(OTHER)] if member == OTHER else []
+            for outcome in ('absent', 'zombie'):
+                with self.subTest(member=member['pid'], outcome=outcome), \
+                        patch.object(control, 'owner_alive', side_effect=lambda item: item != member), \
+                        patch.object(control, 'identity') as identify:
+                    def observed(pid):
+                        if pid == member['pid'] and outcome == 'absent':
+                            raise control.psutil.NoSuchProcess(pid)
+                        return self.records[pid]
+                    identify.side_effect = observed
+                    self.process.return_value.status.return_value = control.psutil.STATUS_ZOMBIE
+                    with self.assertRaises(control.DomainPending):
+                        control.bind_domain(self.registration, ANCHOR)
+        self.signal.assert_not_called()
+
+    def test_reused_denied_and_protected_losses_do_not_become_pending(self):
+        for member, outcome in ((MEMBER, 'reused'), (MEMBER, 'denied'), (MEMBER, 'unreadable-zombie'), (MEMBER, 'unreadable-status'),
+                                (RUNNER, 'absent'), (ANCHOR, 'absent')):
+            with self.subTest(member=member['pid'], outcome=outcome), \
+                    patch.object(control, 'owner_alive', side_effect=lambda item: item != member), \
+                    patch.object(control, 'identity') as identify:
+                if outcome == 'denied':
+                    identify.side_effect = control.psutil.AccessDenied(member['pid'])
+                elif outcome == 'unreadable-zombie':
+                    identify.side_effect = control.psutil.ZombieProcess(member['pid'])
+                elif outcome == 'unreadable-status':
+                    identify.return_value = member
+                    self.process.return_value.status.side_effect = control.psutil.NoSuchProcess(member['pid'])
+                elif outcome == 'absent':
+                    identify.side_effect = control.psutil.NoSuchProcess(member['pid'])
+                else:
+                    identify.return_value = {**member, 'birth': member['birth'] + 1}
+                with self.assertRaises(JobsError) as raised:
+                    control.bind_domain(self.registration, ANCHOR)
+                self.assertNotIsInstance(raised.exception, control.DomainPending)
+                self.process.return_value.status.side_effect = None
+        self.signal.assert_not_called()
+
+    def test_protected_subtree_overlap_cannot_become_exit_pending(self):
+        self.registration['protected'] = [OTHER]
+        self.children = [self.child(OTHER)]
+        probes = 0
+
+        def alive(member):
+            nonlocal probes
+            if member == OTHER:
+                probes += 1
+                return probes == 1
+            return True
+
+        self.process.return_value.status.return_value = control.psutil.STATUS_ZOMBIE
+        with patch.object(control, 'owner_alive', side_effect=alive):
+            with self.assertRaisesRegex(JobsError, 'overlaps protected') as raised:
+                control.bind_domain(self.registration, ANCHOR)
+            self.assertNotIsInstance(raised.exception, control.DomainPending)
+        self.signal.assert_not_called()
+
     def test_escaped_new_session_and_protected_group_refuse(self):
         self.sid.side_effect = lambda pid: 999 if pid == MEMBER['pid'] else ANCHOR['pid']
-        with self.assertRaisesRegex(JobsError, 'escaped'):
+        with self.assertRaisesRegex(JobsError, 'escaped') as raised:
             control.bind_domain(self.registration, ANCHOR)
+        self.assertNotIsInstance(raised.exception, control.DomainPending)
+        with patch.object(control, 'owner_alive', side_effect=lambda item: item != MEMBER):
+            self.process.return_value.status.return_value = control.psutil.STATUS_ZOMBIE
+            with self.assertRaisesRegex(JobsError, 'escaped') as raised:
+                control.bind_domain(self.registration, ANCHOR)
+            self.assertNotIsInstance(raised.exception, control.DomainPending)
         self.sid.side_effect = None
         self.pgid.return_value = ANCHOR['pid']
         with self.assertRaisesRegex(JobsError, 'protected ownership group'):
