@@ -17,7 +17,7 @@ from cmw.jobs import runtime, suspension
 from cmw.jobs.ownership import identity, owner_alive
 from cmw.jobs.store import Store
 from tests.jobs.isolated_runtime import install
-from tests.jobs.lifecycle_evidence import retain_lifecycle_evidence
+from tests.jobs.lifecycle_evidence import bounded_tail, retain_lifecycle_evidence
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -135,7 +135,20 @@ print('ORCA TERMINATED NORMALLY')
             self.assertEqual(identity(member['pid']), member)
             self.assertEqual(json.loads(path.read_text())['sentinel'], before['sentinel'])
             (self.root / f'release-{stage}').touch()
-        wait_for(lambda: self.current()['status'] == 'Done')
+        def terminal():
+            job = self.current()
+            return job if job['status'] in {'Done', 'Fail', 'Cancelled', 'Unknown'} else None
+        try:
+            finished = wait_for(terminal)
+            self.assertEqual(finished['status'], 'Done')
+        except AssertionError as exc:
+            logs = {}
+            for path in (self.root/'stage.err',
+                         self.store.root/'attempts'/attempt/'stderr.log'):
+                if path.is_file():
+                    logs[path.name] = bounded_tail(path)
+            raise AssertionError(json.dumps({'error': str(exc), 'job': self.current(),
+                                             'logs': logs}, indent=2)) from exc
         self.assertEqual(self.current()['attempt_id'], attempt)
         self.assertEqual(len(self.current()['suspension']['intervals']), 2)
         record = json.loads(self.metadata.read_text())
