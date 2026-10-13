@@ -883,7 +883,9 @@ class Coordinator:
                 if set((p['pid'],p['birth']) for p in old) != set((p['pid'],p['birth']) for p in domain.computational) or not all(_stopped(m) for m in domain.computational):
                     raise JobsError('Suspended membership lost, changed, or externally continued')
                 ack = self.ack(job, 'suspended', 'paused')
-                if not ack or not isinstance(ack.get('observed_clock'), (int, float)) or not 0 <= now-ack['observed_clock'] <= 3:
+                # The runner can refresh its acknowledgement during validation.
+                checked_at = now_clock()
+                if not ack or not isinstance(ack.get('observed_clock'), (int, float)) or not 0 <= checked_at-ack['observed_clock'] <= 3:
                     raise JobsError('Fresh suspended runner/deadline acknowledgement unavailable')
                 self.update(job, evidence=self._evidence(domain), verified_at=time.time(),
                             intervals=ack.get('intervals', []), suspended_seconds=ack.get('suspended_seconds'),

@@ -351,6 +351,25 @@ class StateTests(unittest.TestCase):
                 self.assertEqual(value['phase'], expected)
                 self.assertTrue(value['inhibited'])
 
+    def test_paused_ack_freshness_uses_clock_after_read(self):
+        for observed, read_at, expected in ((100.1, 100.2, 'Suspended'),
+                                           (100, 104, 'Unverified'),
+                                           (100.3, 100.2, 'Unverified')):
+            with self.subTest(observed_clock=observed, read_at=read_at):
+                job = self.phase('Suspended', inhibited=True)
+                coordinator = self.coordinator()
+                with patch('cmw.jobs.suspension_protocol.now_clock', return_value=100.0) as clock, \
+                        patch.object(control, '_stopped', return_value=True):
+                    def read_ack(*args):
+                        clock.return_value = read_at
+                        return {'observed_clock': observed, 'intervals': []}
+                    coordinator.ack = Mock(side_effect=read_ack)
+                    coordinator.tick(job)
+                value = self.current()['suspension']
+                self.assertEqual(value['phase'], expected)
+                self.assertTrue(value['inhibited'])
+        self.send.assert_not_called()
+
     def test_nonstoppable_member_never_reports_suspended(self):
         coordinator = self.coordinator()
         job = self.phase('Suspending', revision=1, request={'id': 'request', 'action': 'suspend'}, inhibited=True)

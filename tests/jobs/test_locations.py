@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -128,7 +129,7 @@ class LocationTests(unittest.TestCase):
         self.assertFalse(missing.root.exists())
 
     def test_legacy_schema_read_does_not_migrate(self):
-        with sqlite3.connect(self.store.path) as con:
+        with closing(sqlite3.connect(self.store.path)) as con, con:
             raw = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
             raw['schema'] = 1
             con.execute("UPDATE meta SET value=? WHERE key='control'", (json.dumps(raw),))

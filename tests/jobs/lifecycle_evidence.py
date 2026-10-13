@@ -1,5 +1,5 @@
 """Bounded, test-only lifecycle evidence captured before fixture teardown."""
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from functools import wraps
 import json
 import os
@@ -72,8 +72,8 @@ def capture(store, destination, *, outcome, started_at):
                 'worker_locks': {}, 'receipts': {}, 'log_tails': {}}
     (destination/'state').mkdir(mode=0o700)
     if store.path.exists():
-        with sqlite3.connect(store.path.as_uri()+'?mode=ro', uri=True) as source:
-            with sqlite3.connect(destination/'state'/store.path.name) as target:
+        with closing(sqlite3.connect(store.path.as_uri()+'?mode=ro', uri=True)) as source:
+            with closing(sqlite3.connect(destination/'state'/store.path.name)) as target, target:
                 source.backup(target)
     for job in state['jobs']:
         attempt = store.root/'attempts'/job['attempt_id']

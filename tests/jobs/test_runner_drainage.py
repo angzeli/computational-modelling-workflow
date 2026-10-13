@@ -41,7 +41,8 @@ class RunnerDrainageTests(unittest.TestCase):
         self.control._check_storage = lambda: None
         self.control._read = lambda name, **kwargs: self.control.context if name == 'context.json' else None
         self.control._write = lambda *args: None
-        stack = self.enterContext(ExitStack())
+        stack = ExitStack()
+        self.addCleanup(stack.close)
         for target, options in (
             ('cmw.jobs.suspension_protocol.os.getpid', {'return_value': 200}),
             ('cmw.jobs.suspension_protocol.os.getsid', {'side_effect': self.sid}),

@@ -178,14 +178,22 @@ root=Path(sys.argv[1]); seq=0; sentinel=17391
 
     @retain_lifecycle_evidence
     def test_pause_aware_budget_excludes_only_confirmed_interval(self):
-        self.launch(budget=2)
+        # Runner startup and both transitions consume this budget on slower CI hosts.
+        # The confirmed pause must still exceed the entire execution budget.
+        budget = 10
+        self.launch(budget=budget)
         suspension.submit(self.store,1,'suspend'); self.phase('Suspended')
-        time.sleep(2.2)
+        time.sleep(budget + .2)
         self.assertEqual(self.job()['status'],'Run')
-        self.assertGreater(self.job()['suspension']['suspended_seconds'],2)
+        self.assertGreater(self.job()['suspension']['suspended_seconds'],budget)
         suspension.submit(self.store,1,'continue'); self.phase('Run')
         (self.root/'finish').touch()
-        wait_for(lambda:self.job()['status']=='Done')
+        def terminal():
+            job = self.job()
+            return job if job['status'] in {'Done','Fail','Cancelled','Unknown'} else None
+        finished = wait_for(terminal)
+        self.assertEqual(finished['status'],'Done',json.dumps(finished,indent=2))
+        self.assertLess(finished['suspension']['unsuspended_elapsed'],budget)
 
     @retain_lifecycle_evidence
     def test_hard_deadline_while_suspended_is_failure_not_continue(self):
