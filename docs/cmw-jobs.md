@@ -321,6 +321,69 @@ accessibility states, CLI results and the session-local resolver API for future
 engines. Location evidence is separate from process ownership and scientific
 finalization. No live-progress parsing is included.
 
+## Offline lifecycle observations
+
+`cmw jobs observe JOB_ID [--json]` reads fresh execution evidence for one
+recorded managed attempt. `show JOB_ID --json` adds `execution_observation` for
+Starting, Run, Cancelling and Unknown. The existing persisted status and elapsed
+time retain their meaning: they are stored lifecycle history, not a fresh claim
+that a computation is alive. No controller is started for observation.
+
+The shared observer checks the recorded worker birth/host/boot, existing worker
+lock, recorded process-group/session anchor, bounded attempt-local receipt and
+controller availability. It opens existing schema-1/2/3 state read-only, inspects
+only recorded PIDs, and never creates missing state or evidence. Unsupported
+schemas and database journal formats are unavailable evidence. Path components
+are pinned without following symlinks and checked again after inspection;
+changed lifecycle/source identities invalidate the observation. Human note edits
+and changing timing projections do not invalidate the attempt binding. Schema-3
+bindings also retain worker protocol, termination intent, suspension phase,
+request/revision/inhibition, capability and stable recorded domain evidence. Evidence carries its own timestamp and is
+stale after five seconds.
+
+`VERIFIED_WORKER` means a matching live worker, held lock and matching recorded
+anchor; full domain membership and numerical progress remain unverified. A
+stopped worker is identified within that same limited scope. An absent worker
+does not exclude surviving ranks. An offline controller alone does not require
+reconciliation when scoped worker/anchor evidence remains valid. Existing
+Unknown remains unresolved even if the recorded worker is observed again.
+
+For schema 3, `evidence.suspension` exposes the stored phase and control
+constraints separately. `CONTROLLED_PHASE` means the worker/anchor was observed
+while a stored suspension/control phase remains in force; it does not verify
+that every computational rank is stopped, runnable or drained. Stored
+Unverified/inhibited metadata cannot be overridden by worker positivity.
+Unsupported runtime or IPC versions remain unavailable. The observer does not
+read or acknowledge runner IPC, call suspension readiness, or grant RELEASE.
+The table retains P2's operational phase display; the selected panel separately
+labels the raw stored primary status.
+
+Legacy `payload-exit.json` contains only an exit code and time. A regular,
+syntactically valid, attempt-local receipt is still not bound to an immutable
+claim and complete domain drainage. Missing, malformed, stale, contradictory or
+unbound receipts cannot establish Done, Fail or Cancelled.
+
+The selected watch panel separates **Stored** status, **Execution** evidence and
+scientific evidence freshness. A stale Run with missing worker visibly says
+UNVERIFIED and reconciliation required, including compact screens. Parser OK is
+only a successful scientific-output read. Selected observations run in one
+background worker; selection/attempt changes discard delayed results. Detaching
+changes no jobs. Full observation evidence is available in Details.
+
+`cmw jobs reconcile JOB_ID --preview [--json]` describes a read-only conditional
+recovery proposal. Missing worker plus an existing unheld lock and no controller
+authority can propose a future conservative Unknown transition with dispatch
+disabled and all commitments retained. Inaccessible or active authority blocks
+that proposal. A changed lifecycle/controller binding rejects stale proposals.
+No proposal grants mutation or terminal authority. Schema-3 previews always
+propose no transition; P2 recovery apply is not implemented or qualified.
+
+**Persistent apply is deferred.** `--apply` is rejected before observation or
+mutation. The observation interfaces support the fixed P2 state contract, but
+conflict-aware persistent recovery needs its own implementation and qualification. Observation and preview
+never signal, adopt, cancel, restart, release reservations, enable dispatch or
+write scientific files. No native MPI, engine or sleep qualification is implied.
+
 ## Selected-job live progress
 
 `cmw jobs progress JOB_ID [--json]` provides bounded, read-only observation without
