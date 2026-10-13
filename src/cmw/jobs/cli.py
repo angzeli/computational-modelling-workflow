@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
-import stat
 import sys
 import time
 import unicodedata
@@ -87,71 +86,64 @@ def tail(path, limit=16384):
 
 
 def _unknown_worker_observation(owner):
-    import psutil
-    import socket
-    from .ownership import identity
+    from .lifecycle import observe_process
 
-    if not isinstance(owner, dict) or not all(key in owner for key in ('pid', 'birth', 'host', 'boot')):
-        return {'verdict': 'missing', 'reason': 'No complete worker identity was recorded.'}
-    if isinstance(owner['pid'], bool) or not isinstance(owner['pid'], int) or owner['pid'] <= 0:
-        return {'verdict': 'unavailable', 'reason': 'The recorded worker PID is invalid.'}
-    try:
-        if owner['host'] != socket.gethostname():
-            return {'verdict': 'mismatch', 'reason': 'The recorded worker belongs to another host.'}
-        if owner['boot'] != psutil.boot_time():
-            return {'verdict': 'mismatch', 'reason': 'The recorded worker belongs to another boot.'}
-        current = identity(owner['pid'])
-        if current != owner:
-            return {'verdict': 'mismatch', 'reason': 'The PID has a different birth identity.',
-                    'observed_identity': current}
-        status = psutil.Process(owner['pid']).status()
-        current = identity(owner['pid'])
-        if current != owner:
-            return {'verdict': 'mismatch', 'reason': 'The PID identity changed during observation.',
-                    'observed_identity': current}
-        if status in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
-            return {'verdict': 'gone', 'reason': f'The recorded worker has exited ({status}).'}
-        return {'verdict': 'matched', 'reason': 'The live process matches the recorded worker identity.',
-                'observed_identity': current}
-    except psutil.NoSuchProcess:
-        return {'verdict': 'gone', 'reason': 'The recorded worker process no longer exists.'}
-    except (psutil.Error, OSError) as exc:
-        return {'verdict': 'unavailable', 'reason': f'Worker observation failed: {type(exc).__name__}.'}
+    return observe_process(owner).to_dict()
 
 
 def _unknown_lock_observation(store, attempt_id):
-    from .ownership import lock_held
+    from .lifecycle import observe_lock
 
-    if not isinstance(attempt_id, str) or re.fullmatch(r'[0-9a-f]{32}', attempt_id) is None:
-        return {'verdict': 'unavailable', 'reason': 'No valid attempt identifier was recorded.'}
-    attempt = store.root/'attempts'/attempt_id
-    path = attempt/'worker.lock'
-    try:
-        # Inspect explicitly: Path.exists() can hide permission errors. Never
-        # follow a redirected attempt path or create a lock for this observation.
-        for directory in (store.root, store.root/'attempts', attempt):
-            if not stat.S_ISDIR(directory.lstat().st_mode):
-                return {'verdict': 'unavailable', 'reason': 'The attempt path is not an ordinary directory.'}
-        before = path.lstat()
-        if not stat.S_ISREG(before.st_mode):
-            return {'verdict': 'unavailable', 'reason': 'The worker lock is not an ordinary file.'}
-        held = lock_held(path, strict=True)
-        after = path.lstat()
-        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
-            return {'verdict': 'unavailable', 'reason': 'The worker lock changed during observation.'}
-        return {'verdict': 'held' if held else 'unheld',
-                'reason': 'The worker lock is currently held.' if held else 'The worker lock is currently unheld.'}
-    except FileNotFoundError:
-        return {'verdict': 'missing', 'reason': 'The worker lock or its attempt directory is absent.'}
-    except OSError as exc:
-        return {'verdict': 'unavailable', 'reason': f'Worker lock observation failed: {type(exc).__name__}.'}
+    return observe_lock(store, attempt_id).to_dict()
 
 
-def _unknown_ownership_observation(store, job):
-    """Advisory evidence for show; never reconcile or grant control authority."""
+def _unknown_ownership_observation(store, job, *, observation=None):
+    """Compatibility projection of the shared read-only lifecycle evidence."""
+    if observation is not None:
+        return {'advisory': True, 'observed_at': observation['observed_at'],
+                'worker': observation['evidence']['worker'],
+                'worker_lock': observation['evidence']['worker_lock']}
     return {'advisory': True, 'observed_at': time.time(),
             'worker': _unknown_worker_observation(job.get('worker')),
             'worker_lock': _unknown_lock_observation(store, job.get('attempt_id'))}
+
+
+def execution_text(observation):
+    """Describe stored state and narrow operational evidence separately."""
+    evidence = observation.get('evidence', {})
+    lines = [f"Job: {observation.get('job_id')}",
+             f"Persisted status: {observation['persisted_status']}",
+             f"Execution observation: {observation['observed_execution']}",
+             f"Quality: {observation['observation_quality']}",
+             f"Observation age: {observation.get('age_seconds', 0):.1f}s"
+             + (' STALE' if observation.get('stale') else '')]
+    for key, label in (('worker', 'Worker'), ('worker_lock', 'Worker lock'),
+                       ('domain', 'Process domain'), ('receipt', 'Receipt'),
+                       ('controller', 'Controller')):
+        item = evidence.get(key, {})
+        lines.append(f"{label}: {item.get('verdict', 'unavailable')} — {item.get('reason', '')}")
+    lines.extend([f"Conclusion: {observation['summary']}",
+                  'Reconciliation: ' + ('Review required.' if observation['reconciliation_required'] else 'No action indicated.')])
+    lines.extend(f"Limit: {item}" for item in observation.get('limitations', []))
+    return '\n'.join(lines)
+
+
+def _managed_job(store, job_id):
+    from .lifecycle import read_job
+
+    if str(job_id).startswith('E'):
+        raise JobsError('External observations are read-only and cannot be reconciled or adopted as managed jobs')
+    return read_job(store, job_id)
+
+
+def inspect_lifecycle(store, args):
+    from .lifecycle import observe_execution
+
+    job, _ = _managed_job(store, args.job_id)
+    result = observe_execution(store, job).to_dict()
+    print(json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False)
+          if args.json else safe_text(execution_text(result)))
+    return 0
 
 
 def guard_text(state):
@@ -296,6 +288,11 @@ def register(subcommands):
             command.add_argument("--stream", choices=("stdout", "stderr"), default="stdout")
             command.add_argument("--bytes", type=int, default=16384)
         command.set_defaults(handler=handle)
+
+    observe = operations.add_parser("observe", help="read-only execution evidence for a managed job; never reconciles")
+    observe.add_argument("job_id")
+    observe.add_argument("--json", action="store_true")
+    observe.set_defaults(handler=handle)
 
     files = operations.add_parser("files", help="inspect declared job locations; opens folders only with --open")
     files.add_argument("job_id")
@@ -472,6 +469,8 @@ def handle(args):
     operation = args.jobs_operation
     from .activity import project
     try:
+        if operation == "observe":
+            return inspect_lifecycle(store, args)
         if operation == "files":
             return inspect_files(store, args)
         if operation == "progress":
@@ -547,8 +546,14 @@ def handle(args):
             if not candidates:
                 raise JobsError(f"No such job: {args.job_id}")
             result = candidates[0]
-            if operation == "show" and result['status'] == 'Unknown':
-                result = {**result, 'ownership_observation': _unknown_ownership_observation(store, result)}
+            if operation == "show":
+                from .lifecycle import observe_execution
+                from .store import ACTIVE
+                if result['status'] in ACTIVE:
+                    observation = observe_execution(store, result, state=state).to_dict()
+                    result = {**result, 'execution_observation': observation}
+                    if result['status'] == 'Unknown':
+                        result['ownership_observation'] = _unknown_ownership_observation(store, result, observation=observation)
             if operation == "logs":
                 result = {"job_id": result["display_id"], "stream": args.stream,
                           "text": tail(result["logs"][args.stream], args.bytes)}

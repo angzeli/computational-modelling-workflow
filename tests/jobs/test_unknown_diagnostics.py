@@ -1,6 +1,7 @@
 """Unknown show observes fixture identities and locks without granting authority."""
 from contextlib import contextmanager, redirect_stdout
 from copy import deepcopy
+import fcntl
 import io
 import json
 import os
@@ -12,7 +13,7 @@ from unittest.mock import Mock, patch
 import psutil
 
 from cmw.cli import build_parser
-from cmw.jobs import activity, cli, ownership
+from cmw.jobs import activity, cli, lifecycle, ownership
 from cmw.jobs.store import Store
 
 
@@ -60,7 +61,7 @@ class UnknownDiagnosticsTests(unittest.TestCase):
         mode = self.store.root.stat().st_mode
         with self.worker_probes(), \
              patch.object(Store, 'transaction', side_effect=AssertionError('show cannot write')), \
-             patch.object(ownership, 'lock_held', side_effect=AssertionError('missing lock cannot be probed')), \
+             patch.object(fcntl, 'flock', side_effect=AssertionError('missing lock cannot be probed')), \
              patch.object(os, 'kill', side_effect=AssertionError('show cannot signal')), \
              patch.object(os, 'killpg', side_effect=AssertionError('show cannot signal')):
             result = self.show(state)
@@ -120,9 +121,11 @@ class UnknownDiagnosticsTests(unittest.TestCase):
         self.lock.parent.mkdir(parents=True)
         self.lock.write_text('fixture lock')
         before = self.lock.stat()
-        with ownership.exclusive(self.lock), patch.object(ownership, 'lock_held', wraps=ownership.lock_held) as probe:
+        with ownership.exclusive(self.lock), patch.object(fcntl, 'flock', wraps=fcntl.flock) as probe:
             self.assertEqual(cli._unknown_lock_observation(self.store, self.job['attempt_id'])['verdict'], 'held')
-            probe.assert_called_once_with(self.lock, strict=True)
+            probe.assert_called_once()
+            self.assertIsInstance(probe.call_args.args[0], int)
+            self.assertEqual(probe.call_args.args[1], fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.assertEqual(cli._unknown_lock_observation(self.store, self.job['attempt_id'])['verdict'], 'unheld')
         after = self.lock.stat()
         self.assertEqual((before.st_mode, before.st_mtime_ns, before.st_ino),
@@ -132,19 +135,36 @@ class UnknownDiagnosticsTests(unittest.TestCase):
     def test_lock_path_and_probe_errors_are_unavailable_not_unheld(self):
         self.lock.parent.mkdir(parents=True)
         self.lock.touch()
-        with patch.object(Path, 'lstat', side_effect=PermissionError('private location')), \
-             patch.object(ownership, 'lock_held') as probe:
+        with patch.object(lifecycle.os, 'open', side_effect=PermissionError('private location')), \
+             patch.object(fcntl, 'flock') as probe:
             result = cli._unknown_lock_observation(self.store, self.job['attempt_id'])
             self.assertEqual(result['verdict'], 'unavailable')
             self.assertNotIn('private location', result['reason'])
             probe.assert_not_called()
-        with patch.object(ownership, 'lock_held', side_effect=PermissionError('private location')):
+        with patch.object(fcntl, 'flock', side_effect=PermissionError('private location')):
             self.assertEqual(cli._unknown_lock_observation(self.store, self.job['attempt_id'])['verdict'], 'unavailable')
-        with patch.object(ownership, 'lock_held', side_effect=FileNotFoundError):
+        with patch.object(fcntl, 'flock', side_effect=FileNotFoundError):
             self.assertEqual(cli._unknown_lock_observation(self.store, self.job['attempt_id'])['verdict'], 'missing')
 
+    def test_lock_replacement_during_pinned_probe_is_unavailable(self):
+        self.lock.parent.mkdir(parents=True)
+        self.lock.write_text('original')
+        original_flock = fcntl.flock
+        replacement = self.lock.with_suffix('.old')
+        def replace_after_acquire(descriptor, operation):
+            result = original_flock(descriptor, operation)
+            if operation == fcntl.LOCK_EX | fcntl.LOCK_NB:
+                self.lock.rename(replacement)
+                self.lock.write_text('replacement')
+            return result
+        with patch.object(fcntl, 'flock', side_effect=replace_after_acquire):
+            result = cli._unknown_lock_observation(self.store, self.job['attempt_id'])
+        self.assertEqual(result['verdict'], 'unavailable')
+        self.assertEqual(replacement.read_text(), 'original')
+        self.assertEqual(self.lock.read_text(), 'replacement')
+
     def test_invalid_and_redirected_attempt_paths_are_not_probed(self):
-        with patch.object(ownership, 'lock_held') as probe:
+        with patch.object(fcntl, 'flock') as probe:
             for identifier in (None, '', '../escape', '/tmp/escape', 'f'*31):
                 self.assertEqual(cli._unknown_lock_observation(self.store, identifier)['verdict'], 'unavailable')
             self.lock.parent.mkdir(parents=True)

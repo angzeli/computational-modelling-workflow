@@ -6,7 +6,7 @@ import time
 import unicodedata
 from copy import deepcopy
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from rich.cells import cell_len, set_cell_size
@@ -124,12 +124,13 @@ class Inspect(ModalScreen):
     Inspect Static { height: auto; }
     """
 
-    def __init__(self, store, job_id, logs=False, job_provider=None, progress_provider=None):
+    def __init__(self, store, job_id, logs=False, job_provider=None, progress_provider=None, execution_provider=None):
         super().__init__()
         self.store, self.job_id, self.logs = store, job_id, logs
         self.log_stamps = None
         self.job_provider = job_provider
         self.progress_provider = progress_provider
+        self.execution_provider = execution_provider
 
     def compose(self):
         with Vertical():
@@ -167,11 +168,18 @@ class Inspect(ModalScreen):
                     f"Finished: {timestamp(job['finished_at'])}\nExit code: {job['exit_code']}   Signal: {job['signal']}\n"
                     f"Failure policy: {job['on_failure']}\nCHECK: Not evaluated\n\n"
                     + json.dumps({key: job[key] for key in ("argv", "env", "cwd", "logs", "worker", "group", "layout")}, indent=2, ensure_ascii=False))
+        if self.execution_provider and not self.logs and job['status'] in ACTIVE:
+            observation = self.execution_provider(job)
+            text += "\n\nEXECUTION OBSERVATION — read only\n"
+            text += (json.dumps(observation, indent=2, ensure_ascii=False) if observation is not None
+                     else "Observation pending / unavailable; stored status is not freshly verified.")
+            if self.app.execution_error:
+                text += "\n" + self.app.execution_error
         if self.progress_provider and not self.logs:
             snapshot = self.progress_provider(job)
             if snapshot is not None:
                 from cmw.progress.formatting import progress_text
-                text += "\n\n" + progress_text(snapshot, detailed=True)
+                text += "\n\nSCIENTIFIC EVIDENCE — parser success does not verify execution\n" + progress_text(snapshot, detailed=True)
                 if self.app.progress_error:
                     text += "\nObservation read unavailable; cached evidence: " + self.app.progress_error
         self.query_one("#body", Static).update(literal(text))
@@ -397,6 +405,7 @@ class JobsApp(App):
     #external-heading { height: 1; padding: 0 1; }
     #external { height: 5; margin: 0 1; }
     #selected { height: auto; max-height: 7; margin: 1 1 0 1; padding: 0 1; border-left: solid #5c8996; }
+    #execution { height: auto; max-height: 2; margin: 0 1; padding: 0 1; border-left: solid #5c8996; color: #efbd82; }
     #progress { height: auto; max-height: 11; margin: 0 1; padding: 0 1; border-left: solid #5c8996; }
     #events { height: 5; margin: 1 1 0 1; color: #9caeba; }
     #message { height: auto; max-height: 3; padding: 0 1; color: #efbd82; }
@@ -410,7 +419,8 @@ class JobsApp(App):
 
     def __init__(self, store=None, *, clock=None, observer=None, sampler=None,
                  location_descriptors=(), location_resolvers=None, file_opener=None,
-                 progress_sources=(), progress_engine=None, progress_service=None, progress_resolver=None):
+                 progress_sources=(), progress_engine=None, progress_service=None, progress_resolver=None,
+                 execution_provider=None):
         super().__init__()
         self.store = store or Store()
         self.clock = clock
@@ -443,6 +453,13 @@ class JobsApp(App):
         self.progress_snapshot = None
         self.progress_error = None
         self.history_view = None
+        self.execution_provider = execution_provider
+        self.execution_busy = False
+        self.execution_closed = False
+        self.execution_generation = 0
+        self.execution_selection = None
+        self.execution_observation = None
+        self.execution_error = None
 
     def compose(self):
         yield Static("CMW / JOBS                                             LOCAL", id="heading")
@@ -454,9 +471,10 @@ class JobsApp(App):
         yield Static("EXTERNAL ACTIVITY — READ ONLY", id="external-heading", markup=False)
         yield JobsTable(id="external", cursor_type="row", zebra_stripes=True)
         yield Static(id="selected", markup=False)
+        yield Static(id="execution", markup=False)
         yield Static(id="progress", markup=False)
         yield Static(id="events", markup=False)
-        yield Static("Best-effort guard · Q / Ctrl-C detaches; execution continues.", id="message", markup=False)
+        yield Static("Best-effort guard · Q / Ctrl-C detaches; jobs are unchanged.", id="message", markup=False)
         yield Static("Enter Details · F Files · G Progress · N Note · L Logs\nP Dispatch · H Hold · O Order · X Cancel · B Scheduling · Q Detach", id="shortcuts", markup=False)
         yield Footer()
 
@@ -467,15 +485,128 @@ class JobsApp(App):
         self.collect_activity()
         self.set_interval(2, self.collect_activity)
         self.set_interval(4, self.collect_progress)
+        self.set_interval(4, self.collect_execution)
 
     def on_unmount(self):
         self.files_generation += 1
+        self.execution_closed = True
+        self.execution_generation += 1
         self.progress_closed = True
         self.progress_generation += 1
         # Cancelling a Textual worker cannot stop a filesystem thread. Keep the
         # busy gate until its real return, and let that worker release readers.
         if not self.progress_busy and self.progress_service is not None:
             self.progress_service.close()
+
+    def execution_identity(self):
+        job = self.selected()
+        if (self.external_selected_id or job is None or job['status'] not in ACTIVE
+                or not hasattr(self.store, 'root')):
+            return None
+        from .lifecycle import observation_key
+        return observation_key(self.store, job)
+
+    def sync_execution_selection(self):
+        if self.execution_closed:
+            return
+        selection = self.execution_identity()
+        if selection != self.execution_selection:
+            self.execution_generation += 1
+            self.execution_selection = selection
+            self.execution_observation = None
+            self.execution_error = None
+            if not self.execution_busy:
+                self.collect_execution()
+        self.render_execution()
+
+    def collect_execution(self):
+        if self.execution_busy or self.execution_closed:
+            return
+        selection = self.execution_identity()
+        if selection != self.execution_selection:
+            self.sync_execution_selection()
+            return
+        if selection is None:
+            return
+        generation = self.execution_generation
+        job = deepcopy(self.selected())
+        state = {'schema': self.state.get('schema'),
+                 'controller': deepcopy(self.state.get('controller', {}))}
+        now = self.clock() if self.clock else None
+        self.execution_busy = True
+        def collect():
+            observation, error = None, None
+            try:
+                from .lifecycle import observe_execution
+                provider = self.execution_provider or observe_execution
+                observation = provider(self.store, job, state=state, now=now)
+            except Exception as exc:
+                error = f'{type(exc).__name__}: {exc}'
+            try:
+                if not self.execution_closed:
+                    self.call_from_thread(self.accept_execution, selection, generation, observation, error)
+            except RuntimeError:
+                pass  # Detached clients cannot accept a delayed observation.
+            finally:
+                if self.execution_closed:
+                    self.execution_busy = False
+        self.run_worker(collect, thread=True, group="execution-observation", exit_on_error=False)
+
+    def accept_execution(self, selection, generation, observation, error):
+        self.execution_busy = False
+        if self.execution_closed:
+            return
+        if generation != self.execution_generation or selection != self.execution_identity():
+            self.sync_execution_selection()
+            self.set_timer(0.05, self.collect_execution)
+            return
+        self.execution_observation = observation
+        self.execution_error = error
+        self.render_execution()
+
+    def selected_execution(self, job):
+        if (self.execution_observation is None or self.execution_closed
+                or self.execution_selection != self.execution_identity()
+                or self.selected() is None or job['attempt_id'] != self.selected()['attempt_id']
+                or job['id'] != self.selected()['id']):
+            return None
+        return self.execution_observation.to_dict(now=self.clock() if self.clock else None)
+
+    def render_execution(self):
+        if not self.is_mounted or self.execution_closed:
+            return
+        widget = self.query_one('#execution', Static)
+        widget.display = self.execution_selection is not None
+        if not widget.display:
+            return
+        job = self.selected()
+        observation = self.selected_execution(job)
+        if observation is None:
+            summary = 'Observation unavailable' if self.execution_error else 'Observation pending'
+            note = 'Stored status is not freshly verified; Enter details'
+        else:
+            category = observation['observed_execution']
+            summary = {
+                'VERIFIED_WORKER': 'Verified worker + anchor',
+                'VERIFIED_STOPPED': 'Verified stopped (observed scope)',
+                'WORKER_MISSING': 'UNVERIFIED — worker missing',
+                'OWNERSHIP_UNVERIFIED': 'UNVERIFIED — ownership',
+                'PARTIAL_DOMAIN': 'UNVERIFIED — partial domain',
+                'TERMINAL_EVIDENCE_PRESENT': 'Terminal evidence; unresolved',
+                'OBSERVATION_UNAVAILABLE': 'Observation unavailable',
+                'NOT_APPLICABLE': 'Not applicable',
+            }.get(category, 'UNVERIFIED')
+            age = observation.get('age_seconds')
+            freshness = 'Observation age unavailable' if age is None else f'Observed {int(age)}s ago'
+            if observation.get('stale'):
+                summary = 'STALE — ' + summary
+            note = ('Reconciliation required' if observation.get('reconciliation_required')
+                    else 'Scope: worker + anchor only' if category == 'VERIFIED_WORKER'
+                    else 'Enter details for observation scope')
+            note += ' · ' + freshness
+        width = max(12, self.size.width - 5)
+        widget.update(literal(set_cell_size(f"Stored: {job['status']} · Execution: {summary}", width).rstrip()
+                              + '\n' + set_cell_size(note, width).rstrip()))
 
     def progress_identity(self):
         job = self.selected()
@@ -486,6 +617,7 @@ class JobsApp(App):
                 self.progress_sources, self.progress_engine, self.location_descriptors)
 
     def sync_progress_selection(self):
+        self.sync_execution_selection()
         selection = self.progress_identity()
         if selection != self.progress_selection:
             if self.history_view is not None and self.history_view.selection != selection:
@@ -586,7 +718,7 @@ class JobsApp(App):
         widget = self.query_one('#progress', Static)
         widget.display = self.progress_selection is not None
         compact = self.size.width < 110 or self.size.height < 36
-        line_budget = 3 if self.size.width < 60 else 6 if compact else 11
+        line_budget = 3 if self.size.width < 60 else (5 if self.execution_selection is not None else 6) if compact else 11
         if compact and self.query_one('#external', DataTable).display:
             line_budget = 3
         if self.progress_error:
@@ -595,8 +727,13 @@ class JobsApp(App):
         if self.progress_snapshot is not None:
             from cmw.progress.formatting import progress_text
             width = max(20, self.size.width - 5)
-            text = progress_text(self.progress_snapshot, compact=compact, width=width,
-                                 max_lines=line_budget - bool(self.progress_error))
+            display_snapshot = replace(self.progress_snapshot, read_health="Parser: " + self.progress_snapshot.read_health)
+            text = progress_text(display_snapshot, compact=compact, width=width,
+                                 now=self.clock() if self.clock else None, max_lines=line_budget - bool(self.progress_error))
+            lines = text.splitlines()
+            if lines and lines[0].startswith("ACTIVE: "):
+                lines[0] = set_cell_size("Scientific: " + lines[0][8:], width).rstrip()
+                text = "\n".join(lines)
             if self.progress_error:
                 error = table_name('Read unavailable; cached evidence: ' + self.progress_error, width).plain
                 text = error + '\n' + text
@@ -676,6 +813,8 @@ class JobsApp(App):
         heading = prefix + table_name(job['name'], max(1, width - cell_len(prefix))).plain
         lines = detail(job, narrow=self.size.width < 110).splitlines()
         lines[0] = heading
+        if job['status'] in ACTIVE and (self.size.width < 110 or self.size.height < 36):
+            return '\n'.join((heading, lines[2]))
         if job.get('note'):
             preview = 'Note: ' + table_name(job['note'], max(1, width - 6)).plain
             if self.size.width < 110 or self.size.height < 36:
@@ -1039,7 +1178,7 @@ class JobsApp(App):
             self.push_screen(ExternalInspect(self.external_selected(), provider=self.external_observation))
             return
         if self.selected_id:
-            self.push_screen(Inspect(self.store, self.selected_id, job_provider=self.current_job, progress_provider=self.selected_progress))
+            self.push_screen(Inspect(self.store, self.selected_id, job_provider=self.current_job, progress_provider=self.selected_progress, execution_provider=self.selected_execution))
 
     def action_logs(self):
         if self.external_read_only():
