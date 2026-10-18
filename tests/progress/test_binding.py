@@ -91,7 +91,7 @@ class BindingTests(unittest.TestCase):
         declarations = tuple(LocationDescriptor('output', str(self.output), stage=stage)
                              for stage in ('one', 'two'))
         result = resolve_context(self.store, job['id'], descriptors=declarations)
-        self.assertEqual(result.binding_status, 'SOURCE_UNRESOLVED')
+        self.assertEqual(result.binding_status, 'SOURCE_CONFLICT')
         self.assertFalse(result.sources)
 
     def test_unsupported_engine_keeps_no_default_source_plan(self):

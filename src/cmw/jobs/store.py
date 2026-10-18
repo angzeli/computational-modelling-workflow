@@ -229,6 +229,19 @@ class Store:
         if 'id' in current:
             current = _job_defaults(current)
             job.update({key: current[key] for key in NOTE_FIELDS})
+            # This immutable declaration is supplied only at add. Preserve it
+            # when an older lifecycle caller omits the additive metadata field.
+            if 'progress_sources' in job and ('progress_sources' not in current
+                    or job['progress_sources'] != current['progress_sources']):
+                raise JobsError('Progress sources are immutable; declare them only when adding a job')
+            if 'progress_sources' in current:
+                if (job.get('attempt_id') != current.get('attempt_id')
+                        or job.get('engine') != current.get('engine')):
+                    raise JobsError('Progress source attempt and engine identity are immutable')
+                job['progress_sources'] = current['progress_sources']
+        elif 'progress_sources' in job:
+            from .source_declarations import recorded_sources
+            recorded_sources(job)
         con.execute("UPDATE jobs SET data=? WHERE id=?", (json.dumps(job), job["id"]))
 
     @staticmethod
@@ -244,7 +257,10 @@ class Store:
     def add(self, *, argv, cwd, name, engine="Command", cpus=None, memory_gib=None,
             mpi_ranks=None, threads_per_rank=None, env=None, hold=False,
             on_failure="pause", layout=None, role="primary", allow_auxiliary=False,
-            independent=False, resource_contract=None, write_scope=None, note='', suspension_backend=None):
+            independent=False, resource_contract=None, write_scope=None, note='', suspension_backend=None,
+            progress_sources=()):
+        from .source_declarations import declaration_record, validate_sources
+        progress_sources = validate_sources(engine, progress_sources, require_complete=bool(progress_sources))
         note = validate_note(note)
         if suspension_backend is not None:
             from .suspension import BACKENDS
@@ -301,6 +317,8 @@ class Store:
                    "finished_at": None, "exit_code": None, "signal": None, "reason": "",
                    "worker": None, "group": None, "claim": None, "claimed_at": None,
                    "cancel_requested": False, "scheduling": scheduling, "sharing_anchor": None}
+            if progress_sources:
+                job['progress_sources'] = declaration_record(engine, job['attempt_id'], progress_sources)
             if suspension_backend:
                 from .suspension import initial_state
                 job['suspension'] = initial_state(suspension_backend)

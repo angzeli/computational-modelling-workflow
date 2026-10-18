@@ -97,6 +97,22 @@ one entry. `--open` without either selects only `preferred_key`. Listing/JSON
 never invokes an opener or backfills missing metadata. Core commands work without
 Textual or Rich.
 
+## Scientific source bindings remain separate
+
+F Files exposes declared navigation locations. S Sources and the
+[progress bridge](cmw-jobs-progress.md#association-and-sources) reuse those
+locations to reconcile exact registered scientific roles with immutable add-time
+source declarations. Compatible declarations are observed automatically;
+conflicting required sources have no silent winner. Opening a Files folder does
+not select it as scientific evidence. Missing or inaccessible declared paths
+retain their association and accessibility result.
+
+Session-local Sources selections and `add --progress-source` metadata do not
+rewrite location records or create a persistent location registry. An explicit
+selection may identify a readable output without establishing execution lineage,
+process ownership or scientific provenance. The existing location identity and
+folder-opening checks continue to apply independently.
+
 ## Caller and future-engine seam
 
 ```python

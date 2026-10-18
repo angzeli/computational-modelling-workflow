@@ -118,7 +118,7 @@ class ObservationService:
             return None, self._empty(context, 'ADAPTER_UNAVAILABLE', 'Progress adapter unavailable')
         if context.binding_status != 'BOUND':
             reasons = tuple(dict.fromkeys(context.limitations)) or ('Source binding is unresolved',)
-            unresolved = self._empty(context, 'SOURCE_UNRESOLVED', reasons[0])
+            unresolved = self._empty(context, context.binding_status, reasons[0])
             return None, replace(unresolved, messages=reasons)
         if not context.key or not context.sources or len(context.sources) > MAX_SOURCES:
             return None, self._empty(context, 'SOURCE_UNRESOLVED', 'An explicit binding with 1–8 sources is required')

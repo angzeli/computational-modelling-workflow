@@ -273,7 +273,12 @@ def _card_text(snapshot, *, compact, width, now, max_lines):
         qualifications.append('? uncertain')
     qualifications.extend(dict.fromkeys('! ' + item.latest.qualification for item in selected
                           if _metric_mark(item.latest) == '!'))
-    parts = qualifications + [f'Evidence {age_text(snapshot.last_new_evidence_at, now)}', snapshot.read_health]
+    association = snapshot.context.association
+    source_label = ('SOURCE_CONFLICT · session-local' if snapshot.context.source_conflicts else
+                    'session-local · unverified' if 'session-local' in association else
+                    'user-declared-at-add' if 'user-declared-at-add' in association else
+                    'recognized declaration' if snapshot.context.declarations else '')
+    parts = ([source_label] if source_label else []) + qualifications + [f'Evidence {age_text(snapshot.last_new_evidence_at, now)}', snapshot.read_health]
     if snapshot.status not in ('OBSERVED', 'OBSERVING', 'PENDING', 'READY'):
         parts.insert(0, snapshot.status)
     if any(source.has_more for source in snapshot.sources):
@@ -298,12 +303,11 @@ def _unresolved_card(snapshot, *, width, max_lines):
     limit = max(3, max_lines)
     available = limit - 2
     shown = list(reasons[:available])
-    heading = 'Scientific: SOURCE_UNRESOLVED'
+    heading = 'Scientific: ' + snapshot.context.binding_status
     if len(reasons) > available:
         heading += f' (+{len(reasons) - available}; Enter details)'
-    action = 'Action: jobs progress --source (exact files); Enter details'
-    if width < 60:
-        action = 'Exact --source; Enter details'
+    action = ('[S] Review Sources' if snapshot.context.binding_status == 'SOURCE_CONFLICT'
+              else '[S] Configure Sources') + ' · Enter details'
     lines = [heading, *shown, action]
     return '\n'.join(fit_text(line, width) for line in lines)
 
@@ -314,7 +318,7 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
     context = snapshot.context
     if snapshot.status == 'ADAPTER_UNAVAILABLE':
         return 'Progress adapter unavailable' + (f' ({context.engine})' if context.engine else '')
-    unresolved = snapshot.status == 'SOURCE_UNRESOLVED'
+    unresolved = snapshot.status in {'SOURCE_UNRESOLVED', 'SOURCE_CONFLICT'}
     if not detailed:
         limit = max_lines or (3 if width < 54 else 6 if compact else 11)
         if unresolved and not snapshot.metrics:
@@ -322,10 +326,10 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
         card = _card_text(snapshot, compact=compact, width=width, now=now, max_lines=limit)
         if unresolved:
             lines = card.splitlines()
-            lines[0] = fit_text('Cached scientific: SOURCE_UNRESOLVED', width)
+            lines[0] = fit_text('Cached scientific: ' + snapshot.status, width)
             card = '\n'.join(lines)
         return card
-    heading = 'SCIENTIFIC PROGRESS · SOURCE_UNRESOLVED' if unresolved else f'PROGRESS · {snapshot.phase}'
+    heading = 'SCIENTIFIC PROGRESS · ' + snapshot.status if unresolved else f'PROGRESS · {snapshot.phase}'
     if snapshot.calculation:
         heading += f' · {snapshot.calculation}'
     if context.stage:
@@ -344,7 +348,7 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
         lines.append('Completed evaluation timing · latest ← previous: ' + duration_pair(snapshot.completed_durations))
     lines.extend(dict.fromkeys(snapshot.messages))
     if unresolved:
-        lines.append('Action: use a supported declaration or cmw jobs --state STATE progress JOB --source ROLE=/absolute/FILE. '
+        lines.append('Action: [S] Sources in the dashboard, or cmw jobs --state STATE progress JOB --source ROLE=/absolute/FILE. '
                      'Use the same Jobs state and attempt. Explicit sources apply only to that invocation; '
                      'they do not update the dashboard binding.')
     lines.append(source)
@@ -352,9 +356,14 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
         lines.insert(0, 'CATCHING UP · bounded historical reads; current evidence may be newer')
     if detailed:
         lines.extend((f'Adapter: {snapshot.adapter}; status: {snapshot.status}; stage: {context.stage or "unknown"}; segment: {snapshot.segment}',
-                      f'Binding: {context.binding_id}; attempt: {context.attempt_id or "not a Jobs attempt"}',
+                      f'Binding: {context.binding_id}; generation: {context.binding_generation}; attempt: {context.attempt_id or "not a Jobs attempt"}',
                       f'Last successful observation: {age_text(snapshot.last_success_at, now)}; last file growth: {age_text(snapshot.last_file_growth_at, now)}',
                       'Observation only; process ownership: false; scientific validation: not assessed.'))
+        for declaration in context.declarations:
+            lines.append(f'Declaration {declaration.role}: {declaration.path}; stage: {declaration.stage or "unknown"}; '
+                         f'origin: {", ".join(declaration.origins)}; {declaration.qualification}')
+        for conflict in context.source_conflicts:
+            lines.append('SOURCE_CONFLICT: ' + conflict)
         for item in series:
             metric = item.latest
             lines.append(f'\n{metric.semantic_id}: {metric.definition}; {metric.qualification}')

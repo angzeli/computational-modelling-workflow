@@ -12,7 +12,7 @@ is not a scientific acceptance decision. No controller is needed.
 cmw jobs progress J1.1
 cmw jobs progress J1.1 --json
 cmw jobs --state /absolute/jobs-state progress J1.1 --json
-# Explicit, session-local sources for an otherwise opaque wrapper:
+# Explicit, invocation-local sources for an otherwise opaque wrapper:
 cmw jobs progress J1.1 --engine VASP \
   --source outcar=/absolute/run/OUTCAR --source stdout=/absolute/log/stdout
 ```
@@ -21,8 +21,9 @@ The command performs one bounded observation, not a complete historical scan.
 Large existing files may report `CATCHING_UP`; `watch` continues bounded background
 chunks until caught up. The default `jobs status` command does not scan scientific
 outputs. JSON schema 1 carries typed context, metric, event and source evidence.
-Unknown engines report `ADAPTER_UNAVAILABLE`; ambiguous declarations report
-`SOURCE_UNRESOLVED`. Files navigation remains available independently.
+Unknown engines report `ADAPTER_UNAVAILABLE`; missing declarations report
+`SOURCE_UNRESOLVED`, and incompatible declarations report `SOURCE_CONFLICT`.
+Files navigation remains available independently.
 
 The main console observes only the selected managed job, approximately every four
 seconds after catch-up. It never changes selection to follow another active job.
@@ -58,42 +59,126 @@ convergence percentage, ETA, scientific-validity badge or automatic stop is show
 
 ## Association and sources
 
-The Jobs bridge uses [delivery 1's location resolver](cmw-jobs-locations.md).
-A unique declared output and stage are required for a registered default source
-plan. Working directory, elapsed time, process names and external observations
-are not fallback associations. State/database identity and immutable job/attempt
-identity participate in the binding revision, together with declared directories
-and source paths. Directory replacement requires a fresh binding.
+The default is automatic: the Jobs bridge consumes the existing
+[location resolver](cmw-jobs-locations.md), recognized runner argv, recorded
+execution layouts and supported workflow metadata, then reconciles these with
+any sources declared at add time. A unique compatible binding starts bounded
+observation immediately. Opening Sources or pressing Validate is unnecessary
+for ordinary supported jobs.
 
-For VASP the default plan observes the declared output's `OUTCAR` and `OSZICAR`,
-and optionally `POSCAR` under the declared inputs directory. These are exact
-registered filenames, not a filesystem search. Current input flags remain
-unverified historical input evidence. Explicit `--source` descriptors replace the
-whole default source plan for that invocation; supply all desired roles. An
-explicit stdout source uses the supported electronic-table dialect. When both
-OSZICAR and stdout are supplied, OSZICAR has priority and duplicate streams are not
-counted twice. Overrides never edit the queue, argv or scientific provenance.
+Reconciliation compares semantic role, stage and exact canonical path; no origin
+silently wins. Identical declarations are combined while retaining their origins.
+Different paths for a required role, including disagreement between runner and
+layout, produce `SOURCE_CONFLICT` without opening either source. An unavailable
+optional source does not invalidate the required binding; conflicting optional
+sources are omitted with a warning. Different ORCA stages remain separate. A
+single VASP stage retains native source roles; multiple VASP stages are refused.
 
-An opaque shell `-c` command with no verified execution layout or supported
-source declaration remains `SOURCE_UNRESOLVED`, even when Files can open its
-working directory and execution observation verifies its worker. Inspect Files
-for declared roles; never assume cwd or a nearby OUTCAR is the output. For a
-caller-confirmed exact source pair, use the command's existing `--source` options
-for `outcar=/absolute/run/OUTCAR` and `oszicar=/absolute/run/OSZICAR`. The override
-is qualified as caller-supplied and applies only to that CLI invocation; it does
-not update an already-running dashboard or persist a binding. An updated runtime
-alone cannot supply an opaque attempt's missing declaration.
+For VASP the default plan observes `OUTCAR` and `OSZICAR` under the declared
+output, plus optional `POSCAR` under separately declared inputs. These are literal
+registered filenames. ORCA uses exact declared native output files and supported
+stage metadata, never Jobs stdout or a workflow root without exact stage files.
+See [ORCA scope and association](molecular/orca-live-progress.md).
 
-Identical binding diagnostics appear once in stable order. Distinct resolver,
-accessibility and integrity errors remain available in Details/JSON; the selected
-card shows a bounded explanation and an explicit-source action.
+A declared path stays established when a file is not yet created, a mount is
+unavailable or access is denied. The reader reports the actual availability or
+access problem; it does not invite configuration merely because evidence is
+missing. An unsupported parser/dialect similarly preserves the binding. Neither
+case permits substitution of another nearby file. Cwd alone, job names, process
+activity, elapsed time and newest-file searches never establish a source.
 
-The job's declared engine selects the adapter. `--engine` is a session-local
-adapter choice for otherwise unsupported labels, not proof of a native dialect.
-The adapter must still qualify actual source evidence. Registered exact-file plans may retain ordered, explicitly recorded stage sources.
-The ORCA plan uses exact declared native output files; it never substitutes Jobs
-stdout, cwd or the newest file. See [ORCA scope and association](molecular/orca-live-progress.md).
-An ambiguous workflow root still requires explicit sources rather than guessing.
+### Portal Sources
+
+On the main Jobs screen, **S** opens Sources for the selected immutable attempt.
+A working automatic association opens in inspection mode, showing origin and
+status; Details exposes exact paths and qualifications. **Use Different Sources**
+opens the explicit form. Unresolved jobs open in configuration mode; conflicting
+jobs expose the declarations for review. The main card remains concise and
+shows `[S] Configure Sources` or `[S] Review Sources` when needed.
+
+Fields come from the registered adapter source plans. A caller-selected VASP
+output directory can **Propose Exact Paths** for `OUTCAR` and `OSZICAR`. Review
+those paths before use; optional `POSCAR` needs its own declared input path and
+is never invented from that output directory. ORCA uses its native output field
+and stage where applicable. Paths are literal, including spaces and Unicode;
+no shell expansion, wrapper execution or directory search occurs.
+
+**Validate** checks roles, stages, required/optional evidence, bounded file
+metadata, accessibility and identity. It does not activate or fully parse the
+output. **Use This Session** rechecks the selected state/job/attempt, declarations
+and filesystem identities before starting normal bounded observation. Conflicts
+also require the explicit review checkbox. Such an override retains the conflict
+and the qualification that scientific lineage is unverified; it changes neither
+the recorded runner nor the persisted declaration. **Use Default** discards this
+session's override and returns to declaration reconciliation.
+
+The in-memory selection belongs to the canonical Jobs state/database identity,
+internal job ID, immutable attempt, engine and binding generation. Switching jobs
+does not transfer it; returning to the same valid attempt can reuse it. Closing
+and reopening the portal clears session selections. File/directory replacement,
+symlink redirection or changed declarations require fresh validation; truncation
+and native generation changes retain the existing reader protections. Late
+asynchronous results cannot update another selected attempt. Sources shares the
+existing bounded progress worker and observation service, without another poller
+or per-poll database writes.
+
+An opaque shell `-c` job without declarations remains `SOURCE_UNRESOLVED`, even
+when Files opens its working directory and execution observation verifies its
+worker. S supplies the explicit fallback for that portal session. F remains
+folder navigation, and G opens history; History's S still selects a stage.
+Shortcut letters typed inside path, note or reason inputs remain literal text.
+
+### Declarations for future jobs
+
+`--progress-source` is optional. Use it before `--` when the output paths are
+known but a wrapper does not expose a recognized declaration:
+
+```sh
+cmw jobs --state /absolute/isolated-jobs add \
+  --name "Opaque VASP wrapper" --engine VASP --cwd /absolute/work --hold \
+  --progress-source outcar=/absolute/run/OUTCAR \
+  --progress-source oszicar=/absolute/run/OSZICAR \
+  -- /bin/bash -c 'exec /absolute/work/trusted-wrapper.sh'
+```
+
+This only enqueues the caller's command. Existing argv handling and launch checks
+are unchanged. `ROLE@STAGE=/absolute/file` supplies an explicit stage. Add-time
+validation checks literal absolute paths, registered roles, duplicate or
+inconsistent declarations and the required source set; files need not exist.
+The registered `stdout` alternative can supply the VASP electronic stream in
+place of `oszicar`. Optional sources retain their registered meaning.
+
+The additive `progress_sources` job metadata has declaration schema 1, the new
+attempt ID, engine, role/path/stage/optional descriptors, origin
+`user-declared-at-add`, and qualification `caller-declared; scientific lineage
+unverified`. It is immutable after add and survives Store reload, separate CLI
+processes, portal/controller restarts and ordinary lifecycle writes. It does not
+freeze inodes before outputs exist or change Jobs control schema 1/2/3 handling;
+legacy records remain absent without read-only backfilling. Existing active
+legacy-state migration safeguards still apply. There is no source-edit operation
+for an existing attempt.
+
+Compatible persisted declarations are observed automatically by the portal and
+`cmw jobs progress JOB_ID --json`; disagreements with automatic declarations
+remain conflicts. JSON, Details and Sources retain origin and qualification.
+A source declaration identifies a file to observe, not verified execution
+lineage, scientific acceptance or finalization provenance.
+
+### Invocation-local CLI sources
+
+The existing `progress --source` syntax still selects sources for one call only;
+supply all desired roles. It does not change an open portal or the Jobs database.
+The explicit choice retains any conflict with recorded declarations. A partial
+single-stream invocation remains supported. VASP stdout uses its supported
+electronic-table dialect; when both OSZICAR and stdout are supplied, OSZICAR has
+priority and streams are not counted twice. `--engine` selects an invocation-local
+adapter for an otherwise unsupported label, not proof of a native dialect;
+persisted sources cannot be reinterpreted as a different engine.
+
+Identical diagnostics appear once in stable order. Distinct resolver, access and
+integrity errors remain available in Details/JSON. Execution observation,
+source-binding health, parser/read health and scientific convergence remain
+separate evidence throughout.
 
 ## Contract for other callers and adapters
 
@@ -122,13 +207,17 @@ meaning changes. The same revision with a different context is refused. `retain`
 releases contexts no longer displayed; `close` releases the client's readers.
 Neither affects execution. No durable history database or daemon is created.
 
-The explicit lazy registry accepts `register_adapter(engine, factory, sources=())`.
+The explicit lazy registry accepts
+`register_adapter(engine, factory, sources=(), source_roles=())`.
 A factory receives `RunContext` and returns an object implementing
 `update(tuple[SourceUpdate, ...], now) -> ProgressSnapshot`. Source updates contain
 complete lines, bounded byte/line evidence, file identity/generation, reset reason,
 health and offsets. Adapters have no Store, launcher, signal or widget dependency.
-`SourcePlan` entries map literal filenames or exact declared files to location roles. There is no
-dynamic plugin discovery, executable configuration or installation framework.
+`SourcePlan` entries map literal filenames or exact declared files to location
+roles. `sources` defines the automatic plan; `source_roles` registers additional
+explicit roles, and a plan may register required-role alternatives. Required and
+optional roles are shared by add-time validation and the Sources form. There is
+no dynamic plugin discovery, executable configuration or installation framework.
 
 Iteration context is an arbitrary tuple of `IterationLevel` values. Metric
 observations carry semantic ID, label, definition/scope, native unit, value,
@@ -381,10 +470,12 @@ the reader's documented residual detection limits.
 6. Update CAPABILITY_MAP.md and the engine's scope documentation.
 
 For explicit CLI declarations, `--source ROLE@STAGE=/absolute/file` carries a stage
-and produces the distinct role `ROLE:STAGE`. Repeat in known workflow order;
-`--stage` remains a history filter. Plain `ROLE=/absolute/file` is unchanged.
-These declarations are session-local observation associations, never edits to the
-queue or scientific provenance.
+and retains that stage in the descriptor. Stage-aware plans use distinct
+`ROLE:STAGE` roles for multiple stages; non-stage-aware plans retain the native
+role and accept only one stage. Repeat stage-aware sources in known workflow
+order; `--stage` remains a history filter. Plain `ROLE=/absolute/file` is
+unchanged. These CLI declarations are invocation-local observation associations,
+never edits to the queue or scientific provenance.
 
 Delivery 4's shared adjustments are exact-file/staged source plans, additive
 source stage metadata, and this generic CLI syntax. Existing VASP directory plans

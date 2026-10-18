@@ -15,6 +15,7 @@ class SourceDescriptor:
     root_path: str | None = None
     root_identity: tuple[int, int] | None = None
     stage: str | None = None
+    origins: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,9 @@ class RunContext:
     limitations: tuple[str, ...] = ()
     diagnostic_targets: tuple[DiagnosticTarget, ...] = ()
     process_ownership: bool = False
+    declarations: tuple[SourceDescriptor, ...] = ()
+    source_conflicts: tuple[str, ...] = ()
+    binding_generation: int = 0
 
     @property
     def key(self):

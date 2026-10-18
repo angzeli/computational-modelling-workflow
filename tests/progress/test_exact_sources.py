@@ -132,12 +132,12 @@ class ExactSourceTests(unittest.TestCase):
         job, state, path = self.workflow()
         state['stages']['FREQ']['runner']['output'] = state['stages']['OPT']['runner']['output']
         path.write_text(json.dumps(state))
-        self.assertEqual(resolve_context(self.store, job['id']).binding_status, 'SOURCE_UNRESOLVED')
+        self.assertEqual(resolve_context(self.store, job['id']).binding_status, 'SOURCE_CONFLICT')
 
     def test_two_files_for_one_stage_are_ambiguous(self):
         job = self.runner()
         extra = (LocationDescriptor('orca-output', self.output/'other.out', kind='file', stage='OPT'),)
-        self.assertEqual(resolve_context(self.store, job['id'], descriptors=extra).binding_status, 'SOURCE_UNRESOLVED')
+        self.assertEqual(resolve_context(self.store, job['id'], descriptors=extra).binding_status, 'SOURCE_CONFLICT')
 
     def test_explicit_source_selects_only_its_matching_stage_and_conflict_rejected(self):
         job, _state, _path = self.workflow()
@@ -155,7 +155,9 @@ class ExactSourceTests(unittest.TestCase):
                         for stage in ('OPT', 'FREQ', 'SP'))
         context = resolve_context(self.store, job['id'], sources=sources)
         self.assertEqual(context.binding_status, 'BOUND')
-        self.assertEqual(context.sources, sources)
+        self.assertEqual([(s.role, s.path, s.stage) for s in context.sources],
+                         [(s.role, s.path, s.stage) for s in sources])
+        self.assertTrue(all(s.origins == ('invocation-local',) for s in context.sources))
         self.assertIsNone(context.stage)
 
     def test_external_scratch_copyback_is_not_misrepresented_as_live_output(self):

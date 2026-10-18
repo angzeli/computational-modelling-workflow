@@ -1,9 +1,8 @@
-"""Read-only Jobs association for the independent live-observation client."""
+"""Read-only, automatic-first association for the bounded progress client."""
 from __future__ import annotations
 
 from dataclasses import asdict, replace
 from pathlib import Path
-import os
 
 from cmw.core.provenance import stable_hash
 from cmw.progress.models import RunContext, SourceDescriptor
@@ -12,38 +11,134 @@ from .locations import _read_job, discover
 from .store import JobsError
 
 
-def _explicit_sources(sources):
-    result, roles, paths = [], set(), set()
+QUALIFICATION = 'Location declarations do not establish process ownership or scientific validity.'
+
+
+def source_role(source):
+    return source.role.split(':', 1)[0]
+
+
+def _explicit_sources(sources, engine=None):
+    from .source_declarations import validate_sources
+    sources = validate_sources(engine, sources) if engine else tuple(sources)
+    result, paths = [], set()
     for source in sources:
-        if not isinstance(source, SourceDescriptor):
-            raise JobsError('Progress sources must be SourceDescriptor values')
-        if (not source.role or not source.role.isprintable() or len(source.role) > 128
-                or source.role in roles):
-            raise JobsError('Progress source roles must be distinct nonempty printable names')
-        path = str(source.path)
-        if not Path(path).is_absolute() or '\0' in path or '://' in path:
-            raise JobsError('Progress source paths must be absolute filesystem paths')
-        canonical = str(Path(path).resolve(strict=False))
+        canonical = str(Path(source.path).resolve(strict=False))
         if canonical in paths:
             raise JobsError('A source cannot be assigned to multiple progress roles')
-        if (source.stage is not None and (not isinstance(source.stage, str)
-                or not source.stage.strip() or not source.stage.isprintable() or len(source.stage) > 256)):
-            raise JobsError('Progress source stages must be nonempty printable text')
-        roles.add(source.role)
         paths.add(canonical)
-        result.append(SourceDescriptor(source.role, os.path.abspath(path), source.qualification,
-                                       source.optional, source.root_path, source.root_identity, source.stage))
+        result.append(source)
     return tuple(result)
 
 
-def resolve_context(store, job_id, *, expected_attempt_id=None, descriptors=(), resolvers=None,
-                    sources=(), engine=None):
-    """Consume delivery-1 declarations; never infer output from cwd or activity.
+def _automatic(found, registration):
+    """Translate every declared location through the existing registered plans."""
+    candidates, issues = [], list(found.diagnostics)
+    if registration is None:
+        return candidates, issues
+    for plan in registration.sources:
+        locations = [item for item in found.locations if item.role == plan.location_role]
+        for location in locations:
+            if location.path is None:
+                if location.detail:
+                    issues.append(location.detail)
+                continue
+            expected_kind = 'directory' if plan.filename is not None else 'file'
+            if location.kind != expected_kind:
+                issues.append(f'{plan.role}: {expected_kind} declaration required for a source plan')
+                continue
+            if plan.filename is not None:
+                name = Path(plan.filename)
+                if name.name != plan.filename or plan.filename in {'.', '..'}:
+                    raise JobsError('Registered progress source names must be single literal filenames')
+                path, root = str(Path(location.path) / name), location.path
+            else:
+                path, root = location.path, str(Path(location.path).parent)
+            candidates.append(SourceDescriptor(plan.role, path,
+                location.qualification + ':' + location.origin, plan.optional,
+                root, location.directory_identity, location.stage, (location.origin,)))
+    return candidates, issues
 
-    ``sources`` is an explicit session-local replacement for the default source
-    plan. It is useful for opaque wrappers and a known stdout dialect. It never
-    edits argv, source records or Jobs state.
-    """
+
+def _staged(sources):
+    """Infer only an unambiguous stage already attached to the same role/path."""
+    result = []
+    for source in sources:
+        if source.stage is None:
+            matching = {item.stage for item in sources if source_role(item) == source_role(source)
+                        and item.stage is not None and item.path == source.path}
+            if len(matching) == 1:
+                source = replace(source, stage=next(iter(matching)))
+        result.append(source)
+    return result
+
+
+def reconcile_sources(sources, plans):
+    """No origin has precedence: equal role/stage/path evidence is combined."""
+    sources = _staged(sources)
+    selected, conflicts, warnings = [], [], []
+    groups = {}
+    for source in sources:
+        groups.setdefault((source_role(source), source.stage), []).append(source)
+    for (role, stage), declarations in groups.items():
+        plan = next((item for item in plans if item.role == role), None)
+        paths = {item.path for item in declarations}
+        if len(paths) > 1:
+            message = f'{role}' + (f'@{stage}' if stage else '') + ': conflicting declarations: ' + '; '.join(
+                f'{",".join(item.origins) or item.qualification} → {item.path}' for item in declarations)
+            (warnings if plan and plan.optional else conflicts).append(message)
+            continue
+        first = declarations[0]
+        origins = tuple(dict.fromkeys(origin for item in declarations for origin in item.origins))
+        qualifications = tuple(dict.fromkeys(item.qualification for item in declarations))
+        selected.append(replace(first, origins=origins, qualification=' + '.join(qualifications)))
+    for plan in plans:
+        role_sources = [item for item in selected if source_role(item) == plan.role]
+        if len(role_sources) > 1:
+            # Several exact stage outputs are supported only by a registered
+            # stage-aware plan; the same file cannot stand for two stages.
+            valid = (plan.stages and all(item.stage is not None for item in role_sources)
+                     and len({item.path for item in role_sources}) == len(role_sources))
+            if not valid:
+                message = f'{plan.role}: incompatible or ambiguous stage declarations'
+                (warnings if plan.optional else conflicts).append(message)
+                selected = [item for item in selected if item not in role_sources]
+    for path in {item.path for item in selected}:
+        aliases = [item for item in selected if item.path == path]
+        if len({source_role(item) for item in aliases}) > 1:
+            required = [item for item in aliases if not item.optional]
+            message = 'One source file has incompatible roles: ' + ', '.join(item.role for item in aliases)
+            (conflicts if len(required) > 1 else warnings).append(message)
+            selected = [item for item in selected if item not in aliases or item in required and len(required) == 1]
+    counts = {role: sum(source_role(item) == role for item in selected)
+              for role in {source_role(item) for item in selected}}
+    selected = [replace(item, role=f'{source_role(item)}:{item.stage}'
+                        if counts[source_role(item)] > 1 else source_role(item)) for item in selected]
+    return tuple(selected), tuple(dict.fromkeys(conflicts)), tuple(dict.fromkeys(warnings))
+
+
+def _source_identity(source):
+    """Resolve literal aliases and pin the containing directory, not file content."""
+    path = Path(source.path)
+    try:
+        canonical = str(path.resolve(strict=False))
+    except (OSError, RuntimeError):
+        canonical = str(path)  # Availability does not erase an established declaration.
+    root = source.root_path or str(Path(canonical).parent)
+    identity = source.root_identity
+    if identity is None:
+        try:
+            info = Path(root).stat()
+            identity = (info.st_dev, info.st_ino)
+        except OSError:
+            pass  # A declared future/unavailable source remains a declaration.
+    return replace(source, path=canonical, root_path=root, root_identity=identity)
+
+
+def resolve_context(store, job_id, *, expected_attempt_id=None, descriptors=(), resolvers=None,
+                    sources=(), engine=None, session_selection=None):
+    """Resolve declarations automatically; explicit observation never rewrites them."""
+    from .source_declarations import recorded_sources
     job, state_identity = _read_job(store, job_id)
     expected = job['attempt_id'] if expected_attempt_id is None else expected_attempt_id
     if expected != job['attempt_id']:
@@ -54,112 +149,72 @@ def resolve_context(store, job_id, *, expected_attempt_id=None, descriptors=(), 
         raise JobsError('Jobs state changed while resolving progress sources')
     selected_engine = str(engine or job['engine']).upper()
     registration = get_registration(selected_engine)
-    association = 'explicit-caller-declaration' if sources else 'declared-job-location'
-    limitations = []
-    binding_status, stage = 'BOUND', None
-    selected = []
-    bindings = []
-    if sources:
-        selected = list(_explicit_sources(sources))
-        # An explicit file selects its own declared stage, not every workflow
-        # stage in the Files listing. A caller may also declare an opaque source.
-        for index, source in enumerate(selected):
-            stages = {item.stage for item in found.locations
-                      if item.path == str(Path(source.path).resolve(strict=False))
-                      and item.stage is not None}
-            if source.stage is not None:
-                if stages and source.stage not in stages:
-                    binding_status = 'SOURCE_UNRESOLVED'
-                    limitations.append(f'{source.role}: explicit stage conflicts with its declared file.')
-            elif len(stages) == 1:
-                selected[index] = replace(source, stage=stages.pop())
-            elif len(stages) > 1:
-                binding_status = 'SOURCE_UNRESOLVED'
-                limitations.append(f'{source.role}: file belongs to several declared stages; '
-                                   'provide an explicit source stage.')
-        limitations.append('Session-local source override; historical execution binding is unverified.')
-    elif registration is not None:
-        preferred = next((item for item in found.locations if item.key == found.preferred_key), None)
-        stage = preferred.stage if preferred else None
-        for plan in registration.sources:
-            if plan.filename is None:
-                # Exact-file source plans bypass folder preference: a workflow
-                # can have several navigable folders but unambiguous stage files.
-                candidates = [item for item in found.locations if item.role == plan.location_role]
-                issues = [item for item in candidates if item.path is None]
-                destinations = {(item.stage, item.path): item for item in candidates if item.path is not None}
-                locations = list(destinations.values())
-                stages = [item.stage for item in locations]
-                paths = [item.path for item in locations]
-                valid = (not issues and 1 <= len(locations) <= 8
-                         and all(item.kind == 'file' for item in locations)
-                         and len(paths) == len(set(paths)))
-                if len(locations) > 1:
-                    valid = (valid and plan.stages and None not in stages
-                             and len(stages) == len(set(stages)))
-                if not valid:
-                    if not plan.optional:
-                        binding_status = 'SOURCE_UNRESOLVED'
-                    limitations.append(f'{plan.role}: no unambiguous exact {plan.location_role} file set; '
-                                       'declare observation sources explicitly.')
-                    limitations.extend(item.detail for item in issues if item.detail)
-                    continue
-                for location in locations:
-                    role = f'{plan.role}:{location.stage}' if len(locations) > 1 else plan.role
-                    selected.append(SourceDescriptor(role, location.path,
-                        location.qualification + ':' + location.origin, plan.optional,
-                        str(Path(location.path).parent), location.directory_identity, location.stage))
-                    bindings.append((location.key, location.target_identity, location.directory_identity))
-                association = locations[0].qualification + ':' + locations[0].origin
-                continue
-            if preferred is None:
-                if not plan.optional:
-                    binding_status = 'SOURCE_UNRESOLVED'
-                limitations.append('No unique declared output/stage: ' + found.status)
-                limitations.extend(found.diagnostics)
-                limitations.extend(item.detail for item in found.locations
-                                   if item.role in {'output', plan.location_role}
-                                   and item.path is None and item.detail)
-                continue
-            if plan.location_role == 'output':
-                candidates = [preferred]
-            else:
-                candidates = [item for item in found.locations
-                              if item.role == plan.location_role and item.path is not None
-                              and item.stage in {None, stage}]
-            destinations = {item.path: item for item in candidates}
-            if len(destinations) != 1:
-                if not plan.optional:
-                    binding_status = 'SOURCE_UNRESOLVED'
-                limitations.append(f'{plan.role}: no unique {plan.location_role} directory declaration')
-                continue
-            location = next(iter(destinations.values()))
-            if location.kind != 'directory':
-                if not plan.optional:
-                    binding_status = 'SOURCE_UNRESOLVED'
-                limitations.append(f'{plan.role}: directory declaration required for a source plan')
-                continue
-            # Canonical output names belong to the registered dialect, never a tree search.
-            name = Path(plan.filename)
-            if name.name != plan.filename or plan.filename in {'.', '..'}:
-                raise JobsError('Registered progress source names must be single literal filenames')
-            selected.append(SourceDescriptor(plan.role, str(Path(location.path) / name),
-                location.qualification + ':' + location.origin, plan.optional,
-                location.path, location.directory_identity, location.stage))
-            bindings.append((location.key, location.target_identity, location.directory_identity))
-            if plan.location_role == 'output':
-                association = location.qualification + ':' + location.origin
-    source_stages = {source.stage for source in selected if source.stage is not None}
-    if source_stages:
-        stage = next(iter(source_stages)) if len(source_stages) == 1 else None
-    if len(selected) > 8:
+    plans = registration.sources if registration else ()
+    automatic, issues = _automatic(found, registration)
+    persisted = recorded_sources(job)
+    if persisted and selected_engine != str(job['engine']).upper():
+        raise JobsError('Persisted sources belong to the recorded engine')
+    declarations = tuple(_source_identity(item) for item in (*automatic, *persisted))
+    invalid_automatic = bool(found.diagnostics and automatic)
+    for plan in plans:
+        if plan.optional:
+            continue
+        locations = [item for item in found.locations if item.role == plan.location_role]
+        if (any(item.path is None for item in locations)
+                and plan.filename is None and any(source_role(item) == plan.role for item in automatic)):
+            invalid_automatic = True
+
+    selected, conflicts, warnings = reconcile_sources(declarations, plans)
+    limitations = list(issues) + list(warnings) + list(conflicts)
+    missing = [plan.role for plan in plans if not plan.optional and not any(
+        source_role(item) in (plan.role, *plan.alternatives) for item in selected)]
+    binding_status = 'SOURCE_CONFLICT' if conflicts else 'SOURCE_UNRESOLVED' if invalid_automatic or missing or not selected else 'BOUND'
+    if missing and not conflicts:
+        limitations.insert(0, 'No unique declared output/stage: ' + found.status)
+    association = 'declared-job-location'
+    origins = tuple(dict.fromkeys(origin for item in selected for origin in item.origins))
+    if origins:
+        association = ' + '.join(origins)
+    # Retain the original pure automatic association label for existing callers.
+    if origins and 'user-declared-at-add' not in origins:
+        association = selected[0].qualification
+    if sources and len(sources) <= 8:
+        explicit = list(_explicit_sources(sources, selected_engine))
+        stage_errors = []
+        for index, source in enumerate(explicit):
+            matching = {item.stage for item in declarations
+                        if item.path == str(Path(source.path).resolve(strict=False)) and item.stage is not None}
+            if source.stage is not None and matching and source.stage not in matching:
+                stage_errors.append(f'{source.role}: explicit stage conflicts with its declared file.')
+            elif source.stage is None and len(matching) == 1:
+                explicit[index] = replace(source, stage=next(iter(matching)))
+            elif source.stage is None and len(matching) > 1:
+                stage_errors.append(f'{source.role}: file belongs to several declared stages; provide an explicit source stage.')
+        selected = tuple(_source_identity(replace(item, origins=('invocation-local',))) for item in explicit)
+        _, differing, _ = reconcile_sources((*declarations, *selected), plans)
+        conflicts = tuple(dict.fromkeys((*conflicts, *differing)))
+        binding_status = 'SOURCE_UNRESOLVED' if stage_errors else 'BOUND'
+        limitations = list(stage_errors) + list(conflicts) + ['Invocation-local source override; historical execution binding is unverified.']
+        association = 'explicit-caller-declaration'
+    if len(selected) > 8 or len(sources) > 8:
         binding_status = 'SOURCE_UNRESOLVED'
         limitations.append('Observation is bounded to at most eight declared sources.')
-    limitations.append('Location declarations do not establish process ownership or scientific validity.')
-    limitations = tuple(dict.fromkeys(limitations))
+    if binding_status != 'BOUND':
+        selected = ()  # Never let unresolved/conflicted declarations reach readers.
+    limitations.append(QUALIFICATION)
+    stages = {source.stage for source in selected if source.stage is not None}
+    stage = next(iter(stages)) if len(stages) == 1 else None
     signature = {'state': str(store.root), 'state_identity': state_identity, 'job': job['id'],
                  'attempt': expected, 'engine': selected_engine, 'stage': stage,
-                 'sources': [asdict(source) for source in selected], 'locations': bindings,
-                 'binding_status': binding_status}
-    return RunContext(stable_hash(signature), selected_engine, tuple(selected), stage, expected,
-                      str(store.root), job['id'], association, binding_status, limitations)
+                 'sources': [asdict(source) for source in selected],
+                 'declarations': [asdict(source) for source in declarations], 'binding_status': binding_status,
+                 'locations': [(item.key, item.target_identity, item.directory_identity)
+                               for item in found.locations
+                               if any(plan.location_role == item.role for plan in plans)]}
+    context = RunContext(stable_hash(signature), selected_engine, tuple(selected), stage, expected,
+        str(store.root), job['id'], association, binding_status, tuple(dict.fromkeys(limitations)),
+        declarations=declarations, source_conflicts=conflicts)
+    if session_selection is not None:
+        from .source_selection import apply_selection
+        context = apply_selection(store, job, state_identity, context, session_selection)
+    return context

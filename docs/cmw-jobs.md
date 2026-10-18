@@ -93,7 +93,7 @@ head blocks later jobs. Move it explicitly, release it, fix its launch blocker,
 or cancel that pending job. The persistent ORDER is independent of job ID and
 screen row order. The console keeps rows stable while ORDER changes.
 
-Console keys: Enter details, F files, N edit managed note, L logs, P toggle dispatch, H hold/release, O order,
+Console keys: Enter details, F files, G progress history, S scientific sources, N edit managed note, L logs, P toggle dispatch, H hold/release, O order,
 X cancellation confirmation, U selected-job Suspend/Continue confirmation, B read-only scheduling details, Q or Ctrl-C detach. Arrow/Page keys scroll. Narrow
 layouts keep JOB ID, NAME, STATUS and ELAPSED visible at 77×24 and 80×24.
 A small FILES action immediately follows JOB ID, followed by NAME at every width. Names use literal single-line
@@ -319,7 +319,8 @@ jobs only and does not infer associations from similar names or elapsed times.
 See [the location contract](cmw-jobs-locations.md) for supported declarations,
 accessibility states, CLI results and the session-local resolver API for future
 engines. Location evidence is separate from process ownership and scientific
-finalization. No live-progress parsing is included.
+finalization. Files navigation does not parse progress or activate source bindings;
+**S Sources** separately inspects or selects scientific observation files.
 
 ## Offline lifecycle observations
 
@@ -387,18 +388,49 @@ write scientific files. No native MPI, engine or sleep qualification is implied.
 ## Selected-job live progress
 
 `cmw jobs progress JOB_ID [--json]` provides bounded, read-only observation without
-a controller. The console shows a compact progress card for the selected supported
-job; Enter Details exposes its cached evidence. Adapters cover the existing bounded
-VASP dialect and [ordinary ORCA SCF/geometry output](molecular/orca-live-progress.md).
-Their metric definitions and criteria remain engine-specific. Unsupported engines
-and ORCA stages retain Files navigation and raw logs.
-Progress never changes job status, Guard, dispatch or scientific finalization. G opens generic Progress History: Enter drills into children,
-D shows evidence, Backspace returns, `[` / `]` page, S/V select stage/segment.
+a controller. The console automatically observes the selected supported job when
+recognized runner argv, recorded execution layout, workflow metadata and any
+add-time source declarations agree. No Sources interaction is needed. Enter
+Details exposes cached evidence. Adapters cover the bounded VASP dialect and
+[ordinary ORCA SCF/geometry output](molecular/orca-live-progress.md); their metric
+definitions and criteria remain engine-specific.
+
+**S Sources** inspects the current association, exact paths and qualification.
+For an opaque wrapper with no declaration, it offers explicit configuration.
+**Validate** checks sources without activating them; **Use This Session** rechecks
+identity and begins observation. Conflicting declarations report
+`SOURCE_CONFLICT`; a session override requires explicit review and keeps the
+conflict warning. A known but missing/inaccessible file or unsupported parser
+retains its binding and reports that separate limitation. F stays folder
+navigation. Sources never searches for a nearby output or evaluates shell text.
+
+Session selections are private to this portal, canonical Jobs state and immutable
+attempt. Switching jobs preserves isolation; closing the portal discards them.
+Future opaque jobs can optionally record sources at creation:
+
+```sh
+cmw jobs add --name "Opaque VASP wrapper" --engine VASP \
+  --cwd /absolute/work --hold \
+  --progress-source outcar=/absolute/run/OUTCAR \
+  --progress-source oszicar=/absolute/run/OSZICAR \
+  -- /bin/bash /absolute/work/trusted-wrapper.sh
+```
+
+Options precede `--`; normal supported runners need none of these source options.
+The new attempt's immutable declaration survives reload and restart, with origin
+`user-declared-at-add` and scientific lineage unverified. Missing future files
+are allowed at add time. The existing invocation-local `progress --source`
+override remains available and does not alter portal state or stored metadata.
+
+Progress never changes job status, Guard, dispatch or scientific finalization.
+G opens generic Progress History: Enter drills into children, D shows evidence,
+Backspace returns, `[` / `]` page, and S/V select stage/segment within that screen.
 `cmw jobs progress JOB_ID --history --json` exposes bounded pages with explicit
 coverage and cursors. Native LOOP/LOOP+ timing remains separate from qualified
-observer intervals; missing historical timing stays unavailable.
-See the [live-progress and adapter contract](cmw-jobs-progress.md) for source
-overrides, metric meanings, incremental-read limits and extension examples.
+observer intervals; missing historical timing stays unavailable. Unsupported
+engines and ORCA stages retain Files navigation and raw logs. See the
+[live-progress and adapter contract](cmw-jobs-progress.md) for reconciliation,
+source validation, metric meanings, incremental-read limits and extension examples.
 
 ## Managed job notes
 

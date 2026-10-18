@@ -282,6 +282,8 @@ def register(subcommands):
     add.add_argument("--name", required=True)
     add.add_argument("--note", default="", help="optional plain-text human annotation (4096 Unicode code points); before --")
     add.add_argument("--engine", default="Command")
+    add.add_argument("--progress-source", action="append", default=[], metavar="ROLE[@STAGE]=ABSOLUTE_PATH",
+                     help="optional attempt-scoped scientific source declaration; repeat before --; files may not exist yet")
     add.add_argument("--suspension-backend", choices=("local-command-v1", "vasp-port-v1", "orca-local-v1"),
                      help="opt in to a qualified local suspension runtime handshake; backend registration may refuse")
     add.add_argument("--cwd", required=True, type=Path)
@@ -467,25 +469,13 @@ def inspect_files(store, args):
 
 def inspect_progress(store, args):
     from cmw.progress.formatting import history_text, progress_text
-    from cmw.progress.models import SourceDescriptor
     from cmw.progress.service import ObservationService
+    from .locations import _read_job
     from .progress import resolve_context
+    from .source_declarations import parse_sources
 
-    sources = []
-    for declaration in args.source:
-        if "=" not in declaration:
-            raise JobsError("--source requires ROLE=ABSOLUTE_PATH")
-        role, path = declaration.split("=", 1)
-        if not role or not Path(path).is_absolute():
-            raise JobsError("--source requires a nonempty role and absolute path")
-        stage = None
-        if "@" in role:
-            role, stage = role.split("@", 1)
-            if (not role or not stage or "@" in stage or not stage.isprintable()
-                    or len(stage) > 256):
-                raise JobsError("--source stage must be a nonempty printable name (up to 256 characters)")
-            role = f"{role}:{stage}"
-        sources.append(SourceDescriptor(role, path, qualification="explicit-client-source", stage=stage))
+    job, _ = _read_job(store, args.job_id)
+    sources = parse_sources(args.source, args.engine or job['engine'])
     context = resolve_context(store, args.job_id, sources=tuple(sources), engine=args.engine)
     if args.history:
         if not 1 <= args.limit <= 200 or not 1 <= args.history_polls <= 4096:
@@ -566,6 +556,8 @@ def handle(args):
         elif operation == "unreserve":
             result = store.set_external_reservation(None)
         elif operation == "add":
+            from .source_declarations import parse_sources
+            progress_sources = parse_sources(args.progress_source, args.engine)
             environment = {}
             for entry in args.env:
                 if "=" not in entry:
@@ -576,7 +568,7 @@ def handle(args):
             result = store.add(argv=argv, cwd=args.cwd, name=args.name, engine=args.engine, note=args.note,
                 cpus=args.cpus, memory_gib=args.memory_gib, mpi_ranks=args.mpi_ranks,
                 threads_per_rank=args.threads_per_rank, env=environment, hold=args.hold,
-                suspension_backend=args.suspension_backend,
+                suspension_backend=args.suspension_backend, progress_sources=progress_sources,
                 on_failure=args.on_failure, layout=args.layout, role=args.role, allow_auxiliary=args.allow_auxiliary,
                 independent=args.independent, resource_contract="trusted-declared" if args.trust_resources else None, write_scope=args.write_scope)
         elif operation in {"start", "stop"}:

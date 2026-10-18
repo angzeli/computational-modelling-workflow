@@ -24,7 +24,17 @@ from .locations import discover
 from .folder_opener import OpenResult, open_location, request_open
 from .history_ui import HistoryDetails, ProgressHistory
 from .suspension_ui import SuspensionConfirm
+from .sources_ui import Sources
 from .suspension_presentation import effective_status, intended_action, suspension_summary, suspension_detail, submission_text
+
+
+def _database_identity(store):
+    """Metadata-only worker check; never called from the Textual event loop."""
+    try:
+        value = store.path.stat()
+    except OSError:
+        return None
+    return value.st_dev, value.st_ino
 
 
 def literal(value):
@@ -422,7 +432,7 @@ class JobsApp(App):
     #suspension-summary { height: 1; width: 1fr; padding-left: 1; color: #b7d8dd; }
     #shortcuts { dock: none; height: auto; background: #22303d; color: #d7e0e8; padding: 0 1; }
     """
-    BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("g", "history", "Progress"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
+    BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("g", "history", "Progress"), Binding("s", "sources", "Sources"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
                 Binding("p", "dispatch", "Dispatch"), Binding("h", "hold", "Hold"),
                 Binding("o", "order", "Order"), Binding("x", "cancel", "Cancel"),
                 Binding("u", "suspension", "Suspend/Continue", show=False),
@@ -464,6 +474,10 @@ class JobsApp(App):
         self.progress_snapshot = None
         self.progress_error = None
         self.history_view = None
+        self.sources_view = None
+        self.sources_request = None
+        self.session_sources = {}
+        self.source_binding_generation = 0
         self.suspension_busy = False
         self.suspension_selection_generation = 0
         self.execution_provider = execution_provider
@@ -492,7 +506,7 @@ class JobsApp(App):
             with Horizontal(id="execution-controls"):
                 yield Button(literal("[U] Suspend job"), id="suspension-action")
                 yield Static("", id="suspension-summary", markup=False)
-            yield Static("Enter Details · F Files · G Progress · N Note · L Logs\nP Dispatch · H Hold · O Order · X Cancel · B Scheduling · Q Detach", id="shortcuts", markup=False)
+            yield Static("Enter Details · F Files · G Progress · S Sources · N Note · L Logs\nP Dispatch · H Hold · O Order · X Cancel · B Scheduling · Q Detach", id="shortcuts", markup=False)
             yield Footer()
 
     def on_mount(self):
@@ -637,14 +651,96 @@ class JobsApp(App):
         job = self.selected()
         if self.external_selected_id or job is None or not hasattr(self.store, 'root'):
             return None
-        declarations = json.dumps({key: job.get(key) for key in ('argv', 'cwd', 'layout', 'engine')}, sort_keys=True)
-        return (str(self.store.root), job['id'], job['attempt_id'], declarations,
-                self.progress_sources, self.progress_engine, self.location_descriptors)
+        declarations = json.dumps({key: job.get(key) for key in ('argv', 'cwd', 'layout', 'engine', 'progress_sources')}, sort_keys=True)
+        base = (str(self.store.root), job['id'], job['attempt_id'])
+        session = self.session_source_for(base)
+        return (*base, declarations, self.progress_sources, self.progress_engine,
+                self.location_descriptors, session.identity if session else None,
+                session.generation if session else None)
+
+    def session_source_for(self, selection):
+        if selection is None:
+            return None
+        return next((item for item in self.session_sources.values()
+                     if item.identity[0] == selection[0]
+                     and item.identity[3:5] == selection[1:3]), None)
+
+    def request_sources(self, view, kind, payload=None):
+        self.sources_request = (view, kind, payload, view.request_generation)
+        self.collect_progress()
+
+    def collect_sources(self, request, selection, generation):
+        view, kind, payload, request_generation = request
+        self.sources_request = None
+        self.progress_busy = True
+        session = self.session_source_for(selection)
+        def collect():
+            result, error = None, None
+            database_identity = _database_identity(self.store)
+            try:
+                from .source_selection import inspect_selection, validate_selection, activate_selection
+                options = dict(expected_attempt_id=selection[2], descriptors=self.location_descriptors,
+                               resolvers=self.location_resolvers, engine=self.progress_engine)
+                if kind == 'inspect':
+                    result = inspect_selection(self.store, selection[1], session_selection=session, **options)
+                elif kind == 'validate':
+                    result = validate_selection(self.store, selection[1], payload, **options)
+                else:
+                    validation, confirmed = payload
+                    result = activate_selection(self.store, validation, self.source_binding_generation + 1,
+                                                confirmed=confirmed, descriptors=self.location_descriptors,
+                                                resolvers=self.location_resolvers)
+                if database_identity != _database_identity(self.store):
+                    raise JobsError('Jobs database changed while checking sources; reopen Sources')
+            except Exception as exc:
+                error = f'{type(exc).__name__}: {exc}'
+            try:
+                if not self.progress_closed:
+                    self.call_from_thread(self.accept_sources, request, selection, generation, result, error)
+            except RuntimeError:
+                pass
+            finally:
+                if self.progress_closed and self.progress_service is not None:
+                    self.progress_service.close()
+        self.run_worker(collect, thread=True, group='live-progress', exit_on_error=False)
+
+    async def accept_sources(self, request, selection, generation, result, error):
+        self.progress_busy = False
+        view, kind, _, request_generation = request
+        current = (not self.progress_closed and not view.closed and not view.expired
+                   and generation == self.progress_generation and selection == self.progress_identity()
+                   and request_generation == view.request_generation)
+        if current:
+            if kind == 'activate' and result is not None and error is None:
+                self.session_sources[result.identity] = result
+                self.source_binding_generation = result.generation
+                while len(self.session_sources) > 32:
+                    del self.session_sources[next(iter(self.session_sources))]
+            await view.accept_result(kind, result, error, request_generation)
+            if kind == 'activate' and result is not None and error is None:
+                self.sync_progress_selection()
+        if self.sources_request is not None:
+            self.collect_progress()
+        elif not self.progress_closed:
+            self.set_timer(.05, self.collect_progress)
+
+    def clear_session_source(self, view):
+        if view.selection != self.progress_identity() or view.expired:
+            view.invalidate()
+            return
+        session = self.session_source_for(view.selection)
+        if session is not None:
+            self.session_sources.pop(session.identity, None)
+        view.closed = True
+        view.dismiss(None)
+        self.sync_progress_selection()
 
     def sync_progress_selection(self):
         self.sync_execution_selection()
         selection = self.progress_identity()
         if selection != self.progress_selection:
+            if self.sources_view is not None and not self.sources_view.closed and self.sources_view.selection != selection:
+                self.sources_view.invalidate()
             if self.history_view is not None and self.history_view.selection != selection:
                 self.history_view.invalidate()
             self.progress_generation += 1
@@ -667,6 +763,14 @@ class JobsApp(App):
                 self.progress_service.retain(())
             return
         generation = self.progress_generation
+        request = self.sources_request
+        if request is not None:
+            view = request[0]
+            if not view.closed and not view.expired and view.selection == selection:
+                self.collect_sources(request, selection, generation)
+                return
+            self.sources_request = None
+        session = self.session_source_for(selection)
         history_view = self.history_view
         history_request = ((history_view, history_view.request_generation, history_view.parameters())
                            if history_view is not None and not history_view.closed and not history_view.expired
@@ -674,15 +778,25 @@ class JobsApp(App):
         self.progress_busy = True
         def collect():
             snapshot, error, history_page = None, None, None
+            invalid_session = None
+            database_identity = _database_identity(self.store)
+            database_changed = False
             try:
                 from cmw.progress.service import ObservationService
                 from .progress import resolve_context
                 if self.progress_service is None:
                     self.progress_service = ObservationService()
                 resolver = self.progress_resolver or resolve_context
-                context = resolver(self.store, selection[1], expected_attempt_id=selection[2],
-                                   descriptors=self.location_descriptors, resolvers=self.location_resolvers,
-                                   sources=self.progress_sources, engine=self.progress_engine)
+                options = dict(expected_attempt_id=selection[2], descriptors=self.location_descriptors,
+                               resolvers=self.location_resolvers, sources=self.progress_sources,
+                               engine=self.progress_engine)
+                if session is not None:
+                    options['session_selection'] = session
+                try:
+                    context = resolver(self.store, selection[1], **options)
+                except JobsError:
+                    invalid_session = session
+                    raise
                 self.progress_service.retain((context,))
                 if history_request:
                     self.call_from_thread(history_request[0].bind_context, context)
@@ -693,9 +807,10 @@ class JobsApp(App):
                     snapshot = self.progress_service.poll(context)
             except Exception as exc:
                 error = f'{type(exc).__name__}: {exc}'
+            database_changed = database_identity != _database_identity(self.store)
             try:
                 if not self.progress_closed:
-                    self.call_from_thread(self.accept_progress, selection, generation, snapshot, error, history_request, history_page)
+                    self.call_from_thread(self.accept_progress, selection, generation, snapshot, error, history_request, history_page, invalid_session, database_changed)
             except RuntimeError:
                 pass  # Detached clients no longer own a visible request.
             finally:
@@ -703,18 +818,39 @@ class JobsApp(App):
                     self.progress_service.close()
         self.run_worker(collect, thread=True, group="live-progress", exit_on_error=False)
 
-    def accept_progress(self, selection, generation, snapshot, error, history_request=None, history_page=None):
+    def accept_progress(self, selection, generation, snapshot, error, history_request=None, history_page=None, invalid_session=None, database_changed=False):
         self.progress_busy = False
         if self.progress_closed or generation != self.progress_generation or selection != self.progress_identity():
             # No replacement starts while an earlier underlying read is blocked.
             if self.progress_service is not None:
                 self.progress_service.retain(())
             self.sync_progress_selection()
+            if self.sources_request is not None and not self.progress_closed:
+                self.collect_progress()
+            return
+        if database_changed:
+            self.session_sources.clear()
+            self.progress_snapshot = None
+            self.progress_selection = None
+            if self.history_view is not None:
+                self.history_view.invalidate()
+            if self.sources_view is not None and not self.sources_view.closed:
+                self.sources_view.invalidate()
+            self.query_one('#message', Static).update('Jobs database changed during observation; earlier source results were discarded.')
+            self.sync_progress_selection()
+            return
+        if invalid_session is not None:
+            self.session_sources.pop(invalid_session.identity, None)
+            self.query_one('#message', Static).update(literal('Session sources changed; [S] review Sources. ' + (error or '')))
+            self.sync_progress_selection()
             return
         if snapshot is not None:
             self.progress_snapshot = snapshot
         self.progress_error = error
         self.render_progress()
+        if self.sources_request is not None:
+            self.collect_progress()
+            return
         current_history = self.history_view
         if history_request and history_page is not None:
             view, request_generation, _ = history_request
@@ -1085,8 +1221,8 @@ class JobsApp(App):
 
     def check_action(self, action, parameters):
         # App priority bindings run before focused text widgets, including Q.
-        if isinstance(self.screen, (NoteEditor, FilesChooser, ProgressHistory, HistoryDetails, SuspensionConfirm)) and action in {
-            'details', 'files', 'history', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'suspension'
+        if isinstance(self.screen, (NoteEditor, FilesChooser, ProgressHistory, HistoryDetails, SuspensionConfirm, Sources)) and action in {
+            'details', 'files', 'history', 'sources', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'suspension'
         }:
             return False
         return super().check_action(action, parameters)
@@ -1309,6 +1445,13 @@ class JobsApp(App):
             self.query_one('#message', Static).update(literal(f"Cannot edit note: {exc}"))
             return
         self.push_screen(NoteEditor(self.store, job), lambda saved: self.refresh_state())
+
+    def action_sources(self):
+        if self.external_read_only():
+            return
+        selection = self.progress_identity()
+        if selection is not None and self.selected_id:
+            self.push_screen(Sources(selection, self.selected_id))
 
     def action_history(self):
         if self.external_read_only():

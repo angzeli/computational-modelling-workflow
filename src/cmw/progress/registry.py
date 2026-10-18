@@ -11,12 +11,14 @@ class SourcePlan:
     location_role: str = 'output'
     optional: bool = False
     stages: bool = False
+    alternatives: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class Registration:
     factory: Callable[[RunContext], ProgressAdapter]
     sources: tuple[SourcePlan, ...] = ()
+    source_roles: tuple[SourcePlan, ...] = ()
 
 
 def _vasp(context):
@@ -30,16 +32,16 @@ def _orca(context):
 
 
 _REGISTRY = {'VASP': Registration(_vasp, (
-    SourcePlan('outcar', 'OUTCAR'), SourcePlan('oszicar', 'OSZICAR'),
+    SourcePlan('outcar', 'OUTCAR'), SourcePlan('oszicar', 'OSZICAR', alternatives=('stdout',)),
     SourcePlan('poscar', 'POSCAR', 'inputs', True),
-)), 'ORCA': Registration(_orca, (
+), (SourcePlan('stdout', None, optional=True),)), 'ORCA': Registration(_orca, (
     SourcePlan('orca_output', None, 'orca-output', stages=True),
 ))}
 
 
-def register_adapter(engine, factory, *, sources=()):
+def register_adapter(engine, factory, *, sources=(), source_roles=()):
     """Register a session-local trusted callable, e.g. a fictional test adapter."""
-    _REGISTRY[engine.upper()] = Registration(factory, tuple(sources))
+    _REGISTRY[engine.upper()] = Registration(factory, tuple(sources), tuple(source_roles))
 
 
 def get_registration(engine):
