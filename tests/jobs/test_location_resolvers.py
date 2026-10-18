@@ -87,6 +87,75 @@ class RunnerLocationTests(unittest.TestCase):
                 self.assertEqual(len(locations), 1)
                 self.assertIsNone(locations[0].path)
 
+    def test_current_controlled_runner_grammar_retains_exact_output(self):
+        for budget in (['--execution-budget', '3600'], ['--execution-budget=3600']):
+            with self.subTest(budget=budget):
+                job = self.job(self.vasp_argv('--managed-foreground',
+                    '--controlled-suspension', *budget, '--timeout', '7200',
+                    '--ranks', '8', '--mpi-mode', 'native'))
+                result = discover(self.store, job['id'])
+                output = next(item for item in result.locations if item.role == 'output')
+                self.assertEqual(output.path, str(self.output))
+                self.assertEqual(result.preferred_key, output.key)
+                self.assertEqual(output.qualification, 'declared')
+                self.assertFalse(output.process_ownership)
+
+    def test_new_options_do_not_relax_strict_argument_shape(self):
+        valid = ['--managed-foreground', '--controlled-suspension',
+                 '--execution-budget', '3600']
+        malformed = (
+            ['--controlled-suspension=true'],
+            ['--execution-budget'], ['--execution-budget='],
+            ['--execution-budget', '--timeout', '7200'],
+            [*valid, '--controlled-suspension'],
+            [*valid, '--execution-budget=7200'],
+            [*valid, '--managed-foreground'],
+            [*valid, '--unknown-runner-option'],
+        )
+        for suffix in malformed:
+            with self.subTest(suffix=suffix):
+                result = vasp_runner_locations({'cwd': str(self.inputs),
+                                                'argv': self.vasp_argv(*suffix)})
+                self.assertEqual(len(result), 1)
+                self.assertIsNone(result[0].path)
+                self.assertIn('Unresolved run-vasp.sh declaration', result[0].detail)
+        missing_output = {'cwd': str(self.inputs), 'argv': [
+            '/synthetic/run-vasp.sh', '--input', str(self.inputs), *valid]}
+        self.assertIsNone(vasp_runner_locations(missing_output)[0].path)
+
+    def test_nested_shell_stays_opaque_even_beside_native_output(self):
+        (self.inputs / 'OUTCAR').write_text('synthetic adjacent output\n')
+        (self.output / 'OUTCAR').write_text('synthetic other attempt output\n')
+        for argv in (
+            ['/bin/bash', '-c', 'exec /synthetic/run-vasp.sh --output .'],
+            ['/bin/bash', '/bin/sh', '-c', 'exec /synthetic/run-vasp.sh --output .'],
+        ):
+            with self.subTest(argv=argv):
+                job = self.job(argv, engine='VASP')
+                from cmw.jobs.progress import resolve_context
+                context = resolve_context(self.store, job['id'])
+                self.assertEqual(context.binding_status, 'SOURCE_UNRESOLVED')
+                self.assertFalse(context.sources)
+                self.assertIsNone(discover(self.store, job['id']).preferred_key)
+
+    def test_similar_named_vasp_attempts_keep_their_declared_sources(self):
+        from cmw.jobs.progress import resolve_context
+        contexts = []
+        for index in range(3):
+            output = self.root / f'similar-run-{index}'
+            output.mkdir()
+            (output / 'OUTCAR').write_text('synthetic per-attempt output\n')
+            job = self.store.add(argv=['/synthetic/run-vasp.sh',
+                '--input', str(self.inputs), '--output', str(output)],
+                cwd=self.inputs, name='same human label', engine='VASP', hold=True)
+            context = resolve_context(self.store, job['id'], expected_attempt_id=job['attempt_id'])
+            self.assertEqual({source.role: source.path for source in context.sources}, {
+                'outcar': str(output / 'OUTCAR'), 'oszicar': str(output / 'OSZICAR'),
+                'poscar': str(self.inputs / 'POSCAR')})
+            self.assertEqual(context.attempt_id, job['attempt_id'])
+            contexts.append(context)
+        self.assertEqual(len({context.key for context in contexts}), 3)
+
     def test_equal_syntax_relative_literal_paths_and_repeated_extra_inputs(self):
         job = self.job(['/synthetic/run-vasp.sh', '--input=.', '--output=../繁體 結果;echo literal',
                         '--extra-input', 'alpha', '--extra-input', 'beta'])

@@ -15,7 +15,7 @@ from .locations import LocationDescriptor, read_location_metadata
 _VASP_PAIRS = frozenset({
     '--input', '--output', '--binary', '--ranks', '--ncore', '--kpar',
     '--mpi-mode', '--restart', '--restart-from', '--timeout', '--stop-before',
-    '--extra-input',
+    '--extra-input', '--execution-budget',
 })
 _ORCA_PAIRS = frozenset({
     '--input', '--target', '--metadata', '--output', '--stderr', '--layout',
@@ -131,7 +131,8 @@ def vasp_runner_locations(job):
         return ()
     try:
         options = _options(argv, _VASP_PAIRS,
-                           {'--managed-foreground', '--dry-run'}, {'--extra-input'}, equals=True)
+                           {'--managed-foreground', '--controlled-suspension', '--dry-run'},
+                           {'--extra-input'}, equals=True)
         source = _path(options['--input'], job)
         output = _path(options['--output'], job)
     except (KeyError, TypeError, ValueError) as exc:

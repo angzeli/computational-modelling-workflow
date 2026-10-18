@@ -39,6 +39,13 @@ process association is unknown.
 | `python -m cmw.molecular.workflows.cli next/advance --state …` | Recorded stage runner/artifact locations and metadata | Only the explicit v1 OPT/FREQ/SP state record is read; stage/target/attempt relationships are checked |
 | Explicit caller descriptors / registered resolvers | Caller-declared roles and exact paths | Session-local API below; no storage schema or registry is added |
 
+The VASP grammar includes `--managed-foreground`, `--controlled-suspension`
+and the value-bearing `--execution-budget SECONDS` option, including `=VALUE`
+syntax. This only interprets declared locations: budget values, suspension
+eligibility, input checks and no-clobber policy remain the runner's validation
+responsibility. Missing values, duplicate non-repeatable options and unknown
+options remain unresolved.
+
 Known shell-interpreter prefixes are accepted only for literal script argv,
 including Jobs' `-e -o pipefail`. Shell `-c`, arbitrary Python, opaque wrappers and
 unrecognized options remain unresolved. Declared path characters are literal:

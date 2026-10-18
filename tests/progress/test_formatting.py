@@ -225,6 +225,48 @@ class ProgressCardTests(unittest.TestCase):
             self.assertIn('T:—', card)
             self.assertIn('Synthetic source correspondence conflict', progress_text(observed, detailed=True))
 
+    def test_unresolved_card_is_bounded_actionable_and_keeps_distinct_errors_in_details(self):
+        qualification = 'Location declarations do not establish process ownership or scientific validity.'
+        reasons = ('No unique declared output/stage: LOCATION_UNKNOWN',
+                   'outcar: permission denied', 'SOURCE_CONFLICT: input identity differs')
+        context = RunContext('unresolved', 'VASP', binding_status='SOURCE_UNRESOLVED',
+                             limitations=(*reasons, reasons[0], qualification))
+        snapshot = ProgressSnapshot(context, 'fixture', status='SOURCE_UNRESOLVED',
+                                    messages=(*reasons, reasons[0]), limitations=context.limitations)
+        card = progress_text(snapshot, compact=True, width=72, max_lines=5)
+        self.assertEqual(len(card.splitlines()), 5)
+        self.assertTrue(all(cell_width(line) <= 72 for line in card.splitlines()))
+        for reason in reasons:
+            self.assertEqual(card.count(reason), 1)
+        self.assertIn('Scientific: SOURCE_UNRESOLVED', card)
+        self.assertIn('jobs progress --source', card)
+        self.assertNotIn(qualification, card)
+        details = progress_text(snapshot, detailed=True)
+        for reason in reasons:
+            self.assertEqual(details.count(reason), 1)
+        self.assertIn(qualification, details)
+        self.assertIn('--state STATE progress JOB --source', details)
+        self.assertIn('Use the same Jobs state and attempt', details)
+        self.assertIn('do not update the dashboard binding', details)
+        narrow = progress_text(snapshot, compact=True, width=72, max_lines=3)
+        self.assertIn(reasons[0], narrow)
+        self.assertIn('+2; Enter details', narrow)
+        self.assertEqual(len(narrow.splitlines()), 3)
+
+    def test_unresolved_cached_metrics_retain_age_qualification_and_read_health(self):
+        cached = replace(active_snapshot(), status='SOURCE_UNRESOLVED', read_health='UNAVAILABLE',
+                         messages=('Declared source is unavailable',))
+        card = progress_text(cached, compact=True, width=72, max_lines=6, now=130)
+        self.assertIn('Cached scientific: SOURCE_UNRESOLVED', card)
+        self.assertIn('* provisional', card)
+        self.assertIn('Evidence 30s ago', card)
+        self.assertIn('UNAVAILABLE', card)
+        self.assertIn('0.12* @26', card)
+        details = progress_text(cached, detailed=True, now=130)
+        self.assertIn('Declared source is unavailable', details)
+        self.assertIn('new evidence 30s ago', details)
+        self.assertIn('provisional', details)
+
     def test_cell_aware_limits_and_tiny_budget_preserve_freshness(self):
         self.assertEqual(cell_width('a界e\u0301'), 4)
         self.assertEqual(fit_text('a界bc', 4), 'a界…')

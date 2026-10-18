@@ -70,7 +70,7 @@ class ObservationService:
     def _empty(context, status, message):
         return ProgressSnapshot(context, adapter=context.engine, status=status,
                                 phase=message, read_health=status,
-                                messages=(message,), limitations=context.limitations)
+                                messages=(message,), limitations=tuple(dict.fromkeys(context.limitations)))
 
     @staticmethod
     def _close_observation(observation):
@@ -117,7 +117,9 @@ class ObservationService:
         if registration is None:
             return None, self._empty(context, 'ADAPTER_UNAVAILABLE', 'Progress adapter unavailable')
         if context.binding_status != 'BOUND':
-            return None, self._empty(context, 'SOURCE_UNRESOLVED', '; '.join(context.limitations) or 'Source binding is unresolved')
+            reasons = tuple(dict.fromkeys(context.limitations)) or ('Source binding is unresolved',)
+            unresolved = self._empty(context, 'SOURCE_UNRESOLVED', reasons[0])
+            return None, replace(unresolved, messages=reasons)
         if not context.key or not context.sources or len(context.sources) > MAX_SOURCES:
             return None, self._empty(context, 'SOURCE_UNRESOLVED', 'An explicit binding with 1–8 sources is required')
         observation = self._contexts.get(context.key)

@@ -100,6 +100,18 @@ class ServiceTests(unittest.TestCase):
         self.assertIn('ambiguous', unresolved.phase)
         self.assertEqual(service.poll(replace(self.context, sources=self.context.sources*9)).status, 'SOURCE_UNRESOLVED')
 
+    def test_unresolved_causes_are_separate_stable_and_deduplicated(self):
+        reasons = ('missing declared output', 'permission denied', 'missing declared output',
+                   'SOURCE_CONFLICT: synthetic declaration')
+        context = replace(self.context, binding_status='SOURCE_UNRESOLVED', limitations=reasons)
+        snapshot = self.service().poll(context)
+        self.assertEqual(snapshot.status, 'SOURCE_UNRESOLVED')
+        self.assertEqual(snapshot.phase, reasons[0])
+        self.assertEqual(snapshot.messages, (reasons[0], reasons[1], reasons[3]))
+        self.assertEqual(snapshot.limitations, snapshot.messages)
+        self.assertEqual(snapshot.context, context)
+        self.assertFalse(snapshot.sources)
+
     def test_same_key_different_context_is_refused(self):
         service = self.service()
         service.poll(self.context)

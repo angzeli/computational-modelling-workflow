@@ -55,7 +55,7 @@ def resolve_context(store, job_id, *, expected_attempt_id=None, descriptors=(), 
     selected_engine = str(engine or job['engine']).upper()
     registration = get_registration(selected_engine)
     association = 'explicit-caller-declaration' if sources else 'declared-job-location'
-    limitations = ['Location declarations do not establish process ownership or scientific validity.']
+    limitations = []
     binding_status, stage = 'BOUND', None
     selected = []
     bindings = []
@@ -117,6 +117,9 @@ def resolve_context(store, job_id, *, expected_attempt_id=None, descriptors=(), 
                     binding_status = 'SOURCE_UNRESOLVED'
                 limitations.append('No unique declared output/stage: ' + found.status)
                 limitations.extend(found.diagnostics)
+                limitations.extend(item.detail for item in found.locations
+                                   if item.role in {'output', plan.location_role}
+                                   and item.path is None and item.detail)
                 continue
             if plan.location_role == 'output':
                 candidates = [preferred]
@@ -152,9 +155,11 @@ def resolve_context(store, job_id, *, expected_attempt_id=None, descriptors=(), 
     if len(selected) > 8:
         binding_status = 'SOURCE_UNRESOLVED'
         limitations.append('Observation is bounded to at most eight declared sources.')
+    limitations.append('Location declarations do not establish process ownership or scientific validity.')
+    limitations = tuple(dict.fromkeys(limitations))
     signature = {'state': str(store.root), 'state_identity': state_identity, 'job': job['id'],
                  'attempt': expected, 'engine': selected_engine, 'stage': stage,
                  'sources': [asdict(source) for source in selected], 'locations': bindings,
                  'binding_status': binding_status}
     return RunContext(stable_hash(signature), selected_engine, tuple(selected), stage, expected,
-                      str(store.root), job['id'], association, binding_status, tuple(limitations))
+                      str(store.root), job['id'], association, binding_status, limitations)

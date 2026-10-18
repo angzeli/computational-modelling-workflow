@@ -74,6 +74,20 @@ explicit stdout source uses the supported electronic-table dialect. When both
 OSZICAR and stdout are supplied, OSZICAR has priority and duplicate streams are not
 counted twice. Overrides never edit the queue, argv or scientific provenance.
 
+An opaque shell `-c` command with no verified execution layout or supported
+source declaration remains `SOURCE_UNRESOLVED`, even when Files can open its
+working directory and execution observation verifies its worker. Inspect Files
+for declared roles; never assume cwd or a nearby OUTCAR is the output. For a
+caller-confirmed exact source pair, use the command's existing `--source` options
+for `outcar=/absolute/run/OUTCAR` and `oszicar=/absolute/run/OSZICAR`. The override
+is qualified as caller-supplied and applies only to that CLI invocation; it does
+not update an already-running dashboard or persist a binding. An updated runtime
+alone cannot supply an opaque attempt's missing declaration.
+
+Identical binding diagnostics appear once in stable order. Distinct resolver,
+accessibility and integrity errors remain available in Details/JSON; the selected
+card shows a bounded explanation and an explicit-source action.
+
 The job's declared engine selects the adapter. `--engine` is a session-local
 adapter choice for otherwise unsupported labels, not proof of a native dialect.
 The adapter must still qualify actual source evidence. Registered exact-file plans may retain ordered, explicitly recorded stage sources.

@@ -289,19 +289,43 @@ def _card_text(snapshot, *, compact, width, now, max_lines):
     return '\n'.join(fit_text(line, width) for line in lines[:-1][:limit-1] + [lines[-1]])
 
 
+def _unresolved_card(snapshot, *, width, max_lines):
+    reasons = tuple(dict.fromkeys((*snapshot.messages, *snapshot.context.limitations, *snapshot.limitations)))
+    # The association qualification stays in JSON and Details; reserve the card
+    # for actionable failures instead of repeating its generic ownership limit.
+    reasons = tuple(reason for reason in reasons
+                    if reason != 'Location declarations do not establish process ownership or scientific validity.')
+    limit = max(3, max_lines)
+    available = limit - 2
+    shown = list(reasons[:available])
+    heading = 'Scientific: SOURCE_UNRESOLVED'
+    if len(reasons) > available:
+        heading += f' (+{len(reasons) - available}; Enter details)'
+    action = 'Action: jobs progress --source (exact files); Enter details'
+    if width < 60:
+        action = 'Exact --source; Enter details'
+    lines = [heading, *shown, action]
+    return '\n'.join(fit_text(line, width) for line in lines)
+
+
 def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, width=120, now=None, max_lines=None):
     """Render adapter descriptors without engine-specific metric names or rules."""
     now = time.time() if now is None else now
     context = snapshot.context
     if snapshot.status == 'ADAPTER_UNAVAILABLE':
         return 'Progress adapter unavailable' + (f' ({context.engine})' if context.engine else '')
-    if snapshot.status == 'SOURCE_UNRESOLVED':
-        reason = '; '.join(snapshot.messages or context.limitations or snapshot.limitations)
-        return 'Progress: SOURCE_UNRESOLVED' + (f' — {reason}' if reason else '')
+    unresolved = snapshot.status == 'SOURCE_UNRESOLVED'
     if not detailed:
-        return _card_text(snapshot, compact=compact, width=width, now=now,
-                          max_lines=max_lines or (3 if width < 54 else 6 if compact else 11))
-    heading = f'PROGRESS · {snapshot.phase}'
+        limit = max_lines or (3 if width < 54 else 6 if compact else 11)
+        if unresolved and not snapshot.metrics:
+            return _unresolved_card(snapshot, width=width, max_lines=limit)
+        card = _card_text(snapshot, compact=compact, width=width, now=now, max_lines=limit)
+        if unresolved:
+            lines = card.splitlines()
+            lines[0] = fit_text('Cached scientific: SOURCE_UNRESOLVED', width)
+            card = '\n'.join(lines)
+        return card
+    heading = 'SCIENTIFIC PROGRESS · SOURCE_UNRESOLVED' if unresolved else f'PROGRESS · {snapshot.phase}'
     if snapshot.calculation:
         heading += f' · {snapshot.calculation}'
     if context.stage:
@@ -318,7 +342,11 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
         lines.append(f'{label:<34} {metric_text(metric, concise=not detailed):<21} {metric_text(item.previous, concise=not detailed):<21} {target_text(metric)}')
     if snapshot.completed_durations:
         lines.append('Completed evaluation timing · latest ← previous: ' + duration_pair(snapshot.completed_durations))
-    lines.extend(snapshot.messages)
+    lines.extend(dict.fromkeys(snapshot.messages))
+    if unresolved:
+        lines.append('Action: use a supported declaration or cmw jobs --state STATE progress JOB --source ROLE=/absolute/FILE. '
+                     'Use the same Jobs state and attempt. Explicit sources apply only to that invocation; '
+                     'they do not update the dashboard binding.')
     lines.append(source)
     if any(state.has_more for state in snapshot.sources):
         lines.insert(0, 'CATCHING UP · bounded historical reads; current evidence may be newer')
@@ -354,7 +382,8 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
         for state in snapshot.sources:
             lines.append(f'Source {state.role}: {state.path}; {state.health}; generation {state.generation}; offset {state.offset}; '
                          f'pending bytes {state.pending_bytes}; catch-up {state.has_more}; poll bytes {state.bytes_read}')
-        lines.extend('Limitation: ' + item for item in dict.fromkeys(context.limitations + snapshot.limitations))
+        lines.extend('Limitation: ' + item for item in dict.fromkeys(context.limitations + snapshot.limitations)
+                     if item not in snapshot.messages)
     return '\n'.join(lines)
 
 

@@ -51,6 +51,30 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(context.association, 'explicit-caller-declaration')
         self.assertEqual(self.store.path.read_bytes(), before)
 
+    def test_unresolved_source_plans_deduplicate_root_cause_and_keep_declaration_detail(self):
+        context = resolve_context(self.store, self.job(False)['id'])
+        self.assertEqual(context.limitations.count('No unique declared output/stage: LOCATION_UNKNOWN'), 1)
+        self.assertIn('Output location is not declared by a supported route', context.limitations)
+        self.assertEqual(len(context.limitations), len(set(context.limitations)))
+        self.assertIn('Location declarations do not establish process ownership or scientific validity.',
+                      context.limitations)
+
+    def test_distinct_resolver_and_source_role_errors_are_preserved_in_order(self):
+        def denied(_job):
+            raise PermissionError('synthetic declaration permission denied')
+        def broken(_job):
+            raise ValueError('synthetic layout identity conflict')
+        context = resolve_context(self.store, self.job(False)['id'], resolvers=(denied, broken),
+                                  descriptors=(LocationDescriptor('inputs', None,
+                                               detail='synthetic input declaration unavailable'),))
+        expected = ('No unique declared output/stage: LOCATION_UNKNOWN',
+                    'Location resolver unavailable: synthetic declaration permission denied',
+                    'Location resolver unavailable: synthetic layout identity conflict',
+                    'synthetic input declaration unavailable')
+        self.assertEqual(context.limitations[:4], expected)
+        self.assertEqual(context.binding_status, 'SOURCE_UNRESOLVED')
+        self.assertFalse(context.sources)
+
     def test_state_and_attempt_identity_and_no_external_adoption(self):
         job = self.job()
         other = Store(self.root/'other'); other_job = self.job(store=other)
