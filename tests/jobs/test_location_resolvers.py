@@ -151,7 +151,7 @@ class RunnerLocationTests(unittest.TestCase):
             context = resolve_context(self.store, job['id'], expected_attempt_id=job['attempt_id'])
             self.assertEqual({source.role: source.path for source in context.sources}, {
                 'outcar': str(output / 'OUTCAR'), 'oszicar': str(output / 'OSZICAR'),
-                'poscar': str(self.inputs / 'POSCAR')})
+                'poscar': str(self.inputs / 'POSCAR'), 'incar': str(self.inputs / 'INCAR')})
             self.assertEqual(context.attempt_id, job['attempt_id'])
             contexts.append(context)
         self.assertEqual(len({context.key for context in contexts}), 3)

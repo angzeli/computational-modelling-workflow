@@ -34,6 +34,7 @@ def _orca(context):
 _REGISTRY = {'VASP': Registration(_vasp, (
     SourcePlan('outcar', 'OUTCAR'), SourcePlan('oszicar', 'OSZICAR', alternatives=('stdout',)),
     SourcePlan('poscar', 'POSCAR', 'inputs', True),
+    SourcePlan('incar', 'INCAR', 'inputs', True),
 ), (SourcePlan('stdout', None, optional=True),)), 'ORCA': Registration(_orca, (
     SourcePlan('orca_output', None, 'orca-output', stages=True),
 ))}

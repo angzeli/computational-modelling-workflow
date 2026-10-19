@@ -432,6 +432,22 @@ engines and ORCA stages retain Files navigation and raw logs. See the
 [live-progress and adapter contract](cmw-jobs-progress.md) for reconciliation,
 source validation, metric meanings, incremental-read limits and extension examples.
 
+## Scientific dashboard and handoff text
+
+The selected-job scientific card keeps adapter-defined metric groups aligned and
+labels the latest complete electronic row separately from a newer native iteration
+header. VASP actively compares eligible declared OSZICAR/stdout/OUTCAR prefixes;
+source-only values and the checked frontier remain distinct. **S Sources** exposes
+stdout as its own alternative and never searches for a nearby file.
+
+**Y Copy** opens a frozen selected-attempt Summary, Diagnostics or JSON preview.
+Ctrl+C with selected text consumes the copy event even if the clipboard fails;
+without selection the existing screen-specific behavior remains. Details, History
+and Logs also offer selectable frozen text. See the [progress and copy contract](cmw-jobs-progress.md)
+for verification scope, target precedence, CLI `--snapshot`, path redaction and
+clipboard limitations. These observations never establish scientific acceptance
+or change execution state.
+
 ## Managed job notes
 
 A managed job may carry one optional plain-text `note`, stored only in the existing

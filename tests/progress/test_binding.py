@@ -34,7 +34,7 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(context.binding_status, 'BOUND')
         self.assertEqual({s.role: s.path for s in context.sources},
                          {'outcar': str(self.output/'OUTCAR'), 'oszicar': str(self.output/'OSZICAR'),
-                          'poscar': str(self.inputs/'POSCAR')})
+                          'poscar': str(self.inputs/'POSCAR'), 'incar': str(self.inputs/'INCAR')})
         self.assertFalse(context.process_ownership)
         self.assertEqual(self.store.path.read_bytes(), before)
 

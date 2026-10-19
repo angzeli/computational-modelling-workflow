@@ -8,6 +8,8 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Label, Static
 
+from .copy_ui import FrozenText, SelectableStatic
+
 from cmw.progress.formatting import (context_text, history_cell, history_columns,
                                      history_entry_text)
 
@@ -19,7 +21,7 @@ def literal(value):
 
 
 class HistoryDetails(ModalScreen):
-    BINDINGS = [('escape', 'dismiss(None)', 'Back'), ('q', 'dismiss(None)', 'Back'),
+    BINDINGS = [('y', 'select_text', 'Select frozen text'), ('escape', 'dismiss(None)', 'Back'), ('q', 'dismiss(None)', 'Back'),
                 Binding('ctrl+c', 'detach', 'Detach', priority=True)]
     DEFAULT_CSS = '''
     HistoryDetails { align: center middle; background: $background 70%; }
@@ -37,8 +39,8 @@ class HistoryDetails(ModalScreen):
         with Vertical():
             yield Label('PROGRESS ENTRY · metrics / criteria / timing / sources')
             with VerticalScroll(id='history-detail-scroll'):
-                yield Static(id='history-detail', markup=False)
-            yield Label('Esc / Q: history · PgUp / PgDn: scroll · Ctrl-C: detach')
+                yield SelectableStatic(id='history-detail', markup=False)
+            yield Label('Esc / Q: history · Y: frozen selectable text · Ctrl-C: detach')
 
     def action_detach(self):
         self.app.exit()
@@ -47,7 +49,12 @@ class HistoryDetails(ModalScreen):
         self.refresh_content()
         self.set_interval(.5, self.refresh_content)
 
+    def action_select_text(self):
+        self.app.push_screen(FrozenText(str(self.query_one('#history-detail', Static).render())))
+
     def refresh_content(self):
+        if getattr(self.query_one('#history-detail', Static), '_copy_selected', False):
+            return
         entry = self.history.entries.get(self.entry_id)
         if entry is not None:
             self.entry = entry

@@ -358,6 +358,9 @@ def register(subcommands):
     progress.add_argument("--source", action="append", default=[], metavar="ROLE[@STAGE]=ABSOLUTE_PATH",
                           help="explicit client-local source, optionally stage-qualified; repeat in stage order")
     progress.add_argument("--history", action="store_true", help="read a bounded native history page")
+    progress.add_argument("--snapshot", choices=("summary", "diagnostics", "json"),
+                          help="capture an untruncated read-only handoff; --json selects JSON")
+    progress.add_argument("--redact-paths", action="store_true", help="redact paths in a handoff snapshot")
     progress.add_argument("--limit", type=int, default=50, help="history entries per page (1–200)")
     progress.add_argument("--cursor", help="opaque history page cursor")
     progress.add_argument("--parent", help="history entry ID whose immediate children to show; * shows all levels")
@@ -474,9 +477,14 @@ def inspect_progress(store, args):
     from .progress import resolve_context
     from .source_declarations import parse_sources
 
-    job, _ = _read_job(store, args.job_id)
+    job, state_identity = _read_job(store, args.job_id)
     sources = parse_sources(args.source, args.engine or job['engine'])
-    context = resolve_context(store, args.job_id, sources=tuple(sources), engine=args.engine)
+    context = resolve_context(store, args.job_id, expected_attempt_id=job['attempt_id'],
+                              sources=tuple(sources), engine=args.engine)
+    if args.snapshot and args.history:
+        raise JobsError('Snapshot and history are separate read-only views')
+    if args.redact_paths and not args.snapshot:
+        raise JobsError('--redact-paths requires --snapshot')
     if args.history:
         if not 1 <= args.limit <= 200 or not 1 <= args.history_polls <= 4096:
             raise JobsError("History --limit must be 1–200 and --history-polls must be 1–4096")
@@ -496,8 +504,21 @@ def inspect_progress(store, args):
             snapshot = observer.poll(context)
     finally:
         observer.close()
-    print(json.dumps(snapshot.to_dict(), indent=2, ensure_ascii=True, allow_nan=False)
-          if args.json else safe_text(history_text(snapshot) if args.history else progress_text(snapshot, detailed=True)))
+    if args.snapshot:
+        from .lifecycle import observe_execution
+        from .snapshot import capture_snapshot, render_snapshot
+        current, current_identity = _read_job(store, args.job_id)
+        if current_identity != state_identity:
+            raise JobsError('Jobs state identity changed while capturing snapshot; select it again')
+        if current['attempt_id'] != job['attempt_id']:
+            raise JobsError('Attempt identity changed while capturing snapshot; select it again')
+        execution = observe_execution(store, current).to_dict()
+        capture = capture_snapshot(current, progress=snapshot, execution=execution)
+        print(render_snapshot(capture, mode='json' if args.json else args.snapshot,
+                              redact_paths=args.redact_paths))
+    else:
+        print(json.dumps(snapshot.to_dict(), indent=2, ensure_ascii=True, allow_nan=False)
+              if args.json else safe_text(history_text(snapshot) if args.history else progress_text(snapshot, detailed=True)))
     return 0
 
 

@@ -157,7 +157,8 @@ class VaspProgressTests(unittest.TestCase):
         (self.root / 'OSZICAR').write_text(texts['OSZICAR'])
         pending = self.poll()
         self.assertNotEqual(pending.status, 'SOURCE_CONFLICT')
-        self.assertFalse(pending.metrics)
+        self.assertEqual(self.metric(pending, 'vasp.electronic.dE').latest.qualification, 'source-local')
+        self.assertIsNone(pending.verification[0].checked_frontier)
         self.append('OUTCAR', texts['OUTCAR'][cut:])
         completed = self.poll()
         self.assertEqual(completed.completeness, 'COMPLETE_EVALUATION')
@@ -181,7 +182,8 @@ class VaspProgressTests(unittest.TestCase):
         (self.root / 'OSZICAR').write_text(texts['OSZICAR'].replace('-2.100000050000', '-9.100000050000'))
         snapshot = self.poll()
         self.assertEqual(snapshot.status, 'SOURCE_CONFLICT')
-        self.assertFalse(any('electronic.' in item.latest.semantic_id for item in snapshot.metrics))
+        self.assertEqual(self.metric(snapshot, 'vasp.electronic.dE').latest.qualification, 'conflict')
+        self.assertIsNone(self.metric(snapshot, 'vasp.electronic.dE').latest.criterion)
 
     def test_new_evaluation_has_no_previous_residual_or_current_force(self):
         snapshot = self.write(relaxation=True, footer=False)
@@ -228,7 +230,9 @@ class VaspProgressTests(unittest.TestCase):
                     path.write_text(text)
                 snapshot = self.poll()
                 self.assertEqual(snapshot.status, 'SOURCE_UNRESOLVED')
-                self.assertFalse(any('electronic.' in item.latest.semantic_id for item in snapshot.metrics))
+                self.assertEqual(snapshot.verification[0].status, 'UNRESOLVED')
+                self.assertIsNone(snapshot.verification[0].checked_frontier)
+                self.assertEqual(len(self.metric(snapshot, 'vasp.electronic.dE').latest.context), 1)
 
     def test_unsupported_modes_remain_diagnostic(self):
         for settings in ({'NSW': '20', 'IBRION': '0'}, {'ISIF': '3'}, {'LHFCALC': 'T'},
@@ -251,7 +255,8 @@ class VaspProgressTests(unittest.TestCase):
         self.context = replace(self.context, sources=(*self.context.sources, SourceDescriptor('oszicar', str(self.root / 'OSZICAR'))))
         snapshot = self.poll()
         self.assertEqual(self.metric(snapshot, 'vasp.electronic.dE').latest.evidence[0].source_role, 'oszicar')
-        self.assertTrue(any('exclusively selected' in value for value in snapshot.limitations))
+        self.assertEqual(snapshot.verification[1].status, 'MATCHED')
+        self.assertEqual(snapshot.verification[1].counterpart_role, 'stdout')
 
     def test_arbitrary_byte_chunking_matches_complete_snapshot(self):
         texts = native_texts()
@@ -296,10 +301,10 @@ class VaspProgressTests(unittest.TestCase):
         self.write(relaxation=True, footer=False)
         self.append('OSZICAR', 'DAV: 1 -2.000000000000 -2.00000000E+00 -0.02000000E+00 12 0.00100000\n')
         snapshot = self.poll()
-        self.assertEqual(snapshot.iteration[0].index, 2)
+        self.assertEqual(tuple(level.kind for level in snapshot.iteration), ('electronic',))
         self.assertEqual(snapshot.completeness, 'PARTIAL')
         self.assertEqual(self.force(snapshot).latest.context[0].index, 1)
-        self.assertFalse(any('electronic.' in item.latest.semantic_id for item in snapshot.metrics))
+        self.assertEqual(self.metric(snapshot, 'vasp.electronic.dE').latest.qualification, 'source-local')
         self.assertTrue(any('Evaluation 2 force not yet available' in message for message in snapshot.messages))
 
     def test_changed_constraints_remove_previous_force_comparison(self):

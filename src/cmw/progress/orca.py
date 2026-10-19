@@ -16,7 +16,7 @@ from cmw.molecular.orca.status import (
     INPUT_ECHO_END_RE, _number, _keyword_payload,
 )
 from .models import (
-    Criterion, HistoryColumn, HistoryEntry, IterationLevel, Metric, MetricSeries,
+    CardCell, CardGroup, Criterion, HistoryColumn, HistoryEntry, IterationLevel, Metric, MetricSeries,
     ProgressEvent, ProgressSnapshot, Timing, comparable,
 )
 
@@ -555,6 +555,24 @@ class OrcaAdapter:
             HistoryColumn('soscf', 'ORB GRAD', 'orca.scf.max_orbital_gradient', kinds=('scf',)),
             HistoryColumn('duration', 'TIMING', kind='timing'))
 
+    def _card_groups(self):
+        labels = (('geometry', 'G'), ('evaluation', 'E'), ('scf', 'SCF'))
+        geometry = {'context_kinds': ('geometry', 'evaluation'), 'context_labels': labels}
+        scf = {'context_kinds': ('scf',), 'context_labels': labels}
+        gradient = ('orca.geometry.max_gradient_component',)
+        step = ('orca.geometry.max_step',)
+        diagnostic = ('orca.scf.max_orbital_gradient',) if self.algorithm == 'SOSCF' else ('orca.scf.diis_error',)
+        return (
+            CardGroup('SCF', ((CardCell(kind='context', context_kinds=('geometry', 'evaluation')),
+                               CardCell(kind='context', context_kinds=('scf',), text='SCF unavailable')),)),
+            CardGroup('GRADIENT', ((CardCell(gradient, 'Max comp', text='— (not observed)', **geometry),
+                                    CardCell(gradient, kind='target')),)),
+            CardGroup('DISPLACE', ((CardCell(step, 'Max step', text='— (not observed)', **geometry),
+                                    CardCell(step, kind='target')),)),
+            CardGroup('ELECTRONIC', ((CardCell(('orca.scf.energy_change',), '|dE|', **scf),
+                                      CardCell(diagnostic, 'Orb grad' if self.algorithm == 'SOSCF' else 'DIIS', **scf)),)),
+        )
+
     def update(self, updates, now):
         for update in updates:
             role = update.source.role
@@ -640,4 +658,4 @@ class OrcaAdapter:
             calculation=self.stage, segment=max(1, self.segment), iteration=iteration,
             metrics=metrics, events=tuple(self.events), completeness='PARTIAL',
             last_new_evidence_at=self.last_new, messages=tuple(messages), limitations=limitations,
-            history_columns=self._columns(), completed_durations=tuple(t for t in reversed(self.completed) if t.value is not None))
+            card_groups=self._card_groups(), history_columns=self._columns(), completed_durations=tuple(t for t in reversed(self.completed) if t.value is not None))

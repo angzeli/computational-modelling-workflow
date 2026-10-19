@@ -323,8 +323,12 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
         limit = max_lines or (3 if width < 54 else 6 if compact else 11)
         if unresolved and not snapshot.metrics:
             return _unresolved_card(snapshot, width=width, max_lines=limit)
-        card = _card_text(snapshot, compact=compact, width=width, now=now, max_lines=limit)
-        if unresolved:
+        if snapshot.card_groups:
+            from .card import card_text
+            card = card_text(snapshot, width=width, now=now, max_lines=limit)
+        else:
+            card = _card_text(snapshot, compact=compact, width=width, now=now, max_lines=limit)
+        if unresolved and not snapshot.card_groups:
             lines = card.splitlines()
             lines[0] = fit_text('Cached scientific: ' + snapshot.status, width)
             card = '\n'.join(lines)
@@ -359,6 +363,15 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
                       f'Binding: {context.binding_id}; generation: {context.binding_generation}; attempt: {context.attempt_id or "not a Jobs attempt"}',
                       f'Last successful observation: {age_text(snapshot.last_success_at, now)}; last file growth: {age_text(snapshot.last_file_growth_at, now)}',
                       'Observation only; process ownership: false; scientific validation: not assessed.'))
+        for setting in snapshot.settings:
+            lines.append(f'Setting {setting.name}: {setting.value}; {setting.qualification}; origin: {setting.origin}; '
+                         f'compared input: {setting.compared_value}; discrepancy: {setting.discrepancy}')
+        for check in snapshot.verification:
+            lines.append(f'Verification {check.domain}: {check.status}; {check.source_role} generation {check.source_generation} '
+                         f'vs {check.counterpart_role} generation {check.counterpart_generation}; '
+                         f'observed {check.observed_frontier}; checked {check.checked_frontier}; native {check.native_frontier}; '
+                         f'context: {context_text(check.context)}; fields: {", ".join(check.fields)}; '
+                         f'comparison: {check.precision_policy}; {check.reason}')
         for declaration in context.declarations:
             lines.append(f'Declaration {declaration.role}: {declaration.path}; stage: {declaration.stage or "unknown"}; '
                          f'origin: {", ".join(declaration.origins)}; {declaration.qualification}')

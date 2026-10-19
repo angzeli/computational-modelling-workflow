@@ -78,6 +78,7 @@ def reconcile_sources(sources, plans):
     sources = _staged(sources)
     selected, conflicts, warnings = [], [], []
     groups = {}
+    alternative_roles = {role for plan in plans if not plan.optional for role in plan.alternatives}
     for source in sources:
         groups.setdefault((source_role(source), source.stage), []).append(source)
     for (role, stage), declarations in groups.items():
@@ -86,7 +87,7 @@ def reconcile_sources(sources, plans):
         if len(paths) > 1:
             message = f'{role}' + (f'@{stage}' if stage else '') + ': conflicting declarations: ' + '; '.join(
                 f'{",".join(item.origins) or item.qualification} → {item.path}' for item in declarations)
-            (warnings if plan and plan.optional else conflicts).append(message)
+            (warnings if plan and plan.optional and role not in alternative_roles else conflicts).append(message)
             continue
         first = declarations[0]
         origins = tuple(dict.fromkeys(origin for item in declarations for origin in item.origins))
@@ -101,7 +102,7 @@ def reconcile_sources(sources, plans):
                      and len({item.path for item in role_sources}) == len(role_sources))
             if not valid:
                 message = f'{plan.role}: incompatible or ambiguous stage declarations'
-                (warnings if plan.optional else conflicts).append(message)
+                (warnings if plan.optional and plan.role not in alternative_roles else conflicts).append(message)
                 selected = [item for item in selected if item not in role_sources]
     for path in {item.path for item in selected}:
         aliases = [item for item in selected if item.path == path]
@@ -164,7 +165,8 @@ def resolve_context(store, job_id, *, expected_attempt_id=None, descriptors=(), 
                 and plan.filename is None and any(source_role(item) == plan.role for item in automatic)):
             invalid_automatic = True
 
-    selected, conflicts, warnings = reconcile_sources(declarations, plans)
+    role_plans = (*plans, *registration.source_roles) if registration else ()
+    selected, conflicts, warnings = reconcile_sources(declarations, role_plans)
     limitations = list(issues) + list(warnings) + list(conflicts)
     missing = [plan.role for plan in plans if not plan.optional and not any(
         source_role(item) in (plan.role, *plan.alternatives) for item in selected)]
@@ -191,7 +193,7 @@ def resolve_context(store, job_id, *, expected_attempt_id=None, descriptors=(), 
             elif source.stage is None and len(matching) > 1:
                 stage_errors.append(f'{source.role}: file belongs to several declared stages; provide an explicit source stage.')
         selected = tuple(_source_identity(replace(item, origins=('invocation-local',))) for item in explicit)
-        _, differing, _ = reconcile_sources((*declarations, *selected), plans)
+        _, differing, _ = reconcile_sources((*declarations, *selected), role_plans)
         conflicts = tuple(dict.fromkeys((*conflicts, *differing)))
         binding_status = 'SOURCE_UNRESOLVED' if stage_errors else 'BOUND'
         limitations = list(stage_errors) + list(conflicts) + ['Invocation-local source override; historical execution binding is unverified.']

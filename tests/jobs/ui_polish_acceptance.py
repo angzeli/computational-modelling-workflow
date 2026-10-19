@@ -163,7 +163,7 @@ def layout_record(app, scenario, size, selected, svg):
     check(table.scroll_y <= table.cursor_row < table.scroll_y + table.size.height - table.header_height,
           'Selected managed row is outside the table viewport')
     check('FILES' in text and 'NAME' in text and 'STATUS' in text, 'Primary table headers not rendered')
-    check('Evidence' in text or 'evidence' in text, 'Evidence freshness not visible')
+    check('data ' in text or 'Evidence' in text or 'evidence' in text, 'Scientific data age not visible')
     check('native' in card if scenario != 'orca_active' else 'Eh' in card, 'Native unit/timing qualification missing')
     check('8.675e+03s' not in card and '8675s' not in card,
           'Duration retains unnecessary scientific/raw seconds form')
@@ -178,7 +178,7 @@ def layout_record(app, scenario, size, selected, svg):
         force = next(series.latest for series in app.progress_snapshot.metrics if series.latest.semantic_id.endswith('.free'))
         check(force.context[0].index == 26, 'Native force lost evaluation 26 identity')
         check(app.progress_snapshot.iteration[0].index == 27, 'Active evaluation is not 27')
-        check('@26' in text or '#26' in text, 'Last completed force context is not visible')
+        check('@E26' in text or '@26' in text or '#26' in text, 'Last completed force context is not visible')
         check('provisional' in text.lower(), 'Provisional criterion qualification hidden')
         check('pending' in card.lower() and 'pending' in text.lower(),
               'Current electronic metrics are missing without a visible pending qualification')

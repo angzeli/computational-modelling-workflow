@@ -12,6 +12,7 @@ from textual.widgets import Button, Checkbox, Input, Static
 from cmw.progress.models import SourceDescriptor
 from cmw.progress.registry import get_registration
 from .cli import safe_text
+from .copy_ui import SelectableStatic
 
 
 def literal(value):
@@ -54,7 +55,7 @@ class Sources(ModalScreen):
         with Vertical():
             yield Static('SCIENTIFIC SOURCES · ' + self.display_id, id='sources-title', markup=False)
             with VerticalScroll(id='sources-scroll'):
-                yield Static('Inspecting recorded declarations…', id='sources-inspection', markup=False)
+                yield SelectableStatic('Inspecting recorded declarations…', id='sources-inspection', markup=False)
                 yield Vertical(id='sources-fields')
                 yield Checkbox('I reviewed the conflict / override and choose these sources.', id='sources-confirm')
             yield Static('', id='sources-validation', markup=False)
@@ -185,7 +186,10 @@ class Sources(ModalScreen):
         for index, plan in enumerate(self.plans):
             matches = [source for source in current if source.role.split(':', 1)[0] == plan.role]
             source = matches[0] if len(matches) == 1 else None
-            label = plan.role + (' (optional)' if plan.optional else '')
+            alternatives = (' (or ' + ', '.join(plan.alternatives) + ')') if plan.alternatives else ''
+            alternative_for = [item.role for item in self.plans if plan.role in item.alternatives]
+            purpose = ' (alternative to ' + ', '.join(alternative_for) + ')' if alternative_for else ''
+            label = plan.role + alternatives + purpose + (' (optional)' if plan.optional and not alternative_for else '')
             widgets.extend((Static(label, markup=False),
                             Input(value=source.path if source else '', placeholder='/absolute/file/path',
                                   id=f'source-path-{index}')))

@@ -293,6 +293,16 @@ class ObservationService:
                 page = cached.page(context, cache.revision, cache.columns, retained=cache.retained(),
                                    status=snapshot.read_health, **cursor_args)
                 return replace(page, messages=tuple(dict.fromkeys((*page.messages, *snapshot.messages))))
+            if snapshot.read_health == 'PARTIAL' and cache.recent and not cache.trimmed:
+                # Independently usable declared sources may already supply history
+                # while a counterpart is absent. Preserve that data and its error.
+                window = Window(query)
+                window.ingest(sorted(cache.recent.values(), key=lambda item: item.sequence))
+                window.complete = True
+                window.messages = snapshot.messages
+                cache.add(window)
+                return window.page(context, cache.revision, cache.columns, retained=cache.retained(),
+                                   status=snapshot.read_health, **cursor_args)
             return self._history_empty(context, snapshot.read_health,
                                        '; '.join(snapshot.messages) or 'History sources are unavailable', cache.revision)
         if cached is not None:

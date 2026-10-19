@@ -27,22 +27,21 @@ Files navigation remains available independently.
 
 The main console observes only the selected managed job, approximately every four
 seconds after catch-up. It never changes selection to follow another active job.
-The card uses adapter-defined priorities within the active context, followed by
-recent historical evidence. For example, current SCF observations take precedence
-while the latest complete force remains labelled with its own evaluation. A new
-context with no matching observations says that current metrics are pending; it
-does not promote the preceding cycle's residuals. A completed geometry context
-again uses its adapter's geometry priorities. No engine-specific metric names or
-threshold rules are built into the widget.
+The scientific card uses adapter-defined groups and fixed label/value columns.
+VASP shows **SCF**, **FORCE**, and **ELECTRONIC**, with the electronic group on two
+physical lines at compact widths. ORCA supplies its own gradient/displacement and
+SCF descriptors. The generic renderer does not infer engine semantics. The current
+native context remains separate from the latest complete row: SCF 9 may be active
+while the complete electronic values are labelled `@SCF8`. Latest force always
+retains its evaluation, and a static calculation has no ionic force stopping target.
 
-Wide cards show a small **LATEST / PREVIOUS / TARGET / DELTA** table. Compact cards
-use `L:`, `P:` and `T:` labels and retain evaluation/iteration references after
-`@`. The bounded card reserves room for the job table and safety warnings; Details
-and History retain omitted metrics. `*` means provisional evidence or a provisional
-target as labelled in the card, `?` means a precision-uncertain target relation,
-and other qualifications remain explicit. These are evidence qualifications, not
-scientific outcome badges. SOURCE_CONFLICT and UNSUPPORTED remain visible even
-when cached numerical observations are available.
+The card preserves units, source qualification, checked frontier and scientific-data
+age. Details/History retain previous values, trends, timing, rms(c), source positions
+and full warnings. Missing current rms(c) is absent; an older value cannot fill it.
+`*` identifies provisional evidence/targets and `?` a precision-uncertain relation;
+neither is a scientific outcome badge. Source conflicts, unsupported evidence and
+cached-read errors remain visible. Direct selection freezes only the selected
+text revision; observation and execution continue.
 
 Arrows and signed deltas describe only latest/previous pairs accepted by the
 existing comparison contract. An equal pair shows `= 0`; a change within the
@@ -75,7 +74,7 @@ sources are omitted with a warning. Different ORCA stages remain separate. A
 single VASP stage retains native source roles; multiple VASP stages are refused.
 
 For VASP the default plan observes `OUTCAR` and `OSZICAR` under the declared
-output, plus optional `POSCAR` under separately declared inputs. These are literal
+output, plus optional `POSCAR` and `INCAR` under separately declared inputs. These are literal
 registered filenames. ORCA uses exact declared native output files and supported
 stage metadata, never Jobs stdout or a workflow root without exact stage files.
 See [ORCA scope and association](molecular/orca-live-progress.md).
@@ -98,8 +97,9 @@ shows `[S] Configure Sources` or `[S] Review Sources` when needed.
 
 Fields come from the registered adapter source plans. A caller-selected VASP
 output directory can **Propose Exact Paths** for `OUTCAR` and `OSZICAR`. Review
-those paths before use; optional `POSCAR` needs its own declared input path and
-is never invented from that output directory. ORCA uses its native output field
+those paths before use; optional `POSCAR` and `INCAR` need their own declared input paths and
+are never invented from that output directory. The separate `stdout` field is a
+genuine electronic-source alternative; do not put stdout in the OSZICAR field. ORCA uses its native output field
 and stage where applicable. Paths are literal, including spaces and Unicode;
 no shell expansion, wrapper execution or directory search occurs.
 
@@ -170,8 +170,9 @@ The existing `progress --source` syntax still selects sources for one call only;
 supply all desired roles. It does not change an open portal or the Jobs database.
 The explicit choice retains any conflict with recorded declarations. A partial
 single-stream invocation remains supported. VASP stdout uses its supported
-electronic-table dialect; when both OSZICAR and stdout are supplied, OSZICAR has
-priority and streams are not counted twice. `--engine` selects an invocation-local
+electronic-table dialect; when both OSZICAR and stdout are supplied, both are read incrementally and
+compared. An empty OSZICAR cannot suppress usable declared stdout; logical rows
+are not counted twice. `--engine` selects an invocation-local
 adapter for an otherwise unsupported label, not proof of a native dialect;
 persisted sources cannot be reinterpreted as a different engine.
 
@@ -268,6 +269,92 @@ conditionally qualified force threshold where whole-atom flags are available.
 Native convergence at NELM is evidence, not a budget-based failure rule. Fatal,
 interruption and native-convergence observations do not control execution.
 
+## Active electronic verification
+
+Only exact declared attempt/stage sources are eligible. CMW never searches nearby
+files or treats an arbitrary operational stdout as a unique native run. OSZICAR and
+stdout retain independent bounded parsed evidence. Stable selection follows the
+most advanced supported frontier, retaining the current source on a tie; usable
+OSZICAR remains the normal initial choice. Source changes are recorded. Missing,
+empty, inaccessible, malformed and contradictory evidence are distinct states.
+
+Each relevant append triggers correspondence checks against retained unmatched
+records, including complete SCF prefixes before a final energy summary or force
+block exists. OUTCAR row correspondence checks ordered iteration labels, supported
+algorithm evidence and energy at printed resolution, within the declared binding,
+source generations and native segment/evaluation association. It does **not** prove
+that OUTCAR independently printed stdout's dE, d eps, rms or rms(c). Duplicate
+OSZICAR/stdout rows can additionally compare equivalent signed electronic fields.
+Ionic-summary d E, band d eps and generic energy estimates are not interchangeable.
+Details/JSON identify comparison fields, precision policy and source evidence.
+
+For example, stdout through SCF 8 with OUTCAR through 6 shows the latest complete
+row as source-only and the checked frontier as 6. Rows 7–8 are rechecked when OUTCAR
+advances, without a key press, new reader or observer restart. Their existing
+history identities are promoted rather than duplicated. An empty or unbound
+counterpart retains its exact limitation. Complete contradictions remain visible
+until the relevant generation/binding boundary changes; a later agreeing row
+cannot silently remove them. Independent generation changes invalidate affected
+associations. Matching energy alone never proves historical provenance or attempt
+ownership. Unsupported/ambiguous associations remain qualified observations.
+
+With no native OUTCAR context, complete source-local rows can have navigable
+History entries and be promoted when native evidence arrives. If OUTCAR already
+has an earlier evaluation and a stream begins an entirely unassociated later
+evaluation, its latest values remain in the card, Details and Copy; navigable
+History waits for that native context. Retention stays bounded, and no guessed
+outer-evaluation identity is assigned.
+
+Effective current-segment OUTCAR settings take precedence. A separately declared
+current INCAR supplies provisional input evidence only; differences from effective
+settings remain explicit. No historical launch-input linkage or default threshold
+is invented. EDIFF applies to supported |dE| and |d eps|, never rms or rms(c).
+EDIFF=0 is not ordinary threshold convergence. Negative EDIFFG is a conditional
+force criterion only within the supported relaxation/constraint contract;
+positive EDIFFG is ionic-energy based, and static force targets are N/A. Whole-atom
+all/free/fixed scopes remain distinct; partial-direction flags are not Cartesian
+force masks.
+
+## Frozen handoff snapshots and copying
+
+**Y Copy** captures the selected immutable job/attempt in a read-only preview.
+Summary is the default; Diagnostics and JSON expose the same captured evidence at
+more detail. The payload stays fixed while new observation arrives. **Refresh**
+explicitly recaptures the same attempt from the client cache; it cannot retarget
+another job or reparse scientific files. Names and paths are not dashboard-truncated.
+
+```sh
+cmw jobs progress J1.1 --snapshot summary
+cmw jobs progress J1.1 --snapshot diagnostics --redact-paths
+cmw jobs progress J1.1 --snapshot json
+# The same explicit --source ROLE[@STAGE]=ABSOLUTE_PATH options also apply.
+```
+
+These CLI commands perform one ordinary bounded observation, then serialize it;
+History remains a separate view. Core observation and snapshot serialization need
+neither Textual nor Rich. Captures include per-component timestamps, execution
+scope, source verification, settings origin, data age and scientific acceptance
+**not assessed**. A captured client snapshot is not an atomic filesystem/kernel
+snapshot. Default exports exclude argv, environment variables, coordinates and raw
+log tails. Diagnostics can contain sensitive paths: review the preview and use
+path redaction before sharing. No export file is created automatically.
+
+Scientific summaries and diagnostic text support selection. When reliable native
+selection is unavailable, Details/History/Logs provide a frozen read-only text
+view. Ctrl+C with a real selection copies and consumes the event, including on
+clipboard failure; without a selection the existing screen-specific back/detach
+behavior remains. Q and process-control letters stay literal in text editors.
+Operational shortcuts are disabled while native summary text is selected;
+Y Copy and main-screen Q Detach remain available.
+Dragging over the Files cell is not an open-folder click.
+
+The bounded clipboard backend reports local-backend acceptance, an OSC52 request,
+or unavailable/failed status separately. A verified direct local macOS desktop can
+use `/usr/bin/pbcopy` with stdin; remote contexts cannot silently use host pbcopy.
+OSC52 delivery depends on terminal support and is only reported as requested.
+The selectable preview remains available if copying fails. Automated checks use
+stub backends; native clipboard contents are never read or overwritten by tests.
+
 ## Bounded reading, lifecycle and freshness
 
 Each regular-file reader keeps its descriptor, byte offset and partial line. One
@@ -275,7 +362,8 @@ poll reads at most 64 KiB of new data plus bounded prefix/tail sentinels (at mos
 256 bytes). Unchanged caught-up polls perform no data reads. Complete newline
 records handle arbitrary byte chunks and split UTF-8; incomplete trailing lines
 or force/energy blocks remain pending. Oversized/malformed lines have explicit
-health diagnostics and bounded storage. Nonregular files are refused.
+health diagnostics and bounded storage (16 KiB maximum source line). Nonregular
+files are refused. Each binding has at most eight declared sources.
 
 Replacement, truncation and detected in-place rewrites advance file generation.
 New native run banners advance segments. Asymmetric cross-file resets remain

@@ -79,7 +79,9 @@ def inspect_selection(store, job_id, *, expected_attempt_id=None, session_select
     if identity != _identity(store, after, after_identity, context.engine):
         raise JobsError('Jobs attempt changed while inspecting sources')
     registration = get_registration(context.engine)
-    return SourceInspection(identity, context, registration.sources if registration else (), context.declarations)
+    plans = () if registration is None else tuple(
+        {plan.role: plan for plan in (*registration.sources, *registration.source_roles)}.values())
+    return SourceInspection(identity, context, plans, context.declarations)
 
 
 def _fingerprints(sources, *, expected_creation=False):

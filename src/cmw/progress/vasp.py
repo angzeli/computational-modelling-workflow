@@ -7,7 +7,7 @@ no Jobs store, process, launcher or finalization interface.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 import math
 import re
 from types import SimpleNamespace
@@ -19,7 +19,7 @@ from cmw.periodic.vasp.results import (
     parse_ionic_summary,
 )
 from .models import (Criterion, IterationLevel, Metric, MetricSeries,
-                     ProgressEvent, ProgressSnapshot, HistoryEntry, HistoryColumn, Timing, comparable)
+                     ProgressEvent, ProgressSnapshot, HistoryEntry, HistoryColumn, Timing, Verification, SettingObservation, comparable)
 
 MAX_EVALUATIONS = 16
 MAX_ITERATIONS = 1024
@@ -44,8 +44,22 @@ def _span(first, last):
 def _relation(parsed, criterion):
     if criterion is None:
         return None
-    return {'PASS': 'BELOW', 'FAIL': 'AT_OR_ABOVE', 'UNKNOWN': 'UNCERTAIN',
-            'NOT_APPLICABLE': 'NOT_APPLICABLE'}[below_printed(parsed, criterion.value)]
+    relation = {'PASS': 'BELOW', 'FAIL': 'AT_OR_ABOVE', 'UNKNOWN': 'UNCERTAIN',
+                'NOT_APPLICABLE': 'NOT_APPLICABLE'}[below_printed(parsed, criterion.value)]
+    return 'PROVISIONAL_' + relation if criterion.kind == 'provisional-engine-stopping' else relation
+
+
+@dataclass
+class _ElectronicStream:
+    """One declared file's bounded native sequence; never shared parser state."""
+
+    evaluations: deque = field(default_factory=deque)
+    segment: int = 1
+    banner_seen: bool = False
+    next_index: int = 1
+    current: dict | None = None
+    last_native: int | None = None
+    serial: int = 0
 
 
 class VaspAdapter:
@@ -62,13 +76,7 @@ class VaspAdapter:
         self.generations = {}
         self.asymmetric_reset = False
         self.out_segment = 0
-        self.osz_segment = 1
-        self.osz_banner_seen = False
         self.out = None
-        self.osz = deque()
-        self.osz_next = 1
-        self.osz_current = None
-        self.osz_last_native = None
         self.flags = None
         self.flags_key = None
         self.poscar_text = ''
@@ -79,16 +87,22 @@ class VaspAdapter:
         self.events = deque(maxlen=64)
         self.last_new = None
         self.issues = deque(maxlen=32)
-        self.electronic_role = self._electronic_role()
+        self.streams = {role: _ElectronicStream() for role in ('oszicar', 'stdout')
+                        if any(source.role.lower() == role for source in context.sources)}
+        self.electronic_role = next(iter(self.streams), None)
+        self.selection_observed = False
+        self.stream_conflicts = deque(maxlen=32)
+        self.incar = {}
+        self.incar_issues = []
         self.pending_lines = {}
         self.history_updates = {}
         self.history_sequence = 0
         self.history_dirty = set()
+        self.pending_electronic_history = {}
+        self.local_history = {}
         self.segment_dirty = False
-        self.out_serial = self.osz_serial = 0
+        self.out_serial = 0
         self.observation = (None, True, None)
-        self.duplicate_streams = sum(s.role.lower() in {'oszicar', 'stdout'}
-                                     for s in context.sources) > 1
 
     def set_observation(self, monotonic_now, *, historical, clock_id):
         self.observation = (monotonic_now, historical, clock_id)
@@ -119,9 +133,52 @@ class VaspAdapter:
         record['observer_end'] = None
         record['observer_clock'] = None
 
-    def _electronic_role(self):
-        roles = {s.role.lower() for s in self.context.sources}
-        return 'oszicar' if 'oszicar' in roles else 'stdout' if 'stdout' in roles else None
+    @property
+    def osz(self):
+        stream = self.streams.get(self.electronic_role)
+        return stream.evaluations if stream else ()
+
+    @property
+    def osz_current(self):
+        stream = self.streams.get(self.electronic_role)
+        return stream.current if stream else None
+
+    @property
+    def osz_segment(self):
+        stream = self.streams.get(self.electronic_role)
+        return stream.segment if stream else 1
+
+    def _select_electronic(self):
+        candidates = []
+        for role, stream in self.streams.items():
+            usable = [item for item in stream.evaluations if self._usable_rows(item)]
+            if usable:
+                item = usable[-1]
+                candidates.append(((item['segment'], item['index'], len(self._usable_rows(item))), role))
+        if not candidates:
+            return
+        frontier = max(value for value, _ in candidates)
+        tied = [role for value, role in candidates if value == frontier]
+        selected = self.electronic_role if self.selection_observed and self.electronic_role in tied else tied[0]
+        if selected != self.electronic_role or not self.selection_observed:
+            self.electronic_role = selected
+            item = next(item for item in reversed(self.streams[selected].evaluations) if self._usable_rows(item))
+            row = self._usable_rows(item)[-1]
+            self._event('display-source', row['line'], 'Electronic display source selected: ' + selected)
+        self.selection_observed = True
+
+    @staticmethod
+    def _usable_rows(item):
+        # Keep complete source-local values even if an unavailable counterpart lags.
+        # A malformed or discontinuous row never becomes a fabricated prefix.
+        result = []
+        for row in item['rows']:
+            if (row.get('malformed') or row['label'] != len(result) + 1
+                    or row['algorithm'] not in {'DAV', 'RMM'}
+                    or any(row.get(key, {}).get('value') is None for key in ('energy', 'dE', 'd_eps', 'rms'))):
+                break
+            result.append(row)
+        return result
 
     def _event(self, kind, line, message, context=()):
         ref = line.evidence
@@ -142,6 +199,7 @@ class VaspAdapter:
         if self.out and self.out['current']:
             self._close_evaluation(self.out['current'], line)
         self._publish_history()
+        self.pending_electronic_history.clear()
         self.out_segment += 1
         self.out = {'version': version, 'settings': {}, 'echoed_incar': {},
                     'in_echo': False, 'nions': None, 'evaluations': deque(),
@@ -179,6 +237,7 @@ class VaspAdapter:
         out = self.out
         evaluation = out['current']
         if evaluation is not None:
+            evaluation['revision'] += 1
             self.history_dirty.add(evaluation['serial'])
         if 'INCAR:' in text:
             out['in_echo'] = True
@@ -216,7 +275,7 @@ class VaspAdapter:
                 evaluation = {'index': out['next'], 'native': ionic, 'rows': [],
                               'energies': {}, 'energy_refs': {}, 'force': None, 'complete': False, 'closed': False,
                               'native_convergence': None, 'line': line, 'end_line': None,
-                              'timings': (), 'timing_issue': None, 'trial': [], 'force_record': None}
+                              'timings': (), 'timing_issue': None, 'trial': [], 'force_record': None, 'revision': 0}
                 self.out_serial += 1
                 evaluation['serial'] = self.out_serial
                 self.history_dirty.add(self.out_serial)
@@ -227,6 +286,7 @@ class VaspAdapter:
                     if dropped['serial'] in self.history_dirty:
                         self._publish_evaluation(dropped)
                     out['evaluations'].popleft()
+                    self.pending_electronic_history = {key: value for key, value in self.pending_electronic_history.items() if key[0] != dropped['history_id']}
                     if not any(item['segment'] == self.out_segment and item['index'] == dropped['index'] for item in self.osz):
                         self._issue('Native evaluation buffer evicted unmatched evidence; earlier correspondence unavailable')
                 out['evaluations'].append(evaluation)
@@ -240,7 +300,17 @@ class VaspAdapter:
             else:
                 row = {'label': electronic, 'energy': None, 'algorithm': None,
                        'line': line, 'timings': (), 'timing_issue': None}
+                previous_sequence = self.history_sequence
                 self._history_identity(row, line, 'electronic')
+                key = (evaluation['history_id'], electronic)
+                pending = self.pending_electronic_history.pop(key, None)
+                row['history_id'] = evaluation['history_id'] + ':electronic:' + str(electronic)
+                local = self.local_history.get((self.out_segment, evaluation['index']))
+                if local and evaluation.get('local_history_adopted'):
+                    pending = pending or local['rows'].get(electronic)
+                if pending is not None:
+                    row['history_sequence'] = pending['history_sequence']
+                    self.history_sequence = previous_sequence
                 evaluation['rows'].append(row)
             out['force'] = None
             out['in_energy'] = False
@@ -413,38 +483,39 @@ class VaspAdapter:
         self._event('force', line, 'Complete atomic-vector force block observed',
                     self._levels(block['evaluation']))
 
-    def _new_osz_evaluation(self):
-        self.osz_serial += 1
-        item = {'index': self.osz_next, 'segment': self.osz_segment, 'rows': [], 'summary': None, 'serial': self.osz_serial}
-        self.osz_next += 1
-        if len(self.osz) >= MAX_EVALUATIONS:
-            dropped = self.osz[0]
+    def _new_osz_evaluation(self, stream):
+        stream.serial += 1
+        item = {'index': stream.next_index, 'segment': stream.segment, 'rows': [],
+                'summary': None, 'serial': stream.serial}
+        stream.next_index += 1
+        if len(stream.evaluations) >= MAX_EVALUATIONS:
+            dropped = stream.evaluations[0]
             if self.out is not None:
-                native = next((item for item in self.out['evaluations'] if item['serial'] == dropped['serial']), None)
+                native = next((entry for entry in self.out['evaluations'] if entry['serial'] == dropped['serial']), None)
                 if native is not None:
                     self._publish_evaluation(native)
-            self.osz.popleft()
+            stream.evaluations.popleft()
             self.history_dirty.discard(dropped['serial'])
             if self.out is not None and self.out['current'] and dropped['segment'] >= self.out_segment and dropped['index'] >= self.out['current']['index']:
                 self._issue('Unmatched electronic evaluation buffer limit reached')
-        self.osz.append(item)
-        self.osz_current = item
+        stream.evaluations.append(item)
+        stream.current = item
         return item
 
-    def _read_electronic(self, line):
+    def _read_electronic(self, line, stream):
         if BANNER.match(line.text):
-            if self.osz_banner_seen or self.osz:
-                self.osz_segment += 1
-            self.osz_banner_seen = True
-            self.osz_next = 1
-            self.osz_current = None
-            self.osz_last_native = None
+            if stream.banner_seen or stream.evaluations:
+                stream.segment += 1
+            stream.banner_seen = True
+            stream.next_index = 1
+            stream.current = None
+            stream.last_native = None
             return
         row = parse_electronic_row(_batch_line(line), line.evidence.source_role)
         if row is not None:
-            if self.osz_current is None or (row['label'] == 1 and self.osz_current['rows']):
-                self._new_osz_evaluation()
-            item = self.osz_current
+            if stream.current is None or (row['label'] == 1 and stream.current['rows']):
+                self._new_osz_evaluation(stream)
+            item = stream.current
             if len(item['rows']) >= MAX_ITERATIONS:
                 self._issue('Electronic source row buffer limit reached')
                 return
@@ -454,21 +525,48 @@ class VaspAdapter:
             self.last_new = line.observed_at
         summary = parse_ionic_summary(_batch_line(line), line.evidence.source_role)
         if summary is not None:
-            item = self.osz_current or self._new_osz_evaluation()
-            # OSZICAR has no mandatory banner. Native summary resets establish
-            # the batch parser's segment boundary only after that summary arrives.
-            if (self.osz_last_native is not None
-                    and summary['native_ionic_label'] <= self.osz_last_native
-                    and self.osz_segment < self.out_segment):
-                self.osz_segment += 1
-                item['segment'] = self.osz_segment
+            item = stream.current or self._new_osz_evaluation(stream)
+            # A reset summary is an explicit segment boundary, never a match by energy alone.
+            if (stream.last_native is not None
+                    and summary['native_ionic_label'] <= stream.last_native
+                    and stream.segment < self.out_segment):
+                stream.segment += 1
+                item['segment'] = stream.segment
                 item['index'] = 1
-                self.osz_next = 2
+                stream.next_index = 2
             item['summary'] = summary
             self.history_dirty.add(item['serial'])
-            self.osz_last_native = summary['native_ionic_label']
-            self.osz_current = None
+            stream.last_native = summary['native_ionic_label']
+            stream.current = None
             self.last_new = line.observed_at
+
+    def _read_incar(self, update):
+        if update.reset:
+            self.incar.clear()
+            self.incar_issues.clear()
+        for line in update.lines:
+            text = re.split(r'[!#]', line.text, maxsplit=1)[0]
+            for match in SET_RE.finditer(text):
+                key, value = match[1].upper(), _scalar(match[2])
+                if key in self.incar and self.incar[key]['value'] != value:
+                    self.incar_issues.append('Conflicting declared INCAR value: ' + key)
+                self.incar[key] = {'value': value, 'reference': line.evidence}
+        del self.incar_issues[:-32]
+
+    def _settings(self):
+        effective = self.out['settings'] if self.out else {}
+        state = self.states.get('incar')
+        provisional = self.incar if state and state.health == 'OK' and not state.has_more and not state.pending_bytes else {}
+        result = []
+        for key in sorted(effective.keys() | provisional.keys()):
+            actual, requested = effective.get(key), provisional.get(key)
+            record = actual or requested
+            result.append(SettingObservation(key, record['value'],
+                'OUTCAR effective ' + key if actual else 'Declared INCAR (historical linkage unestablished)',
+                'effective' if actual else 'provisional', (record['reference'],),
+                requested['value'] if actual and requested else None,
+                bool(actual and requested and actual['value'] != requested['value'])))
+        return tuple(result)
 
     def _read_poscar(self, update):
         if update.reset:
@@ -507,10 +605,31 @@ class VaspAdapter:
         self.flags, self.flags_key = flags, key
         self.poscar_issue = None
 
-    def _correspondence(self, evaluation):
+    def _correspondence(self, evaluation, role=None):
+        role = role or self.electronic_role
+        stream = self.streams.get(role)
+        item = next((entry for entry in stream.evaluations if entry['segment'] == self.out_segment
+                     and entry['index'] == evaluation['index']), None) if stream else None
+        signature = (self.out_segment, self.asymmetric_reset, self.generations.get(role),
+                     self.generations.get('outcar'), evaluation['revision'],
+                     len(item['rows']) if item else None, repr(item['summary']) if item else None)
+        cache = evaluation.setdefault('correspondence_cache', {})
+        previous = cache.get(role)
+        if previous is not None and previous[0] == signature:
+            return previous[1]
+        # Complete rows are immutable inside one reader generation. Only the last
+        # checked native row can still acquire its algorithm/energy field.
+        matched = previous[1][1] if previous and previous[0][:4] == signature[:4] else ()
+        result = self._correspondence_scan(evaluation, role, matched)
+        cache[role] = (signature, result)
+        return result
+
+    def _correspondence_scan(self, evaluation, role=None, previous=()):
         if self.asymmetric_reset:
             return 'unresolved', [], 'Source generations changed independently; sibling correspondence is unestablished'
-        item = next((v for v in self.osz if v['serial'] == evaluation['serial']), None)
+        stream = self.streams.get(role or self.electronic_role)
+        item = next((v for v in stream.evaluations if v['segment'] == self.out_segment
+                     and v['index'] == evaluation['index']), None) if stream else None
         if item is None and self.osz_segment > self.out_segment:
             return 'unresolved', [], 'Electronic source segment cannot be associated with the current native segment'
         if item is None:
@@ -518,61 +637,207 @@ class VaspAdapter:
         native_rows, rows = evaluation['rows'], item['rows']
         if self.out['evaluations'] and evaluation['index'] < self.out['evaluations'][0]['index']:
             return 'unresolved', [], 'Native correspondence buffer was exceeded'
-        matched = []
-        for native, row in zip(native_rows, rows):
-            if native['label'] != row['label'] or row.get('malformed'):
-                return 'conflict', [], 'Complete electronic rows disagree in label or grammar'
+        start = max(0, len(previous) - 1)
+        matched = list(previous[:start])
+        for index, (native, row) in enumerate(zip(native_rows[start:], rows[start:]), start + 1):
+            if row.get('malformed'):
+                return 'unsupported', matched, 'Malformed complete electronic row; comparison unsupported'
+            if native['label'] != index or row['label'] != index:
+                return 'conflict', matched, 'Complete electronic rows disagree in ordered labels'
             if row['algorithm'] not in {'DAV', 'RMM'}:
                 return 'unsupported', [], 'Electronic algorithm is outside DAV/RMM support'
             if native['algorithm'] is not None and native['algorithm'] != row['algorithm']:
-                return 'conflict', [], 'Electronic algorithms conflict across files'
+                return 'conflict', matched, 'Electronic algorithms conflict across files'
             if native['energy'] is None:
                 break
             if not _same_printed(native['energy'], row.get('energy')):
-                return 'conflict', [], 'Complete electronic energies conflict across files'
+                return 'conflict', matched, 'Complete electronic energies conflict across files'
             matched.append(row)
         summary = item['summary']
         if summary is not None:
             if summary['native_ionic_label'] != evaluation['native']:
-                return 'conflict', [], 'Native evaluation labels conflict across files'
+                return 'conflict', matched, 'Native evaluation labels conflict across files'
             for key in ('free_energy', 'sigma_to_zero'):
                 actual = evaluation['energies'].get(key)
                 if actual is not None and not _same_printed(actual, summary[key]):
-                    return 'conflict', [], 'Complete evaluated ionic energies conflict across files'
+                    return 'conflict', matched, 'Complete evaluated ionic energies conflict across files'
             if evaluation['complete'] and len(native_rows) != len(rows):
-                return 'conflict', [], 'Completed evaluation electronic row counts conflict'
+                return 'conflict', matched, 'Completed evaluation electronic row counts conflict'
         if summary is None and evaluation['complete']:
             return 'pending', matched, 'Awaiting evaluated-energy counterpart; matched SCF rows remain usable'
         if len(matched) < max(len(native_rows), len(rows)) or (summary is not None and not evaluation['complete']):
             return 'pending', matched, 'Cross-file evidence is pending; complete matching rows remain usable'
         return 'matched', matched, ''
 
+    def _remember_stream_conflict(self, message, segment, roles):
+        entry = (segment, message, frozenset(roles))
+        if entry not in self.stream_conflicts:
+            self.stream_conflicts.append(entry)
+
+    def _duplicate_check(self, item, role, other_role):
+        other = next((candidate for candidate in self.streams[other_role].evaluations
+                      if candidate['segment'] == item['segment'] and candidate['index'] == item['index']), None)
+        signature = (self.asymmetric_reset, self.generations.get(role), self.generations.get(other_role),
+                     item['segment'], item['index'], len(item['rows']), len(other['rows']) if other else None)
+        cache = item.setdefault('duplicate_cache', {})
+        previous = cache.get(other_role)
+        if previous is not None and previous[0] == signature:
+            return previous[1]
+        checked = previous[1][1] if previous and previous[0][:5] == signature[:5] else ()
+        fields = previous[1][2] if checked else ()
+        result = self._duplicate_scan(item, role, other_role, checked, fields)
+        cache[other_role] = (signature, result)
+        return result
+
+    def _duplicate_scan(self, item, role, other_role, previous=(), previous_fields=()):
+        other = next((candidate for candidate in self.streams[other_role].evaluations
+                      if candidate['segment'] == item['segment'] and candidate['index'] == item['index']), None)
+        if self.asymmetric_reset:
+            return 'UNRESOLVED', [], (), 'Source generations changed independently; duplicate association unestablished'
+        if other is None:
+            return 'PENDING', [], (), 'Duplicate electronic counterpart has not yet written this evaluation'
+        checked, fields = list(previous), set(previous_fields)
+        start = len(checked)
+        for index, (left, right) in enumerate(zip(item['rows'][start:], other['rows'][start:]), start + 1):
+            if left.get('malformed') or right.get('malformed'):
+                return 'UNSUPPORTED', checked, tuple(sorted(fields)), 'Malformed complete electronic row; comparison unsupported'
+            if left['label'] != index or right['label'] != index or left['algorithm'] != right['algorithm']:
+                return 'CONFLICT', checked, tuple(sorted(fields)), 'Duplicate electronic streams disagree in ordered labels or algorithm'
+            if left['algorithm'] not in {'DAV', 'RMM'}:
+                return 'UNSUPPORTED', checked, tuple(sorted(fields)), 'Electronic algorithm is outside DAV/RMM support'
+            common = tuple(key for key in ('energy', 'dE', 'd_eps', 'rms', 'rms_c') if key in left and key in right)
+            for key in common:
+                if not _same_printed(left[key], right[key]):
+                    return 'CONFLICT', checked, tuple(sorted(fields | {key})), 'Duplicate electronic streams disagree in ' + key
+            compared = {'label', 'algorithm', *common}
+            fields = fields & compared if checked else compared
+            checked.append(left)
+        status = 'MATCHED' if checked and len(checked) == max(len(item['rows']), len(other['rows'])) else 'PARTIAL' if checked else 'PENDING'
+        reason = '' if status == 'MATCHED' else 'Newer electronic rows are source-only; duplicate counterpart not yet written'
+        if checked and 'rms_c' not in fields:
+            reason += ('; ' if reason else '') + 'rms(c) absent in part of overlap; excluded from checked fields'
+        return status, checked, tuple(sorted(fields)), reason
+
+    def _check_all_streams(self):
+        # Revisit retained prefixes on every source advance, including late peers.
+        # Conflicts remain latched for this segment even after later rows agree.
+        for role, stream in self.streams.items():
+            if self.out is not None:
+                for evaluation in self.out['evaluations']:
+                    status, _, message = self._correspondence(evaluation, role)
+                    if status == 'conflict':
+                        self._remember_stream_conflict(f"Evaluation {evaluation['index']}: {message} ({role}/OUTCAR)", self.out_segment, (role, 'outcar'))
+            for item in stream.evaluations:
+                if len(self._usable_rows(item)) < len(item['rows']):
+                    self._issue(role + ': malformed, unsupported or discontinuous electronic row; only complete supported prefix is usable')
+                for other_role in self.streams:
+                    if role >= other_role:
+                        continue
+                    status, _, _, message = self._duplicate_check(item, role, other_role)
+                    if status == 'CONFLICT':
+                        self._remember_stream_conflict(f"{role}/{other_role} evaluation {item['index']}: {message}", item['segment'], (role, other_role))
+
+    def _selected_observation(self):
+        stream = self.streams.get(self.electronic_role)
+        if stream is None:
+            return [], (), ()
+        items = [item for item in stream.evaluations if self._usable_rows(item)
+                 and (not self.out or item['segment'] >= self.out_segment)]
+        if not items:
+            state = self.states.get(self.electronic_role)
+            malformed = any(item['rows'] for item in stream.evaluations)
+            status = 'UNSUPPORTED' if malformed else 'UNAVAILABLE' if state and state.health not in {'OK', 'PENDING'} else 'PENDING'
+            reason = ('Electronic stream lacks a supported ordered complete prefix' if malformed else
+                      'Electronic source unavailable: ' + state.health if status == 'UNAVAILABLE' else
+                      'Declared electronic source has not written complete supported rows')
+            if self.out and stream.evaluations:
+                reason = 'Electronic source segment cannot be associated with the current native segment'
+            return [], (Verification('electronic-row', status, self.electronic_role, 'outcar',
+                        reason=reason, source_generation=self.generations.get(self.electronic_role),
+                        counterpart_generation=self.generations.get('outcar')),), ()
+        item = items[-1]
+        rows = self._usable_rows(item)
+        native = (next((entry for entry in self.out['evaluations'] if entry['index'] == item['index']), None)
+                  if self.out and item['segment'] == self.out_segment else None)
+        status, matched, reason = (self._correspondence(native) if native else
+            ('pending', [], 'OUTCAR has not yet written an associated native evaluation'))
+        associated = bool(matched) and status not in {'unresolved', 'conflict', 'unsupported'}
+        context = self._levels(native) if associated else ()
+        native_frontier = native['rows'][-1]['label'] if native and native['rows'] else None
+        out_state = self.states.get('outcar')
+        if status == 'pending':
+            state = 'PARTIAL' if matched else 'PENDING'
+            if out_state is None or out_state.health not in {'OK', 'PENDING'}:
+                state = 'UNAVAILABLE'
+        else:
+            state = status.upper()
+        compared = ('label', 'energy') + (('algorithm',) if matched and all(row['algorithm'] for row in native['rows'][:len(matched)]) else ())
+        refs = ((matched[-1]['line'].evidence, native['rows'][len(matched)-1]['energy_ref']) if matched else ())
+        verification = [Verification('electronic-row', state, self.electronic_role, 'outcar',
+            rows[-1]['label'], matched[-1]['label'] if matched else None, native_frontier,
+            context, compared if matched else (),
+            'Sum of printed half-last-place intervals plus 1e-12 eV (shared parser)', reason,
+            self.generations.get(self.electronic_role), self.generations.get('outcar'), refs)]
+        for other_role in self.streams:
+            if other_role == self.electronic_role:
+                continue
+            duplicate, checked, fields, message = self._duplicate_check(item, self.electronic_role, other_role)
+            other_state = self.states.get(other_role)
+            if duplicate == 'PENDING' and other_state and other_state.health not in {'OK', 'PENDING'}:
+                duplicate, message = 'UNAVAILABLE', 'Duplicate source unavailable: ' + other_state.health
+            verification.append(Verification('electronic-stream', duplicate, self.electronic_role, other_role,
+                rows[-1]['label'], checked[-1]['label'] if checked else None,
+                context=context, fields=fields,
+                precision_policy='Sum of printed half-last-place intervals plus 1e-12 (shared parser)',
+                reason=message, source_generation=self.generations.get(self.electronic_role),
+                counterpart_generation=self.generations.get(other_role)))
+        conflicts = [message for segment, message, _ in self.stream_conflicts if segment == item['segment']]
+        qualification = ('conflict' if conflicts else 'row-correspondence' if matched and matched[-1]['label'] == rows[-1]['label'] else 'source-local')
+        metrics = self._electronic_metrics(native or {}, rows, qualification=qualification, associated=associated, segment=item['segment'])
+        if conflicts or status in {'conflict', 'unresolved', 'unsupported'} or (self.out and item['segment'] != self.out_segment):
+            metrics = [MetricSeries(replace(series.latest, qualification='conflict' if conflicts else 'source-local', criterion=None, relation=None),
+                       replace(series.previous, qualification='conflict' if conflicts else 'source-local', criterion=None, relation=None) if series.previous else None)
+                       for series in metrics]
+        for segment, message, roles in self.stream_conflicts:
+            if segment == item['segment']:
+                left, right = sorted(roles)
+                verification.append(Verification('retained-electronic-conflict', 'CONFLICT', left, right,
+                    context=context, reason=message, source_generation=self.generations.get(left),
+                    counterpart_generation=self.generations.get(right)))
+        local_context = (IterationLevel('electronic', rows[-1]['label'], f"SCF {rows[-1]['label']}"),)
+        return metrics, tuple(verification), local_context
+
     def _criterion(self, key, unit, definition):
-        value = self._values().get(key)
+        setting = next((item for item in self._settings() if item.name == key), None)
+        value = setting.value if setting else None
+        origin = setting.origin if setting else ''
+        if setting and setting.qualification == 'provisional':
+            definition = definition.replace('effective EDIFF', 'declared provisional EDIFF') + '; historical linkage unestablished'
         if type(value) not in (int, float) or not math.isfinite(value):
             return None
         if key == 'EDIFF' and value > 0:
-            return Criterion(value, unit, '<', 'OUTCAR effective EDIFF', definition=definition,
+            return Criterion(value, unit, '<', origin, kind='provisional-engine-stopping' if setting.qualification == 'provisional' else 'engine-stopping', definition=definition,
                              signed_value=value)
         if key == 'EDIFFG' and value < 0:
-            return Criterion(-value, unit, '<', 'OUTCAR effective EDIFFG', definition=definition,
+            return Criterion(-value, unit, '<', origin, kind='provisional-engine-stopping' if setting.qualification == 'provisional' else 'engine-stopping', definition=definition,
                              signed_value=value)
         return None
 
     def _targets(self, semantic_id):
         return tuple(v.criterion for v in self.context.diagnostic_targets if v.semantic_id == semantic_id)
 
-    def _electronic_metrics(self, evaluation, rows):
+    def _electronic_metrics(self, evaluation, rows, *, qualification='observed', associated=True, segment=None):
         result = []
         if not rows:
             return result
         for key, label, definition, unit, magnitude, priority in (
+            ('energy', 'Electronic energy', 'Electronic iteration free energy; not evaluated ionic energy', 'eV', False, 60),
             ('dE', '|dE|', 'Magnitude of electronic total-energy change within one SCF evaluation', 'eV', True, 20),
             ('d_eps', '|d eps|', 'Magnitude of electronic band-energy change within one SCF evaluation', 'eV', True, 21),
             ('rms', 'rms', 'Native electronic wavefunction residual norm', 'native', False, 40),
             ('rms_c', 'rms(c)', 'Native charge-density residual norm', 'native', False, 30),
         ):
-            semantic_id = 'vasp.electronic.' + key
+            semantic_id = 'vasp.electronic.' + ('free_energy' if key == 'energy' else key)
             criterion = self._criterion('EDIFF', 'eV', 'Both dE and d eps magnitudes must satisfy effective EDIFF') if magnitude else None
             def metric(row):
                 value = row.get(key)
@@ -581,12 +846,13 @@ class VaspAdapter:
                 raw = parsed['value']
                 return Metric(semantic_id, label, definition, unit,
                               abs(raw) if magnitude and raw is not None else raw,
-                              self._levels(evaluation, row['label']), self.context.stage,
-                              self.out_segment, parsed['half_last_place'], parsed['printed'],
-                              raw if magnitude else None, 'observed', (row['line'].evidence,),
+                              (self._levels(evaluation, row['label']) if associated else
+                               (IterationLevel('electronic', row['label'], f"SCF {row['label']}"),)), self.context.stage,
+                              segment or max(1, self.out_segment), parsed['half_last_place'], parsed['printed'],
+                              raw if magnitude else None, qualification, (row['line'].evidence,),
                               row['line'].observed_at, criterion, self._targets(semantic_id),
                               _relation(parsed, criterion), priority,
-                              comparison_context=self._levels(evaluation))
+                              comparison_context=self._levels(evaluation) if associated else ())
             latest = metric(rows[-1])
             previous = metric(rows[-2]) if len(rows) > 1 and rows[-2]['label'] + 1 == rows[-1]['label'] else None
             result.append(MetricSeries(latest, previous if previous is not None and comparable(latest, previous) else None))
@@ -622,7 +888,7 @@ class VaspAdapter:
                 bound = math.sqrt(3) * record['precision']
                 parsed = {'value': value, 'half_last_place': bound}
                 relation = _relation(parsed, criterion)
-                if relation:
+                if relation and not relation.startswith('PROVISIONAL_'):
                     relation = 'PROVISIONAL_' + relation
                 return Metric(semantic_id, 'Fmax ' + scope, definition, 'eV/Angstrom', value,
                               self._levels(record['evaluation']), self.context.stage,
@@ -695,23 +961,95 @@ class VaspAdapter:
 
     def _put_history(self, record, *, levels=(), parent_id=None, kind='evaluation',
                      native_label='', state='PARTIAL', coverage='PARTIAL', metrics=(),
-                     timings=(), evidence=(), child_count=0, annotations=()):
+                     timings=(), evidence=(), child_count=0, annotations=(), segment=None):
         entry = HistoryEntry(record['history_id'], record['history_sequence'],
             context=levels, parent_id=parent_id, kind=kind, native_label=str(native_label),
             state=state, coverage=coverage, metrics=tuple(metrics), timings=tuple(timings),
             evidence=tuple(evidence), binding_id=self.context.binding_id,
             attempt_id=self.context.attempt_id, stage=self.context.stage,
-            segment=self.out_segment, child_count=child_count, annotations=tuple(annotations))
+            segment=segment or self.out_segment, child_count=child_count, annotations=tuple(annotations))
         self.history_updates[entry.entry_id] = entry
+
+    def _publish_local_history(self):
+        stream = self.streams.get(self.electronic_role)
+        if stream is None or self.asymmetric_reset:
+            return
+        for item in stream.evaluations:
+            rows = self._usable_rows(item)
+            if not rows:
+                continue
+            key = (item['segment'], item['index'])
+            native = (next((entry for entry in self.out['evaluations'] if entry['index'] == item['index']), None)
+                      if self.out and item['segment'] == self.out_segment else None)
+            if self.out and native is None:
+                # Future sequence rows stay available in Snapshot/Details/Copy.
+                # Publishing a guessed parent here would break chronology while
+                # a previous native evaluation is still arriving.
+                continue
+            if native is not None:
+                # Native history already owns this context unless local rows
+                # existed first. Keep its established identity when peers arrive.
+                if key not in self.local_history:
+                    continue
+                state, matched, _ = self._correspondence(native)
+                if matched and state not in {'conflict', 'unresolved', 'unsupported'}:
+                    continue
+            record = self.local_history.get(key)
+            if record is None:
+                record = {'rows': {}, 'segment': item['segment']}
+                self._history_identity(record, rows[0]['line'], 'electronic-series')
+                self.local_history[key] = record
+                while len(self.local_history) > MAX_EVALUATIONS:
+                    self.local_history.pop(next(iter(self.local_history)))
+            metrics = tuple(series.latest for series in self._electronic_metrics({}, rows, associated=False,
+                            qualification='source-local', segment=item['segment']))
+            if self.out and item['segment'] != self.out_segment:
+                metrics = tuple(replace(metric, criterion=None, relation=None) for metric in metrics)
+            conflicts = tuple(message for segment, message, _ in self.stream_conflicts if segment == item['segment'])
+            notes = ('Complete source-local electronic sequence; native outer-evaluation association unestablished', *conflicts)
+            if conflicts:
+                metrics = tuple(replace(metric, criterion=None, relation=None, qualification='conflict') for metric in metrics)
+            self._put_history(record, kind='electronic-series', native_label='Source-local SCF',
+                state='PARTIAL', coverage='PARTIAL', metrics=metrics, child_count=len(rows),
+                evidence=(rows[0]['line'].evidence,), annotations=notes, segment=item['segment'])
+            for row in rows:
+                child = record['rows'].get(row['label'])
+                if child is None:
+                    child = {}
+                    self._history_identity(child, row['line'], 'electronic')
+                    child['history_id'] = record['history_id'] + ':electronic:' + str(row['label'])
+                    record['rows'][row['label']] = child
+                row_metrics = tuple(series.latest for series in self._electronic_metrics({}, (row,), associated=False,
+                                    qualification='source-local', segment=item['segment']))
+                if self.out and item['segment'] != self.out_segment:
+                    row_metrics = tuple(replace(metric, criterion=None, relation=None) for metric in row_metrics)
+                if conflicts:
+                    row_metrics = tuple(replace(metric, criterion=None, relation=None, qualification='conflict') for metric in row_metrics)
+                self._put_history(child, levels=row_metrics[0].context, parent_id=record['history_id'],
+                    kind='electronic', native_label=row['label'], state='COMPLETE', coverage='PARTIAL',
+                    metrics=row_metrics, evidence=(row['line'].evidence,), annotations=notes, segment=item['segment'])
 
     def _publish_evaluation(self, evaluation):
         self.history_dirty.discard(evaluation['serial'])
         correspondence, matched, message = self._correspondence(evaluation)
+        local = self.local_history.get((self.out_segment, evaluation['index']))
+        if local is not None and not evaluation.get('local_history_adopted'):
+            if not matched or correspondence in {'conflict', 'unresolved', 'unsupported'}:
+                return
+            evaluation['history_id'] = local['history_id']
+            evaluation['history_sequence'] = local['history_sequence']
+            evaluation['local_history_adopted'] = True
+            for row in evaluation['rows']:
+                row['history_id'] = evaluation['history_id'] + ':electronic:' + str(row['label'])
+                old = local['rows'].get(row['label'])
+                if old is not None:
+                    row['history_sequence'] = old['history_sequence']
         supported = _scope(self.out)['supported']
-        coverage = ('UNRESOLVED' if self.out['conflicts'] or correspondence in {'conflict', 'unresolved'} else
+        electronic_conflicts = [message for segment, message, _ in self.stream_conflicts if segment == self.out_segment]
+        coverage = ('UNRESOLVED' if electronic_conflicts or self.out['conflicts'] or correspondence in {'conflict', 'unresolved'} else
                     'COMPLETE' if correspondence == 'matched' and supported else 'PARTIAL')
         levels = self._levels(evaluation)
-        notes = list(self.out['conflicts'])
+        notes = [*self.out['conflicts'], *electronic_conflicts]
         if not supported:
             notes.extend(_scope(self.out)['reasons'])
         if message:
@@ -724,14 +1062,19 @@ class VaspAdapter:
         force = evaluation['force_record']
         metrics = [item.latest for item in self._force_metrics((force,))] if force else []
         if matched and correspondence not in {'conflict', 'unresolved', 'unsupported'}:
-            metrics.extend(item.latest for item in self._electronic_metrics(evaluation, matched))
+            metrics.extend(item.latest for item in self._electronic_metrics(evaluation, matched) if item.latest.semantic_id != 'vasp.electronic.free_energy')
         for key, value in evaluation['energies'].items():
             metrics.append(Metric('vasp.evaluation.' + key, key.replace('_', ' '),
                 'Native evaluated ionic energy; distinct from electronic iteration energy',
                 'eV', value['value'], levels, self.context.stage, self.out_segment,
                 value['half_last_place'], value['printed'], evidence=(evaluation['energy_refs'][key],)))
-        if not supported or self.out['conflicts'] or correspondence == 'conflict':
+        if not supported or self.out['conflicts']:
             metrics = [replace(metric, qualification='provisional', criterion=None, relation=None) for metric in metrics]
+        if electronic_conflicts:
+            metrics = [replace(metric, qualification='conflict', criterion=None, relation=None)
+                       if metric.semantic_id.startswith('vasp.electronic.') else metric for metric in metrics]
+        source_item = next((item for item in self.osz if item['segment'] == self.out_segment and item['index'] == evaluation['index']), None)
+        child_count = max(len(evaluation['rows']), len(self._usable_rows(source_item)) if source_item and matched else 0)
         complete = evaluation['complete']
         self._put_history(evaluation, levels=levels,
             kind='trial-evaluation' if evaluation['trial'] else 'evaluation',
@@ -739,8 +1082,11 @@ class VaspAdapter:
             state='COMPLETE' if complete else 'INCOMPLETE' if evaluation['closed'] else 'PARTIAL', coverage=coverage,
             metrics=metrics, timings=self._record_timings(evaluation, levels, finished=complete or evaluation['closed']),
             evidence=(evaluation['line'].evidence, *((force['evidence'],) if force else ()),
-                      *evaluation['trial']), child_count=len(evaluation['rows']), annotations=notes)
-        by_position = {index: row for index, row in enumerate(matched)}
+                      *evaluation['trial']), child_count=child_count, annotations=notes)
+        source_item = next((item for item in self.osz if item['segment'] == self.out_segment and item['index'] == evaluation['index']), None)
+        usable = self._usable_rows(source_item) if source_item else []
+        associated = bool(matched) and correspondence not in {'conflict', 'unresolved', 'unsupported'}
+        by_label = {row['label']: row for row in usable} if associated else {}
         for index, row in enumerate(evaluation['rows']):
             row_levels = self._levels(evaluation, row['label'])
             native_energy = row['energy']
@@ -751,19 +1097,45 @@ class VaspAdapter:
                     native_energy['value'], row_levels, self.context.stage, self.out_segment,
                     native_energy['half_last_place'], native_energy['printed'],
                     evidence=(row['energy_ref'],)))
-            counterpart = by_position.get(index)
+            counterpart = by_label.get(row['label'])
             if counterpart is not None and correspondence not in {'conflict', 'unresolved', 'unsupported'}:
-                row_metrics.extend(item.latest for item in self._electronic_metrics(evaluation, (counterpart,)))
+                qualification = 'row-correspondence' if index < len(matched) else 'source-local'
+                row_metrics.extend(item.latest for item in self._electronic_metrics(evaluation, (counterpart,), qualification=qualification)
+                                   if item.latest.semantic_id != 'vasp.electronic.free_energy' or native_energy is None)
             if not supported or self.out['conflicts'] or correspondence == 'conflict':
                 row_metrics = [replace(metric, qualification='provisional', criterion=None, relation=None) for metric in row_metrics]
+            if electronic_conflicts:
+                row_metrics = [replace(metric, qualification='conflict', criterion=None, relation=None) for metric in row_metrics]
             finished = native_energy is not None or index < len(evaluation['rows']) - 1 or complete or evaluation['closed']
             self._put_history(row, levels=row_levels, parent_id=evaluation['history_id'],
                 kind='electronic', native_label=row['label'], state='COMPLETE' if finished else 'PARTIAL',
-                coverage='COMPLETE' if counterpart is not None and supported and not self.out['conflicts'] and correspondence not in {'conflict', 'unresolved', 'unsupported'} else 'PARTIAL',
+                coverage='COMPLETE' if not electronic_conflicts and counterpart is not None and index < len(matched) and supported and not self.out['conflicts'] and correspondence not in {'conflict', 'unresolved', 'unsupported'} else 'PARTIAL',
                 metrics=row_metrics, timings=self._record_timings(row, row_levels, finished=finished),
-                evidence=(row['line'].evidence,), annotations=((message,) if message else ()))
+                evidence=(row['line'].evidence,), annotations=((*electronic_conflicts, message) if message else tuple(electronic_conflicts)))
+
+        if associated:
+            native_labels = {row['label'] for row in evaluation['rows']}
+            for counterpart in usable:
+                if counterpart['label'] in native_labels:
+                    continue
+                key = (evaluation['history_id'], counterpart['label'])
+                record = self.pending_electronic_history.get(key)
+                if record is None:
+                    record = {'line': counterpart['line'], 'timings': (), 'timing_issue': None}
+                    self._history_identity(record, counterpart['line'], 'electronic')
+                    record['history_id'] = evaluation['history_id'] + ':electronic:' + str(counterpart['label'])
+                    self.pending_electronic_history[key] = record
+                row_levels = self._levels(evaluation, counterpart['label'])
+                self._put_history(record, levels=row_levels, parent_id=evaluation['history_id'],
+                    kind='electronic', native_label=counterpart['label'], state='COMPLETE', coverage='PARTIAL',
+                    metrics=tuple(replace(series.latest, qualification='conflict', criterion=None, relation=None)
+                                  if electronic_conflicts else series.latest
+                                  for series in self._electronic_metrics(evaluation, (counterpart,), qualification='source-local')),
+                    evidence=(counterpart['line'].evidence,),
+                    annotations=('Complete source-local row; OUTCAR counterpart not yet written', *electronic_conflicts))
 
     def _publish_history(self):
+        self._publish_local_history()
         if self.out is None:
             return
         for evaluation in self.out['evaluations']:
@@ -801,8 +1173,9 @@ class VaspAdapter:
         return tuple(result)
 
     def update(self, updates, now):
-        # Retain at most one bounded reader batch per source; structural
-        # lockstep prevents a short OSZICAR stream racing past OUTCAR history.
+        # Each role has its own reader and bounded queue. Rotate fairly across
+        # streams at the same evaluation frontier, so a small stdout cannot
+        # consume all retained history while a large OUTCAR is catching up.
         for update in sorted(updates, key=lambda u: u.source.role.lower() != 'poscar'):
             role = update.source.role.lower()
             self.states[role] = update.state
@@ -811,58 +1184,52 @@ class VaspAdapter:
             if update.reset and prior is not None and prior > 0 and role in {'outcar', 'oszicar', 'stdout'}:
                 self.asymmetric_reset = True
                 self.history_updates.clear()
-                self.pending_lines.clear()
+                self.pending_lines.pop(role, None)
+                self.pending_electronic_history.clear()
+                self.local_history.clear()
                 if role == 'outcar':
                     self.out = None
                     self.out_segment = 0
-                elif role == self.electronic_role:
-                    self.osz.clear()
-                    self.osz_current = None
-                    self.osz_segment, self.osz_next = 1, 1
-                    self.osz_last_native = None
+                else:
+                    self.streams[role] = _ElectronicStream()
+                self.stream_conflicts = deque((entry for entry in self.stream_conflicts if role not in entry[2]), maxlen=32)
                 self._issue('Source reset: ' + str(update.reason or role))
             if role == 'poscar':
                 self._read_poscar(update)
-            elif role == 'outcar' or role == self.electronic_role:
+            elif role == 'incar':
+                self._read_incar(update)
+            elif role == 'outcar' or role in self.streams:
                 self.pending_lines.setdefault(role, deque()).extend(update.lines)
         poscar_pending = bool(self.states.get('poscar') and self.states['poscar'].has_more)
         history_full = len(self.history_updates) >= MAX_PENDING_HISTORY
         if history_full:
             self._issue('History consumer must drain pending entries before reading more')
         for _ in range(0 if poscar_pending or history_full else MAX_HISTORY_LINES):
-            out_lines = self.pending_lines.get('outcar')
-            electronic_lines = self.pending_lines.get(self.electronic_role)
-            if not out_lines and not electronic_lines:
+            ready = [role for role, lines in self.pending_lines.items() if lines]
+            if not ready:
                 break
-            out_ready = bool(out_lines)
-            electronic_ready = bool(electronic_lines)
-            if out_ready and electronic_ready:
-                role = 'outcar' if self.out_serial <= self.osz_serial else self.electronic_role
-            else:
-                role = 'outcar' if out_ready else self.electronic_role
-                sibling = self.electronic_role if out_ready else 'outcar'
-                ahead = self.out_serial > self.osz_serial if out_ready else self.osz_serial > self.out_serial
-                sibling_state = self.states.get(sibling)
-                if ahead and sibling_state and sibling_state.has_more:
-                    break
+            serial = lambda role: self.out_serial if role == 'outcar' else self.streams[role].serial
+            role = min(ready, key=lambda role: (serial(role), role != 'outcar', role))
+            waiting = [name for name, state in self.states.items() if name != role
+                       and (name == 'outcar' or name in self.streams) and state.has_more and not self.pending_lines.get(name)]
+            if any(serial(name) < serial(role) for name in waiting):
+                break
             line = self.pending_lines[role].popleft()
             if role == 'outcar':
                 self._read_out(line)
             else:
-                self._read_electronic(line)
-        if self.out is not None:
-            # Late counterparts may prove a contradiction in an earlier retained
-            # evaluation. A later valid evaluation cannot erase that evidence.
-            for evaluation in self.out['evaluations']:
-                correspondence, _, message = self._correspondence(evaluation)
-                if correspondence == 'conflict':
-                    self._out_conflict(f"Evaluation {evaluation['index']}: {message}")
+                self._read_electronic(line, self.streams[role])
+        self._select_electronic()
+        self._check_all_streams()
+        electronic_metrics, verification, local_iteration = self._selected_observation()
         messages, limitations = [], list(self.context.limitations)
         limitations.extend(self.issues)
         limitations.extend(('Live observations never establish scientific acceptance or process ownership',
                             'Evaluations are chronological; accepted optimizer steps are not inferred'))
-        if self.duplicate_streams:
-            limitations.append('OSZICAR and stdout both declared; OSZICAR exclusively selected to avoid duplicate rows')
+        limitations.extend(self.incar_issues)
+        for setting in self._settings():
+            if setting.discrepancy:
+                limitations.append(f'{setting.name}: declared INCAR differs from effective OUTCAR; effective OUTCAR remains authoritative')
         if self.flags is not None:
             limitations.append('Constraint groups are current-POSCAR-derived; historical execution binding is unestablished')
         elif self.poscar_issue:
@@ -887,16 +1254,13 @@ class VaspAdapter:
                     status = 'SOURCE_UNRESOLVED'
                 elif correspondence == 'unsupported':
                     status = 'UNSUPPORTED'
-                else:
-                    metrics.extend(self._electronic_metrics(evaluation, rows))
                 metrics.extend(self._force_metrics())
                 ahead = self.osz_current
                 active_ahead = (ahead is not None and ahead['segment'] == self.out_segment
                                 and ahead['index'] > evaluation['index'] and bool(ahead['rows']))
                 if (ahead is not None and ahead['segment'] == self.out_segment
                         and ahead['index'] > evaluation['index'] and ahead['rows']):
-                    provisional = {'index': ahead['index'], 'native': 'pending'}
-                    iteration = self._levels(provisional, ahead['rows'][-1]['label'])
+                    iteration = local_iteration
                     phase = 'Electronic SCF; native counterpart pending'
                     metrics = [item for item in metrics if not item.latest.semantic_id.startswith('vasp.electronic.')]
                     messages.append(f"Evaluation {ahead['index']} force not yet available; OUTCAR correspondence pending")
@@ -941,12 +1305,36 @@ class VaspAdapter:
                 messages.append('Native optimizer stopping observed; no accepted-step count inferred')
         if self.flags is not None and any(any(row) and not all(row) for row in self.flags):
             limitations.append('Partial-direction constraints are not Cartesian masks; projected/free-force criterion unsupported')
+        if electronic_metrics:
+            metrics.extend(electronic_metrics)
+            if not iteration or electronic_metrics[0].latest.segment > max(1, self.out_segment):
+                iteration = local_iteration
+                phase, status, completeness = 'Electronic SCF; native association pending', 'OBSERVED', 'PARTIAL'
+        active_segment = max(1, self.out_segment, *(series.latest.segment for series in electronic_metrics))
+        conflicts = [message for segment, message, _ in self.stream_conflicts if segment == active_segment]
+        if conflicts:
+            status = 'SOURCE_CONFLICT'
+            limitations.extend(conflicts)
+        elif self.asymmetric_reset:
+            status = 'SOURCE_UNRESOLVED'
+        if self.out and (self.out['conflicts'] or not _scope(self.out)['supported']):
+            metrics = [MetricSeries(replace(item.latest, criterion=None, relation=None, qualification='provisional'),
+                replace(item.previous, criterion=None, relation=None, qualification='provisional') if item.previous else None) for item in metrics]
+        settings = self._settings()
+        if self.out and active_segment != self.out_segment:
+            calculation = None
+            settings = tuple(replace(setting, qualification='other-segment',
+                origin=setting.origin + f' (native segment {self.out_segment}; active source segment {active_segment})')
+                if setting.qualification == 'effective' else setting for setting in settings)
         self._publish_history()
-        return ProgressSnapshot(self.context, 'vasp-live-6.6.1', status=status, phase=phase,
-                                calculation=calculation, segment=max(1, self.out_segment),
+        snapshot = ProgressSnapshot(self.context, 'vasp-live-6.6.1', status=status, phase=phase,
+                                calculation=calculation, segment=active_segment,
                                 iteration=iteration, metrics=tuple(sorted(metrics, key=lambda item: item.latest.priority)),
                                 events=tuple(self.events), completeness=completeness,
                                 history_columns=self._history_columns(),
                                 completed_durations=self._completed_durations(),
                                 last_new_evidence_at=self.last_new, messages=tuple(messages),
+                                verification=verification, settings=settings,
                                 limitations=tuple(dict.fromkeys(limitations)))
+        from .vasp_card import vasp_card_groups
+        return replace(snapshot, card_groups=vasp_card_groups(snapshot))

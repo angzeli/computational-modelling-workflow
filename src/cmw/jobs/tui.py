@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 import unicodedata
 from copy import deepcopy
@@ -13,6 +14,7 @@ from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual import events
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static, TextArea
@@ -23,6 +25,8 @@ from .status_presentation import admission_presentation, scheduling_detail
 from .locations import discover
 from .folder_opener import OpenResult, open_location, request_open
 from .history_ui import HistoryDetails, ProgressHistory
+from .copy_ui import CopyPreview, FrozenText, SelectableStatic
+from .clipboard import copy_text
 from .suspension_ui import SuspensionConfirm
 from .sources_ui import Sources
 from .suspension_presentation import effective_status, intended_action, suspension_summary, suspension_detail, submission_text
@@ -128,7 +132,7 @@ class Prompt(ModalScreen):
 
 
 class Inspect(ModalScreen):
-    BINDINGS = [("escape", "dismiss(None)", "Back"), ("q", "dismiss(None)", "Back"), ("ctrl+c", "dismiss(None)", "Back")]
+    BINDINGS = [("y", "select_text", "Select frozen text"), ("escape", "dismiss(None)", "Back"), ("q", "dismiss(None)", "Back"), ("ctrl+c", "dismiss(None)", "Back")]
     DEFAULT_CSS = """
     Inspect { align: center middle; background: $background 70%; }
     Inspect > Vertical { width: 94%; height: 90%; border: round $accent; padding: 1 2; background: $surface; }
@@ -148,14 +152,19 @@ class Inspect(ModalScreen):
         with Vertical():
             yield Label("LOG TAIL · stdout / stderr · bounded to 16 KiB each" if self.logs else "ATTEMPT DETAILS")
             with VerticalScroll():
-                yield Static(id="body", markup=False)
-            yield Label("Esc / Q: back · PgUp / PgDn: scroll")
+                yield SelectableStatic(id="body", markup=False)
+            yield Label("Esc / Q: back · Y: frozen selectable text · PgUp / PgDn: scroll")
 
     def on_mount(self):
         self.refresh_content()
         self.set_interval(1 if self.logs else 0.5, self.refresh_content)
 
+    def action_select_text(self):
+        self.app.push_screen(FrozenText(str(self.query_one("#body", Static).render())))
+
     def refresh_content(self):
+        if getattr(self.query_one("#body", Static), "_copy_selected", False):
+            return
         job = (self.job_provider(self.job_id) if self.job_provider and not self.logs else
                next((j for j in self.store.snapshot()["jobs"] if j["display_id"] == self.job_id), None))
         if not job:
@@ -375,6 +384,10 @@ class JobsTable(DataTable):
     BINDINGS = [Binding("enter", "select_cursor", "Details")]
 
     async def _on_click(self, event):
+        if self.app.copy_mouse_dragged:
+            event.stop()
+            event.prevent_default()
+            return
         if self.id != "table":
             return
         # Textual 6 uses rendered cell metadata, not RowSelected, for mouse hit tests.
@@ -432,16 +445,16 @@ class JobsApp(App):
     #suspension-summary { height: 1; width: 1fr; padding-left: 1; color: #b7d8dd; }
     #shortcuts { dock: none; height: auto; background: #22303d; color: #d7e0e8; padding: 0 1; }
     """
-    BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("g", "history", "Progress"), Binding("s", "sources", "Sources"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
+    BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("g", "history", "Progress"), Binding("y", "copy_snapshot", "Copy"), Binding("s", "sources", "Sources"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
                 Binding("p", "dispatch", "Dispatch"), Binding("h", "hold", "Hold"),
                 Binding("o", "order", "Order"), Binding("x", "cancel", "Cancel"),
                 Binding("u", "suspension", "Suspend/Continue", show=False),
-                Binding("q", "quit", "Detach", priority=True), Binding("ctrl+c", "quit", "Detach", show=False, priority=True)]
+                Binding("q", "quit", "Detach", priority=True), Binding("ctrl+c", "detach", "Detach", show=False, priority=True)]
 
     def __init__(self, store=None, *, clock=None, observer=None, sampler=None,
                  location_descriptors=(), location_resolvers=None, file_opener=None,
                  progress_sources=(), progress_engine=None, progress_service=None, progress_resolver=None,
-                 execution_provider=None):
+                 execution_provider=None, clipboard_backend=None):
         super().__init__()
         self.store = store or Store()
         self.clock = clock
@@ -487,6 +500,11 @@ class JobsApp(App):
         self.execution_selection = None
         self.execution_observation = None
         self.execution_error = None
+        self.clipboard_backend = clipboard_backend
+        self.copy_busy = False
+        self.copy_result = None
+        self.copy_mouse_dragged = False
+        self.copy_mouse_start = None
 
     def compose(self):
         yield Static("CMW / JOBS                                             LOCAL", id="heading")
@@ -497,16 +515,16 @@ class JobsApp(App):
         yield Static(id="guard", markup=False)
         yield Static("EXTERNAL ACTIVITY — READ ONLY", id="external-heading", markup=False)
         yield JobsTable(id="external", cursor_type="row", zebra_stripes=True)
-        yield Static(id="selected", markup=False)
+        yield SelectableStatic(id="selected", markup=False)
         yield Static(id="execution", markup=False)
-        yield Static(id="progress", markup=False)
+        yield SelectableStatic(id="progress", markup=False)
         yield Static(id="events", markup=False)
         yield Static("Best-effort guard · Q / Ctrl-C detaches; execution state unchanged.", id="message", markup=False)
         with Vertical(id="command-bar"):
             with Horizontal(id="execution-controls"):
                 yield Button(literal("[U] Suspend job"), id="suspension-action")
                 yield Static("", id="suspension-summary", markup=False)
-            yield Static("Enter Details · F Files · G Progress · S Sources · N Note · L Logs\nP Dispatch · H Hold · O Order · X Cancel · B Scheduling · Q Detach", id="shortcuts", markup=False)
+            yield Static("Enter Details · F Files · G Progress · S Sources · Y Copy · N Note · L Logs\nP Dispatch · H Hold · O Order · X Cancel · B Scheduling · Q Detach", id="shortcuts", markup=False)
             yield Footer()
 
     def on_mount(self):
@@ -879,19 +897,20 @@ class JobsApp(App):
         widget = self.query_one('#progress', Static)
         widget.display = self.progress_selection is not None
         compact = self.size.width < 110 or self.size.height < 36
-        line_budget = 3 if self.size.width < 60 else (5 if self.execution_selection is not None else 6) if compact else 11
+        line_budget = 3 if self.size.width < 60 else 6 if compact else 11
         if compact and self.query_one('#external', DataTable).display:
-            line_budget = 3
+            line_budget = 6 if self.progress_snapshot and self.progress_snapshot.card_groups else 3
         if self.progress_error:
             line_budget = max(4, line_budget)
         widget.styles.max_height = line_budget
         if self.progress_snapshot is not None:
             from cmw.progress.formatting import progress_text
-            width = max(20, self.size.width - 5)
-            display_snapshot = replace(self.progress_snapshot, read_health="Parser: " + self.progress_snapshot.read_health)
+            width = max(20, self.size.width - 7)
+            structured_card = bool(self.progress_snapshot.card_groups)
+            display_snapshot = self.progress_snapshot if structured_card else replace(self.progress_snapshot, read_health="Parser: " + self.progress_snapshot.read_health)
             # Reserve the longer scientific label before the formatter places
             # bounded context and essential trailing qualifiers such as pending.
-            text = progress_text(display_snapshot, compact=compact, width=width - 4,
+            text = progress_text(display_snapshot, compact=compact, width=width if structured_card else width - 4,
                                  now=self.clock() if self.clock else None, max_lines=line_budget - bool(self.progress_error))
             lines = text.splitlines()
             if lines and lines[0].startswith("ACTIVE: "):
@@ -902,6 +921,8 @@ class JobsApp(App):
                 text = error + '\n' + text
         else:
             text = 'Progress: ' + (self.progress_error or 'awaiting bounded observation…')
+        line_budget = max(line_budget, len(text.splitlines()))
+        widget.styles.max_height = line_budget
         job = self.selected()
         if job and effective_status(job) == 'Suspended':
             text = 'Suspended: output inactivity is expected; source age remains actual.\n' + text
@@ -973,7 +994,7 @@ class JobsApp(App):
         job = self.selected()
         if not job:
             return detail(None)
-        width = max(12, self.size.width - 6)
+        width = max(12, self.size.width - 8)
         role = (f" [{job.get('scheduling', {}).get('role', 'primary').title()}]"
                 if self.state.get('mode') == 'Bounded Sharing' else '')
         phase = effective_status(job)
@@ -989,6 +1010,8 @@ class JobsApp(App):
             if self.size.width < 110 or self.size.height < 36:
                 return '\n'.join((heading, preview, lines[2]))
             lines.insert(1, preview)
+        if self.size.width < 110 or self.size.height < 36:
+            return '\n'.join((heading, lines[2]))
         return '\n'.join(lines)
 
     def external_read_only(self):
@@ -1028,6 +1051,7 @@ class JobsApp(App):
         sharing.update(literal(sharing_text(display_state, compact=compact)))
         table = self.query_one("#external", DataTable)
         observations = (guard or {}).get("observations", [])
+        table.styles.height = min(4, len(observations) + 1) if compact else 5
         external_heading = self.query_one("#external-heading", Static)
         external_heading.update(table_name(presentation.external_summary, max(12, self.size.width - 2)))
         external_heading.styles.color = tones[presentation.external_tone]
@@ -1107,10 +1131,10 @@ class JobsApp(App):
         self.query_one("#machine", Static).styles.max_height = 1 if tiny else 2
         self.query_one("#message", Static).styles.max_height = 1 if tiny else 3
         self.query_one("#guard", Static).styles.max_height = 1 if tiny else 3 if compact else 5
-        self.query_one("#external", DataTable).styles.height = 4 if compact else 5
         self.query_one("#selected", Static).styles.max_height = 2 if tiny else 3
         self.query_one("#selected", Static).styles.margin = (0 if compact else 1, 1, 0, 1)
-        table.styles.min_height = 3 if compact else 5
+        table.styles.min_height = 3 if tiny or compact and self.progress_error else 4 if compact else 5
+        table.styles.margin = (0 if compact else 1, 1, 0, 1)
         table.display = bool(jobs)
         wide = self.size.width >= 110
         self.refresh_external(wide)
@@ -1221,8 +1245,13 @@ class JobsApp(App):
 
     def check_action(self, action, parameters):
         # App priority bindings run before focused text widgets, including Q.
-        if isinstance(self.screen, (NoteEditor, FilesChooser, ProgressHistory, HistoryDetails, SuspensionConfirm, Sources)) and action in {
-            'details', 'files', 'history', 'sources', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'suspension'
+        protected = {'details', 'files', 'history', 'sources', 'copy_snapshot', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'suspension'}
+        if action in {'dispatch', 'hold', 'order', 'cancel', 'suspension'} and self.selected_copy_text():
+            return False
+        if isinstance(self.focused, (Input, TextArea)) and action in protected:
+            return False
+        if isinstance(self.screen, (NoteEditor, FilesChooser, ProgressHistory, HistoryDetails, SuspensionConfirm, Sources, FrozenText)) and action in {
+            'details', 'files', 'history', 'sources', 'copy_snapshot', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'detach', 'suspension'
         }:
             return False
         return super().check_action(action, parameters)
@@ -1445,6 +1474,83 @@ class JobsApp(App):
             self.query_one('#message', Static).update(literal(f"Cannot edit note: {exc}"))
             return
         self.push_screen(NoteEditor(self.store, job), lambda saved: self.refresh_state())
+
+    def action_detach(self):
+        self.exit()
+
+    def selected_copy_text(self):
+        focused = self.focused
+        if isinstance(focused, (TextArea, Input)) and focused.selected_text:
+            return focused.selected_text
+        get_text = getattr(self.screen, 'get_selected_text', None)
+        return get_text() if get_text else None
+
+    async def on_event(self, event):
+        # Priority Ctrl-C otherwise reaches Detach before any widget handler.
+        if isinstance(event, events.Key) and not event.is_forwarded and event.key == 'ctrl+c':
+            selected = self.selected_copy_text()
+            if selected:
+                event.stop()
+                event.prevent_default()
+                self.request_copy(selected, view=self.screen)
+                return
+        if isinstance(event, events.MouseDown) and not event.is_forwarded:
+            self.copy_mouse_start = event.screen_offset
+            self.copy_mouse_dragged = False
+        elif isinstance(event, (events.MouseMove, events.MouseUp)) and not event.is_forwarded:
+            if self.copy_mouse_start is not None and event.screen_offset != self.copy_mouse_start:
+                self.copy_mouse_dragged = True
+        await super().on_event(event)
+
+    def copy_to_clipboard(self, text):
+        # TextArea's supported copy action also uses the verified backend.
+        self.request_copy(text, view=self.screen)
+
+    def request_copy(self, text, *, view=None):
+        if self.copy_busy:
+            self.notify('Clipboard request pending; selection retained.')
+            return
+        self.copy_busy = True
+        driver_ready = self._driver is not None and sys.stdout.isatty()
+        def deliver():
+            from .clipboard import CopyResult
+            try:
+                if self.clipboard_backend is not None:
+                    result = self.clipboard_backend(text)
+                else:
+                    osc52 = (lambda value: self.call_from_thread(super(JobsApp, self).copy_to_clipboard, value)) if driver_ready else None
+                    result = copy_text(text, osc52=osc52)
+            except Exception as exc:
+                result = CopyResult('FAILED', f'Clipboard failed ({type(exc).__name__}); selection retained.')
+            try:
+                self.call_from_thread(self.accept_copy, result, view)
+            except RuntimeError:
+                pass
+        self.run_worker(deliver, thread=True, group='clipboard', exit_on_error=False)
+
+    def accept_copy(self, result, view):
+        self.copy_busy = False
+        self.copy_result = result
+        if isinstance(view, FrozenText) and view.is_mounted:
+            view.query_one('#copy-status', Static).update(result.message)
+        else:
+            self.notify(result.message)
+
+    def capture_copy_snapshot(self, identity=None):
+        from .snapshot import capture_snapshot
+        job = self.selected()
+        if job is None or self.external_selected_id:
+            return None
+        if identity is not None and identity != (job['id'], job['attempt_id']):
+            return None
+        return capture_snapshot(job, progress=self.selected_progress(job),
+            execution=self.selected_execution(job), captured_at=self.clock() if self.clock else None,
+            read_error=self.progress_error, execution_error=self.execution_error)
+
+    def action_copy_snapshot(self):
+        snapshot = self.capture_copy_snapshot()
+        if snapshot is not None:
+            self.push_screen(CopyPreview(snapshot, self.capture_copy_snapshot))
 
     def action_sources(self):
         if self.external_read_only():

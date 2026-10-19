@@ -266,6 +266,54 @@ class HistoryPage:
 
 
 @dataclass(frozen=True)
+class Verification:
+    """Scoped consistency evidence, never source provenance or acceptance."""
+
+    domain: str
+    status: str
+    source_role: str | None = None
+    counterpart_role: str | None = None
+    observed_frontier: int | None = None
+    checked_frontier: int | None = None
+    native_frontier: int | None = None
+    context: tuple[IterationLevel, ...] = ()
+    fields: tuple[str, ...] = ()
+    precision_policy: str = ''
+    reason: str = ''
+    source_generation: int | None = None
+    counterpart_generation: int | None = None
+    evidence: tuple[Evidence, ...] = ()
+
+
+@dataclass(frozen=True)
+class SettingObservation:
+    name: str
+    value: float | int | str | bool | None
+    origin: str
+    qualification: str = 'effective'
+    evidence: tuple[Evidence, ...] = ()
+    compared_value: float | int | str | bool | None = None
+    discrepancy: bool = False
+
+
+@dataclass(frozen=True)
+class CardCell:
+    metric_ids: tuple[str, ...] = ()
+    label: str = ''
+    kind: str = 'metric'
+    text: str = ''
+    context_kinds: tuple[str, ...] = ()
+    context_labels: tuple[tuple[str, str], ...] = ()
+    show_context: bool = True
+
+
+@dataclass(frozen=True)
+class CardGroup:
+    label: str
+    rows: tuple[tuple[CardCell, ...], ...]
+
+
+@dataclass(frozen=True)
 class ProgressSnapshot:
     context: RunContext
     adapter: str
@@ -288,6 +336,9 @@ class ProgressSnapshot:
     scientific_validation: str = 'not-assessed'
     history_columns: tuple[HistoryColumn, ...] = ()
     completed_durations: tuple[Timing, ...] = ()
+    verification: tuple[Verification, ...] = ()
+    settings: tuple[SettingObservation, ...] = ()
+    card_groups: tuple[CardGroup, ...] = ()
 
     def to_dict(self):
         return {'schema': 1, **asdict(self)}

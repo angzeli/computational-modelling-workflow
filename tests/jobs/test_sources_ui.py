@@ -115,6 +115,31 @@ class SourcesUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state['controller']['dispatch'])
         self.assertTrue(all(job['status'] == 'Hold' for job in state['jobs']))
 
+    async def test_declared_stdout_field_observes_when_oszicar_is_empty(self):
+        stdout = self.output / 'explicit-stream.log'
+        stdout.write_text((self.output / 'OSZICAR').read_text())
+        (self.output / 'OSZICAR').write_text('')
+        before = self.store.path.read_bytes()
+        app = JobsApp(self.store)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.settle(app, pilot)
+            screen = await self.open_sources(app, pilot)
+            await self.configure(screen, pilot)
+            roles = [plan.role for plan in screen.plans]
+            stdout_index = roles.index('stdout')
+            screen.query_one(f'#source-path-{stdout_index}', Input).value = str(stdout)
+            await pilot.pause()
+            await self.validate(app, screen, pilot)
+            await self.activate(app, screen, pilot)
+            snapshot = app.progress_snapshot
+            self.assertTrue(any(item.source_role == 'stdout' for item in snapshot.verification))
+            self.assertTrue(any(item.latest.semantic_id == 'vasp.electronic.dE'
+                                for item in snapshot.metrics))
+            self.assertEqual({item.role for item in snapshot.context.sources},
+                             {'outcar', 'oszicar', 'stdout'})
+            await pilot.press('q')
+        self.assertEqual(self.store.path.read_bytes(), before)
+
     async def test_automatic_inspection_is_optional_and_preserves_history_s(self):
         with self.store.transaction() as con:
             job = self.store.get(con, self.job['id'])
