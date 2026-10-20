@@ -180,8 +180,23 @@ def layout_record(app, scenario, size, selected, svg):
         check(app.progress_snapshot.iteration[0].index == 27, 'Active evaluation is not 27')
         check('@E26' in text or '@26' in text or '#26' in text, 'Last completed force context is not visible')
         check('provisional' in text.lower(), 'Provisional criterion qualification hidden')
-        check('pending' in card.lower() and 'pending' in text.lower(),
-              'Current electronic metrics are missing without a visible pending qualification')
+        electronic = {series.latest.semantic_id: series.latest for series in app.progress_snapshot.metrics
+                      if series.latest.semantic_id.startswith('vasp.electronic.')}
+        for suffix, value, rendered in (('dE', .002, '0.002 eV @SCF2'),
+                                        ('d_eps', .0015, '0.0015 eV @SCF2'),
+                                        ('rms', .002, '0.002 @SCF2')):
+            metric = electronic.get('vasp.electronic.' + suffix)
+            check(metric is not None and metric.value == value
+                  and tuple((level.kind, level.index) for level in metric.context) == (('electronic', 2),)
+                  and metric.qualification == 'source-local',
+                  f'Current electronic {suffix} lost its value or source-local context')
+            check(rendered in card and rendered in text, f'Current electronic {suffix} not rendered')
+        check('source-local' in card and 'source-local' in text,
+              'Current electronic source-local qualification hidden')
+        correspondence = app.progress_snapshot.verification[0]
+        check(correspondence.source_role == 'oszicar' and correspondence.observed_frontier == 2
+              and correspondence.counterpart_role == 'outcar' and correspondence.checked_frontier is None,
+              'Pending OUTCAR correspondence gained a fabricated checked frontier')
     return {'scenario': scenario, 'size': list(size), 'selected': app.selected_id,
             'table_height': table.size.height, 'table_scroll_y': table.scroll_y,
             'footer_bottom': footer.region.bottom, 'progress': card,

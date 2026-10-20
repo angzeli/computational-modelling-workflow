@@ -36,7 +36,9 @@ async def scientific_card_views(root, renders=None):
     captured = example()
     context = replace(captured.context, binding_id='synthetic-ui-card', attempt_id=selected['attempt_id'],
                       job_id=selected['id'], jobs_state=str(store.root))
-    captured = replace(captured, context=context, last_new_evidence_at=NOW - 12, last_success_at=NOW)
+    captured = replace(captured, context=context, last_new_evidence_at=NOW - 12, last_success_at=NOW,
+        metrics=tuple(replace(item, latest=replace(item.latest, observed_at=NOW - 12))
+                      for item in captured.metrics))
     variants = {
         'source-local': replace(captured, verification=(replace(captured.verification[0], status='PENDING', checked_frontier=None),)),
         'partial': replace(captured, verification=(replace(captured.verification[0], status='PARTIAL', checked_frontier=6),)),
@@ -87,9 +89,9 @@ async def scientific_card_views(root, renders=None):
                     if scenario == 'conflict':
                         assert 'CONFLICT' in text and 'ERROR' in text
                     elif scenario in ('partial', 'cached-error'):
-                        assert 'matched 6' in text and 'source-only' in text
+                        assert 'outcar checked 6' in text and '8 source-local' in text
                     if scenario == 'cached-error':
-                        assert all(word in text for word in ('cached', 'native warnings', 'settings differ', 'source-only'))
+                        assert all(word in text for word in ('cached', 'native warnings', 'settings differ', '8 source-local'))
                     assert app.selected_id == selected['display_id']
                     views.append(dict(scenario=scenario, size=size, useful_rows=table.size.height-table.header_height,
                                       card=card, footer_bottom=app.query_one('#shortcuts').region.bottom))

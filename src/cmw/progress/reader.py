@@ -41,6 +41,7 @@ class RegularFileReader:
         self._prefix = b''
         self._tail = b''
         self._generation = 0
+        self._last_attempt = None
         self._last_success = None
         self._last_growth = None
         self._last_change = None
@@ -94,7 +95,7 @@ class RegularFileReader:
             role=self.source.role, path=self.source.path, generation=self._generation,
             health=health, identity=self._identity, file_version=self._signature, offset=self._offset,
             pending_bytes=len(self._partial) + (self.max_line_bytes + 1 if self._dropping_line else 0),
-            has_more=has_more, last_success_at=self._last_success,
+            has_more=has_more, last_attempt_at=self._last_attempt, last_success_at=self._last_success,
             last_growth_at=self._last_growth, last_change_at=self._last_change,
             bytes_read=self._poll_bytes, total_bytes_read=self._total_bytes,
             limitations=tuple(dict.fromkeys((REWRITE_LIMIT, *self._warnings, *limitations))),
@@ -137,6 +138,7 @@ class RegularFileReader:
         """Read at most one data budget, plus at most two bounded sentinels."""
         now = time.time() if now is None else now
         self._poll_bytes = 0
+        self._last_attempt = now
         if self._closed:
             return self._update('CLOSED', reason='Reader is closed')
         if not Path(self.source.path).is_absolute() or '\x00' in self.source.path:

@@ -120,24 +120,33 @@ class SourcesUiTests(unittest.IsolatedAsyncioTestCase):
         stdout.write_text((self.output / 'OSZICAR').read_text())
         (self.output / 'OSZICAR').write_text('')
         before = self.store.path.read_bytes()
-        app = JobsApp(self.store)
-        async with app.run_test(size=(80, 24)) as pilot:
-            await self.settle(app, pilot)
-            screen = await self.open_sources(app, pilot)
-            await self.configure(screen, pilot)
-            roles = [plan.role for plan in screen.plans]
-            stdout_index = roles.index('stdout')
-            screen.query_one(f'#source-path-{stdout_index}', Input).value = str(stdout)
-            await pilot.pause()
-            await self.validate(app, screen, pilot)
-            await self.activate(app, screen, pilot)
-            snapshot = app.progress_snapshot
-            self.assertTrue(any(item.source_role == 'stdout' for item in snapshot.verification))
-            self.assertTrue(any(item.latest.semantic_id == 'vasp.electronic.dE'
-                                for item in snapshot.metrics))
-            self.assertEqual({item.role for item in snapshot.context.sources},
-                             {'outcar', 'oszicar', 'stdout'})
-            await pilot.press('q')
+        for include_oszicar in (True, False):
+            with self.subTest(include_oszicar=include_oszicar):
+                app = JobsApp(self.store)
+                async with app.run_test(size=(80, 24)) as pilot:
+                    await self.settle(app, pilot)
+                    screen = await self.open_sources(app, pilot)
+                    await self.configure(screen, pilot)
+                    roles = [plan.role for plan in screen.plans]
+                    self.assertEqual(roles.count('stdout'), 1)
+                    stdout_index = roles.index('stdout')
+                    self.assertEqual(screen.query_one(f'#source-path-{stdout_index}', Input).value, '')
+                    screen.query_one(f'#source-path-{stdout_index}', Input).value = str(stdout)
+                    if not include_oszicar:
+                        oszicar_index = roles.index('oszicar')
+                        screen.query_one(f'#source-path-{oszicar_index}', Input).value = ''
+                    await pilot.pause()
+                    await self.validate(app, screen, pilot)
+                    await self.activate(app, screen, pilot)
+                    snapshot = app.progress_snapshot
+                    self.assertTrue(any(item.source_role == 'stdout' for item in snapshot.verification))
+                    self.assertTrue(any(item.latest.semantic_id == 'vasp.electronic.dE'
+                                        for item in snapshot.metrics))
+                    expected_roles = {'outcar', 'stdout'} | ({'oszicar'} if include_oszicar else set())
+                    self.assertEqual({item.role for item in snapshot.context.sources}, expected_roles)
+                    self.assertEqual(next(item.path for item in snapshot.context.sources
+                                          if item.role == 'stdout'), str(stdout))
+                    await pilot.press('q')
         self.assertEqual(self.store.path.read_bytes(), before)
 
     async def test_automatic_inspection_is_optional_and_preserves_history_s(self):

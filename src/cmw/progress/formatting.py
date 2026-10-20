@@ -366,6 +366,18 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
         for setting in snapshot.settings:
             lines.append(f'Setting {setting.name}: {setting.value}; {setting.qualification}; origin: {setting.origin}; '
                          f'compared input: {setting.compared_value}; discrepancy: {setting.discrepancy}')
+        for diagnostic in snapshot.source_diagnostics:
+            lines.append(f'Source parser {diagnostic.role}: {diagnostic.status}; '
+                         f'parsed lines {diagnostic.parsed_lines}; latest evaluation complete rows {diagnostic.complete_rows}; '
+                         f'usable prefix {diagnostic.usable_rows}; latest SCF {diagnostic.latest_iteration}; '
+                         f'source segment/evaluation {diagnostic.segment}/{diagnostic.evaluation}; '
+                         f'last complete row observed {diagnostic.last_complete_row_at}; {diagnostic.reason}')
+        for key in ('last_observation_at', 'last_structural_evidence_at', 'last_correspondence_at'):
+            lines.append(f'{key}: {getattr(snapshot, key)}')
+        for source_state in snapshot.sources:
+            lines.append(f'Source clock {source_state.role}: attempt {source_state.last_attempt_at}; '
+                         f'success {source_state.last_success_at}; growth {source_state.last_growth_at}; '
+                         f'bytes {source_state.bytes_read}; total bytes {source_state.total_bytes_read}')
         for check in snapshot.verification:
             lines.append(f'Verification {check.domain}: {check.status}; {check.source_role} generation {check.source_generation} '
                          f'vs {check.counterpart_role} generation {check.counterpart_generation}; '

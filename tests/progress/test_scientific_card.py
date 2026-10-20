@@ -45,8 +45,8 @@ class ScientificCardTests(unittest.TestCase):
                 self.assertEqual([line.split()[0] for line in lines[:4]], ['SCIENTIFIC', 'SCF', 'FORCE', 'ELECTRONIC'])
                 self.assertTrue(all(cell_width(line) <= width for line in lines))
                 self.assertIn('SCF 9 / 300 allowed', text)
-                self.assertIn('3.11 eV @SCF8', text)
-                self.assertIn('2.93 eV @SCF8', text)
+                self.assertIn('3.1087 eV @SCF8', text)
+                self.assertIn('2.9332 eV @SCF8', text)
                 self.assertIn('rms', text)
                 self.assertIn('1.89 @SCF8', text)
                 self.assertIn('EDIFF (both) <1e-05 eV', text)
@@ -75,13 +75,13 @@ class ScientificCardTests(unittest.TestCase):
     def test_partial_and_conflict_scope_and_read_error_remain_visible(self):
         snapshot = example(checked=6)
         text = progress_text(snapshot, width=72, now=112)
-        self.assertIn('outcar matched 6', text)
-        self.assertIn('stdout 8 source-only', text)
+        self.assertIn('outcar checked 6', text)
+        self.assertIn('8 source-local', text)
         self.assertIn('data 12s ago', text)
         conflict = replace(snapshot.verification[0], status='CONFLICT', reason='Complete row energies disagree')
         bad = replace(snapshot, verification=(conflict,), read_health='ERROR', last_success_at=112)
         text = progress_text(bad, width=72, now=120)
-        self.assertIn('CONFLICT outcar', text)
+        self.assertIn('stdout/outcar', text)
         self.assertIn('ERROR', text)
         self.assertIn('data 20s ago', text)
         details = progress_text(bad, detailed=True, now=120)
@@ -104,8 +104,8 @@ class ScientificCardTests(unittest.TestCase):
             self.assertEqual(len(text.splitlines()), 6)
             self.assertIn('native warnings 1', text)
             self.assertIn('* provisional target', text)
-            self.assertIn('SOURCE_CONFLICT', text)
-            self.assertIn('CONFLICT outcar', text)
+            self.assertIn('SOURCE CONFLICT', text)
+            self.assertIn('stdout/outcar', text)
             self.assertIn('0.012 eV/Å @E26', text)
             self.assertIn('data 12s ago', text)
 
@@ -129,8 +129,8 @@ class ScientificCardTests(unittest.TestCase):
         duplicate = replace(snapshot.verification[0], domain='electronic-stream', counterpart_role='oszicar',
                             status='PENDING', checked_frontier=None)
         text = progress_text(replace(snapshot, verification=(*snapshot.verification, duplicate)), width=72, now=112)
-        self.assertIn('outcar matched 8', text)
-        self.assertIn('oszicar pending', text)
+        self.assertIn('outcar matched through SCF 8', text)
+        self.assertNotIn('source-local', text)
         self.assertNotIn('source-only', text)
 
     def test_input_only_criterion_remains_explicitly_provisional(self):
@@ -150,7 +150,7 @@ class ScientificCardTests(unittest.TestCase):
         text = progress_text(replace(snapshot, verification=(check,)), width=72, now=112)
         self.assertIn('outcar unavailable', text)
         self.assertNotIn('matched', text)
-        self.assertIn('3.11 eV @SCF8', text)
+        self.assertIn('3.1087 eV @SCF8', text)
 
     def test_static_completed_force_has_no_target_and_zero_ediff_is_explicit(self):
         snapshot = example()

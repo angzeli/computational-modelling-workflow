@@ -12,6 +12,7 @@ from cmw.jobs.source_selection import activate_selection, inspect_selection, val
 from cmw.jobs.store import JobsError, Store
 from cmw.progress.models import SourceDescriptor
 from cmw.progress.service import ObservationService
+from tests.periodic.vasp.result_fixtures import write_run
 
 
 class SourceSelectionTests(unittest.TestCase):
@@ -42,6 +43,27 @@ class SourceSelectionTests(unittest.TestCase):
         self.assertIn('session-local', context.association)
         self.assertEqual(self.store.path.read_bytes(), before)
         self.assertEqual(resolve_context(self.store, self.job['id']).binding_status, 'SOURCE_UNRESOLVED')
+
+    def test_native_looking_operational_or_nearby_stdout_is_not_implicitly_adopted(self):
+        write_run(self.output)
+        native = (self.output / 'OSZICAR').read_text()
+        operational = Path(self.job['logs']['stdout'])
+        operational.parent.mkdir(parents=True)
+        operational.write_text(native)
+        (self.output / 'stdout.log').write_text(native)
+        (self.output / 'OSZICAR').write_text('')
+        before = self.store.path.read_bytes()
+        context = resolve_context(self.store, self.job['id'],
+            descriptors=(LocationDescriptor('output', self.output),))
+        self.assertEqual(context.binding_status, 'BOUND')
+        self.assertEqual({source.role for source in context.sources}, {'outcar', 'oszicar'})
+        service = ObservationService()
+        self.addCleanup(service.close)
+        snapshot = service.poll(context)
+        self.assertFalse(any(series.latest.semantic_id == 'vasp.electronic.dE'
+                             for series in snapshot.metrics))
+        self.assertEqual({source.role for source in snapshot.sources}, {'outcar', 'oszicar'})
+        self.assertEqual(self.store.path.read_bytes(), before)
 
     def test_compatible_origins_merge_and_conflicts_require_explicit_review(self):
         automatic = (LocationDescriptor('output', self.output, origin='recognized-runner'),)

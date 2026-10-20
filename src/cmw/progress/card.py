@@ -1,6 +1,8 @@
 """Cell-aware scientific cards driven only by adapter presentation descriptors."""
 from __future__ import annotations
 
+import math
+
 from .formatting import age_text, cell_width, context_text, fit_text, value_text
 
 
@@ -47,6 +49,12 @@ def _cell(cell, snapshot, width):
     label = cell.label or metric.label
     # Units and complete-row labels take precedence over verbose metric labels.
     suffix = value_text(metric, compact=True)
+    # Preserve useful native digits when the complete value/unit/context fits.
+    if metric.value is not None and math.isfinite(metric.value):
+        precise = f'{metric.value:.6g}'
+        unit = (' ' + metric.unit.replace('Angstrom', 'Å')) if metric.unit and metric.unit != 'native' else ''
+        if cell_width(label + ' ' + precise + unit + _reference(cell, metric)) <= width:
+            suffix = precise
     if metric.qualification == 'current-input-derived':
         suffix += '*'
     if metric.unit and metric.unit != 'native':
@@ -61,45 +69,58 @@ def _cell(cell, snapshot, width):
 
 
 def verification_summary(snapshot, *, width, now):
-    """Keep checked scope, newer source-local evidence and data age distinct."""
-    parts = []
+    """Keep actual rows, correspondence and observation timestamps independent."""
     conflicts = [item for item in snapshot.verification if item.status == 'CONFLICT']
-    checks = conflicts or list(snapshot.verification)
-    if checks:
-        source = checks[0].source_role or 'source'
-        if conflicts:
-            parts.append(source + ' · CONFLICT ' + '/'.join(dict.fromkeys(
-                item.counterpart_role or 'counterpart' for item in conflicts)))
+    primary = next((item for item in snapshot.verification if item.domain == 'electronic-row'), None)
+    diagnostics = {item.role: item for item in snapshot.source_diagnostics}
+    source = diagnostics.get(primary.source_role) if primary else None
+    parts = []
+    stamps = [item.latest.observed_at for item in snapshot.metrics if item.latest.observed_at is not None
+              and (not primary or not item.latest.evidence or any(ref.source_role == primary.source_role for ref in item.latest.evidence))]
+    stamp = max(stamps) if stamps else None
+    if conflicts:
+        pairs = '/'.join(dict.fromkeys(role for check in conflicts
+                        for role in (check.source_role, check.counterpart_role) if role))
+        parts += ['SOURCE CONFLICT', pairs, 'Enter Details']
+    elif primary and primary.observed_frontier is not None:
+        role, observed, checked = primary.source_role or 'source', primary.observed_frontier, primary.checked_frontier
+        counterpart = primary.counterpart_role or 'counterpart'
+        if source and source.status == 'NOT_YET_PARSED':
+            parts += [role + ' catching up', f'{source.usable_rows} complete rows', f'latest @SCF{observed}' if source.usable_rows else f'retained @SCF{observed}']
+        elif source and source.status in {'UNAVAILABLE', 'MALFORMED', 'UNSUPPORTED', 'UNRESOLVED'}:
+            parts += [role + ' ' + source.status.lower(), f'cached SCF{observed}', 'Details']
+        elif checked is None:
+            parts += [f'{role} SCF {observed} source-local', counterpart + ' ' + primary.status.lower()]
+        elif checked < observed:
+            parts += [f'{role} SCF {observed}', f'{counterpart} checked {checked}', f'{observed} source-local']
         else:
-            frontiers = [item.observed_frontier for item in checks if item.observed_frontier is not None]
-            observed = max(frontiers) if frontiers else None
-            # Adapters order the primary correspondence check before optional
-            # duplicate-stream checks; an empty duplicate cannot undo a match.
-            primary = checks[0]
-            source_only = primary.checked_frontier is None or (observed is not None and primary.checked_frontier < observed)
-            parts.append(source + (f' {observed}' if observed is not None and source_only else '')
-                         + (' source-only' if source_only else ''))
-            for check in checks:
-                counterpart = check.counterpart_role or 'counterpart'
-                if check.checked_frontier is not None:
-                    parts.append(f'{counterpart} matched {check.checked_frontier}')
-                elif check.status == 'UNAVAILABLE':
-                    parts.append(f'{counterpart} unavailable')
-                elif check.status in ('UNSUPPORTED', 'UNRESOLVED'):
-                    parts.append(f'{counterpart} {check.status.lower()}')
-                else:
-                    parts.append(f'{counterpart} pending')
+            parts += [role, f'{counterpart} matched through SCF {checked}']
+        if source and source.latest_iteration == observed and source.last_complete_row_at is not None:
+            stamp = source.last_complete_row_at
+    elif diagnostics:
+        labels = {'UNDECLARED': 'not declared', 'NOT_YET_PARSED': 'catching up'}
+        parts += [item.role + ' ' + labels.get(item.status, item.status.lower()) for item in diagnostics.values()]
+        parts.append('SCF values unavailable')
+        stamp = None
+    elif primary:
+        parts += [(primary.source_role or 'source') + ' values unavailable',
+                  (primary.counterpart_role or 'counterpart') + ' ' + primary.status.lower()]
     else:
+        # Other adapters retain generic observation wording without VASP assumptions.
         parts.append('source observation')
-    if snapshot.context.source_conflicts or snapshot.status in ('SOURCE_CONFLICT', 'SOURCE_UNRESOLVED', 'UNSUPPORTED'):
+        stamps = [item.latest.observed_at for item in snapshot.metrics if item.latest.observed_at is not None]
+        stamp = max(stamps) if stamps else None
+    if not conflicts and (snapshot.context.source_conflicts or snapshot.status in ('SOURCE_CONFLICT', 'SOURCE_UNRESOLVED', 'UNSUPPORTED')):
         parts.insert(0, snapshot.status if snapshot.status != 'OBSERVED' else 'SOURCE_CONFLICT')
     if snapshot.read_health not in ('OK', 'PENDING'):
         parts.insert(0, snapshot.read_health)
-    if any(source.has_more for source in snapshot.sources):
+    if snapshot.completeness == 'CATCHING_UP' and not (source and source.status == 'NOT_YET_PARSED'):
         parts.insert(0, 'CATCHING UP')
-    age = 'data ' + age_text(snapshot.last_new_evidence_at, now)
     text = ' · '.join(dict.fromkeys(parts))
-    return fit_text(text, max(0, width - cell_width(age) - 3)) + ' · ' + age
+    if stamp is not None:
+        age = 'data ' + age_text(stamp, now)
+        return fit_text(text, max(0, width - cell_width(age) - 3)) + ' · ' + age
+    return fit_text(text, width)
 
 
 def card_text(snapshot, *, width, now, max_lines=None):

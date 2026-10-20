@@ -48,7 +48,23 @@ class CopyUiTests(unittest.IsolatedAsyncioTestCase):
         app = self.app()
         before = self.store.snapshot()['jobs']
         async with app.run_test(size=(77, 24)) as pilot:
-            app.progress_snapshot = fixture(self.jobs[0])
+            table = app.query_one('#table', DataTable)
+            async def select_job(job):
+                table.move_cursor(row=app.row_ids.index(job['display_id']), animate=False)
+                await pilot.pause()
+                self.assertEqual(app.selected_id, job['display_id'])
+                self.assertEqual(app.progress_selection, app.progress_identity())
+                self.assertEqual(app.progress_selection[1:3], (job['id'], job['attempt_id']))
+                app.progress_snapshot = fixture(job)
+                # A normal refresh must preserve the same cursor, binding and cache.
+                app.refresh_state()
+                await pilot.pause()
+                self.assertEqual(app.selected_id, job['display_id'])
+                self.assertEqual(app.row_ids[table.cursor_row], job['display_id'])
+                self.assertEqual(app.selected_progress(job), app.progress_snapshot)
+                self.assertIsNotNone(app.progress_snapshot)
+
+            await select_job(self.jobs[0])
             await pilot.press('y')
             self.assertIsInstance(app.screen, CopyPreview)
             view = app.screen
@@ -59,18 +75,18 @@ class CopyUiTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(area.read_only)
             await pilot.press('q', 'u', 'x', 'p', 'y')
             self.assertEqual(area.text, initial)
-            app.selected_id = self.jobs[1]['display_id']
-            app.progress_snapshot = fixture(self.jobs[1])
-            await pilot.pause()
+            await select_job(self.jobs[1])
             self.assertEqual(area.text, initial)
+            self.assertEqual(app.selected_id, self.jobs[1]['display_id'])
             await pilot.click('#copy-refresh')
             self.assertEqual(area.text, initial)
             self.assertIn('retained', str(view.query_one('#copy-status', Static).render()))
             await pilot.click('#copy-all')
             await self.copied(app, pilot)
             self.backend.assert_called_with(initial)
-            app.selected_id = self.jobs[0]['display_id']
+            await select_job(self.jobs[0])
             app.progress_snapshot = replace(fixture(self.jobs[0]), messages=('Explicit refresh evidence',))
+            self.assertEqual(app.selected_id, self.jobs[0]['display_id'])
             await pilot.click('#copy-refresh')
             self.assertIn('Explicit refresh evidence', area.text)
             view.query_one(Select).value = 'json'

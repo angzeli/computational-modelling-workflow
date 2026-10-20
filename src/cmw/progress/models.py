@@ -102,6 +102,7 @@ class SourceState:
     limitations: tuple[str, ...] = ()
     identity: tuple[int, int] | None = None
     file_version: tuple[int, int, int] | None = None
+    last_attempt_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -286,6 +287,22 @@ class Verification:
 
 
 @dataclass(frozen=True)
+class SourceDiagnostic:
+    """Parser evidence scoped to one source generation's latest evaluation."""
+
+    role: str
+    status: str
+    reason: str = ''
+    parsed_lines: int = 0
+    complete_rows: int = 0
+    usable_rows: int = 0
+    latest_iteration: int | None = None
+    segment: int | None = None
+    evaluation: int | None = None
+    last_complete_row_at: float | None = None
+
+
+@dataclass(frozen=True)
 class SettingObservation:
     name: str
     value: float | int | str | bool | None
@@ -339,6 +356,10 @@ class ProgressSnapshot:
     verification: tuple[Verification, ...] = ()
     settings: tuple[SettingObservation, ...] = ()
     card_groups: tuple[CardGroup, ...] = ()
+    source_diagnostics: tuple[SourceDiagnostic, ...] = ()
+    last_observation_at: float | None = None
+    last_structural_evidence_at: float | None = None
+    last_correspondence_at: float | None = None
 
     def to_dict(self):
         return {'schema': 1, **asdict(self)}

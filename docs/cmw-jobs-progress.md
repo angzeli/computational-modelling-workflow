@@ -56,6 +56,31 @@ Enter Details exposes the cached full evidence without another reader. Files,
 Name, Note, Status, Elapsed and existing controls retain their purposes. No overall
 convergence percentage, ETA, scientific-validity badge or automatic stop is shown.
 
+### Source evidence and independent targets
+
+A missing electronic measurement does not hide a known target. The card obtains
+EDIFF and EDIFFG independently from qualified effective OUTCAR settings, falling
+back only to explicitly declared provisional INCAR evidence. Contradictory,
+unsupported or other-segment settings cannot restore a target. Before a force
+measurement and its constraint comparison exist, a negative EDIFFG is shown as a
+conditional threshold; static calculations remain target N/A.
+
+JSON, Details and Copy distinguish undeclared, empty, incomplete/catching-up,
+unparsed, malformed, unsupported, unavailable, source-local, partially matched,
+matched and conflicting electronic evidence. Source diagnostics count parsed
+lines per reader generation and complete/usable rows in its latest evaluation.
+Retained earlier metrics keep their own row context and timestamp. An empty
+source never receives a source-local claim. An explicit unsupported native banner
+cannot be matched merely because its numerical energies agree.
+
+The card's data age is the observation time of the displayed complete electronic
+row, never a newer OUTCAR header or setting. Details and Copy separately expose
+observation attempt, successful source read, observed file growth, complete row,
+OUTCAR structural/setting evidence and correspondence advancement times. These
+are client observation times, not reconstructed native write times. An unchanged
+poll advances the read clock without refreshing electronic evidence. Bounded
+readers and parser queues remain unchanged; no per-poll database writes occur.
+
 ## Association and sources
 
 The default is automatic: the Jobs bridge consumes the existing

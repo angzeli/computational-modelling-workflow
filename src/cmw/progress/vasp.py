@@ -19,7 +19,7 @@ from cmw.periodic.vasp.results import (
     parse_ionic_summary,
 )
 from .models import (Criterion, IterationLevel, Metric, MetricSeries,
-                     ProgressEvent, ProgressSnapshot, HistoryEntry, HistoryColumn, Timing, Verification, SettingObservation, comparable)
+                     ProgressEvent, ProgressSnapshot, HistoryEntry, HistoryColumn, Timing, Verification, SettingObservation, SourceDiagnostic, comparable)
 
 MAX_EVALUATIONS = 16
 MAX_ITERATIONS = 1024
@@ -56,10 +56,12 @@ class _ElectronicStream:
     evaluations: deque = field(default_factory=deque)
     segment: int = 1
     banner_seen: bool = False
+    version: str | None = None
     next_index: int = 1
     current: dict | None = None
     last_native: int | None = None
     serial: int = 0
+    parsed_lines: int = 0
 
 
 class VaspAdapter:
@@ -86,6 +88,9 @@ class VaspAdapter:
         self.poscar_issue = None
         self.events = deque(maxlen=64)
         self.last_new = None
+        self.last_structural = None
+        self.last_correspondence = None
+        self.checked_prefixes = {}
         self.issues = deque(maxlen=32)
         self.streams = {role: _ElectronicStream() for role in ('oszicar', 'stdout')
                         if any(source.role.lower() == role for source in context.sources)}
@@ -172,6 +177,8 @@ class VaspAdapter:
         # Keep complete source-local values even if an unavailable counterpart lags.
         # A malformed or discontinuous row never becomes a fabricated prefix.
         result = []
+        if item.get('version') not in (None, '6.6.1'):
+            return result
         for row in item['rows']:
             if (row.get('malformed') or row['label'] != len(result) + 1
                     or row['algorithm'] not in {'DAV', 'RMM'}
@@ -190,6 +197,8 @@ class VaspAdapter:
         self.events.append(ProgressEvent(identity, kind, self.context.stage,
                                         max(1, self.out_segment), context, (ref,), message))
         self.last_new = line.observed_at
+        if ref.source_role.lower() == 'outcar':
+            self.last_structural = line.observed_at
 
     def _issue(self, message):
         if message not in self.issues:
@@ -250,6 +259,7 @@ class VaspAdapter:
                 if key in target and target[key]['value'] != value:
                     self._out_conflict('conflicting effective/echoed setting: ' + key)
                 target[key] = {'value': value, 'reference': line.evidence}
+                self.last_structural = line.observed_at
         if evaluation is not None:
             for match in SET_RE.finditer(text):
                 previous = out['settings'].get(match[1].upper())
@@ -388,6 +398,7 @@ class VaspAdapter:
                 evaluation['rows'][-1]['energy'] = parsed
                 evaluation['rows'][-1]['energy_ref'] = line.evidence
             self.last_new = line.observed_at
+            self.last_structural = line.observed_at
         energies = re.search(r'energy\s+without entropy\s*=\s*(' + NUMBER + r').*energy\(sigma->0\)\s*=\s*(' + NUMBER + ')', text, re.I)
         if energies and evaluation and out['in_energy']:
             evaluation['energy_refs'].update({key: line.evidence for key in ('without_entropy', 'sigma_to_zero')})
@@ -486,7 +497,7 @@ class VaspAdapter:
     def _new_osz_evaluation(self, stream):
         stream.serial += 1
         item = {'index': stream.next_index, 'segment': stream.segment, 'rows': [],
-                'summary': None, 'serial': stream.serial}
+                'summary': None, 'serial': stream.serial, 'version': stream.version}
         stream.next_index += 1
         if len(stream.evaluations) >= MAX_EVALUATIONS:
             dropped = stream.evaluations[0]
@@ -503,7 +514,10 @@ class VaspAdapter:
         return item
 
     def _read_electronic(self, line, stream):
-        if BANNER.match(line.text):
+        stream.parsed_lines += 1
+        banner = BANNER.match(line.text)
+        if banner:
+            stream.version = banner[1]
             if stream.banner_seen or stream.evaluations:
                 stream.segment += 1
             stream.banner_seen = True
@@ -561,9 +575,11 @@ class VaspAdapter:
         for key in sorted(effective.keys() | provisional.keys()):
             actual, requested = effective.get(key), provisional.get(key)
             record = actual or requested
+            conflict = (any(message.endswith(': ' + key) for message in self.out['conflicts']) if actual else
+                        any(message.endswith(': ' + key) for message in self.incar_issues))
             result.append(SettingObservation(key, record['value'],
                 'OUTCAR effective ' + key if actual else 'Declared INCAR (historical linkage unestablished)',
-                'effective' if actual else 'provisional', (record['reference'],),
+                'conflict' if conflict else 'effective' if actual else 'provisional', (record['reference'],),
                 requested['value'] if actual and requested else None,
                 bool(actual and requested and actual['value'] != requested['value'])))
         return tuple(result)
@@ -634,6 +650,8 @@ class VaspAdapter:
             return 'unresolved', [], 'Electronic source segment cannot be associated with the current native segment'
         if item is None:
             return 'pending', [], 'Awaiting electronic counterpart for the native evaluation'
+        if item.get('version') not in (None, '6.6.1'):
+            return 'unsupported', [], 'Declared electronic banner is outside VASP 6.6.1 support'
         native_rows, rows = evaluation['rows'], item['rows']
         if self.out['evaluations'] and evaluation['index'] < self.out['evaluations'][0]['index']:
             return 'unresolved', [], 'Native correspondence buffer was exceeded'
@@ -696,6 +714,8 @@ class VaspAdapter:
             return 'UNRESOLVED', [], (), 'Source generations changed independently; duplicate association unestablished'
         if other is None:
             return 'PENDING', [], (), 'Duplicate electronic counterpart has not yet written this evaluation'
+        if any(value.get('version') not in (None, '6.6.1') for value in (item, other)):
+            return 'UNSUPPORTED', [], (), 'Electronic banner is outside VASP 6.6.1 support'
         checked, fields = list(previous), set(previous_fields)
         start = len(checked)
         for index, (left, right) in enumerate(zip(item['rows'][start:], other['rows'][start:]), start + 1):
@@ -807,9 +827,79 @@ class VaspAdapter:
         local_context = (IterationLevel('electronic', rows[-1]['label'], f"SCF {rows[-1]['label']}"),)
         return metrics, tuple(verification), local_context
 
+    def _source_diagnostics(self, verification):
+        result = []
+        for role in ('oszicar', 'stdout'):
+            stream = self.streams.get(role)
+            if stream is None:
+                result.append(SourceDiagnostic(role, 'UNDECLARED', 'No source role in this attempt binding'))
+                continue
+            state = self.states.get(role)
+            item = stream.evaluations[-1] if stream.evaluations else None
+            rows = self._usable_rows(item) if item else []
+            complete = [row for row in item['rows'] if not row.get('malformed')] if item else []
+            reason = 'Counts refer to the latest parsed evaluation in this source generation'
+            status = 'SOURCE_LOCAL' if rows else 'EMPTY'
+            if state is None or state.health == 'PENDING':
+                status, reason = 'NOT_YET_PARSED', 'Source has not yet been read'
+            elif state.health not in {'OK', 'MALFORMED'}:
+                status, reason = 'UNAVAILABLE', 'Reader: ' + state.health + '; cached rows are not a fresh read'
+            elif state.health == 'MALFORMED' or item and any(row.get('malformed') for row in item['rows']):
+                status, reason = 'MALFORMED', 'Malformed complete record; only an earlier supported prefix may be usable'
+            elif item and item.get('version') not in (None, '6.6.1'):
+                status, reason = 'UNSUPPORTED', 'Declared electronic banner is outside VASP 6.6.1 support'
+            elif item and len(rows) < len(item['rows']):
+                status, reason = 'UNSUPPORTED', 'Electronic algorithm or ordered labels lack a supported prefix'
+            elif item and self.out and item['segment'] < self.out_segment:
+                status, reason = 'UNRESOLVED', 'Electronic rows belong to an earlier segment; no current association'
+            elif state.has_more or state.pending_bytes or self.pending_lines.get(role):
+                status, reason = 'NOT_YET_PARSED', 'Bounded read/parser is catching up or a trailing record is incomplete'
+            elif not rows:
+                status = 'EMPTY' if state.offset == 0 else 'UNPARSED'
+                reason = ('Accessible regular file has zero bytes' if status == 'EMPTY' else
+                          'Bytes read, but no supported complete DAV/RMM prefix; inspect declared dialect and continuity')
+            else:
+                check = next((check for check in verification if check.domain == 'electronic-row'
+                              and check.source_role == role), None)
+                if check is None and self.out and item['segment'] == self.out_segment:
+                    native = next((entry for entry in self.out['evaluations']
+                                   if entry['index'] == item['index']), None)
+                    if native is not None:
+                        native_status, matched, native_reason = self._correspondence(native, role)
+                        fields = ('label', 'energy') + (('algorithm',) if matched and all(
+                            row['algorithm'] for row in native['rows'][:len(matched)]) else ())
+                        check = Verification('electronic-row', native_status.upper(),
+                            checked_frontier=matched[-1]['label'] if matched else None,
+                            fields=fields if matched else (), reason=native_reason)
+                if any(segment == item['segment'] and role in roles for segment, _, roles in self.stream_conflicts):
+                    status, reason = 'CONFLICT', 'Comparable complete native evidence contradicts; see verification'
+                elif check and check.status in {'UNRESOLVED', 'UNSUPPORTED'}:
+                    status, reason = check.status, check.reason
+                elif check and check.checked_frontier is not None:
+                    status = 'MATCHED' if check.checked_frontier == rows[-1]['label'] else 'PARTIALLY_MATCHED'
+                    reason += f'; OUTCAR checked through SCF {check.checked_frontier} for {", ".join(check.fields)} only'
+            result.append(SourceDiagnostic(role, status, reason, stream.parsed_lines, len(complete), len(rows),
+                rows[-1]['label'] if rows else None, item['segment'] if item else None,
+                item['index'] if item else None, rows[-1]['line'].observed_at if rows else None))
+        return tuple(result)
+
+    def _track_correspondence(self, verification, now):
+        current = {}
+        for check in verification:
+            if check.checked_frontier is None:
+                continue
+            key = (check.domain, check.source_role, check.counterpart_role, check.source_generation,
+                   check.counterpart_generation, self.osz_segment, check.context)
+            value = (check.checked_frontier, check.fields)
+            previous = self.checked_prefixes.get(key)
+            if previous is None or value[0] > previous[0] or set(value[1]) > set(previous[1]):
+                self.last_correspondence = now
+            current[key] = value
+        self.checked_prefixes = current
+
     def _criterion(self, key, unit, definition):
         setting = next((item for item in self._settings() if item.name == key), None)
-        value = setting.value if setting else None
+        value = setting.value if setting and setting.qualification in {'effective', 'provisional'} else None
         origin = setting.origin if setting else ''
         if setting and setting.qualification == 'provisional':
             definition = definition.replace('effective EDIFF', 'declared provisional EDIFF') + '; historical linkage unestablished'
@@ -1183,6 +1273,8 @@ class VaspAdapter:
             self.generations[role] = update.state.generation
             if update.reset and prior is not None and prior > 0 and role in {'outcar', 'oszicar', 'stdout'}:
                 self.asymmetric_reset = True
+                self.last_correspondence = None
+                self.checked_prefixes.clear()
                 self.history_updates.clear()
                 self.pending_lines.pop(role, None)
                 self.pending_electronic_history.clear()
@@ -1190,6 +1282,7 @@ class VaspAdapter:
                 if role == 'outcar':
                     self.out = None
                     self.out_segment = 0
+                    self.last_structural = None
                 else:
                     self.streams[role] = _ElectronicStream()
                 self.stream_conflicts = deque((entry for entry in self.stream_conflicts if role not in entry[2]), maxlen=32)
@@ -1222,6 +1315,7 @@ class VaspAdapter:
         self._select_electronic()
         self._check_all_streams()
         electronic_metrics, verification, local_iteration = self._selected_observation()
+        self._track_correspondence(verification, now)
         messages, limitations = [], list(self.context.limitations)
         limitations.extend(self.issues)
         limitations.extend(('Live observations never establish scientific acceptance or process ownership',
@@ -1335,6 +1429,9 @@ class VaspAdapter:
                                 completed_durations=self._completed_durations(),
                                 last_new_evidence_at=self.last_new, messages=tuple(messages),
                                 verification=verification, settings=settings,
+                                source_diagnostics=self._source_diagnostics(verification),
+                                last_observation_at=now, last_structural_evidence_at=self.last_structural,
+                                last_correspondence_at=self.last_correspondence,
                                 limitations=tuple(dict.fromkeys(limitations)))
         from .vasp_card import vasp_card_groups
         return replace(snapshot, card_groups=vasp_card_groups(snapshot))

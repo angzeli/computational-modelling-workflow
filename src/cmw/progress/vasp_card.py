@@ -1,28 +1,52 @@
 """VASP presentation descriptors; no numerical inference or file reading."""
+import math
+
 from .models import CardCell, CardGroup
+
+
+def _qualified_settings(snapshot):
+    settings = {}
+    for item in snapshot.settings:
+        if item.qualification not in ('effective', 'provisional'):
+            continue
+        if item.name not in settings or settings[item.name].qualification != 'effective':
+            settings[item.name] = item
+    return settings
+
+
+def _finite_value(setting):
+    value = setting.value if setting else None
+    return value if type(value) in (int, float) and math.isfinite(value) else None
 
 
 def vasp_card_groups(snapshot):
     labels = (('evaluation', 'E'), ('electronic', 'SCF'))
     electronic = {'context_kinds': ('electronic',), 'context_labels': labels}
     force_ids = ('vasp.force.maximum_atomic_norm.free', 'vasp.force.maximum_atomic_norm.all')
-    settings = {item.name: item for item in snapshot.settings if item.qualification != 'other-segment'}
+    settings = _qualified_settings(snapshot)
+    force_setting, energy_setting = settings.get('EDIFFG'), settings.get('EDIFF')
+    force_value, energy_value = _finite_value(force_setting), _finite_value(energy_setting)
     target = 'Target unavailable'
     if snapshot.calculation == 'static':
         target = 'Target N/A · static'
-    elif 'EDIFFG' in settings:
-        value = settings['EDIFFG'].value
-        if isinstance(value, (int, float)) and value > 0:
+    elif force_value is not None:
+        if force_value > 0:
             target = 'Target N/A · ionic energy'
-        elif value == 0:
+        elif force_value == 0:
             target = 'Target N/A · EDIFFG=0'
-        if target != 'Target unavailable' and settings['EDIFFG'].qualification == 'provisional':
+        elif snapshot.calculation == 'fixed-cell-relaxation' and snapshot.status != 'UNSUPPORTED':
+            # The setting is known before a force/constraint comparison exists.
+            target = f'Conditional <{-force_value:g} eV/Å'
+        if target != 'Target unavailable' and force_setting.qualification == 'provisional':
             target += '*'
     energy_ids = ('vasp.electronic.dE', 'vasp.electronic.d_eps')
     energy_target = 'EDIFF unavailable'
-    if 'EDIFF' in settings and settings['EDIFF'].value == 0:
-        energy_target = 'EDIFF=0 · fixed iterations'
-        if settings['EDIFF'].qualification == 'provisional':
+    if energy_value is not None:
+        if energy_value == 0:
+            energy_target = 'EDIFF=0 · fixed iterations'
+        elif energy_value > 0 and snapshot.status != 'UNSUPPORTED':
+            energy_target = f'EDIFF (both) <{energy_value:g} eV'
+        if energy_target != 'EDIFF unavailable' and energy_setting.qualification == 'provisional':
             energy_target += '*'
     evaluation = next((level for level in snapshot.iteration if level.kind == 'evaluation'), None)
     evaluation_text = evaluation.label.replace('evaluation', 'Eval', 1) if evaluation else 'Eval unassigned'

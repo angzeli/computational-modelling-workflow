@@ -168,6 +168,15 @@ def render_snapshot(snapshot, *, mode='summary', redact_paths=False):
     else:
         lines += [f"Scientific status: {progress['status']} · {progress['read_health']} · {progress['completeness']}",
                   f"Observed active context: {_context(progress['iteration'])} · segment {progress['segment']} · calculation {progress.get('calculation') or 'unknown'}"]
+        for diagnostic in progress.get('source_diagnostics', []):
+            lines.append(f"Source parser {diagnostic['role']}: {diagnostic['status']} · "
+                         f"parsed lines {diagnostic['parsed_lines']} · latest evaluation complete rows {diagnostic['complete_rows']} · "
+                         f"usable prefix {diagnostic['usable_rows']} · latest SCF {diagnostic.get('latest_iteration')} · "
+                         f"last complete row observed {diagnostic.get('last_complete_row_at')} · {diagnostic['reason']}")
+        for source in progress.get('sources', []):
+            lines.append(f"Source clock {source['role']}: attempt {source.get('last_attempt_at')} · "
+                         f"success {source.get('last_success_at')} · growth {source.get('last_growth_at')} · "
+                         f"bytes {source.get('bytes_read')} · total bytes {source.get('total_bytes_read')}")
         for check in progress.get('verification', []):
             lines.append(f"Verification: {check['domain']} · {check['status']} · source {check.get('source_role')} "
                          f"through {check.get('observed_frontier')} · counterpart {check.get('counterpart_role')} "
@@ -199,7 +208,8 @@ def render_snapshot(snapshot, *, mode='summary', redact_paths=False):
             if metric.get('relation'):
                 line += ' · ' + metric['relation']
             lines.append(line)
-        for key in ('last_new_evidence_at', 'last_source_change_at', 'last_file_growth_at', 'last_success_at'):
+        for key in ('last_observation_at', 'last_structural_evidence_at', 'last_correspondence_at',
+                    'last_new_evidence_at', 'last_source_change_at', 'last_file_growth_at', 'last_success_at'):
             stamp = progress.get(key)
             age = 'unknown' if stamp is None else f"{max(0, data['captured_at'] - stamp):g}s ago"
             lines.append(f'{key}: {stamp} ({age})')
