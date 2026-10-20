@@ -419,6 +419,16 @@ class JobsTable(DataTable):
         self.app.sync_progress_selection()
 
 
+class ScientificProgress(SelectableStatic):
+    """Apply frame chrome with the accepted paint, including deferred selections."""
+
+    def update(self, content='', *, layout=True):
+        if not getattr(self, '_copy_selected', False):
+            plain = content.plain if isinstance(content, Text) else str(content)
+            self.set_class(any(line.startswith('┌─') for line in plain.splitlines()), 'framed')
+        super().update(content, layout=layout)
+
+
 class JobsApp(App):
     TITLE = "CMW / JOBS"
     CSS = """
@@ -436,6 +446,7 @@ class JobsApp(App):
     #selected { height: auto; max-height: 7; margin: 1 1 0 1; padding: 0 1; border-left: solid #5c8996; }
     #execution { height: auto; max-height: 2; margin: 0 1; padding: 0 1; border-left: solid #5c8996; color: #efbd82; }
     #progress { height: auto; max-height: 11; margin: 0 1; padding: 0 1; border-left: solid #5c8996; }
+    #progress.framed { border-left: none; padding: 0 1 0 0; }
     #events { height: 5; margin: 1 1 0 1; color: #9caeba; }
     #message { height: auto; max-height: 3; padding: 0 1; color: #efbd82; }
     #command-bar { dock: bottom; height: auto; }
@@ -517,7 +528,7 @@ class JobsApp(App):
         yield JobsTable(id="external", cursor_type="row", zebra_stripes=True)
         yield SelectableStatic(id="selected", markup=False)
         yield Static(id="execution", markup=False)
-        yield SelectableStatic(id="progress", markup=False)
+        yield ScientificProgress(id="progress", markup=False)
         yield Static(id="events", markup=False)
         yield Static("Best-effort guard · Q / Ctrl-C detaches; execution state unchanged.", id="message", markup=False)
         with Vertical(id="command-bar"):
@@ -911,7 +922,7 @@ class JobsApp(App):
             # Reserve the longer scientific label before the formatter places
             # bounded context and essential trailing qualifiers such as pending.
             text = progress_text(display_snapshot, compact=compact, width=width if structured_card else width - 4,
-                                 now=self.clock() if self.clock else None, max_lines=line_budget - bool(self.progress_error))
+                                 now=self.clock() if self.clock else None, max_lines=line_budget - bool(self.progress_error), framed=True)
             lines = text.splitlines()
             if lines and lines[0].startswith("ACTIVE: "):
                 lines[0] = set_cell_size("Scientific: " + lines[0][8:], width).rstrip()
@@ -927,7 +938,13 @@ class JobsApp(App):
         if job and effective_status(job) == 'Suspended':
             text = 'Suspended: output inactivity is expected; source age remains actual.\n' + text
             widget.styles.max_height = line_budget + 1
-        widget.update(literal(text))
+        framed = any(line.startswith('┌─') for line in text.splitlines())
+        rendered = literal(text)
+        if framed:
+            for index, char in enumerate(rendered.plain):
+                if char in '─│┌┐└┘├┤┴':
+                    rendered.stylize('#5c8996', index, index + 1)
+        widget.update(rendered)
 
     def collect_activity(self):
         if self.collecting:

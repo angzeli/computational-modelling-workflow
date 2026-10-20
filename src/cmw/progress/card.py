@@ -123,7 +123,41 @@ def verification_summary(snapshot, *, width, now):
     return fit_text(text, width)
 
 
-def card_text(snapshot, *, width, now, max_lines=None):
+def _frame(snapshot, *, width, now, heading, max_lines):
+    """Use viewport/descriptor geometry only, so polling cannot shift columns."""
+    rows = [(group.label if index == 0 else '', row)
+            for group in snapshot.card_groups for index, row in enumerate(group.rows)]
+    columns = max((len(row) for _, row in rows), default=0)
+    if not columns or width < 54 or max_lines is not None and len(rows) + 4 > max_lines:
+        return None
+    label_width = max(cell_width(group.label) for group in snapshot.card_groups)
+    # Reclaim decoration in stages before returning to the original plain card.
+    for padding, separator, minimum in ((1, '│', 32), (0, '│', 29), (0, ' ', 28)):
+        available = width - 2 - columns - 2 * padding * (columns + 1) - label_width
+        value_width, remainder = divmod(available, columns)
+        title = (' ' if padding else '') + heading + (' ' if padding else '')
+        if value_width < minimum or cell_width(title) + 1 > width - 2:
+            continue
+        widths = [label_width] + [value_width] * columns
+        widths[-1] += remainder
+        def line(values):
+            return '│' + separator.join(' ' * padding + value + ' ' * (size - cell_width(value) + padding)
+                                        for value, size in zip(values, widths)) + '│'
+        lines = ['┌─' + title + '─' * (width - 3 - cell_width(title)) + '┐']
+        for label, row in rows:
+            values = [label] + [_cell(cell, snapshot, size) for cell, size in zip(row, widths[1:])]
+            lines.append(line(values + [''] * (len(widths) - len(values))))
+        join = '┴' if separator == '│' else '─'
+        lines.append('├' + join.join('─' * (size + 2 * padding) for size in widths) + '┤')
+        footer_width = width - 2 - 2 * padding
+        footer = verification_summary(snapshot, width=footer_width, now=now)
+        lines.append('│' + ' ' * padding + footer + ' ' * (footer_width - cell_width(footer) + padding) + '│')
+        lines.append('└' + '─' * (width - 2) + '┘')
+        return '\n'.join(lines)
+    return None
+
+
+def card_text(snapshot, *, width, now, max_lines=None, framed=False):
     """Render fixed logical groups; engine-specific meaning lives in their cells."""
     label_width = max((cell_width(group.label) for group in snapshot.card_groups), default=0)
     label_width = min(label_width, max(0, width // 4))
@@ -146,6 +180,10 @@ def card_text(snapshot, *, width, now, max_lines=None):
     if any('UNCERTAIN' in (item.latest.relation or '') for item in snapshot.metrics):
         notices.append('? uncertain')
     heading = ' · '.join(('SCIENTIFIC', *notices))
+    if framed:
+        panel = _frame(snapshot, width=width, now=now, heading=heading, max_lines=max_lines)
+        if panel is not None:
+            return panel
     lines = [heading]
     for group in snapshot.card_groups:
         for index, row in enumerate(group.rows):

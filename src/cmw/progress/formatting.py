@@ -312,7 +312,7 @@ def _unresolved_card(snapshot, *, width, max_lines):
     return '\n'.join(fit_text(line, width) for line in lines)
 
 
-def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, width=120, now=None, max_lines=None):
+def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, width=120, now=None, max_lines=None, framed=False):
     """Render adapter descriptors without engine-specific metric names or rules."""
     now = time.time() if now is None else now
     context = snapshot.context
@@ -325,7 +325,7 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
             return _unresolved_card(snapshot, width=width, max_lines=limit)
         if snapshot.card_groups:
             from .card import card_text
-            card = card_text(snapshot, width=width, now=now, max_lines=limit)
+            card = card_text(snapshot, width=width, now=now, max_lines=limit, framed=framed)
         else:
             card = _card_text(snapshot, compact=compact, width=width, now=now, max_lines=limit)
         if unresolved and not snapshot.card_groups:
