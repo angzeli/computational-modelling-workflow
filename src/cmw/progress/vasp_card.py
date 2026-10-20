@@ -21,7 +21,7 @@ def _finite_value(setting):
 
 def vasp_card_groups(snapshot):
     labels = (('evaluation', 'E'), ('electronic', 'SCF'))
-    electronic = {'context_kinds': ('electronic',), 'context_labels': labels}
+    electronic = {'context_kinds': ('electronic',), 'context_labels': labels, 'value_format': 'scientific'}
     force_ids = ('vasp.force.maximum_atomic_norm.free', 'vasp.force.maximum_atomic_norm.all')
     settings = _qualified_settings(snapshot)
     force_setting, energy_setting = settings.get('EDIFFG'), settings.get('EDIFF')

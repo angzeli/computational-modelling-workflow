@@ -312,6 +312,114 @@ class StateTests(unittest.TestCase):
         coordinator.channel.write.assert_not_called()
         self.send.assert_not_called()
 
+    def test_exit_after_running_domain_validation_preserves_final_timing(self):
+        from cmw.jobs.runtime import finish
+        for boundary in ('before-status', 'during-status', 'matching-zombie', 'zombie-topology-gone'):
+            with self.subTest(boundary=boundary):
+                self.change(status='Run')
+                job = self.phase('Run', revision=4, request={'id': 'continued', 'action': 'continue'},
+                                 clock_started=80, intervals=[{'start': 85, 'end': 90}],
+                                 accounting_uncertain=False, clock_finished=None)
+                coordinator = self.coordinator()
+                probes = 0
+
+                def alive(member):
+                    nonlocal probes
+                    if member == MEMBER:
+                        probes += 1
+                        return boundary == 'during-status' or probes == 1
+                    return True
+
+                zombie = boundary in {'matching-zombie', 'zombie-topology-gone'}
+                identify = (None if zombie
+                            else control.psutil.NoSuchProcess(MEMBER['pid']))
+                status = (None if zombie
+                          else control.psutil.NoSuchProcess(MEMBER['pid']))
+                topology = ProcessLookupError() if boundary == 'zombie-topology-gone' else None
+                with patch.object(control, 'owner_alive', side_effect=alive), \
+                        patch.object(control, 'identity', return_value=MEMBER, side_effect=identify), \
+                        patch.object(control.os, 'getsid', return_value=ANCHOR['pid'], side_effect=topology), \
+                        patch.object(control.psutil, 'Process') as process, \
+                        patch.object(control.time, 'monotonic', return_value=1):
+                    process.return_value.status.return_value = control.psutil.STATUS_ZOMBIE
+                    process.return_value.status.side_effect = status
+                    coordinator.tick(job)
+                current = self.current()
+                self.assertEqual(current['status'], 'Run')
+                self.assertEqual(current['suspension']['phase'], 'Run')
+                self.assertFalse(current['suspension'].get('accounting_uncertain'))
+                self.assertIsNone(current['suspension']['evidence'])
+                self.assertEqual(coordinator.domain_pending_since, 1)
+                self.assertEqual(current['resources'], job['resources'])
+                coordinator.channel.write.assert_not_called()
+                finish(self.store, job['id'], job['claim'], 'Done', 0, 'Synthetic receipt and drainage verified')
+                final = self.current()['suspension']
+                self.assertEqual(final['unsuspended_elapsed'], 15)
+                self.assertEqual(final['clock_finished'], 100)
+                self.assertEqual(self.store.snapshot(now=1000)['jobs'][0]['suspension']['unsuspended_elapsed'], 15)
+        self.send.assert_not_called()
+
+    def test_stop_state_uncertainty_and_transition_exit_still_invalidate(self):
+        cases = (('Run', 'reused'), ('Run', 'denied'), ('Run', 'unreadable-zombie'),
+                 ('Run', 'escaped-zombie'), ('Run', 'topology-denied'), ('Run', 'status-denied'),
+                 ('Run', 'live-topology-gone'),
+                 ('Suspended', 'absent'), ('Resuming', 'absent'))
+        for phase, observation in cases:
+            with self.subTest(phase=phase, observation=observation):
+                job = self.phase(phase, revision=4, request={'id': 'continued', 'action': 'continue'},
+                                 evidence={'checked_clock': 100, 'computational': [MEMBER]},
+                                 accounting_uncertain=False)
+                coordinator = self.coordinator()
+                coordinator.pending = dict(id='continued', stage='verify_continue', started=1,
+                                           domain=control.Domain((MEMBER,), (ANCHOR, RUNNER), ()))
+                probes = 0
+
+                def alive(member):
+                    nonlocal probes
+                    if member == MEMBER:
+                        probes += 1
+                        return observation == 'status-denied' or (phase != 'Suspended' and probes == 1)
+                    return True
+
+                errors = {'denied': control.psutil.AccessDenied(MEMBER['pid']),
+                          'unreadable-zombie': control.psutil.ZombieProcess(MEMBER['pid']),
+                          'absent': control.psutil.NoSuchProcess(MEMBER['pid'])}
+                observed = {**MEMBER, 'birth': MEMBER['birth']+1} if observation == 'reused' else MEMBER
+                topology = (PermissionError() if observation == 'topology-denied' else
+                            ProcessLookupError() if observation == 'live-topology-gone' else None)
+                with patch.object(control, 'owner_alive', side_effect=alive), \
+                        patch.object(control, 'identity', return_value=observed, side_effect=errors.get(observation)), \
+                        patch.object(control.os, 'getsid', return_value=OTHER['pid'], side_effect=topology), \
+                        patch.object(control.psutil, 'Process') as process, \
+                        patch.object(control.time, 'monotonic', return_value=1):
+                    process.return_value.status.return_value = control.psutil.STATUS_ZOMBIE
+                    if observation == 'live-topology-gone':
+                        process.return_value.status.return_value = control.psutil.STATUS_RUNNING
+                    if observation == 'status-denied':
+                        process.return_value.status.side_effect = control.psutil.AccessDenied(MEMBER['pid'])
+                    coordinator.tick(job)
+                value = self.current()['suspension']
+                self.assertEqual(value['phase'], 'Unverified')
+                self.assertTrue(value['accounting_uncertain'])
+                self.assertIsNone(value['unsuspended_elapsed'])
+                self.assertIsNone(coordinator.domain_pending_since)
+                self.assertEqual(coordinator.channel.write.call_args.args[1]['operation'], 'invalidate')
+        self.send.assert_not_called()
+
+    def test_unexpected_stop_precedes_a_later_running_member_exit(self):
+        job = self.phase('Run', revision=4, request={'id': 'continued', 'action': 'continue'})
+        coordinator = self.coordinator()
+        coordinator._validate.return_value = control.Domain((MEMBER, OTHER), (ANCHOR, RUNNER), ())
+        with patch.object(control, '_stopped', side_effect=[True, control.DomainPending('Later member exited')]) as stopped:
+            coordinator.tick(job)
+        value = self.current()['suspension']
+        self.assertEqual(value['phase'], 'Unverified')
+        self.assertEqual(value['reason'], 'Unexpected stopped computation outside a confirmed request')
+        self.assertTrue(value['accounting_uncertain'])
+        self.assertIsNone(coordinator.domain_pending_since)
+        stopped.assert_called_once_with(MEMBER, exit_anchor=ANCHOR)
+        self.send.assert_not_called()
+
     def test_incomplete_running_domain_expires_without_resetting_deadline(self):
         job = self.phase('Run', revision=4, request={'id': 'continued', 'action': 'continue'})
         coordinator = self.coordinator()

@@ -11,7 +11,8 @@ from cmw.jobs.clipboard import CopyResult
 from cmw.jobs.snapshot import render_snapshot
 from cmw.jobs.store import Store
 from cmw.progress.formatting import cell_width
-from cmw.progress.models import ProgressEvent, SettingObservation
+from cmw.progress.models import (Criterion, IterationLevel, Metric, MetricSeries,
+                                 ProgressEvent, SettingObservation)
 from cmw.progress.vasp_card import vasp_card_groups
 from tests.jobs.ui_polish_acceptance import NOW, scenario_projection, screenshot_text
 from tests.progress.test_scientific_card import example
@@ -42,6 +43,17 @@ async def scientific_card_views(root, renders=None):
     projection = scenario_projection(state, 'no_external_complete')
     projection['job_usage'][selected['attempt_id']]['cpu_cores'] = 7.91
     captured = example()
+    electronic_values = {
+        'vasp.electronic.dE': (.00015254, '0.00015254', 5e-9),
+        'vasp.electronic.d_eps': (.00000069071, '-0.00000069071', 5e-12),
+        'vasp.electronic.rms': (.000415, '0.000415', 5e-7),
+    }
+    captured = replace(captured, metrics=tuple(replace(item, latest=replace(item.latest,
+        value=electronic_values[item.latest.semantic_id][0],
+        printed=electronic_values[item.latest.semantic_id][1],
+        precision=electronic_values[item.latest.semantic_id][2],
+        signed_value=float(electronic_values[item.latest.semantic_id][1])))
+        if item.latest.semantic_id in electronic_values else item for item in captured.metrics))
     context = replace(captured.context, binding_id='synthetic-ui-card', attempt_id=selected['attempt_id'],
                       job_id=selected['id'], jobs_state=str(store.root))
     captured = replace(captured, context=context, last_new_evidence_at=NOW - 12, last_success_at=NOW,
@@ -63,6 +75,13 @@ async def scientific_card_views(root, renders=None):
                      'long-name': captured, 'missing-metrics': replace(captured, metrics=()),
                      'suspended': captured, 'guard-warning': captured, 'transient': captured, 'status-error': captured,
                      'unverified-execution': captured})
+    force = Metric('vasp.force.maximum_atomic_norm.free', 'Fmax free',
+        'Synthetic maximum free-atom force norm', 'eV/Angstrom', .014864,
+        context=(IterationLevel('evaluation', 26, 'evaluation 26'),), observed_at=NOW - 12,
+        criterion=Criterion(.02, 'eV/Angstrom', '<', 'Synthetic effective EDIFFG'))
+    force_snapshot = replace(captured, calculation='fixed-cell-relaxation',
+                             metrics=(*captured.metrics, MetricSeries(force)))
+    variants['force-decimal'] = replace(force_snapshot, card_groups=vasp_card_groups(force_snapshot))
     operational = dict(observed_execution='VERIFIED_WORKER', age_seconds=0, stale=False,
                        reconciliation_required=False, evidence={})
     views = []
@@ -117,9 +136,18 @@ async def scientific_card_views(root, renders=None):
                     assert app.query_one('#progress').region.bottom <= app.query_one('#command-bar').region.y, (scenario, size, 'scientific card clipped', geometry)
                     assert app.query_one('#progress').size.height >= len(card.splitlines()), (scenario, size, 'scientific rows clipped', geometry)
                     assert all(word in text for word in ('SCF', 'FORCE', 'ELECTRONIC', '791%', 'RSS')), (scenario, size)
-                    assert all(word in card for word in ('OUTCAR SCF 9/300', 'EDIFF (both)', 'static'))
+                    assert all(word in card for word in ('OUTCAR SCF 9/300', 'EDIFF (both) <1e-05 eV'))
+                    if scenario == 'force-decimal':
+                        assert '0.014864 eV/Å @E26' in card and 'Target <0.02 eV/Å' in card, (scenario, size, card)
+                        assert '1.4864e-02' not in card
+                    else:
+                        assert 'static' in card
                     if scenario != 'missing-metrics':
-                        assert all(word in card for word in ('@SCF8', '3.1087', '2.9332', '1.89', 'data')), (scenario, size, card)
+                        assert all(word in card for word in ('|dE|', '|d eps|', 'rms', '1.5254e-04 eV @SCF8',
+                            '6.9071e-07 eV @SCF8', '4.15e-04 @SCF8', 'data')), (scenario, size, card)
+                    else:
+                        assert all(word in card for word in ('|dE|', '|d eps|', 'rms', '—'))
+                        assert not any(value in card for value in ('1.5254e-04', '6.9071e-07', '4.15e-04'))
                     framed = True
                     assert '┌─' in card, (scenario, size, 'borderless scientific card', geometry)
                     assert app.query_one('#progress').has_class('framed')
@@ -231,7 +259,7 @@ class ScientificCardUiTests(unittest.TestCase):
     def test_synthetic_source_verification_cards_at_required_and_narrow_sizes(self):
         with tempfile.TemporaryDirectory(prefix='cmw-scientific-card-ui-') as directory:
             views = asyncio.run(scientific_card_views(Path(directory)))
-        self.assertEqual(len(views), 13 * len(SIZES))
+        self.assertEqual(len(views), 14 * len(SIZES))
         self.assertTrue(all(view['useful_rows'] >= 3 for view in views))
 
 

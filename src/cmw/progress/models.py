@@ -322,6 +322,7 @@ class CardCell:
     context_kinds: tuple[str, ...] = ()
     context_labels: tuple[tuple[str, str], ...] = ()
     show_context: bool = True
+    value_format: str = ''
 
 
 @dataclass(frozen=True)
@@ -362,7 +363,13 @@ class ProgressSnapshot:
     last_correspondence_at: float | None = None
 
     def to_dict(self):
-        return {'schema': 1, **asdict(self)}
+        result = {'schema': 1, **asdict(self)}
+        # Live-card formatting hints are not part of exported scientific evidence.
+        for group in result['card_groups']:
+            for row in group['rows']:
+                for cell in row:
+                    cell.pop('value_format')
+        return result
 
 
 class ProgressAdapter(Protocol):

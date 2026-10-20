@@ -47,8 +47,8 @@ class CardFrameTests(unittest.TestCase):
         self.assert_frame(text, 135)
         self.assertEqual([line.split('│')[1].strip() for line in text.splitlines()[1:5]],
                          ['SCF', 'FORCE', 'ELECTRONIC', ''])
-        for value in ('SCIENTIFIC', 'Eval 1', 'OUTCAR SCF 9/300', '3.1087 eV @SCF8',
-                      '2.9332 eV @SCF8', '1.89 @SCF8', 'EDIFF (both) <1e-05 eV',
+        for value in ('SCIENTIFIC', 'Eval 1', 'OUTCAR SCF 9/300', '3.1087e+00 eV @SCF8',
+                      '2.9332e+00 eV @SCF8', '1.89e+00 @SCF8', 'EDIFF (both) <1e-05 eV',
                       '— (not observed)', 'Target N/A · static', 'data 12s ago'):
             self.assertIn(value, text)
         self.assertEqual(snapshot.to_dict(), before)
@@ -100,7 +100,7 @@ class CardFrameTests(unittest.TestCase):
         self.assert_frame(text, 135)
         for value in ('SOURCE CONFLICT', 'stdout/outcar', 'ERROR', 'data 12s ago', 'native warnings 1; Details'):
             self.assertIn(value, text)
-        self.assertIn('3.1087 eV @SCF8', text)
+        self.assertIn('3.1087e+00 eV @SCF8', text)
 
     def test_generic_varied_rows_and_unicode_use_display_cell_alignment(self):
         cell = lambda text: CardCell(kind='text', text=text)
@@ -124,8 +124,8 @@ class CardFrameTests(unittest.TestCase):
         simple = self.render(snapshot, width=70)
         for width, text in ((95, padded), (75, compact), (70, simple)):
             self.assert_frame(text, width)
-            self.assertIn('3.1087 eV @SCF8', text)
-            self.assertIn('2.9332 eV @SCF8', text)
+            self.assertIn('3.1087e+00 eV @SCF8', text)
+            self.assertIn('2.9332e+00 eV @SCF8', text)
         self.assertTrue(padded.splitlines()[1].startswith('│ SCF'))
         self.assertTrue(compact.splitlines()[1].startswith('│SCF'))
         self.assertEqual(len(separators(compact.splitlines()[1])), 4)
@@ -134,7 +134,10 @@ class CardFrameTests(unittest.TestCase):
             with self.subTest(width=width):
                 actual = self.render(snapshot, width=width)
                 plain = progress_text(snapshot, width=width, max_lines=11, now=112)
-                self.assertEqual(actual, plain)
+                legacy = replace(snapshot, card_groups=tuple(replace(group, rows=tuple(
+                    tuple(replace(cell, value_format='') for cell in row) for row in group.rows))
+                    for group in snapshot.card_groups))
+                self.assertEqual(self.render(legacy, width=width), plain)
                 self.assertTrue(all(cell_width(line) <= width for line in actual.splitlines()))
                 self.assertFalse(any(char in actual for char in BOX))
 
@@ -146,14 +149,15 @@ class CardFrameTests(unittest.TestCase):
                         text = self.render(snapshot, width=width, max_lines=height)
                         self.assert_frame(text, width, extra=height - 4)
                         for value in ('OUTCAR SCF 9/300', 'FORCE', 'ELECTRONIC',
-                                      '3.1087 eV @SCF8', '2.9332 eV @SCF8', '1.89 @SCF8'):
+                                      '3.1087e+00 eV @SCF8', '2.9332e+00 eV @SCF8', '1.89e+00 @SCF8'):
                             self.assertIn(value, text)
                         self.assertIn('data 12s ago', text)
                         if snapshot.verification[0].status == 'PARTIAL':
                             self.assertIn('outcar checked 6', text)
                             self.assertIn('8 source-local', text)
-        self.assertEqual(self.render(example(), max_lines=5),
-                         progress_text(example(), width=135, max_lines=5, now=112))
+        fallback = self.render(example(), max_lines=5)
+        self.assertFalse(any(char in fallback for char in BOX))
+        self.assertIn('3.1087e+00 eV @SCF8', fallback)
 
     def test_compact_conflict_and_long_notice_keep_frame_and_qualifications(self):
         from cmw.progress.models import SettingObservation
@@ -185,7 +189,7 @@ class CardFrameTests(unittest.TestCase):
         snapshot = example()
         for width in (70, 73, 135):
             initial = self.render(snapshot, width=width, max_lines=6).splitlines()
-            for value in (0., 1.23456e-12, 123456.789):
+            for value, shown in ((0., '0e+00'), (1.23456e-12, '1.2346e-12'), (123456.789, '1.2346e+05')):
                 with self.subTest(value=value, width=width):
                     updated = replace(snapshot, metrics=tuple(
                         replace(series, latest=replace(series.latest, value=value)) for series in snapshot.metrics))
@@ -193,7 +197,7 @@ class CardFrameTests(unittest.TestCase):
                     self.assertEqual([separators(line) for line in lines[1:5]],
                                      [separators(line) for line in initial[1:5]])
                     self.assertEqual(lines[-1], initial[-1])
-                    self.assertIn(f'{value:.6g} eV @SCF8', lines[3])
+                    self.assertIn(f'{shown} eV @SCF8', lines[3])
 
     def test_default_details_and_structured_copy_remain_undecorated(self):
         snapshot = example()

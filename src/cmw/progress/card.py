@@ -25,7 +25,23 @@ def _provisional_target(metric, snapshot):
                 and setting.origin == metric.criterion.origin for setting in snapshot.settings))
 
 
-def _cell(cell, snapshot, width):
+def _scientific_value(metric, width):
+    digits = 5
+    if metric.value and metric.precision and math.isfinite(metric.precision) and metric.precision > 0:
+        # Metric precision is the native half-last-place resolution.
+        last_place = round(math.log10(metric.precision) + math.log10(2))
+        digits = max(1, min(digits, math.floor(math.log10(abs(metric.value))) - last_place + 1))
+    for significant in range(digits, 0, -1):
+        mantissa, exponent = f'{metric.value:.{significant - 1}e}'.split('e')
+        if '.' in mantissa:
+            mantissa = mantissa.rstrip('0').rstrip('.')
+        value = mantissa + 'e' + exponent
+        if cell_width(value) <= width:
+            return value
+    return value
+
+
+def _cell(cell, snapshot, width, *, main_card=False):
     if cell.kind == 'text':
         return fit_text(cell.text, width)
     if cell.kind == 'context':
@@ -50,7 +66,11 @@ def _cell(cell, snapshot, width):
     # Units and complete-row labels take precedence over verbose metric labels.
     suffix = value_text(metric, compact=True)
     # Preserve useful native digits when the complete value/unit/context fits.
-    if metric.value is not None and math.isfinite(metric.value):
+    if main_card and cell.value_format == 'scientific' and metric.value is not None and math.isfinite(metric.value):
+        unit = (' ' + metric.unit.replace('Angstrom', 'Å')) if metric.unit and metric.unit != 'native' else ''
+        marker = '*' if metric.qualification == 'current-input-derived' else ''
+        suffix = _scientific_value(metric, width - cell_width(label + ' ' + unit + _reference(cell, metric) + marker))
+    elif metric.value is not None and math.isfinite(metric.value):
         precise = f'{metric.value:.6g}'
         unit = (' ' + metric.unit.replace('Angstrom', 'Å')) if metric.unit and metric.unit != 'native' else ''
         if cell_width(label + ' ' + precise + unit + _reference(cell, metric)) <= width:
@@ -161,7 +181,7 @@ def _frame(snapshot, *, width, now, heading, max_lines):
                                         for value, size in zip(values, widths)) + '│'
         lines = ['┌─' + title + '─' * (width - 3 - cell_width(title)) + '┐']
         for label, row in rows:
-            values = [label] + [_cell(cell, snapshot, size) for cell, size in zip(row, widths[1:])]
+            values = [label] + [_cell(cell, snapshot, size, main_card=True) for cell, size in zip(row, widths[1:])]
             lines.append(line(values + [''] * (len(widths) - len(values))))
         if frame_height == len(rows) + 4:
             lines.append('├' + '┴'.join('─' * (size + 2 * padding) for size in widths) + '┤')
@@ -212,7 +232,7 @@ def card_text(snapshot, *, width, now, max_lines=None, framed=False):
             widths = [max(1, (body_width - 2 * (len(row) - 1)) // max(1, len(row)))] * len(row)
             if widths:
                 widths[-1] += max(0, body_width - sum(widths) - 2 * (len(row) - 1))
-            values = [_cell(cell, snapshot, size) for cell, size in zip(row, widths)]
+            values = [_cell(cell, snapshot, size, main_card=framed) for cell, size in zip(row, widths)]
             body = '  '.join(value + ' ' * max(0, size - cell_width(value))
                              for value, size in zip(values, widths)).rstrip()
             lines.append(label + ' ' * (label_width - cell_width(label) + 2) + body)

@@ -319,13 +319,21 @@ def _descends(pid, ancestor):
         raise JobsError('Process ancestry cannot be observed') from exc
 
 
-def _observed_exit(pid, expected=None, anchor=None):
+def _observed_exit(pid, expected=None, anchor=None, *, allow_zombie_topology_loss=False):
     """Distinguish absence or an owned matching zombie from lost visibility."""
     try:
         current = identity(pid)
-        return (expected is not None and current == expected
-                and os.getsid(pid) == anchor['pid']
-                and psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+        if expected is None or current != expected:
+            return False
+        try:
+            if os.getsid(pid) != anchor['pid']:
+                return False
+        except ProcessLookupError:
+            if not allow_zombie_topology_loss:
+                raise
+            # A previously verified Run member can retain its original zombie
+            # identity after macOS drops its SID. This permits pending, not drain.
+        return (psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
                 and identity(pid) == expected)
     except psutil.ZombieProcess:
         return False  # An unreadable birth identity is not verified absence.
@@ -462,12 +470,18 @@ def _send(member, anchor, signum):
     os.kill(member['pid'], signum)
 
 
-def _stopped(member):
+def _stopped(member, *, exit_anchor=None):
     if not owner_alive(member):
+        if exit_anchor is not None and _observed_exit(
+                member['pid'], member, exit_anchor, allow_zombie_topology_loss=True):
+            raise DomainPending('Computational member exited during stop-state observation')
         raise JobsError('Computational member disappeared')
     try:
         return psutil.Process(member['pid']).status() == psutil.STATUS_STOPPED
     except psutil.Error as exc:
+        if (isinstance(exc, psutil.NoSuchProcess) and exit_anchor is not None
+                and _observed_exit(member['pid'], member, exit_anchor, allow_zombie_topology_loss=True)):
+            raise DomainPending('Computational member exited during stop-state observation') from exc
         raise JobsError('Computational stop state cannot be observed') from exc
 
 
@@ -573,10 +587,17 @@ class Coordinator:
                     'native_mpi': 'runtime-specific synthetic acceptance; see qualification matrix'}})
         return True
 
-    def _evidence(self, domain):
+    def _evidence(self, domain, *, allow_exit=False):
         from .suspension_protocol import now_clock
+        options = {'exit_anchor': self.anchor} if allow_exit else {}
+        stopped = []
+        for member in domain.computational:
+            if _stopped(member, **options):
+                if allow_exit:
+                    raise JobsError('Unexpected stopped computation outside a confirmed request')
+                stopped.append(member)
         return {**domain.evidence(), 'checked_clock': now_clock(), 'observed_at': time.time(),
-                'stopped': [m for m in domain.computational if _stopped(m)]}
+                'stopped': stopped}
 
     def _validate(self):
         from .suspension_protocol import clock_descriptor
@@ -909,11 +930,12 @@ class Coordinator:
                 if now-self.last_check < VERIFY_CADENCE:
                     return
                 domain = self._validate()
-                if any(_stopped(m) for m in domain.computational):
-                    raise JobsError('Unexpected stopped computation outside a confirmed request')
+                # A Run member may finish after domain validation; only verified
+                # exit enters the existing bounded wait for genuine completion.
+                evidence = self._evidence(domain, allow_exit=True)
                 self.last_check = now
                 self.domain_pending_since = None
-                self.update(job, evidence=self._evidence(domain), verified_at=time.time())
+                self.update(job, evidence=evidence, verified_at=time.time())
                 return
             if phase == 'Suspended':
                 if now-self.last_check < VERIFY_CADENCE:
