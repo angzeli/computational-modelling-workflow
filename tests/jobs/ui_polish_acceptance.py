@@ -191,9 +191,9 @@ def layout_record(app, scenario, size, selected, svg):
         check('provisional' in text.lower(), 'Provisional criterion qualification hidden')
         electronic = {series.latest.semantic_id: series.latest for series in app.progress_snapshot.metrics
                       if series.latest.semantic_id.startswith('vasp.electronic.')}
-        for suffix, value, rendered in (('dE', .002, '0.002 eV @SCF2'),
-                                        ('d_eps', .0015, '0.0015 eV @SCF2'),
-                                        ('rms', .002, '0.002 @SCF2')):
+        for suffix, value, rendered in (('dE', .002, '2e-03 eV @SCF2'),
+                                        ('d_eps', .0015, '1.5e-03 eV @SCF2'),
+                                        ('rms', .002, '2e-03 @SCF2')):
             metric = electronic.get('vasp.electronic.' + suffix)
             check(metric is not None and metric.value == value
                   and tuple((level.kind, level.index) for level in metric.context) == (('electronic', 2),)

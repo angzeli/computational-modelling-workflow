@@ -283,33 +283,59 @@ class StateTests(unittest.TestCase):
         self.send.assert_not_called()
 
     def test_root_exit_during_post_continue_validation_waits_for_completion(self):
-        job = self.phase('Run', revision=4, request={'id': 'continued', 'action': 'continue'})
-        coordinator = self.coordinator()
-        del coordinator._validate
-        root_probes = 0
+        for observation in ('absent', 'zombie-topology-gone', 'foreign-session',
+                            'live-topology-gone', 'denied', 'reused'):
+            with self.subTest(observation=observation):
+                job = self.phase('Run', revision=4, request={'id': 'continued', 'action': 'continue'},
+                                 accounting_uncertain=False)
+                coordinator = self.coordinator()
+                del coordinator._validate
+                root_probes = 0
 
-        def alive(member):
-            nonlocal root_probes
-            if member == MEMBER:
-                root_probes += 1
-                return root_probes == 1
-            return True
+                def alive(member):
+                    nonlocal root_probes
+                    if member == MEMBER:
+                        root_probes += 1
+                        return root_probes == 1
+                    return True
 
-        with patch.object(control, 'owner_alive', side_effect=alive), \
-                patch.object(control, 'identity', side_effect=control.psutil.NoSuchProcess(MEMBER['pid'])), \
-                patch.object(control.os, 'getsid', return_value=ANCHOR['pid']), \
-                patch.object(control, '_stopped', return_value=False), \
-                patch.object(control.time, 'monotonic', return_value=1):
-            coordinator.tick(job)
-        current = self.current()
-        self.assertEqual(current['status'], 'Run')
-        self.assertEqual(current['suspension']['phase'], 'Run')
-        self.assertEqual(current['suspension']['revision'], 4)
-        self.assertIsNone(current['suspension']['evidence'])
-        self.assertIsNone(current['suspension']['verified_at'])
-        self.assertEqual(current['resources'], job['resources'])
-        self.assertEqual(coordinator.domain_pending_since, 1)
-        coordinator.channel.write.assert_not_called()
+                def session(pid):
+                    if pid == MEMBER['pid']:
+                        if observation in {'zombie-topology-gone', 'live-topology-gone'}:
+                            raise ProcessLookupError()
+                        if observation == 'foreign-session':
+                            return OTHER['pid']
+                    return ANCHOR['pid']
+
+                errors = {'absent': control.psutil.NoSuchProcess(MEMBER['pid']),
+                          'denied': control.psutil.AccessDenied(MEMBER['pid'])}
+                observed = {**MEMBER, 'birth': MEMBER['birth']+1} if observation == 'reused' else MEMBER
+                with patch.object(control, 'owner_alive', side_effect=alive), \
+                        patch.object(control, 'identity', return_value=observed, side_effect=errors.get(observation)), \
+                        patch.object(control.os, 'getsid', side_effect=session), \
+                        patch.object(control.psutil, 'Process') as process, \
+                        patch.object(control, '_stopped', return_value=False), \
+                        patch.object(control.time, 'monotonic', return_value=1):
+                    process.return_value.status.return_value = (control.psutil.STATUS_RUNNING
+                        if observation == 'live-topology-gone' else control.psutil.STATUS_ZOMBIE)
+                    coordinator.tick(job)
+                current = self.current()
+                value = current['suspension']
+                self.assertEqual(current['status'], 'Run')
+                self.assertEqual(value['revision'], 4)
+                self.assertEqual(current['resources'], job['resources'])
+                if observation in {'absent', 'zombie-topology-gone'}:
+                    self.assertEqual(value['phase'], 'Run')
+                    self.assertIsNone(value['evidence'])
+                    self.assertIsNone(value['verified_at'])
+                    self.assertFalse(value['accounting_uncertain'])
+                    self.assertEqual(coordinator.domain_pending_since, 1)
+                    coordinator.channel.write.assert_not_called()
+                else:
+                    self.assertEqual(value['phase'], 'Unverified')
+                    self.assertTrue(value['accounting_uncertain'])
+                    self.assertIsNone(coordinator.domain_pending_since)
+                    self.assertEqual(coordinator.channel.write.call_args.args[1]['operation'], 'invalidate')
         self.send.assert_not_called()
 
     def test_exit_after_running_domain_validation_preserves_final_timing(self):

@@ -112,8 +112,24 @@ def retain_lifecycle_evidence(method):
                         if evidence_root:
                             Path(evidence_root).mkdir(parents=True, exist_ok=True, mode=0o700)
                         destination = Path(tempfile.mkdtemp(prefix=method.__name__+'-', dir=evidence_root))
-                        capture(test.store, destination, outcome=outcome, started_at=started)
+                        metadata = capture(test.store, destination, outcome=outcome, started_at=started)
                         print(f'Lifecycle evidence ({outcome}): {destination}', flush=True)
+                        if outcome != 'PASS':
+                            jobs = []
+                            for job in metadata['snapshot']['jobs'][:8]:
+                                suspension = job.get('suspension') or {}
+                                request = suspension.get('request') or {}
+                                jobs.append({'id': job.get('id'), 'status': job.get('status'),
+                                    'reason': str(job.get('reason') or '')[:1000],
+                                    'suspension': {
+                                        **{key: suspension.get(key) for key in (
+                                            'phase', 'accounting_uncertain', 'unsuspended_elapsed',
+                                            'clock', 'clock_started', 'clock_finished',
+                                            'suspended_seconds', 'verified_at')},
+                                        'reason': str(suspension.get('reason') or '')[:1000],
+                                        'request': {key: request.get(key) for key in ('action', 'revision')},
+                                        'intervals': (suspension.get('intervals') or [])[-4:]}})
+                            print('Lifecycle failure state: ' + json.dumps(jobs), flush=True)
                     except Exception as exc:
                         print(f'Lifecycle evidence unavailable: {type(exc).__name__}', file=sys.stderr)
     return run

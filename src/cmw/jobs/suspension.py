@@ -353,13 +353,15 @@ def _observed_exit(pid, expected=None, anchor=None, *, allow_zombie_topology_los
 
 def _check_identity(member, anchor, *, allow_exit=False):
     if not owner_alive(member):
-        if allow_exit and _observed_exit(member['pid'], member, anchor):
+        if allow_exit and _observed_exit(
+                member['pid'], member, anchor, allow_zombie_topology_loss=True):
             raise DomainPending('Computational member exited during domain observation')
         raise JobsError('Computational identity lost or escaped its owned session')
     try:
         session = os.getsid(member['pid'])
     except ProcessLookupError as exc:
-        if allow_exit and _observed_exit(member['pid'], member, anchor):
+        if allow_exit and _observed_exit(
+                member['pid'], member, anchor, allow_zombie_topology_loss=True):
             raise DomainPending('Computational member exited during domain observation') from exc
         raise
     if session != anchor['pid']:
