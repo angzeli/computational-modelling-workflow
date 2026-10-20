@@ -30,9 +30,12 @@ seconds after catch-up. It never changes selection to follow another active job.
 The scientific card uses adapter-defined groups and fixed label/value columns.
 VASP shows **SCF**, **FORCE**, and **ELECTRONIC**, with the electronic group on two
 physical lines at compact widths. ORCA supplies its own gradient/displacement and
-SCF descriptors. The dashboard adds a light frame and source-footer separator
-when the existing viewport budget permits it; compact terminals retain the
-borderless card. CLI and Copy snapshots remain undecorated. The generic renderer
+SCF descriptors. The dashboard uses bordered scientific tables at ordinary
+compact widths. Available height selects eight rows with a source-footer rule,
+seven without that rule, or six with evidence integrated into the bottom edge.
+Compact layout reserves at least three managed rows and the operational controls;
+only genuinely narrow or short viewports fall back to borderless text. CLI and
+Copy snapshots remain undecorated. The generic renderer
 does not infer engine semantics. The current native context remains separate
 from the latest complete row: SCF 9 may be active
 while the complete electronic values are labelled `@SCF8`. Latest force always

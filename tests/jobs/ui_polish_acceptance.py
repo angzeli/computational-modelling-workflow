@@ -164,7 +164,16 @@ def layout_record(app, scenario, size, selected, svg):
           'Selected managed row is outside the table viewport')
     check('FILES' in text and 'NAME' in text and 'STATUS' in text, 'Primary table headers not rendered')
     check('data ' in text or 'Evidence' in text or 'evidence' in text, 'Scientific data age not visible')
-    check('native' in card if scenario != 'orca_active' else 'Eh' in card, 'Native unit/timing qualification missing')
+    if scenario == 'orca_active':
+        check('Eh' in card, 'Native ORCA energy unit missing')
+    else:
+        from cmw.progress.formatting import progress_text
+        check('eV/Å' in card and 'OUTCAR SCF' in card, 'Force unit or OUTCAR iteration provenance missing')
+        check(any(timing.source == 'native' and timing.clock == 'wall' and timing.value == 8675
+                  for timing in app.progress_snapshot.completed_durations),
+              'Completed native wall duration lost its value or source')
+        check('(wall, native)' in progress_text(app.progress_snapshot, detailed=True),
+              'Native timing qualification missing from Details')
     check('8.675e+03s' not in card and '8675s' not in card,
           'Duration retains unnecessary scientific/raw seconds form')
     check(app.query_one('#external', DataTable).display == (scenario == 'external_vasp'),

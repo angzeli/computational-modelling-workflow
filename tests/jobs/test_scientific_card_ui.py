@@ -10,16 +10,21 @@ from unittest.mock import Mock, patch
 from cmw.jobs.clipboard import CopyResult
 from cmw.jobs.snapshot import render_snapshot
 from cmw.jobs.store import Store
+from cmw.progress.formatting import cell_width
 from cmw.progress.models import ProgressEvent, SettingObservation
-from tests.jobs.ui_polish_acceptance import NOW, SIZES, scenario_projection, screenshot_text
+from cmw.progress.vasp_card import vasp_card_groups
+from tests.jobs.ui_polish_acceptance import NOW, scenario_projection, screenshot_text
 from tests.progress.test_scientific_card import example
 
 try:
     from cmw.jobs.copy_ui import CopyPreview
     from cmw.jobs.tui import JobsApp
-    from textual.widgets import DataTable, Select, Static, TextArea
+    from textual.widgets import DataTable, Footer, Select, Static, TextArea
 except ImportError:
     JobsApp = None
+
+
+SIZES = ((77, 24), (80, 24), (85, 26), (90, 25), (95, 27), (100, 30), (140, 40), (80, 24))
 
 
 async def scientific_card_views(root, renders=None):
@@ -49,9 +54,15 @@ async def scientific_card_views(root, renders=None):
         'conflict': replace(captured, verification=(replace(captured.verification[0], status='CONFLICT',
                                       reason='Synthetic complete-row disagreement'),), read_health='ERROR'),
     }
-    variants['cached-error'] = replace(variants['partial'],
+    variants['cached-error'] = replace(variants['partial'], read_health='ERROR',
         events=(ProgressEvent('native-warning', 'native-fatal', None, 1, message='Synthetic native fatal text'),),
         settings=(SettingObservation('EDIFF', 1e-5, 'OUTCAR effective', compared_value=1e-6, discrepancy=True),))
+    provisional = replace(captured, settings=(SettingObservation('EDIFF', 1e-5, 'Declared INCAR', 'provisional'),),
+        metrics=tuple(replace(item, latest=replace(item.latest, qualification='provisional')) for item in captured.metrics))
+    variants.update({'provisional': replace(provisional, card_groups=vasp_card_groups(provisional)),
+                     'long-name': captured, 'missing-metrics': replace(captured, metrics=()),
+                     'suspended': captured, 'guard-warning': captured, 'transient': captured, 'status-error': captured,
+                     'unverified-execution': captured})
     operational = dict(observed_execution='VERIFIED_WORKER', age_seconds=0, stale=False,
                        reconciliation_required=False, evidence={})
     views = []
@@ -72,10 +83,21 @@ async def scientific_card_views(root, renders=None):
             table = app.query_one('#table', DataTable)
             table.move_cursor(row=app.row_ids.index(selected['display_id']), animate=False)
             for scenario, snapshot in variants.items():
+                selected['name'] = 'Synthetic long 名称 ΔE ' * 14 if scenario == 'long-name' else 'Synthetic electronic observation 8'
+                selected['suspension'] = ({'phase': 'Suspended', 'verification_fresh': True,
+                                           'current_suspended_seconds': 12} if scenario == 'suspended' else {})
+                app.activity_projection = scenario_projection(state, 'ownership_uncertain' if scenario == 'guard-warning' else 'no_external_complete')
+                app.job_usage = deepcopy(projection['job_usage'])
+                operational.update(observed_execution='OWNERSHIP_UNVERIFIED' if scenario == 'unverified-execution' else 'VERIFIED_WORKER',
+                                   reconciliation_required=scenario == 'unverified-execution')
+                app.execution_selection = ('synthetic', selected['id'], selected['attempt_id'])
+                app.query_one('#message').update('Checking declared file locations…' if scenario == 'transient' else
+                    'Readiness unavailable: synthetic source cannot be read; inspect Details before proceeding.' if scenario == 'status-error' else
+                    'Best-effort guard · Q / Ctrl-C detaches; execution state unchanged.')
                 app.progress_snapshot = snapshot
                 app.progress_error = 'Synthetic disconnected source; cached observations' if scenario == 'cached-error' else None
                 evidence_before = snapshot.to_dict()
-                for size in (*SIZES, (50, 30)):
+                for size in SIZES:
                     await pilot.resize_terminal(*size)
                     app.refresh_state()
                     app.render_progress()
@@ -85,20 +107,43 @@ async def scientific_card_views(root, renders=None):
                     if renders:
                         (renders / f'scientific-{scenario}-{size[0]}x{size[1]}.svg').write_text(svg)
                     card = str(app.query_one('#progress', Static).render())
-                    assert table.size.height - table.header_height >= (2 if scenario == 'cached-error' or size[0] < 60 else 3), (scenario, size, 'fewer than three useful job rows')
-                    assert app.query_one('#shortcuts').region.bottom <= size[1], (scenario, size, 'footer clipped')
-                    assert app.query_one('#progress').region.bottom <= size[1], (scenario, size, 'scientific card clipped')
-                    assert app.query_one('#progress').size.height >= (5 if size[0] < 60 else 6), (scenario, size, 'scientific rows clipped')
-                    assert all(word in text for word in ('SCF', 'FORCE', 'ELECTRONIC', 'data', '791%', 'RSS')), (scenario, size)
-                    if size[0] >= 60:
-                        assert all(word in card for word in ('@SCF8', 'OUTCAR SCF 9/300', 'EDIFF (both)', 'static'))
-                    framed = size == (140, 40)
-                    assert ('┌─' in card) == framed
-                    assert app.query_one('#progress').has_class('framed') == framed
-                    if framed:
-                        assert app.query_one('#progress').styles.padding.left == 0
-                        assert app.query_one('#progress').styles.border_left[0] == ''
-                        assert app.query_one('#selected').styles.border_left[0] == 'solid'
+                    geometry = {name: (app.query_one('#' + name).region, str(app.query_one('#' + name).render()))
+                                for name in ('controller', 'table', 'guard', 'external-heading', 'selected', 'execution',
+                                             'progress', 'message', 'execution-controls', 'shortcuts')}
+                    assert table.size.height - table.header_height >= 3, (scenario, size, 'fewer than three useful job rows', geometry)
+                    footer = app.query_one(Footer) if app.query_one(Footer).display else app.query_one('#shortcuts')
+                    assert footer.region.height > 0 and footer.region.bottom <= size[1], (scenario, size, 'footer clipped', geometry)
+                    assert app.query_one('#execution-controls').region.bottom <= size[1], (scenario, size, 'suspension controls clipped')
+                    assert app.query_one('#progress').region.bottom <= app.query_one('#command-bar').region.y, (scenario, size, 'scientific card clipped', geometry)
+                    assert app.query_one('#progress').size.height >= len(card.splitlines()), (scenario, size, 'scientific rows clipped', geometry)
+                    assert all(word in text for word in ('SCF', 'FORCE', 'ELECTRONIC', '791%', 'RSS')), (scenario, size)
+                    assert all(word in card for word in ('OUTCAR SCF 9/300', 'EDIFF (both)', 'static'))
+                    if scenario != 'missing-metrics':
+                        assert all(word in card for word in ('@SCF8', '3.1087', '2.9332', '1.89', 'data')), (scenario, size, card)
+                    framed = True
+                    assert '┌─' in card, (scenario, size, 'borderless scientific card', geometry)
+                    assert app.query_one('#progress').has_class('framed')
+                    assert app.query_one('#progress').styles.padding.left == 0
+                    assert app.query_one('#progress').styles.border_left[0] == ''
+                    assert app.query_one('#selected').styles.border_left[0] == 'solid'
+                    panel = card.splitlines()[next(i for i, line in enumerate(card.splitlines()) if line.startswith('┌─')):]
+                    assert len({cell_width(line) for line in panel}) == 1, (scenario, size, panel)
+                    assert panel[-1].startswith('└') and panel[-1].endswith('┘'), (scenario, size, panel)
+                    boundaries = [tuple(cell_width(line[:i]) for i, char in enumerate(line) if char == '│') for line in panel[1:5]]
+                    assert len(set(boundaries)) == 1 and len(boundaries[0]) == 4, (scenario, size, boundaries)
+                    if scenario == 'unverified-execution':
+                        assert 'UNVERIFIED' in text and 'Reconciliation required' in text, (scenario, size)
+                    else:
+                        assert 'Scope: worker + anchor only' in text, (scenario, size, 'execution scope hidden')
+                        assert 'Verified worker + anchor' in text, (scenario, size, 'execution observation hidden')
+                    if scenario == 'suspended':
+                        assert 'inactivity expected' in text and 'Continue job' in text, (scenario, size)
+                    if scenario == 'guard-warning':
+                        assert 'UNCERTAIN' in text or 'uncertain' in text, (scenario, size)
+                    if scenario == 'status-error':
+                        assert 'Readiness unavailable' in text, (scenario, size)
+                    if scenario == 'provisional':
+                        assert 'provisional' in card, (scenario, size)
                     region = app.query_one('#progress').region
                     app.render_progress()
                     await pilot.pause()
@@ -107,11 +152,34 @@ async def scientific_card_views(root, renders=None):
                     assert '(native' not in card and 'allowed' not in card
                     if scenario == 'conflict':
                         assert 'CONFLICT' in text and 'ERROR' in text
-                    elif scenario in ('partial', 'cached-error') and size[0] >= 60:
-                        assert 'outcar checked 6' in text and '8 source-local' in text
-                    if scenario == 'cached-error' and size[0] >= 60:
-                        assert all(word in text for word in ('cached', 'native warnings', 'settings differ', '8 source-local'))
-                    if scenario == 'matched' and framed:
+                    elif scenario in ('partial', 'cached-error'):
+                        assert 'outcar checked 6' in text and '8 source-local' in text, (scenario, size, card)
+                    if scenario == 'cached-error':
+                        assert all(word in text for word in ('cached', 'ERROR', 'native warnings', 'settings differ', '8 source-local')), (scenario, size, card)
+                    if scenario == 'matched' and size == (80, 24):
+                        message = app.query_one('#message', Static)
+                        previous_message = message.render()
+                        message.update('Checking declared file locations…')
+                        app.render_progress()
+                        await pilot.pause()
+                        assert str(app.query_one('#progress').render()) == card
+                        assert app.query_one('#progress').region == region
+                        message.update(previous_message)
+                        with patch.object(store, 'snapshot', side_effect=OSError(
+                                'Synthetic Jobs state read failed; retry read-only observation after checking Details.')):
+                            app.refresh_state()
+                            await pilot.pause()
+                            assert 'State unavailable' in str(message.render())
+                            assert '┌─' in str(app.query_one('#progress').render())
+                            assert table.size.height - table.header_height >= 3
+                            assert app.query_one('#progress').region.bottom <= app.query_one('#command-bar').region.y
+                            assert app.query_one('#shortcuts').region.bottom <= size[1]
+                        message.update(previous_message)
+                        app.refresh_state()
+                        await pilot.pause()
+                        assert str(app.query_one('#progress').render()) == card
+                        assert app.query_one('#progress').region == region
+                    if scenario == 'matched' and size == (140, 40):
                         capture = app.capture_copy_snapshot()
                         await pilot.press('y')
                         assert isinstance(app.screen, CopyPreview)
@@ -142,15 +210,17 @@ async def scientific_card_views(root, renders=None):
                         assert app.screen is app.screen_stack[0]
                         app.screen.clear_selection()
                         await pilot.pause()
-                        assert not widget.has_class('framed')
-                        assert '┌─' not in str(widget.render())
+                        assert widget.has_class('framed')
+                        assert 'settings differ' in str(widget.render())
+                        assert str(widget.render()) != card
                         app.progress_snapshot = snapshot
                         app.render_progress()
                         await pilot.pause()
                     assert snapshot.to_dict() == evidence_before
                     assert app.selected_id == selected['display_id']
                     views.append(dict(scenario=scenario, size=size, useful_rows=table.size.height-table.header_height,
-                                      card=card, footer_bottom=app.query_one('#shortcuts').region.bottom))
+                                      card=card, frame_rows=len(panel), progress_height=app.query_one('#progress').size.height,
+                                      footer_bottom=footer.region.bottom))
             await pilot.press('q')
     assert store.snapshot(now=NOW) == baseline, 'Synthetic state changed during observation'
     return views
@@ -161,8 +231,8 @@ class ScientificCardUiTests(unittest.TestCase):
     def test_synthetic_source_verification_cards_at_required_and_narrow_sizes(self):
         with tempfile.TemporaryDirectory(prefix='cmw-scientific-card-ui-') as directory:
             views = asyncio.run(scientific_card_views(Path(directory)))
-        self.assertEqual(len(views), 25)
-        self.assertTrue(all(view['useful_rows'] >= 3 for view in views if view['scenario'] != 'cached-error' and view['size'][0] >= 60))
+        self.assertEqual(len(views), 13 * len(SIZES))
+        self.assertTrue(all(view['useful_rows'] >= 3 for view in views))
 
 
 if __name__ == '__main__':

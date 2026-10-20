@@ -902,15 +902,45 @@ class JobsApp(App):
             return None
         return snapshot
 
+    def scientific_line_budget(self):
+        """Reserve visible operations and three managed rows before card decoration."""
+        def height(widget):
+            if not widget.display:
+                return 0
+            styles = widget.styles
+            width = max(1, self.size.width - styles.margin.width - styles.gutter.width)
+            content = widget.get_content_height(self.size, self.size, width)
+            if styles.height is not None and not styles.height.is_auto:
+                content = int(styles.height.value)
+            if styles.min_height is not None:
+                content = max(content, int(styles.min_height.value))
+            if styles.max_height is not None:
+                content = min(content, int(styles.max_height.value))
+            return content + styles.gutter.height + styles.margin.height
+
+        reserved = sum(height(self.query_one('#' + name)) for name in (
+            'heading', 'controller', 'machine', 'sharing', 'guard', 'external-heading',
+            'external', 'selected', 'execution', 'events', 'message', 'execution-controls', 'shortcuts'))
+        reserved += height(self.query_one(Footer))
+        table = self.query_one('#table', DataTable)
+        if table.display:
+            reserved += table.header_height + 3 + table.styles.margin.height
+        return max(3, self.size.height - reserved)
+
     def render_progress(self):
         if not self.is_mounted:
             return
         widget = self.query_one('#progress', Static)
         widget.display = self.progress_selection is not None
         compact = self.size.width < 110 or self.size.height < 36
-        line_budget = 3 if self.size.width < 60 else 6 if compact else 11
-        if compact and self.query_one('#external', DataTable).display:
-            line_budget = 6 if self.progress_snapshot and self.progress_snapshot.card_groups else 3
+        structured_card = bool(self.progress_snapshot and self.progress_snapshot.card_groups)
+        job = self.selected()
+        suspended = bool(job and effective_status(job) == 'Suspended')
+        extra_lines = bool(self.progress_error) + suspended
+        line_budget = (min(8 + extra_lines, self.scientific_line_budget()) if structured_card
+                       else 3 if self.size.width < 60 else 6 if compact else 11)
+        if not structured_card and compact and self.query_one('#external', DataTable).display:
+            line_budget = 3
         if self.progress_error:
             line_budget = max(4, line_budget)
         widget.styles.max_height = line_budget
@@ -922,7 +952,7 @@ class JobsApp(App):
             # Reserve the longer scientific label before the formatter places
             # bounded context and essential trailing qualifiers such as pending.
             text = progress_text(display_snapshot, compact=compact, width=width if structured_card else width - 4,
-                                 now=self.clock() if self.clock else None, max_lines=line_budget - bool(self.progress_error), framed=True)
+                                 now=self.clock() if self.clock else None, max_lines=line_budget - bool(self.progress_error) - suspended, framed=True)
             lines = text.splitlines()
             if lines and lines[0].startswith("ACTIVE: "):
                 lines[0] = set_cell_size("Scientific: " + lines[0][8:], width).rstrip()
@@ -934,10 +964,9 @@ class JobsApp(App):
             text = 'Progress: ' + (self.progress_error or 'awaiting bounded observation…')
         line_budget = max(line_budget, len(text.splitlines()))
         widget.styles.max_height = line_budget
-        job = self.selected()
-        if job and effective_status(job) == 'Suspended':
-            text = 'Suspended: output inactivity is expected; source age remains actual.\n' + text
-            widget.styles.max_height = line_budget + 1
+        if suspended:
+            text = 'Suspended: inactivity expected; source age remains actual.\n' + text
+            widget.styles.max_height = max(line_budget, len(text.splitlines()))
         framed = any(line.startswith('┌─') for line in text.splitlines())
         rendered = literal(text)
         if framed:
@@ -1123,6 +1152,7 @@ class JobsApp(App):
             self.state = self.store.snapshot(now=self.clock() if self.clock else None)
         except (ValueError, OSError) as exc:
             self.query_one("#message", Static).update(literal(f"State unavailable: {exc}"))
+            self.render_progress()
             return
         self.state['sharing_evidence'] = self.activity_projection.get('sharing_evidence')
         self.refresh_usage()
@@ -1138,19 +1168,21 @@ class JobsApp(App):
         bounded = mode == 'Bounded Sharing'
         counts = (f"Run: {sum(j['status']=='Run' for j in jobs)}   Queue: {sum(j['status']=='Queue' for j in jobs)}   "
                   f"Hold: {sum(j['status']=='Hold' for j in jobs)}")
-        header = (f"Controller: {status}   Dispatch intent: {'ON' if control['dispatch'] else 'OFF'}\nManaged: {counts} · {mode}" if compact else
+        short_counts = f"Run {sum(j['status']=='Run' for j in jobs)} Queue {sum(j['status']=='Queue' for j in jobs)} Hold {sum(j['status']=='Hold' for j in jobs)}"
+        header = (f"Controller: {status} · Dispatch {'ON' if control['dispatch'] else 'OFF'} · {short_counts} · {mode}" if compact else
                   f"Controller: {status}   Dispatch intent: {'ON' if control['dispatch'] else 'OFF'}   Mode: {mode}   Updated: {age}\n"
                   f"Managed requested: CPUs {cpu}   RAM: {ram} GiB   {counts}")
         self.query_one("#controller", Static).update(literal(header))
         self.query_one("#events", Static).display = not compact
         tiny = self.size.width < 60
-        self.query_one("#controller", Static).styles.max_height = 2 if tiny else None
+        self.query_one("#controller", Static).styles.min_height = 1 if compact else 2
+        self.query_one("#controller", Static).styles.max_height = None
         self.query_one("#machine", Static).styles.max_height = 1 if tiny else 2
         self.query_one("#message", Static).styles.max_height = 1 if tiny else 3
         self.query_one("#guard", Static).styles.max_height = 1 if tiny else 3 if compact else 5
         self.query_one("#selected", Static).styles.max_height = 2 if tiny else 3
         self.query_one("#selected", Static).styles.margin = (0 if compact else 1, 1, 0, 1)
-        table.styles.min_height = 3 if tiny or compact and self.progress_error else 4 if compact else 5
+        table.styles.min_height = 3 if tiny else 4 if compact else 5
         table.styles.margin = (0 if compact else 1, 1, 0, 1)
         table.display = bool(jobs)
         wide = self.size.width >= 110
@@ -1206,6 +1238,7 @@ class JobsApp(App):
             self.empty_notice_shown = False
 
         self.refresh_suspension_controls()
+        self.render_execution()
         current_job = self.selected()
         current_files_context = self.files_context(current_job) if current_job else None
         if previous_files_context != current_files_context:

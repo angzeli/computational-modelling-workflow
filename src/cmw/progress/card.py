@@ -68,7 +68,7 @@ def _cell(cell, snapshot, width):
     return fit_text(text, width)
 
 
-def verification_summary(snapshot, *, width, now):
+def verification_summary(snapshot, *, width, now, compact=False):
     """Keep actual rows, correspondence and observation timestamps independent."""
     conflicts = [item for item in snapshot.verification if item.status == 'CONFLICT']
     primary = next((item for item in snapshot.verification if item.domain == 'electronic-row'), None)
@@ -81,7 +81,9 @@ def verification_summary(snapshot, *, width, now):
     if conflicts:
         pairs = '/'.join(dict.fromkeys(role for check in conflicts
                         for role in (check.source_role, check.counterpart_role) if role))
-        parts += ['SOURCE CONFLICT', pairs, 'Enter Details']
+        parts += ['SOURCE CONFLICT', pairs]
+        if not compact:
+            parts.append('Enter Details')
     elif primary and primary.observed_frontier is not None:
         role, observed, checked = primary.source_role or 'source', primary.observed_frontier, primary.checked_frontier
         counterpart = primary.counterpart_role or 'counterpart'
@@ -92,7 +94,8 @@ def verification_summary(snapshot, *, width, now):
         elif checked is None:
             parts += [f'{role} SCF {observed} source-local', counterpart + ' ' + primary.status.lower()]
         elif checked < observed:
-            parts += [f'{role} SCF {observed}', f'{counterpart} checked {checked}', f'{observed} source-local']
+            parts += ([f'{role} {observed} source-local', f'{counterpart} checked {checked}'] if compact else
+                      [f'{role} SCF {observed}', f'{counterpart} checked {checked}', f'{observed} source-local'])
         else:
             parts += [role, f'{counterpart} matched through SCF {checked}']
         if source and source.latest_iteration == observed and source.last_complete_row_at is not None:
@@ -116,10 +119,16 @@ def verification_summary(snapshot, *, width, now):
         parts.insert(0, snapshot.read_health)
     if snapshot.completeness == 'CATCHING_UP' and not (source and source.status == 'NOT_YET_PARSED'):
         parts.insert(0, 'CATCHING UP')
-    text = ' · '.join(dict.fromkeys(parts))
-    if stamp is not None:
-        age = 'data ' + age_text(stamp, now)
-        return fit_text(text, max(0, width - cell_width(age) - 3)) + ' · ' + age
+    parts = list(dict.fromkeys(parts))
+    age = 'data ' + age_text(stamp, now) if stamp is not None else None
+    separator = ' · '
+    if compact and cell_width(separator.join(parts + ([age] if age else []))) > width:
+        separator = '; '
+        if age and cell_width(separator.join(parts + [age])) > width:
+            age = age.removesuffix(' ago')
+    text = separator.join(parts)
+    if age:
+        return fit_text(text, max(0, width - cell_width(age) - len(separator))) + separator + age
     return fit_text(text, width)
 
 
@@ -128,11 +137,18 @@ def _frame(snapshot, *, width, now, heading, max_lines):
     rows = [(group.label if index == 0 else '', row)
             for group in snapshot.card_groups for index, row in enumerate(group.rows)]
     columns = max((len(row) for _, row in rows), default=0)
-    if not columns or width < 54 or max_lines is not None and len(rows) + 4 > max_lines:
+    if not columns or width < 54 or max_lines is not None and len(rows) + 2 > max_lines:
         return None
+    frame_height = min(len(rows) + 4, max_lines) if max_lines is not None else len(rows) + 4
     label_width = max(cell_width(group.label) for group in snapshot.card_groups)
+    if cell_width(heading) > width - 6:
+        notices = [('settings differ' if part.startswith('settings differ:') else part)
+                   .replace('; Details', '').replace('* provisional target', '* provisional')
+                   .replace('* provisional settings', '* provisional')
+                   for part in heading.split(' · ')]
+        heading = ' · '.join(dict.fromkeys(notices))
     # Reclaim decoration in stages before returning to the original plain card.
-    for padding, separator, minimum in ((1, '│', 32), (0, '│', 29), (0, ' ', 28)):
+    for padding, separator, minimum in ((1, '│', 32), (0, '│', 28)):
         available = width - 2 - columns - 2 * padding * (columns + 1) - label_width
         value_width, remainder = divmod(available, columns)
         title = (' ' if padding else '') + heading + (' ' if padding else '')
@@ -147,12 +163,17 @@ def _frame(snapshot, *, width, now, heading, max_lines):
         for label, row in rows:
             values = [label] + [_cell(cell, snapshot, size) for cell, size in zip(row, widths[1:])]
             lines.append(line(values + [''] * (len(widths) - len(values))))
-        join = '┴' if separator == '│' else '─'
-        lines.append('├' + join.join('─' * (size + 2 * padding) for size in widths) + '┤')
-        footer_width = width - 2 - 2 * padding
-        footer = verification_summary(snapshot, width=footer_width, now=now)
-        lines.append('│' + ' ' * padding + footer + ' ' * (footer_width - cell_width(footer) + padding) + '│')
-        lines.append('└' + '─' * (width - 2) + '┘')
+        if frame_height == len(rows) + 4:
+            lines.append('├' + '┴'.join('─' * (size + 2 * padding) for size in widths) + '┤')
+        if frame_height >= len(rows) + 3:
+            footer_width = width - 2 - 2 * padding
+            footer = verification_summary(snapshot, width=footer_width, now=now, compact=width < 90)
+            lines.append('│' + ' ' * padding + footer + ' ' * (footer_width - cell_width(footer) + padding) + '│')
+            lines.append('└' + '─' * (width - 2) + '┘')
+        else:
+            # Like the integrated title, the evidence label is part of the edge.
+            footer = verification_summary(snapshot, width=width - 6, now=now, compact=True)
+            lines.append('└─ ' + footer + ' ' + '─' * (width - 5 - cell_width(footer)) + '┘')
         return '\n'.join(lines)
     return None
 

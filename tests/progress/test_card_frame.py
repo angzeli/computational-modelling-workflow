@@ -20,19 +20,24 @@ class CardFrameTests(unittest.TestCase):
     def render(self, snapshot, *, width=135, max_lines=11):
         return progress_text(snapshot, framed=True, width=width, max_lines=max_lines, now=112)
 
-    def assert_frame(self, text, width, rows=4):
+    def assert_frame(self, text, width, rows=4, extra=4):
         lines = text.splitlines()
-        self.assertEqual(len(lines), rows + 4)
+        self.assertEqual(len(lines), rows + extra)
         self.assertEqual({cell_width(line) for line in lines}, {width})
         self.assertTrue(lines[0].startswith('┌─'))
         self.assertTrue(lines[0].endswith('┐'))
-        self.assertEqual(lines[-1], '└' + '─' * (width - 2) + '┘')
-        self.assertTrue(lines[-3].startswith('├') and lines[-3].endswith('┤'))
-        self.assertEqual(sum(line.startswith('├') for line in lines), 1)
-        self.assertTrue(all(line.startswith('│') and line.endswith('│') for line in lines[1:-3]))
-        self.assertEqual(len({separators(line) for line in lines[1:-3]}), 1)
-        for offset in separators(lines[1])[1:-1]:
-            self.assertEqual(lines[-3][offset], '┴')
+        self.assertTrue(lines[-1].startswith('└') and lines[-1].endswith('┘'))
+        self.assertTrue(all(line.startswith('│') and line.endswith('│') for line in lines[1:rows + 1]))
+        self.assertEqual(len({separators(line) for line in lines[1:rows + 1]}), 1)
+        self.assertEqual(sum(line.startswith('├') for line in lines), int(extra == 4))
+        if extra == 4:
+            self.assertTrue(lines[-3].startswith('├') and lines[-3].endswith('┤'))
+            for offset in separators(lines[1])[1:-1]:
+                self.assertEqual(lines[-3][offset], '┴')
+        if extra > 2:
+            self.assertEqual(lines[-1], '└' + '─' * (width - 2) + '┘')
+        else:
+            self.assertIn('data 12s ago', lines[-1])
         self.assertFalse(any(char in text for char in '━┃┏┓┗┛═║╔╗╚╝'))
 
     def test_normal_card_preserves_groups_values_context_and_static_target(self):
@@ -124,7 +129,7 @@ class CardFrameTests(unittest.TestCase):
         self.assertTrue(padded.splitlines()[1].startswith('│ SCF'))
         self.assertTrue(compact.splitlines()[1].startswith('│SCF'))
         self.assertEqual(len(separators(compact.splitlines()[1])), 4)
-        self.assertEqual(len(separators(simple.splitlines()[1])), 2)
+        self.assertEqual(len(separators(simple.splitlines()[1])), 4)
         for width in (69, 53, 40):
             with self.subTest(width=width):
                 actual = self.render(snapshot, width=width)
@@ -133,27 +138,62 @@ class CardFrameTests(unittest.TestCase):
                 self.assertTrue(all(cell_width(line) <= width for line in actual.splitlines()))
                 self.assertFalse(any(char in actual for char in BOX))
 
-    def test_height_budget_falls_back_without_removing_metrics_or_warning(self):
-        snapshot = example()
-        for limit in (3, 6, 7):
-            with self.subTest(limit=limit):
-                actual = self.render(snapshot, max_lines=limit)
-                self.assertEqual(actual, progress_text(snapshot, width=135, max_lines=limit, now=112))
-                for value in ('FORCE', 'ELECTRONIC', '3.1087 eV @SCF8'):
-                    self.assertIn(value, actual)
-        self.assert_frame(self.render(snapshot, max_lines=8), 135)
+    def test_height_adaptive_frames_preserve_all_metric_rows_and_evidence(self):
+        for width in (70, 73, 78, 83, 88, 93, 133):
+            for height in (6, 7, 8):
+                for snapshot in (example(), example(checked=6)):
+                    with self.subTest(width=width, height=height):
+                        text = self.render(snapshot, width=width, max_lines=height)
+                        self.assert_frame(text, width, extra=height - 4)
+                        for value in ('OUTCAR SCF 9/300', 'FORCE', 'ELECTRONIC',
+                                      '3.1087 eV @SCF8', '2.9332 eV @SCF8', '1.89 @SCF8'):
+                            self.assertIn(value, text)
+                        self.assertIn('data 12s ago', text)
+                        if snapshot.verification[0].status == 'PARTIAL':
+                            self.assertIn('outcar checked 6', text)
+                            self.assertIn('8 source-local', text)
+        self.assertEqual(self.render(example(), max_lines=5),
+                         progress_text(example(), width=135, max_lines=5, now=112))
+
+    def test_compact_conflict_and_long_notice_keep_frame_and_qualifications(self):
+        from cmw.progress.models import SettingObservation
+        snapshot = replace(example(), read_health='ERROR',
+            verification=(replace(example().verification[0], status='CONFLICT'),),
+            events=(ProgressEvent('warn', 'native-fatal', None, 1, message='Synthetic'),),
+            settings=(SettingObservation('Long synthetic setting name', 1, 'fixture', discrepancy=True),))
+        text = self.render(snapshot, width=70, max_lines=6)
+        self.assert_frame(text, 70, extra=2)
+        for value in ('native warnings 1', 'settings differ', 'SOURCE CONFLICT',
+                      'stdout/outcar', 'ERROR', 'data 12s ago'):
+            self.assertIn(value, text)
+
+    def test_compact_partial_error_retains_complete_frontier_qualifications(self):
+        for observed, checked in ((8, 6), (10, 6), (300, 299)):
+            snapshot = replace(example(active=observed + 1, complete=observed, checked=checked), read_health='ERROR')
+            for now in (112, 3700):
+                with self.subTest(observed=observed, checked=checked, now=now):
+                    text = progress_text(snapshot, framed=True, width=70, max_lines=6, now=now)
+                    self.assertEqual(len(text.splitlines()), 6)
+                    self.assertEqual({cell_width(line) for line in text.splitlines()}, {70})
+                    footer = text.splitlines()[-1]
+                    for value in ('ERROR', f'stdout {observed} source-local', f'outcar checked {checked}',
+                                  'data 12s' if now == 112 else 'data 60.0m'):
+                        self.assertIn(value, footer)
+                    self.assertNotIn('…', footer)
 
     def test_columns_stay_fixed_when_metric_values_change(self):
         snapshot = example()
-        initial = self.render(snapshot).splitlines()
-        for value in (0., 1.23456e-12, 123456.789):
-            with self.subTest(value=value):
-                updated = replace(snapshot, metrics=tuple(
-                    replace(series, latest=replace(series.latest, value=value)) for series in snapshot.metrics))
-                lines = self.render(updated).splitlines()
-                self.assertEqual([separators(line) for line in lines[1:5]],
-                                 [separators(line) for line in initial[1:5]])
-                self.assertEqual(lines[-3], initial[-3])
+        for width in (70, 73, 135):
+            initial = self.render(snapshot, width=width, max_lines=6).splitlines()
+            for value in (0., 1.23456e-12, 123456.789):
+                with self.subTest(value=value, width=width):
+                    updated = replace(snapshot, metrics=tuple(
+                        replace(series, latest=replace(series.latest, value=value)) for series in snapshot.metrics))
+                    lines = self.render(updated, width=width, max_lines=6).splitlines()
+                    self.assertEqual([separators(line) for line in lines[1:5]],
+                                     [separators(line) for line in initial[1:5]])
+                    self.assertEqual(lines[-1], initial[-1])
+                    self.assertIn(f'{value:.6g} eV @SCF8', lines[3])
 
     def test_default_details_and_structured_copy_remain_undecorated(self):
         snapshot = example()
