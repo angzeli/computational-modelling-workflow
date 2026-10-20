@@ -49,10 +49,18 @@ def vasp_card_groups(snapshot):
         if energy_target != 'EDIFF unavailable' and energy_setting.qualification == 'provisional':
             energy_target += '*'
     evaluation = next((level for level in snapshot.iteration if level.kind == 'evaluation'), None)
-    evaluation_text = evaluation.label.replace('evaluation', 'Eval', 1) if evaluation else 'Eval unassigned'
+    evaluation_text = f'Eval {evaluation.index}' if evaluation else 'Eval unassigned'
+    # Only OUTCAR contexts include an evaluation; source-local context is electronic-only.
+    native = next((level for level in snapshot.iteration if level.kind == 'electronic'), None) if evaluation else None
+    scf_text = 'OUTCAR SCF unavailable'
+    if native is not None and type(native.index) is int and native.index > 0:
+        budget = native.budget
+        valid_budget = (type(budget) is int and budget > 0 and not any(
+            item.name == 'NELM' and item.qualification != 'effective' for item in snapshot.settings))
+        scf_text = f'OUTCAR SCF {native.index}/' + (str(budget) if valid_budget else '—')
     return (
         CardGroup('SCF', ((CardCell(kind='text', text=evaluation_text),
-                           CardCell(kind='context', context_kinds=('electronic',), text='SCF unavailable')),)),
+                           CardCell(kind='text', text=scf_text)),)),
         CardGroup('FORCE', ((CardCell(force_ids, text='— (not observed)',
                                       context_kinds=('evaluation',), context_labels=labels),
                              CardCell(force_ids, kind='target', text=target)),)),

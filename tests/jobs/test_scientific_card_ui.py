@@ -85,7 +85,8 @@ async def scientific_card_views(root, renders=None):
                     assert app.query_one('#progress').region.bottom <= size[1], (scenario, size, 'scientific card clipped')
                     assert app.query_one('#progress').size.height >= 6, (scenario, size, 'scientific rows clipped')
                     assert all(word in text for word in ('SCF', 'FORCE', 'ELECTRONIC', 'data', '791%', 'RSS'))
-                    assert all(word in card for word in ('@SCF8', 'SCF 9', 'EDIFF (both)', 'static'))
+                    assert all(word in card for word in ('@SCF8', 'OUTCAR SCF 9/300', 'EDIFF (both)', 'static'))
+                    assert '(native' not in card and 'allowed' not in card
                     if scenario == 'conflict':
                         assert 'CONFLICT' in text and 'ERROR' in text
                     elif scenario in ('partial', 'cached-error'):

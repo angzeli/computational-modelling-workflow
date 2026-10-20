@@ -44,7 +44,7 @@ class ScientificCardTests(unittest.TestCase):
                 self.assertEqual(len(lines), 6)
                 self.assertEqual([line.split()[0] for line in lines[:4]], ['SCIENTIFIC', 'SCF', 'FORCE', 'ELECTRONIC'])
                 self.assertTrue(all(cell_width(line) <= width for line in lines))
-                self.assertIn('SCF 9 / 300 allowed', text)
+                self.assertIn('OUTCAR SCF 9/300', text)
                 self.assertIn('3.1087 eV @SCF8', text)
                 self.assertIn('2.9332 eV @SCF8', text)
                 self.assertIn('rms', text)
@@ -58,6 +58,81 @@ class ScientificCardTests(unittest.TestCase):
                 self.assertEqual(lines[3].index('|d eps|'), lines[4].index('EDIFF'))
         self.assertEqual(snapshot.to_dict(), before)
 
+    def test_outcar_label_uses_chronological_evaluation_and_real_budget(self):
+        for chronological, native, budget in ((1, 1, 120), (2, 7, 73)):
+            with self.subTest(chronological=chronological, native=native, budget=budget):
+                snapshot = replace(example(active=3, complete=4, checked=3), iteration=(
+                    IterationLevel('evaluation', chronological, f'evaluation {chronological} (native {native})'),
+                    IterationLevel('electronic', 3, 'SCF 3', budget)))
+                legacy = replace(snapshot, card_groups=(CardGroup('SCF', ((
+                    CardCell(kind='text', text=f'Eval {chronological} (native {native})'),
+                    CardCell(kind='context', context_kinds=('electronic',))),)), *snapshot.card_groups[1:]))
+                snapshot = replace(snapshot, card_groups=vasp_card_groups(snapshot))
+                before = snapshot.to_dict()
+                for width in (80, 140):
+                    text = progress_text(snapshot, width=width, now=112)
+                    self.assertEqual(' '.join(text.splitlines()[1].split()),
+                                     f'SCF Eval {chronological} OUTCAR SCF 3/{budget}')
+                    self.assertNotIn('allowed', text)
+                    self.assertNotIn('(native', text)
+                    self.assertIn('3.1087 eV @SCF4', text)
+                    self.assertIn('2.9332 eV @SCF4', text)
+                    self.assertEqual(text.splitlines()[2:],
+                                     progress_text(legacy, width=width, now=112).splitlines()[2:])
+                self.assertEqual(snapshot.to_dict(), before)
+
+    def test_outcar_label_missing_or_invalid_budget_is_explicit(self):
+        for budget in (None, 0, -1, True, 1.5, '120'):
+            with self.subTest(budget=budget):
+                snapshot = replace(example(active=3), iteration=(
+                    IterationLevel('evaluation', 1, 'evaluation 1 (native 1)'),
+                    IterationLevel('electronic', 3, 'SCF 3', budget)))
+                snapshot = replace(snapshot, card_groups=vasp_card_groups(snapshot))
+                self.assertIn('OUTCAR SCF 3/—', progress_text(snapshot, width=80))
+        snapshot = replace(example(active=3), settings=(SettingObservation('NELM', 300, 'OUTCAR', 'conflict'),))
+        snapshot = replace(snapshot, card_groups=vasp_card_groups(snapshot))
+        self.assertIn('OUTCAR SCF 3/—', progress_text(snapshot, width=80))
+
+    def test_outcar_label_never_relabels_source_local_iteration(self):
+        for levels in ((), (IterationLevel('evaluation', 1, 'evaluation 1 (native 1)'),),
+                       (IterationLevel('electronic', 4, 'SCF 4'),)):
+            with self.subTest(levels=levels):
+                snapshot = replace(example(complete=4), iteration=levels)
+                snapshot = replace(snapshot, card_groups=vasp_card_groups(snapshot))
+                text = progress_text(snapshot, width=80)
+                self.assertIn('OUTCAR SCF unavailable', text)
+                self.assertNotIn('OUTCAR SCF 4', text)
+                self.assertIn('@SCF4', text)
+
+    def test_native_reader_context_remains_in_details_history_and_json(self):
+        from cmw.progress.formatting import history_entry_text
+        from tests.periodic.vasp.result_fixtures import native_texts
+        from tests.progress.test_vasp_crosscheck import electronic_row, native_row
+        with tempfile.TemporaryDirectory(prefix='cmw-outcar-label-') as directory:
+            root = Path(directory)
+            prefix = native_texts(nelm=120)['OUTCAR'].split('--------------------------------------- Iteration')[0]
+            (root / 'OUTCAR').write_text(prefix + ''.join(native_row(i).replace(
+                'Iteration      1(', 'Iteration      7(') for i in range(1, 4)))
+            (root / 'stdout.log').write_text(''.join(electronic_row(i) for i in range(1, 5)))
+            context = RunContext('synthetic-outcar-label', 'VASP', (
+                SourceDescriptor('outcar', str(root / 'OUTCAR')),
+                SourceDescriptor('stdout', str(root / 'stdout.log'))))
+            service = ObservationService(clock=lambda: 100)
+            try:
+                snapshot = service.poll(context)
+                before = snapshot.to_dict()
+                text = progress_text(snapshot, width=80, now=112)
+                self.assertEqual(' '.join(text.splitlines()[1].split()), 'SCF Eval 1 OUTCAR SCF 3/120')
+                self.assertIn('3.1087 eV @SCF4', text)
+                self.assertIn('2.9332 eV @SCF4', text)
+                self.assertIn('evaluation 1 (native 7)', progress_text(snapshot, detailed=True))
+                self.assertEqual(snapshot.to_dict()['iteration'][0]['label'], 'evaluation 1 (native 7)')
+                page = service.history(context, limit=20, parent_id='*')
+                self.assertTrue(any('evaluation 1 (native 7)' in history_entry_text(entry) for entry in page.entries))
+                self.assertEqual(snapshot.to_dict(), before)
+            finally:
+                service.close()
+
     def test_latest_force_keeps_older_evaluation_and_target_qualification(self):
         snapshot = example(calculation='fixed-cell-relaxation')
         force = Metric('vasp.force.maximum_atomic_norm.free', 'Fmax free',
@@ -69,7 +144,8 @@ class ScientificCardTests(unittest.TestCase):
         self.assertIn('0.012 eV/Å @E26', text)
         self.assertIn('Target <0.02 eV/Å*', text)
         self.assertIn('* provisional', text)
-        self.assertIn('Eval 1 (native 1)', text)
+        self.assertIn('Eval 1', text)
+        self.assertNotIn('(native 1)', text)
         self.assertNotIn('0.012 eV/Å @E1', text)
 
     def test_partial_and_conflict_scope_and_read_error_remain_visible(self):
