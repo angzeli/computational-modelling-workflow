@@ -48,7 +48,7 @@ class CardFrameTests(unittest.TestCase):
         self.assertEqual([line.split('│')[1].strip() for line in text.splitlines()[1:5]],
                          ['SCF', 'FORCE', 'ELECTRONIC', ''])
         for value in ('SCIENTIFIC', 'Eval 1', 'OUTCAR SCF 9/300', '3.1087e+00 eV @SCF8',
-                      '2.9332e+00 eV @SCF8', '1.89e+00 @SCF8', 'EDIFF (both) <1e-05 eV',
+                      '2.9332e+00 eV @SCF8', '1.89e+00 @SCF8', 'EDIFF 1E-5 eV',
                       '— (not observed)', 'Target N/A · static', 'data 12s ago'):
             self.assertIn(value, text)
         self.assertEqual(snapshot.to_dict(), before)
@@ -75,7 +75,7 @@ class CardFrameTests(unittest.TestCase):
         text = self.render(snapshot)
         self.assert_frame(text, 135)
         for value in ('SCF', 'FORCE', 'ELECTRONIC', '|dE| —', '|d eps| —', 'rms —',
-                      'EDIFF (both) <1e-05 eV', 'Target N/A · static'):
+                      'EDIFF 1E-5 eV', 'Target N/A · static'):
             self.assertIn(value, text)
         self.assertNotIn('3.1087', text)
 
@@ -88,8 +88,25 @@ class CardFrameTests(unittest.TestCase):
         text = self.render(snapshot)
         self.assert_frame(text, 135)
         self.assertIn('0.012 eV/Å @E1', text)
-        self.assertIn('Target <0.02 eV/Å', text)
+        self.assertIn('Target 0.020 eV/Å', text)
         self.assertNotIn('Target N/A', text)
+
+    def test_narrow_movable_force_preserves_digits_units_and_evaluation_before_label(self):
+        snapshot = example(calculation='fixed-cell-relaxation')
+        force = Metric('vasp.force.maximum_atomic_norm.free', 'Fmax free', 'Synthetic free-atom norm',
+                       'eV/Angstrom', .014864,
+                       (replace(snapshot.iteration[0], index=26),), precision=5e-7, observed_at=100,
+                       criterion=Criterion(.02, 'eV/Angstrom', '<', 'OUTCAR effective EDIFFG'))
+        snapshot = replace(snapshot, metrics=(*snapshot.metrics, MetricSeries(force)))
+        snapshot = replace(snapshot, card_groups=vasp_card_groups(snapshot))
+        for width in (70, 73, 75, 77):
+            with self.subTest(width=width):
+                text = self.render(snapshot, width=width, max_lines=6)
+                self.assertIn('0.014864 eV/Å @E26', text)
+                self.assertNotIn('0.0149 eV/Å', text)
+                self.assertEqual(len(text.splitlines()), 6)
+                self.assertTrue(all(cell_width(line) <= width for line in text.splitlines()))
+                self.assertEqual(text.count('FORCE'), 1)
 
     def test_conflict_read_error_and_native_warning_remain_visible(self):
         snapshot = example()
@@ -135,7 +152,7 @@ class CardFrameTests(unittest.TestCase):
                 actual = self.render(snapshot, width=width)
                 plain = progress_text(snapshot, width=width, max_lines=11, now=112)
                 legacy = replace(snapshot, card_groups=tuple(replace(group, rows=tuple(
-                    tuple(replace(cell, value_format='') for cell in row) for row in group.rows))
+                    tuple(replace(cell, value_format='') if cell.kind == 'metric' else cell for cell in row) for row in group.rows))
                     for group in snapshot.card_groups))
                 self.assertEqual(self.render(legacy, width=width), plain)
                 self.assertTrue(all(cell_width(line) <= width for line in actual.splitlines()))

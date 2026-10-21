@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import sys
@@ -45,8 +46,34 @@ def usage_cells(usage):
     cores = usage.get("cpu_cores")
     cpu = metric(None if cores is None else cores * 100, usage.get("cpu_quality"), "{:.0f}%", stale=usage.get("stale", False))
     rss = usage.get("rss_bytes")
-    memory = metric(None if rss is None else rss / 2**30, usage.get("memory_quality"), "{:.1f} GiB RSS", stale=usage.get("stale", False))
+    memory = metric(None if rss is None else rss / 2**30, usage.get("memory_quality"), "{:.1f} GiB RSSΣ", stale=usage.get("stale", False))
     return cpu, memory
+
+
+def usage_summary(usage, *, width=None):
+    """Fit resource coverage into the existing selected-job line."""
+    value = usage or {}
+    cpu, memory = usage_cells(value)
+    parts = []
+    if value.get('total_members') is not None:
+        count = value.get('memory_members', 0)
+        total = value['total_members']
+        scope = 'session ' if value.get('scope') == 'verified payload session' else ''
+        parts.append(scope + (f'{count}p' if count == total else f'{count}/{total}p'))
+    expected, observed = value.get('expected_vasp_ranks'), value.get('observed_vasp_ranks')
+    if expected is not None:
+        parts.append(f"VASP {observed if observed is not None else '—'}/{expected}")
+    if value.get('coverage_quality') == 'partial':
+        parts.append('partial')
+    age = value.get('age_seconds')
+    parts.append(('stale ' if value.get('stale') else '') + (f'{age:.0f}s' if age is not None else 'age —'))
+    suffix = ' · ' + ' · '.join(parts) if usage else ''
+    text = f'CPU NOW: {cpu}   RAM NOW: {memory}' + suffix
+    if width is not None and len(text) > width:
+        text = f'CPU {cpu} · {memory}' + suffix
+    if width is not None and len(text) > width:
+        text = text[:max(0, width-1)] + '…'
+    return text
 
 
 def usage_detail(usage):
@@ -54,12 +81,29 @@ def usage_detail(usage):
         return "CPU NOW: —   RAM NOW: — (no current workload sample)"
     cpu, memory = usage_cells(usage)
     age = usage.get("age_seconds")
-    return (f"CPU NOW: {cpu} (100% = one logical CPU)   RAM NOW: {memory} (aggregate RSS)\n"
-            f"Measurement age: {'—' if age is None else f'{age:.1f}s'}{' STALE' if usage.get('stale') else ''}\n"
-            f"CPU quality: {usage.get('cpu_quality', 'unavailable')} ({usage.get('cpu_members', 0)}/{usage.get('total_members', 0)} members); "
-            f"RAM quality: {usage.get('memory_quality', 'unavailable')} ({usage.get('memory_members', 0)}/{usage.get('total_members', 0)} members)\n"
-            "RSS sums may count shared pages more than once; usage is not requested resources.\n"
-            f"{usage.get('reason') or ''}")
+    observed = usage.get('observed_at')
+    stamp = '—' if observed is None else datetime.fromtimestamp(observed, timezone.utc).isoformat()
+    footprint = usage.get('footprint_bytes')
+    footprint_text = metric(None if footprint is None else footprint / 2**30,
+                            usage.get('footprint_quality'), '{:.1f} GiB', stale=usage.get('stale', False))
+    lines = [f"CPU NOW: {cpu} (100% = one logical CPU)   RAM NOW: {memory}",
+             f"Resource scope: {usage.get('scope', 'verified observed members')} · "
+             f"Coverage: {usage.get('coverage_quality', 'not recorded')}",
+             f"Measurement age: {'—' if age is None else f'{age:.1f}s'}{' STALE' if usage.get('stale') else ''}",
+             f"Sample time: {stamp}",
+             f"CPU quality: {usage.get('cpu_quality', 'unavailable')} ({usage.get('cpu_members', 0)}/{usage.get('total_members', 0)} members); "
+             f"RAM quality: {usage.get('memory_quality', 'unavailable')} ({usage.get('memory_members', 0)}/{usage.get('total_members', 0)} members)",
+             f"RSS source: {usage.get('memory_source', 'psutil.Process.memory_info().rss')}",
+             f"Job footprint Σ: {footprint_text} · {usage.get('footprint_quality', 'unavailable')} "
+             f"({usage.get('footprint_members', 0)}/{usage.get('total_members', 0)} members)",
+             f"Footprint source: {usage.get('footprint_source') or 'unavailable'}"]
+    expected, observed = usage.get('expected_vasp_ranks'), usage.get('observed_vasp_ranks')
+    if expected is not None:
+        lines.append(f"VASP ranks observed/declared: {observed if observed is not None else '—'}/{expected}")
+    lines.extend(["RSS sums may count shared pages more than once; aggregates are not unique physical RAM or machine Memory Used.",
+                  "Observed usage is not requested resources or scientific acceptance.",
+                  usage.get('coverage_reason') or '', usage.get('reason') or ''])
+    return '\n'.join(line for line in lines if line)
 
 
 def machine_text(usage):
@@ -69,8 +113,24 @@ def machine_text(usage):
     memory = "—" if used is None or total is None else f"{used / 2**30:.1f} / {total / 2**30:.1f} GiB"
     if usage.get("stale"):
         memory += "~"
-    warm = " (warming up)" if usage.get("cpu_quality") == "warming-up" else ""
-    return f"Machine: CPU {cpu}{warm}   RAM {memory}"
+    return f"Machine: CPU {cpu}   RAM {memory} [psutil T−avail]"
+
+
+def machine_detail(usage):
+    """Explain native counters in the existing details view, without summing categories."""
+    value = usage or {}
+    def gib(counter):
+        return 'unavailable' if counter is None else f'{counter / 2**30:.2f} GiB'
+    lines = [machine_text(value),
+             'Machine RAM = total − available; availability follows psutil platform accounting.',
+             f"Machine source: {value.get('memory_source', 'psutil.virtual_memory')}",
+             f"System swap used: {gib(value.get('swap_used_bytes'))}; separate from physical RAM."]
+    categories = value.get('memory_categories_bytes') or {}
+    if categories:
+        lines.append('Native memory categories (overlapping; do not add): ' + '; '.join(
+            f'{name}: {gib(counter)}' for name, counter in categories.items()))
+    lines.append('This is not an Activity Monitor equivalence claim or a memory-pressure percentage.')
+    return '\n'.join(lines)
 
 
 def tail(path, limit=16384):

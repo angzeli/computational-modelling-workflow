@@ -25,7 +25,7 @@ class IndependentTargetTests(unittest.TestCase):
         self.assertIn('|dE| —', text)
         self.assertIn('|d eps| —', text)
         self.assertIn('rms —', text)
-        self.assertIn('EDIFF (both) <1e-06 eV', text)
+        self.assertIn('EDIFF 1E-6 eV', text)
         self.assertFalse(snapshot.metrics)
         self.assertNotIn('BELOW', text)
         self.assertNotIn('reached', text)
@@ -37,17 +37,17 @@ class IndependentTargetTests(unittest.TestCase):
         for settings in ((effective, provisional), (provisional, effective)):
             with self.subTest(settings=settings):
                 _, text = card(*settings)
-                self.assertIn('EDIFF (both) <1e-06 eV', text)
-                self.assertNotIn('<0.0001', text)
-                self.assertNotIn('<1e-06 eV*', text)
+                self.assertIn('EDIFF 1E-6 eV', text)
+                self.assertNotIn('EDIFF 0.0001', text)
+                self.assertNotIn('1E-6 eV*', text)
 
     def test_provisional_target_and_effective_input_discrepancy_remain_visible(self):
         _, provisional = card(SettingObservation('EDIFF', 1e-6, 'Declared INCAR', 'provisional'))
-        self.assertIn('EDIFF (both) <1e-06 eV*', provisional)
+        self.assertIn('EDIFF 1E-6 eV*', provisional)
         self.assertIn('* provisional settings', provisional)
         snapshot, mismatch = card(SettingObservation('EDIFF', 1e-6, 'OUTCAR current segment',
             compared_value=1e-4, discrepancy=True))
-        self.assertIn('EDIFF (both) <1e-06 eV', mismatch)
+        self.assertIn('EDIFF 1E-6 eV', mismatch)
         self.assertIn('settings differ: EDIFF', mismatch)
         details = progress_text(snapshot, detailed=True, now=100)
         self.assertIn('compared input: 0.0001; discrepancy: True', details)
@@ -63,13 +63,13 @@ class IndependentTargetTests(unittest.TestCase):
             with self.subTest(value=value):
                 _, text = card(SettingObservation('EDIFF', value, 'OUTCAR current segment'))
                 self.assertIn('EDIFF unavailable', text)
-                self.assertNotIn('EDIFF (both) <', text)
+                self.assertNotIn('EDIFF 1E-', text)
         for qualification in ('other-segment', 'conflict', 'unsupported', 'unavailable'):
             with self.subTest(qualification=qualification):
                 _, text = card(SettingObservation('EDIFF', 1e-6, 'OUTCAR', qualification))
                 self.assertIn('EDIFF unavailable', text)
         _, text = card(SettingObservation('EDIFF', 1e-6, 'OUTCAR'), status='UNSUPPORTED')
-        self.assertIn('EDIFF unavailable', text)
+        self.assertIn('EDIFF 1E-6 eV', text)
 
     def test_absent_settings_never_invent_targets(self):
         _, text = card(calculation='fixed-cell-relaxation')
@@ -77,12 +77,12 @@ class IndependentTargetTests(unittest.TestCase):
         self.assertIn('Target unavailable', text)
         self.assertNotIn('provisional', text)
 
-    def test_force_target_exists_conditionally_before_force_measurement(self):
+    def test_known_force_setting_is_unapplied_before_force_comparison(self):
         for qualification in ('effective', 'provisional'):
             with self.subTest(qualification=qualification):
                 snapshot, text = card(SettingObservation('EDIFFG', -.02, 'Declared target', qualification),
                     calculation='fixed-cell-relaxation')
-                expected = 'Conditional <0.02 eV/Å' + ('*' if qualification == 'provisional' else '')
+                expected = 'EDIFFG -0.02 eV/Å (unapplied)' + ('*' if qualification == 'provisional' else '')
                 self.assertIn(expected, text)
                 self.assertIn('— (not observed)', text)
                 self.assertFalse(snapshot.metrics)
@@ -107,7 +107,7 @@ class IndependentTargetTests(unittest.TestCase):
             with self.subTest(calculation=calculation, status=status):
                 _, text = card(SettingObservation('EDIFFG', -.02, 'OUTCAR current segment'),
                     calculation=calculation, status=status)
-                self.assertIn('Target unavailable', text)
+                self.assertIn('EDIFFG -0.02 eV/Å (unapplied)', text)
 
     def test_conflicting_native_settings_cannot_restore_a_target(self):
         native = native_texts(ediff='1e-6')
@@ -128,7 +128,7 @@ class IndependentTargetTests(unittest.TestCase):
                     self.assertTrue(all(series.latest.criterion is None for series in snapshot.metrics))
                     text = progress_text(snapshot, width=77)
                     self.assertIn('EDIFF unavailable', card_text(snapshot, width=77, now=100))
-                    self.assertNotIn('EDIFF (both) <', text)
+                    self.assertNotIn('EDIFF 1E-', text)
                     self.assertIn('conflict', progress_text(snapshot, detailed=True))
                 finally:
                     service.close()
@@ -149,7 +149,7 @@ class IndependentTargetTests(unittest.TestCase):
                 self.assertEqual(setting.qualification, 'conflict')
                 self.assertFalse(snapshot.metrics)
                 self.assertIn('EDIFF unavailable', progress_text(snapshot, width=77))
-                self.assertNotIn('EDIFF (both) <', progress_text(snapshot, width=77))
+                self.assertNotIn('EDIFF 1E-', progress_text(snapshot, width=77))
             finally:
                 service.close()
 
@@ -171,8 +171,8 @@ class IndependentTargetTests(unittest.TestCase):
                 self.assertEqual(ediff.qualification, 'effective')
                 self.assertEqual(ediff.value, 1e-6)
                 text = progress_text(snapshot, width=77)
-                self.assertIn('EDIFF (both) <1e-06 eV', text)
-                self.assertIn('Conditional <0.02 eV/Å', text)
+                self.assertIn('EDIFF 1E-6 eV', text)
+                self.assertIn('EDIFFG -0.02 eV/Å (unapplied)', text)
                 self.assertIn('|dE| —', text)
                 self.assertIn('|d eps| —', text)
                 self.assertIn('rms —', text)

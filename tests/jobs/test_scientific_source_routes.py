@@ -47,9 +47,11 @@ class ScientificSourceRoutesTests(unittest.TestCase):
         from cmw.jobs.locations import LocationDescriptor
         without = resolve_context(self.store, self.job['id'],
                                   descriptors=(LocationDescriptor('output', self.output),))
-        self.assertNotIn('incar', {source.role for source in without.sources})
+        for role in ('incar', 'poscar'):
+            self.assertNotIn(role, {source.role for source in without.sources})
         declared = resolve_context(self.store, self.job['id'], descriptors=(
             LocationDescriptor('output', self.output), LocationDescriptor('inputs', self.root)))
-        settings = next(source for source in declared.sources if source.role == 'incar')
-        self.assertEqual(settings.path, str(self.root / 'INCAR'))
-        self.assertTrue(settings.optional)
+        for role, filename in (('incar', 'INCAR'), ('poscar', 'POSCAR')):
+            source = next(source for source in declared.sources if source.role == role)
+            self.assertEqual(source.path, str(self.root / filename))
+            self.assertTrue(source.optional)

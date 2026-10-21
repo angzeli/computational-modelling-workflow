@@ -19,7 +19,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static, TextArea
 
-from .cli import elapsed, safe_text, name_text, tail, guard_text, external_detail, usage_cells, usage_detail, machine_text, sharing_text, job_sharing_detail, observation_sharing
+from .cli import elapsed, safe_text, name_text, tail, guard_text, external_detail, usage_cells, usage_detail, usage_summary, machine_text, machine_detail, sharing_text, job_sharing_detail, observation_sharing
 from .store import ACTIVE, PENDING, JobsError, Store
 from .status_presentation import admission_presentation, scheduling_detail
 from .locations import discover
@@ -89,14 +89,13 @@ def detail(job, *, narrow=False):
     if not job:
         return "No selection. Add a prepared job through cmw jobs add."
     resource = job["resources"]
-    cpu_now, ram_now = usage_cells(job.get("usage"))
     resources = (f"Requested: {resource['cpus'] or '—'} CPUs / {resource['memory_gib'] or '—'} GiB\n"
                  f"MPI: {resource['mpi_ranks'] or '—'} ranks × {resource['threads_per_rank'] or '—'} threads/rank\n" if narrow else
                  f"CPUs requested: {resource['cpus'] or '—'}    MPI ranks: {resource['mpi_ranks'] or '—'}    "
                  f"Threads/rank: {resource['threads_per_rank'] or '—'}    RAM requested: {resource['memory_gib'] or '—'} GiB\n")
     return (f"SELECTED: {job['display_id']} / {name_text(job['name'])}\n"
             f"Status: {effective_status(job)}    Order: {job['order'] or '—'}    Engine: {job['engine']}\n"
-            f"CPU NOW: {cpu_now}   RAM NOW: {ram_now}\n"
+            f"{usage_summary(job.get('usage'))}\n"
             f"{resources}"
             f"Working directory: {job['cwd']}\n{job['reason'] or '—'}")
 
@@ -184,7 +183,7 @@ class Inspect(ModalScreen):
             text = "\n\n".join(f"{stream.upper()} · {path}\n{tail(path)}" for stream, path in job["logs"].items())
         else:
             text = (detail(job) + f"\n\nNote (human annotation):\n{job.get('note') or '—'}\n\n"
-                    + job_sharing_detail(job) + "\n\n" + usage_detail(job.get("usage")) + f"\n\nAttempt: {job['attempt_id']}\n"
+                    + job_sharing_detail(job) + "\n\n" + usage_detail(job.get("usage")) + "\n\n" + machine_detail(getattr(self.app, "activity_projection", {}).get("machine_usage")) + f"\n\nAttempt: {job['attempt_id']}\n"
                     f"Enqueued: {timestamp(job['enqueued_at'])}\nStarted: {timestamp(job['started_at'])}\n"
                     f"Finished: {timestamp(job['finished_at'])}\nExit code: {job['exit_code']}   Signal: {job['signal']}\n"
                     f"Failure policy: {job['on_failure']}\nCHECK: Not evaluated\n\n"
@@ -662,7 +661,7 @@ class JobsApp(App):
             if observation.get('stale'):
                 summary = 'STALE — ' + summary
             note = ('Reconciliation required' if observation.get('reconciliation_required')
-                    else 'Scope: worker + anchor only' if category == 'VERIFIED_WORKER'
+                    else 'Execution scope: worker + anchor; RAM scope in Details' if category == 'VERIFIED_WORKER'
                     else 'Enter details for observation scope')
             suspension = observation.get('evidence', {}).get('suspension', {})
             if suspension.get('phase') and suspension.get('verdict') != 'not_applicable':
@@ -1031,10 +1030,9 @@ class JobsApp(App):
     def selected_text(self):
         item = self.external_selected()
         if item:
-            cpu_now, ram_now = usage_cells(item.get('usage'))
             return (f"EXTERNAL: {item['id']} / {item['engine']} — READ ONLY\n"
                     f"Ownership: {item.get('ownership', 'External / unattributed')} · PID {item['pid']}\n"
-                    f"CPU NOW: {cpu_now}   RAM NOW: {ram_now}\n"
+                    f"{usage_summary(item.get('usage'), width=max(12, self.size.width - 8))}\n"
                     f"NPROC: {item.get('nproc', 1)} observed processes · Process age: {elapsed(item.get('age_seconds'))}\n"
                     f"Working directory: {item.get('cwd') or '—'}\nEnter: measurement quality and evidence")
         job = self.selected()
@@ -1049,6 +1047,7 @@ class JobsApp(App):
         heading = prefix + table_name(job['name'], max(1, width - cell_len(prefix))).plain
         lines = detail(job, narrow=self.size.width < 110).splitlines()
         lines[0] = heading
+        lines[2] = usage_summary(job.get('usage'), width=width)
         if job['status'] in ACTIVE and (self.size.width < 110 or self.size.height < 36):
             return '\n'.join((heading, lines[2]))
         if job.get('note'):

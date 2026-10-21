@@ -432,7 +432,7 @@ def _scope(segment):
         reasons.append("unsupported_meta_gga")
     if values.get("NSW") == 0 and values.get("IBRION") == -1:
         mode = "static"
-    elif type(values.get("NSW")) is int and values["NSW"] > 0 and values.get("IBRION") in (1, 2, 3) and values.get("ISIF") == 2:
+    elif type(values.get("NSW")) is int and values["NSW"] > 0 and values.get("IBRION") in (1, 2, 3) and values.get("ISIF") in (0, 2):
         mode = "fixed-cell-relaxation"
     else:
         mode = "unsupported"

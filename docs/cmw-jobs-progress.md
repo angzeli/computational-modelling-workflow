@@ -38,8 +38,10 @@ only genuinely narrow or short viewports fall back to borderless text. CLI and
 Copy snapshots remain undecorated. The generic renderer
 does not infer engine semantics. The current native context remains separate
 from the latest complete row: SCF 9 may be active
-while the complete electronic values are labelled `@SCF8`. Latest force always
-retains its evaluation, and a static calculation has no ionic force stopping target.
+while the complete electronic values are labelled `@SCF8`. The native evaluation
+label includes effective positive NSW when available, such as `Eval 7/20`; missing or unqualified NSW leaves `Eval 7`. Latest force always
+retains its evaluation (for example `@E6` while evaluation 7 is current), and a
+static calculation has no ionic force stopping target.
 
 The card preserves units, source qualification, checked frontier and scientific-data
 age. Details/History retain previous values, trends, timing, rms(c), source positions
@@ -67,9 +69,19 @@ convergence percentage, ETA, scientific-validity badge or automatic stop is show
 A missing electronic measurement does not hide a known target. The card obtains
 EDIFF and EDIFFG independently from qualified effective OUTCAR settings, falling
 back only to explicitly declared provisional INCAR evidence. Contradictory,
-unsupported or other-segment settings cannot restore a target. Before a force
-measurement and its constraint comparison exist, a negative EDIFFG is shown as a
-conditional threshold; static calculations remain target N/A.
+unsupported or other-segment settings cannot restore a target. Known effective
+settings remain visible even when the calculation or comparison is unsupported;
+this does not claim criterion satisfaction. A negative EDIFFG without a supported
+force/mask comparison is labelled `unapplied`; static calculations remain target N/A.
+
+Ordinary VASP 6.6.1 fixed-cell relaxation supports ISIF 0 and 2 within the existing
+electronic-mode and special-control restrictions. With a separately declared,
+validated whole-atom POSCAR mask, the compact FORCE row shows only `Fmax movable`
+and its conditional EDIFFG target. Completely fixed atoms do not control this
+comparison. All/fixed force norms remain in Details/JSON; absent or partial-direction
+constraints never turn the all-atom norm into a movable-force criterion. Input
+declarations retain their attempt association and current-input qualification;
+they are not immutable proof of historical executed bytes.
 
 JSON, Details and Copy distinguish undeclared, empty, incomplete/catching-up,
 unparsed, malformed, unsupported, unavailable, source-local, partially matched,

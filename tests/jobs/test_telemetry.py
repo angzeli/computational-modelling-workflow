@@ -37,7 +37,8 @@ class TelemetryTests(unittest.TestCase):
         self.memory_provider = Mock(return_value=SimpleNamespace(total=1000,available=250,used=900))
         self.sampler = telemetry.Sampler(process_factory=self.factory, identity_provider=lambda pid:self.owners[pid],
                                         cpu_times=self.cpu_provider,virtual_memory=self.memory_provider,
-                                        monotonic=lambda:self.clock, wall_time=lambda:self.wall)
+                                        monotonic=lambda:self.clock, wall_time=lambda:self.wall,
+                                        footprint=None, swap_memory=None)
         self.store = Mock(root=Path('/fixture/state'))
         self.state = {'jobs':[]}
         self.guard = {'state':'BUSY','observations':[{'id':'E1','members':self.members(1,2)}], 'stale':False}
@@ -131,7 +132,9 @@ class TelemetryTests(unittest.TestCase):
         self.advance()
         del self.processes[2]
         usage = self.sample()
-        self.assertEqual(usage['total_members'],1)
+        self.assertEqual(usage['total_members'],2)
+        self.assertEqual(usage['observed_members'],1)
+        self.assertEqual(usage['memory_quality'],'partial')
         self.assertEqual(len(self.sampler.baselines),1)
         self.owners[1] = identity(1,birth=2)
         mismatch = self.sample()

@@ -12,7 +12,7 @@ from tests.progress.test_card_frame import separators
 
 def without_value_format(snapshot):
     return replace(snapshot, card_groups=tuple(replace(group, rows=tuple(
-        tuple(replace(cell, value_format='') for cell in row) for row in group.rows))
+        tuple(replace(cell, value_format='') if cell.kind == 'metric' else cell for cell in row) for row in group.rows))
         for group in snapshot.card_groups))
 
 
@@ -49,7 +49,7 @@ class ElectronicNotationTests(unittest.TestCase):
                     self.assertEqual(lines[5:], previous[5:])
                     self.assertEqual([separators(line) for line in lines[1:5]],
                                      [separators(line) for line in previous[1:5]])
-                    self.assertIn('EDIFF (both) <1e-05 eV', lines[4])
+                    self.assertIn('EDIFF 1E-5 eV', lines[4])
             self.assertEqual(snapshot.to_dict(), before)
 
     def test_native_precision_zero_large_and_extreme_finite_values(self):
@@ -98,8 +98,8 @@ class ElectronicNotationTests(unittest.TestCase):
                 baseline = self.render(without_value_format(snapshot), width)
                 self.assertEqual(text.splitlines()[2], baseline.splitlines()[2])
                 self.assertIn(f'{value:g} eV/Å', text)
-                self.assertIn('Target <0.02 eV/Å', text)
-                self.assertIn('EDIFF (both) <1e-05 eV', text)
+                self.assertIn('Target 0.020 eV/Å', text)
+                self.assertIn('EDIFF 1E-5 eV', text)
 
     def test_generic_and_orca_default_formats_remain_decimal(self):
         for engine in ('ORCA', 'FICTIONAL'):

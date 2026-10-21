@@ -24,6 +24,9 @@ def vasp_card_groups(snapshot):
     electronic = {'context_kinds': ('electronic',), 'context_labels': labels, 'value_format': 'scientific'}
     force_ids = ('vasp.force.maximum_atomic_norm.free', 'vasp.force.maximum_atomic_norm.all')
     settings = _qualified_settings(snapshot)
+    free_force = next((series.latest for series in snapshot.metrics
+                       if series.latest.semantic_id == force_ids[0]), None)
+    force_label = 'Fmax movable' if free_force and free_force.criterion else ''
     force_setting, energy_setting = settings.get('EDIFFG'), settings.get('EDIFF')
     force_value, energy_value = _finite_value(force_setting), _finite_value(energy_setting)
     target = 'Target unavailable'
@@ -34,9 +37,9 @@ def vasp_card_groups(snapshot):
             target = 'Target N/A · ionic energy'
         elif force_value == 0:
             target = 'Target N/A · EDIFFG=0'
-        elif snapshot.calculation == 'fixed-cell-relaxation' and snapshot.status != 'UNSUPPORTED':
-            # The setting is known before a force/constraint comparison exists.
-            target = f'Conditional <{-force_value:g} eV/Å'
+        else:
+            # A known setting alone does not establish a force/mask comparison.
+            target = f'EDIFFG {force_value:g} eV/Å (unapplied)'
         if target != 'Target unavailable' and force_setting.qualification == 'provisional':
             target += '*'
     energy_ids = ('vasp.electronic.dE', 'vasp.electronic.d_eps')
@@ -44,12 +47,17 @@ def vasp_card_groups(snapshot):
     if energy_value is not None:
         if energy_value == 0:
             energy_target = 'EDIFF=0 · fixed iterations'
-        elif energy_value > 0 and snapshot.status != 'UNSUPPORTED':
-            energy_target = f'EDIFF (both) <{energy_value:g} eV'
+        elif energy_value > 0:
+            value = f'{energy_value:g}'.upper().replace('E-0', 'E-').replace('E+0', 'E+')
+            energy_target = f'EDIFF {value} eV'
         if energy_target != 'EDIFF unavailable' and energy_setting.qualification == 'provisional':
             energy_target += '*'
     evaluation = next((level for level in snapshot.iteration if level.kind == 'evaluation'), None)
     evaluation_text = f'Eval {evaluation.index}' if evaluation else 'Eval unassigned'
+    nsw = settings.get('NSW')
+    if (evaluation and nsw and nsw.qualification == 'effective'
+            and type(nsw.value) is int and nsw.value > 0):
+        evaluation_text += f'/{nsw.value}'
     # Only OUTCAR contexts include an evaluation; source-local context is electronic-only.
     native = next((level for level in snapshot.iteration if level.kind == 'electronic'), None) if evaluation else None
     scf_text = 'OUTCAR SCF unavailable'
@@ -61,13 +69,13 @@ def vasp_card_groups(snapshot):
     return (
         CardGroup('SCF', ((CardCell(kind='text', text=evaluation_text),
                            CardCell(kind='text', text=scf_text)),)),
-        CardGroup('FORCE', ((CardCell(force_ids, text='— (not observed)',
+        CardGroup('FORCE', ((CardCell(force_ids, label=force_label, text='— (not observed)',
                                       context_kinds=('evaluation',), context_labels=labels),
-                             CardCell(force_ids, kind='target', text=target)),)),
+                             CardCell(force_ids, kind='target', text=target, value_format='fixed3')),)),
         CardGroup('ELECTRONIC', (
             (CardCell((energy_ids[0],), '|dE|', **electronic),
              CardCell((energy_ids[1],), '|d eps|', **electronic)),
             (CardCell(('vasp.electronic.rms',), 'rms', **electronic),
-             CardCell(energy_ids, 'EDIFF (both)', kind='target', text=energy_target)),
+             CardCell(energy_ids, 'EDIFF', kind='target', text=energy_target, value_format='scientific')),
         )),
     )

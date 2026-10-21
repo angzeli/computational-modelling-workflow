@@ -52,7 +52,17 @@ def _cell(cell, snapshot, width, *, main_card=False):
         if metric is None or metric.criterion is None:
             return fit_text(cell.text or 'Target unavailable', width)
         target = metric.criterion
-        text = f'{cell.label or "Target"} {target.comparator}{target.value:g} {target.unit.replace("Angstrom", "Å")}'
+        value = f'{target.value:g}'
+        comparator = target.comparator
+        if cell.value_format == 'scientific':
+            value = value.upper().replace('E-0', 'E-').replace('E+0', 'E+')
+            comparator = ''
+        elif cell.value_format == 'fixed3':
+            # Keep exact small/irregular targets instead of rounding them to zero.
+            fixed = f'{target.value:.3f}'
+            value = fixed if float(fixed) == target.value else value
+            comparator = ''
+        text = f'{cell.label or "Target"} {comparator}{value} {target.unit.replace("Angstrom", "Å")}'
         if _provisional_target(metric, snapshot):
             text += '*'
         if 'UNCERTAIN' in (metric.relation or ''):
@@ -73,7 +83,8 @@ def _cell(cell, snapshot, width, *, main_card=False):
     elif metric.value is not None and math.isfinite(metric.value):
         precise = f'{metric.value:.6g}'
         unit = (' ' + metric.unit.replace('Angstrom', 'Å')) if metric.unit and metric.unit != 'native' else ''
-        if cell_width(label + ' ' + precise + unit + _reference(cell, metric)) <= width:
+        marker = '*' if metric.qualification == 'current-input-derived' else ''
+        if 8 + cell_width(' ' + precise + marker + unit + _reference(cell, metric)) <= width:
             suffix = precise
     if metric.qualification == 'current-input-derived':
         suffix += '*'

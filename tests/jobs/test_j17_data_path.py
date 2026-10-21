@@ -86,7 +86,7 @@ class J17DataPathTests(unittest.TestCase):
         self.assertEqual({item.role for item in self.context.sources}, {'outcar', 'oszicar', 'stdout'})
         target_only = self.service.poll(self.context)
         self.assertFalse(target_only.metrics)
-        self.assertIn('EDIFF (both) <1e-06 eV', progress_text(target_only, width=80, now=self.now))
+        self.assertIn('EDIFF 1E-6 eV', progress_text(target_only, width=80, now=self.now))
 
         split = len(DAV_ROWS[7]) // 2
         self.append('stdout.log', HEADER + ''.join(DAV_ROWS[:7]) + DAV_ROWS[7][:split])
@@ -113,7 +113,7 @@ class J17DataPathTests(unittest.TestCase):
         self.assertGreater(next(item.bytes_read for item in local.sources if item.role == 'stdout'), 0)
         for width, _height in SIZES:
             card = progress_text(local, width=width, now=self.now)
-            for value in ('3.1087', '2.9332', '1.89', '@SCF8', 'EDIFF (both) <1e-06 eV'):
+            for value in ('3.1087', '2.9332', '1.89', '@SCF8', 'EDIFF 1E-6 eV'):
                 self.assertIn(value, card)
         initial_rows = {entry.native_label: entry for entry in self.service.history(self.context, parent_id='*', limit=100).entries
                         if entry.kind == 'electronic'}

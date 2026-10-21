@@ -140,7 +140,7 @@ class NameTuiTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     table = app.query_one('#table', DataTable)
                     self.assertEqual(str(table.get_cell('J1.1', 'cpu_now')), '713%')
-                    self.assertEqual(str(table.get_cell('J1.1', 'ram_now')), '18.3 GiB RSS')
+                    self.assertEqual(str(table.get_cell('J1.1', 'ram_now')), '18.3 GiB RSSΣ')
                     self.assertEqual(str(table.get_cell('J2.1', 'role')), 'Auxiliary')
                     location = os.environ.get('CMW_JOBS_NAMES_RENDER')
                     if location:
@@ -152,6 +152,6 @@ class NameTuiTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.press('enter')
                     detail = str(app.screen.query_one('#body', Static).render())
                     self.assertIn('713%', detail)
-                    self.assertIn('18.3 GiB RSS', detail)
+                    self.assertIn('18.3 GiB RSSΣ', detail)
                     self.assertIn('CPUs requested: 8', detail)
                     await pilot.press('escape', 'q')

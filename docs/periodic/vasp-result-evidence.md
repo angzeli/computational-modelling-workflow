@@ -8,7 +8,7 @@ No overall scientific acceptance is emitted without an explicit policy.
 ## Native dialect and modes
 
 The supported native dialect is VASP **6.6.1** ordinary self-consistent static
-calculations (`NSW=0`, `IBRION=-1`) and fixed-cell ionic relaxation (`ISIF=2`,
+calculations (`NSW=0`, `IBRION=-1`) and fixed-cell ionic relaxation (`ISIF=0/2`,
 `IBRION=1/2/3`). Non-spin-polarized and collinear settings (`ISPIN=1/2`), IALGO
 38/48 and DAV/RMM iteration tables are covered. The private read-only development
 sample established the DAV path in 6.6.1; RMM and collinear variants have synthetic

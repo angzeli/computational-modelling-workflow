@@ -564,7 +564,15 @@ heartbeat age and stale/offline state are displayed independently of job state.
 The machine line describes the whole local Mac: CPU is a percentage from changes
 in host CPU-time counters. RAM shows used / total in GiB, with used defined as
 `total - available`. This is psutil's platform accounting, not a claim of byte-for-byte agreement
-with macOS Activity Monitor. It is independent of the visible workload totals.
+with macOS Activity Monitor. The header labels this `psutil T−avail` and
+retains the existing admission quantity. On macOS, psutil available memory is
+inactive plus raw free pages; CMW does not use psutil's separate active-plus-wired
+`used` field. The total-minus-available result includes physical compressor
+occupancy within system accounting; no logical compressed amount or swap is
+added to it. Native category counters are overlapping diagnostics, not terms to
+sum. Unsupported categories remain unavailable. System swap used is exposed
+separately in JSON and existing Details. No memory-pressure percentage is inferred.
+The machine measurement is independent of visible workload totals.
 
 CPU NOW displays **100% per fully busy logical CPU**: summed process CPU-time
 deltas divided by monotonic elapsed time, multiplied by 100. `710%` means roughly
@@ -577,7 +585,24 @@ The console retains its sampler and updates in the existing two-second backgroun
 observation cycle. One-shot `status`/`show` starts a new sampler, so CPU ordinarily
 warms up there while available RAM is reported immediately.
 
-RAM NOW is current aggregate RSS from verified live members. **Summing RSS can
+RAM NOW is current aggregate RSS from verified live members, labelled `RSSΣ`.
+The existing selected-job line adds measured process/rank coverage and sample age;
+it does not add a dashboard row. The separate execution observation's worker/anchor
+scope is not the resource scope. A payload-owned session includes verified members
+across its process groups, including MPI ranks; the outside guardian worker is not
+part of that payload sum. Members are deduplicated by birth identity and checked
+before and after measurement. Declared MPI-rank coverage is reported only when a
+rank count exists; missing executable metadata cannot establish complete coverage.
+A disappearing nominated member or missing/invalid counter leaves a partial sample.
+
+On macOS, an optional unprivileged `proc_pid_rusage(RUSAGE_INFO_V0)` read supplies
+`ri_phys_footprint`. Its separately labelled sum, source, timestamp and coverage
+appear in existing Details/JSON. Unsupported platforms and access failures retain
+RSS and mark footprint unavailable. Neither aggregate establishes unique physical
+RAM ownership or exact Activity Monitor equivalence. All values are bytes in JSON
+and divided by 2**30 for GiB; decimal GB would require division by 10**9.
+
+RAM NOW retains RSS as its primary metric. **Summing RSS can
 count shared pages more than once**; it is not exact physical memory ownership or
 reserved RAM. Requested CPU slots, MPI ranks, threads/rank and memory remain
 unchanged in job declarations and details. External requested resources remain
