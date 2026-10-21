@@ -72,7 +72,21 @@ class LifecycleUiTests(unittest.IsolatedAsyncioTestCase):
         return Mock(side_effect=observe)
 
     def app(self, provider):
-        return JobsApp(self.store, clock=lambda: self.now, execution_provider=provider)
+        app = JobsApp(self.store, clock=lambda: self.now, execution_provider=provider)
+        schedule = app.set_interval
+        def set_interval(interval, callback=None, **kwargs):
+            # Provider counts follow explicit fixture actions, not CI rendering speed.
+            if callback == app.collect_execution:
+                kwargs['pause'] = True
+            timer = schedule(interval, callback, **kwargs)
+            if callback == app.collect_execution:
+                # Retain the paused timer until app shutdown and fixture cleanup.
+                self.addCleanup(timer.stop)
+            return timer
+        mocked = patch.object(app, 'set_interval', side_effect=set_interval)
+        mocked.start()
+        self.addCleanup(mocked.stop)
+        return app
 
     async def until(self, predicate):
         for _ in range(200):
