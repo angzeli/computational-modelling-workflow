@@ -159,6 +159,25 @@ def _validate_controlled_metadata(scalar, positions, running, finished, argv):
     _require(abs(total - suspended) <= .05, "Controlled suspension total differs from its intervals")
 
 
+def _parse_record(content, allowed_keys):
+    values, positions, staged = {}, {}, {}
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        key, separator, value = line.partition(": ")
+        _require(separator and key in allowed_keys, "Unsupported runner metadata line or key")
+        _require(key in _REPEATED or key not in values, "Repeated runner metadata identity or terminal key")
+        values.setdefault(key, []).append(value)
+        positions.setdefault(key, []).append(index)
+        if key == "staged_file":
+            match = _STAGED.fullmatch(value)
+            _require(match is not None, "Malformed staged-file identity")
+            name, size, _device, _inode, stat_size, _mtime, digest = match.groups()
+            _require(name not in staged and int(size) == int(stat_size) and int(size) > 0,
+                     "Duplicate, empty or inconsistent staged-file identity")
+            staged[name] = {"sha256": digest, "bytes": int(size)}
+    return values, positions, staged
+
+
 def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
     """Read metadata and four runtime input identities; never retain their text."""
     result = {"valid": False, "facts": None, "sources": [], "error": None}
@@ -190,21 +209,8 @@ def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
         _require(path == output / "RUN_METADATA.txt", "Runner record must occupy its original runtime location")
         content, record = consume(path, "runner_record", text=True, max_bytes=64 * 1024)
         _require(record["sha256"] == declaration["sha256"], "Runner record differs from its declared identity")
-        values, positions, staged = {}, {}, {}
+        values, positions, staged = _parse_record(content, allowed_keys)
         lines = content.splitlines()
-        for index, line in enumerate(lines):
-            key, separator, value = line.partition(": ")
-            _require(separator and key in allowed_keys, "Unsupported runner metadata line or key")
-            _require(key in _REPEATED or key not in values, "Repeated runner metadata identity or terminal key")
-            values.setdefault(key, []).append(value)
-            positions.setdefault(key, []).append(index)
-            if key == "staged_file":
-                match = _STAGED.fullmatch(value)
-                _require(match is not None, "Malformed staged-file identity")
-                name, size, _device, _inode, stat_size, _mtime, digest = match.groups()
-                _require(name not in staged and int(size) == int(stat_size) and int(size) > 0,
-                         "Duplicate, empty or inconsistent staged-file identity")
-                staged[name] = {"sha256": digest, "bytes": int(size)}
         scalar = {key: entries[0] for key, entries in values.items() if key not in _REPEATED}
         _require(values.get("state") == ["STAGING", "RUNNING", "FINISHED"]
                  and positions["state"][0] == 0 and positions["state"][-1] == len(lines) - 1,

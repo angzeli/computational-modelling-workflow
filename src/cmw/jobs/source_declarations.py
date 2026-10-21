@@ -14,6 +14,8 @@ from .store import JobsError
 SOURCE_SCHEMA = 1
 SOURCE_ORIGIN = 'user-declared-at-add'
 SOURCE_QUALIFICATION = 'caller-declared; scientific lineage unverified'
+AUTOMATIC_ORIGIN = 'automatic-at-add'
+AUTOMATIC_QUALIFICATION = 'prepared-input snapshot; staging unverified'
 MAX_SOURCES = 8
 
 
@@ -119,12 +121,16 @@ def parse_sources(declarations, engine):
     return validate_sources(engine, sources)
 
 
-def declaration_record(engine, attempt_id, sources):
-    """Serialize an already checked declaration against a newly created attempt."""
-    return {'schema': SOURCE_SCHEMA, 'attempt_id': attempt_id, 'engine': engine.upper(),
-            'origin': SOURCE_ORIGIN, 'qualification': SOURCE_QUALIFICATION,
-            'sources': [{'role': source.role, 'path': source.path, 'stage': source.stage,
-                         'optional': source.optional} for source in sources]}
+def declaration_record(engine, attempt_id, sources, *, vasp_input=None):
+    """Serialize declarations and optional prepared identity for a new attempt."""
+    record = {'schema': SOURCE_SCHEMA, 'attempt_id': attempt_id, 'engine': engine.upper(),
+              'origin': SOURCE_ORIGIN if sources else AUTOMATIC_ORIGIN,
+              'qualification': SOURCE_QUALIFICATION if sources else AUTOMATIC_QUALIFICATION,
+              'sources': [{'role': source.role, 'path': source.path, 'stage': source.stage,
+                           'optional': source.optional} for source in sources]}
+    if vasp_input is not None:
+        record['vasp_input'] = vasp_input
+    return record
 
 
 def recorded_sources(job):
@@ -141,9 +147,12 @@ def recorded_sources(job):
             or record.get('attempt_id') != job.get('attempt_id')
             or not isinstance(record.get('engine'), str)
             or record['engine'] != str(job.get('engine', '')).upper()
-            or record.get('origin') != SOURCE_ORIGIN
-            or record.get('qualification') != SOURCE_QUALIFICATION
-            or not isinstance(record.get('sources'), list) or not record['sources']):
+            or record.get('origin') not in {SOURCE_ORIGIN, AUTOMATIC_ORIGIN}
+            or record.get('qualification') != (SOURCE_QUALIFICATION if record.get('origin') == SOURCE_ORIGIN
+                                               else AUTOMATIC_QUALIFICATION)
+            or not isinstance(record.get('sources'), list)
+            or (not record['sources'] and 'vasp_input' not in record)
+            or (record['sources'] and record['origin'] != SOURCE_ORIGIN)):
         raise JobsError('Invalid attempt-scoped progress source declaration')
     sources = []
     for value in record['sources']:

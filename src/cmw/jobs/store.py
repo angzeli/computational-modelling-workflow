@@ -317,8 +317,11 @@ class Store:
                    "finished_at": None, "exit_code": None, "signal": None, "reason": "",
                    "worker": None, "group": None, "claim": None, "claimed_at": None,
                    "cancel_requested": False, "scheduling": scheduling, "sharing_anchor": None}
-            if progress_sources:
-                job['progress_sources'] = declaration_record(engine, job['attempt_id'], progress_sources)
+            from .input_sources import prepare_vasp_input
+            vasp_input = prepare_vasp_input(job)
+            if progress_sources or vasp_input is not None:
+                job['progress_sources'] = declaration_record(engine, job['attempt_id'], progress_sources,
+                                                             vasp_input=vasp_input)
             if suspension_backend:
                 from .suspension import initial_state
                 job['suspension'] = initial_state(suspension_backend)

@@ -124,17 +124,24 @@ def _unknown(detail, *, stage=None, origin='recognized-runner-argv'):
                               qualification='unresolved', detail=detail)
 
 
-def vasp_runner_locations(job):
-    """Interpret the known run-vasp.sh argv dialect without terminal receipts."""
+def vasp_runner_arguments(job):
+    """Return the registered literal staging route, without executing the runner."""
     argv = _script_argv(job)
     if not argv or Path(argv[0]).name != 'run-vasp.sh':
-        return ()
+        return None
+    options = _options(argv, _VASP_PAIRS,
+                       {'--managed-foreground', '--controlled-suspension', '--dry-run'},
+                       {'--extra-input'}, equals=True)
+    return options, _path(options['--input'], job), _path(options['--output'], job)
+
+
+def vasp_runner_locations(job):
+    """Interpret the known run-vasp.sh argv dialect without terminal receipts."""
     try:
-        options = _options(argv, _VASP_PAIRS,
-                           {'--managed-foreground', '--controlled-suspension', '--dry-run'},
-                           {'--extra-input'}, equals=True)
-        source = _path(options['--input'], job)
-        output = _path(options['--output'], job)
+        route = vasp_runner_arguments(job)
+        if route is None:
+            return ()
+        options, source, output = route
     except (KeyError, TypeError, ValueError) as exc:
         return (_unknown(f'Unresolved run-vasp.sh declaration: {exc}'),)
     return (_decl('inputs', source, kind='directory'),

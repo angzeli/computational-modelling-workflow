@@ -80,8 +80,10 @@ validated whole-atom POSCAR mask, the compact FORCE row shows only `Fmax movable
 and its conditional EDIFFG target. Completely fixed atoms do not control this
 comparison. All/fixed force norms remain in Details/JSON; absent or partial-direction
 constraints never turn the all-atom norm into a movable-force criterion. Input
-declarations retain their attempt association and current-input qualification;
-they are not immutable proof of historical executed bytes.
+declarations retain their attempt association and current-input qualification.
+For newly queued supported `run-vasp.sh` routes, the automatic staged-input
+identity described below additionally checks the exact POSCAR bytes. Force
+comparisons remain provisional and never establish scientific acceptance.
 
 JSON, Details and Copy distinguish undeclared, empty, incomplete/catching-up,
 unparsed, malformed, unsupported, unavailable, source-local, partially matched,
@@ -206,6 +208,61 @@ Compatible persisted declarations are observed automatically by the portal and
 remain conflicts. JSON, Details and Sources retain origin and qualification.
 A source declaration identifies a file to observe, not verified execution
 lineage, scientific acceptance or finalization provenance.
+
+### Automatic POSCAR identity for future VASP attempts
+
+Both `jobs add` and the programmatic `Store.add` API use the same optional
+registration hook for the recognized `run-vasp.sh --input … --output …
+--managed-foreground` route, including its controlled-suspension variant. No
+extra monitoring option is needed. Static and fixed-cell preparation share this
+route; ordinary and Selective Dynamics POSCAR files retain their exact bytes,
+atom order, geometry and flags.
+
+At enqueue, additive `progress_sources.vasp_input` metadata records the immutable
+Jobs attempt UUID, exact argv and input/output paths, output-parent identity and
+the prepared POSCAR SHA-256, byte count and source stat identity. This is a
+**prepared snapshot**, not evidence that staging or execution occurred. The
+output must not yet exist, matching the supported runner's exclusive staging
+contract. Missing, inaccessible, oversized or ambiguous evidence records a
+monitoring limitation without preventing enqueue or launch. The existing Jobs
+database schema and scheduler behavior are unchanged.
+
+During read-only resolution, CMW consumes only the declared output's bounded
+`RUN_METADATA.txt` staging prefix. It requires an ordered STAGING/RUNNING boundary,
+all four staged input identities, matching paths and mode, POSCAR hash/size and
+source stat, and a staging timestamp within the recorded Jobs attempt. It then
+checks the actual `<output>/POSCAR`. The bounded progress reader verifies the
+exact bytes it consumes against the immutable digest before exposing a complete
+constraint mask. The origin is `attempt-staged-input`; local runner evidence is
+not authenticated execution or scientific acceptance. Terminal failure does not
+undo a completed staging step. Finalization retains its separate, stricter
+terminal/receipt and scientific checks.
+
+The same immutable source metadata survives lifecycle saves and client/controller
+restarts. A retry is a new enqueue with a new Jobs UUID and a fresh input identity;
+there is no in-place Jobs retry operation. Historical observation continues to
+use its original staged path and expected digest even after the prepared input
+changes. Missing, replaced or modified staged bytes remain unavailable, with no
+fallback to the latest prepared POSCAR. Snapshotting the content is unnecessary;
+retention of the original runtime file is still required. Editing prepared inputs
+between enqueue and staging deliberately leaves the optional binding unqualified.
+
+An explicit incompatible POSCAR path remains a visible optional-source conflict.
+A failed staged expectation cannot be satisfied by an alternate add-time POSCAR.
+Invocation-local/session source overrides retain their existing explicit,
+unverified qualification. Opaque wrappers, layout-only declarations and runner
+invocations without the managed-foreground contract (including dry runs) have no
+registered staging contract and retain their existing current-input association;
+CMW does not invent an executed-input binding for them. CMW preparation publishes
+inputs but does not enqueue or launch VASP, and the generic workflow materializer
+has no standard VASP renderer.
+
+Legacy attempts are never backfilled. In particular, a historical OUTCAR/OSZICAR/
+stdout declaration without POSCAR does not acquire a durable POSCAR association
+from observation. Later historical association needs separately authorized exact
+attempt/runner records, original staged POSCAR identity and source closure; a
+current file or matching atom count alone is insufficient. No historical binding
+edit command is introduced by this feature.
 
 ### Invocation-local CLI sources
 
