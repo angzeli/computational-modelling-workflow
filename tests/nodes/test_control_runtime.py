@@ -112,10 +112,14 @@ class NodeControlRuntimeTests(unittest.TestCase):
                 'endpoint', str(self.config_root), str(self.store.root)]
         if lost_request is not None:
             args.append(lost_request)
-        transport = ProcessTransport(args, timeout=1.5 if lost_request else 15, env=environment())
+        transport = ProcessTransport(args, timeout=15, env=environment())
         backend = ConnectedBackend('fixture-mini', self.entry, transport=transport)
-        backend.call('capabilities')
         self.backends.append(backend)
+        try:
+            backend.call('capabilities')
+        except BaseException:
+            backend.close()
+            raise
         self.endpoints.append(transport.process)
         return backend
 
@@ -242,8 +246,15 @@ while True:
 
         continue_plan = self.preview('continue'); continue_id = uuid4().hex
         delayed = self.connect(lost_request=continue_id)
-        with self.assertRaises(NodeError) as uncertain:
-            self.apply(continue_plan, backend=delayed, request_id=continue_id)
+        exchange = delayed.transport.exchange
+        def lose_continue_reply(operation, params=None, target=None, *, request_id=None):
+            if operation == 'control' and request_id == continue_id:
+                with patch.object(delayed.transport, 'timeout', 1.5):
+                    return exchange(operation, params, target, request_id=request_id)
+            return exchange(operation, params, target, request_id=request_id)
+        with patch.object(delayed.transport, 'exchange', side_effect=lose_continue_reply):
+            with self.assertRaises(NodeError) as uncertain:
+                self.apply(continue_plan, backend=delayed, request_id=continue_id)
         self.assertEqual(uncertain.exception.code, 'OUTCOME_UNKNOWN')
         self.assertEqual((self.store.root / 'reply-delayed-after-commit').read_text(), continue_id)
         wait_for(lambda: self.phase('Run'))

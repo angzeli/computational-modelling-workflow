@@ -53,7 +53,7 @@ class VaspSubmissionTests(unittest.TestCase):
             path.write_bytes(content)
             selections.append({'source': str(path), 'path': 'inputs/' + name,
                                'role': 'potcar' if name == 'POTCAR' else 'input'})
-        wait_for_fixture_sources(source.iterdir())
+        wait_for_fixture_sources(source.iterdir(), quiet_seconds=12, timeout=40)
         prepared = prepare_local_bundle(node['root'] / 'spool', selections,
             node_id=node['config']['node_id'], queue_id=node['config']['queues']['research']['queue_id'],
             potcar_authorized=True)
