@@ -328,6 +328,9 @@ def register(subcommands):
                     "Telemetry may veto admission but never proves completion or releases commitments. "
                     "Resource declarations are not hard OS limits; external activity observation provides no machine-wide exclusion.")
     parser.add_argument("--state", type=Path, help="isolated state directory (or CMW_JOBS_STATE)")
+    parser.add_argument("--node", help="explicitly enrolled execution node; no local fallback")
+    parser.add_argument("--queue", help="enrolled queue alias on the selected node")
+    parser.add_argument("--nodes-config", type=Path, help="private frontend connection registry")
     operations = parser.add_subparsers(dest="jobs_operation", required=True)
     for name in ("status", "start", "stop", "pause", "resume", "watch"):
         command = operations.add_parser(name)
@@ -583,6 +586,9 @@ def inspect_progress(store, args):
 
 
 def handle(args):
+    if getattr(args, "node", None) or getattr(args, "queue", None):
+        from cmw.nodes.jobs_cli import handle as handle_node
+        return handle_node(args)
     store = Store(args.state)
     operation = args.jobs_operation
     from .activity import project

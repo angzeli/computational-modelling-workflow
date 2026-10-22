@@ -159,8 +159,10 @@ class Store:
             con.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, time REAL, job_id INTEGER, message TEXT)")
             con.execute("INSERT OR IGNORE INTO meta VALUES ('control', ?)", (json.dumps({"schema": 2, "dispatch": False, "stop": False, "reason": "Not started", "heartbeat": None, "owner": None, "scheduler": scheduler_defaults()}),))
             raw_control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
-            if type(raw_control.get('schema')) is not int or raw_control['schema'] not in {1, 2, 3}:
+            if type(raw_control.get('schema')) is not int or raw_control['schema'] not in {1, 2, 3, 4}:
                 raise JobsError("Unsupported Jobs state schema")
+            if raw_control['schema'] == 4:
+                self._queue_identity(con, raw_control['schema'])
             if raw_control['schema'] == 1:
                 # Old supervisors reject schema 2 on their next receipt/finalize
                 # transaction. Keep their state readable until they are done.
@@ -184,10 +186,109 @@ class Store:
         finally:
             con.close()
 
+    def _queue_identity(self, con, schema):
+        row = con.execute("SELECT value FROM meta WHERE key='queue_identity'").fetchone()
+        if row is None:
+            if schema == 4:
+                raise JobsError('Enrolled queue identity is missing')
+            return None
+        try:
+            record = json.loads(row[0])
+            expected = {'schema', 'node_id', 'host_id', 'queue_id', 'state_root',
+                        'root_identity', 'database_identity'}
+            if (not isinstance(record, dict) or set(record) != expected
+                    or type(record['schema']) is not int or record['schema'] != 1
+                    or schema != 4 or not re.fullmatch(r'[a-f0-9]{32}', record['queue_id'])
+                    or any(not isinstance(record[key], list) or len(record[key]) != 2
+                           or any(type(value) is not int or value < 0 for value in record[key])
+                           for key in ('root_identity', 'database_identity'))
+                    or any(not isinstance(record[key], str) or not record[key]
+                           or len(record[key]) > 256 or any(ord(char) < 33 for char in record[key])
+                           for key in ('node_id', 'host_id'))):
+                raise ValueError('Malformed queue identity')
+            root_info = self.root.lstat()
+            database_info = self.path.lstat()
+            if (not stat.S_ISDIR(root_info.st_mode) or not stat.S_ISREG(database_info.st_mode)
+                    or self.root.resolve(strict=True) != self.root
+                    or record['state_root'] != str(self.root)
+                    or record['root_identity'] != [root_info.st_dev, root_info.st_ino]
+                    or record['database_identity'] != [database_info.st_dev, database_info.st_ino]):
+                raise JobsError('Enrolled queue was moved, replaced or copied; explicit new enrollment is required')
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            if isinstance(exc, JobsError):
+                raise
+            raise JobsError(f'Enrolled queue identity is malformed or unavailable: {exc}') from exc
+        return record
+
+    def queue_identity(self):
+        """Read enrollment without initializing, migrating or probing execution."""
+        if not self.path.exists():
+            return None
+        try:
+            flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+            descriptor = os.open(self.path, flags)
+            try:
+                before = os.fstat(descriptor)
+                if not stat.S_ISREG(before.st_mode):
+                    raise JobsError('Queue database is not a regular file')
+                header = os.read(descriptor, 20)
+                if header and (len(header) < 20 or header[18:20] != b'\x01\x01'):
+                    raise JobsError('Unsupported database journal format for read-only enrollment')
+                con = sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True, timeout=2)
+                try:
+                    con.execute('PRAGMA query_only=ON')
+                    con.execute('BEGIN')
+                    tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    if not tables:
+                        return None
+                    control = self.control(con)
+                    record = self._queue_identity(con, control['schema'])
+                    after = self.path.lstat()
+                    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                        raise JobsError('Queue database changed while reading enrollment')
+                    return record
+                finally:
+                    con.close()
+            finally:
+                os.close(descriptor)
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, IndexError) as exc:
+            if isinstance(exc, JobsError):
+                raise
+            raise JobsError(f'Queue identity unavailable: {exc}') from exc
+
+    def enroll_queue(self, node_id, host_id):
+        """Explicitly enroll an inactive queue, retaining existing jobs and IDs."""
+        for label, value in (('Node', node_id), ('Host', host_id)):
+            if (not isinstance(value, str) or not value or len(value) > 256
+                    or any(ord(char) < 33 for char in value)):
+                raise JobsError(f'{label} identity must be a nonempty bounded identifier')
+        with self.transaction() as con:
+            control = self.control(con)
+            existing = self._queue_identity(con, control['schema'])
+            if existing is not None:
+                if (existing['node_id'], existing['host_id']) != (node_id, host_id):
+                    raise JobsError('Queue is already enrolled to another node or host identity')
+                return existing
+            from .ownership import lock_held, owner_alive
+            if (any(job['status'] in ACTIVE for job in self.rows(con))
+                    or lock_held(self.root / 'controller.lock') or owner_alive(control.get('owner'))):
+                raise JobsError('Queue enrollment requires no active or unresolved attempts and an offline controller')
+            root_info, database_info = self.root.stat(), self.path.stat()
+            record = {'schema': 1, 'node_id': node_id, 'host_id': host_id,
+                      'queue_id': uuid4().hex, 'state_root': str(self.root),
+                      'root_identity': [root_info.st_dev, root_info.st_ino],
+                      'database_identity': [database_info.st_dev, database_info.st_ino]}
+            con.execute("INSERT INTO meta(key, value) VALUES ('queue_identity', ?)", (json.dumps(record),))
+            # Older workers reject this schema rather than bypass node-local gates.
+            control['schema'] = 4
+            self.set_control(con, control)
+            self.event(con, None, 'Queue explicitly enrolled for node access')
+            return record
+
     @staticmethod
     def control(con):
         control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
-        if type(control.get('schema')) is not int or control['schema'] not in {1, 2, 3}:
+        if type(control.get('schema')) is not int or control['schema'] not in {1, 2, 3, 4}:
             raise JobsError('Unsupported Jobs state schema')
         control['schema'] = max(2, control['schema'])
         control['scheduler'] = {**scheduler_defaults(), **control.get('scheduler', {})}
@@ -518,6 +619,8 @@ class Store:
                     control, jobs, events = empty, [], []
                 else:
                     control, jobs = self.control(con), self.rows(con)
+                    if control['schema'] == 4:
+                        self._queue_identity(con, control['schema'])
                     events = [dict(zip(("id", "time", "job_id", "message"), row)) for row in con.execute("SELECT * FROM events ORDER BY id DESC LIMIT 30")][::-1]
             except sqlite3.Error as exc:
                 raise JobsError(f"Queue database unavailable: {exc}") from exc

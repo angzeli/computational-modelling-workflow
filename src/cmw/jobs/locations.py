@@ -121,7 +121,9 @@ def _read_job(store, job_id):
         con = sqlite3.connect(store.path.as_uri() + '?mode=ro', uri=True, timeout=2)
         try:
             con.execute('BEGIN')
-            Store.control(con)  # Reject unsupported schema without migration.
+            control = Store.control(con)  # Reject unsupported schema without migration.
+            if control['schema'] == 4:
+                store._queue_identity(con, control['schema'])
             job = Store.get(con, job_id)
         finally:
             con.close()

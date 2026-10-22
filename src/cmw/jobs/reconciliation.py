@@ -45,8 +45,10 @@ def preview_reconciliation(store, job, *, state=None, now=None):
     if state is None:
         _, control = read_job(store, job['id'])
         state = {'schema': control['schema'], 'controller': control}
-    if type(state.get('schema')) is not int or state['schema'] not in {1, 2, 3}:
+    if type(state.get('schema')) is not int or state['schema'] not in {1, 2, 3, 4}:
         raise JobsError('Unsupported Jobs state schema for reconciliation preview')
+    if state['schema'] == 4 and store.queue_identity() is None:
+        raise JobsError('Unsupported Jobs state schema: enrolled queue identity is missing')
     binding = observation_key(store, job)
     observation = observe_execution(store, job, state=state, now=now).to_dict(now=now)
     current, fresh_control = read_job(store, job['id'])
@@ -65,9 +67,9 @@ def preview_reconciliation(store, job, *, state=None, now=None):
     elif (evidence.get('source', {}).get('verdict') != 'matched'
           or observation.get('observation_quality') == 'unavailable'):
         rationale = ('Observation source is unavailable, changed or unsupported; no transition is proposed.',)
-    elif fresh_control['schema'] == 3:
+    elif fresh_control['schema'] >= 3:
         rationale = (APPLY_DEFERRED,
-                     'Schema 3 previews describe evidence only; no persistent lifecycle transition is proposed.')
+                     f"Schema {fresh_control['schema']} previews describe evidence only; no persistent lifecycle transition is proposed.")
     elif job['status'] not in ACTIVE:
         rationale = ('No active managed attempt requires recovery.',)
     elif job['status'] == 'Unknown':

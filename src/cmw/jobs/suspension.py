@@ -48,7 +48,7 @@ def initial_state(backend):
 def enroll_state(store, con):
     """Migration is opt-in and cannot invalidate a live legacy supervisor."""
     control = store.control(con)
-    if control['schema'] == 3:
+    if control['schema'] >= 3:
         return
     if (lock_held(store.root/'controller.lock') or owner_alive(control.get('owner'))):
         if control.get('runtime_protocol') != 3:
