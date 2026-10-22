@@ -85,6 +85,16 @@ def install():
     patches.enter_context(patch.object(activity, 'DEFAULT_OBSERVER', activity.Observer(collector=fixture_collect)))
     patches.enter_context(patch.object(runtime, 'detached', detached))
     patches.enter_context(patch.object(sharing, 'AdmissionSampler', FixtureAdmissionSampler))
+    # Node endpoint tests exercise real queue/protocol/control services without
+    # scanning unrelated scientific processes for their status presentation.
+    from cmw.nodes import endpoint
+    from cmw.nodes.backend import LocalBackend
+    serve = endpoint.serve
+    def isolated_serve(*args, **kwargs):
+        kwargs.setdefault('backend_factory', lambda config, queue: LocalBackend(
+            config, queue, activity_projector=lambda store: store.snapshot()))
+        return serve(*args, **kwargs)
+    patches.enter_context(patch.object(endpoint, 'serve', isolated_serve))
     return patches
 
 

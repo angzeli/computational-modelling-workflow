@@ -335,17 +335,28 @@ def register(subcommands):
     for name in ("status", "start", "stop", "pause", "resume", "watch"):
         command = operations.add_parser(name)
         if name == "watch":
+            command.add_argument("--all-nodes", action="store_true", help="observe explicitly configured node default queues; never starts execution")
             command.description = ("Observe Jobs without starting execution. Enter: details; F: files; N: edit a managed job note. "
                 "Editor: Ctrl-S saves, Esc cancels, Ctrl-C detaches without saving; Q inserts text. "
                 "U opens selected-job Suspend/Continue readiness and confirmation. Outside text input Q or Ctrl-C detaches with execution state unchanged.")
         if name != "watch":
             command.add_argument("--json", action="store_true")
+        if name in {"start", "stop", "pause", "resume"}:
+            command.add_argument("--preview", action="store_true", help="node-selected control preview")
+            command.add_argument("--request-id", help="durable node control UUID; inspect the original request after a timeout")
         command.set_defaults(handler=handle)
     submit = operations.add_parser("submit", help="explicit node only: transfer reviewed files and register a held job")
     submit.add_argument("--spec", type=Path, required=True)
     submit.add_argument("--preview", action="store_true", help="prepare a local manifest and inspect destination preflight; no remote mutation")
     submit.add_argument("--json", action="store_true")
     submit.set_defaults(handler=handle)
+    fetch = operations.add_parser("fetch", help="explicit node only: copy selected declared artifacts as verified replicas")
+    fetch.add_argument("job_id")
+    fetch.add_argument("--spec", type=Path, required=True)
+    fetch.add_argument("--destination", type=Path, required=True)
+    fetch.add_argument("--request-id")
+    fetch.add_argument("--json", action="store_true")
+    fetch.set_defaults(handler=handle)
     request = operations.add_parser("request", help="explicit node only: look up the original durable request identity")
     request.add_argument("request_id")
     request.add_argument("--json", action="store_true")
@@ -379,6 +390,9 @@ def register(subcommands):
         command = operations.add_parser(name)
         command.add_argument("job_id")
         command.add_argument("--json", action="store_true")
+        if name in {"hold", "release", "move", "cancel"}:
+            command.add_argument("--preview", action="store_true", help="node-selected control preview")
+            command.add_argument("--request-id", help="durable node control request UUID")
         if name == "move":
             command.add_argument("position", type=int)
         if name == "cancel":
@@ -395,6 +409,8 @@ def register(subcommands):
                         "Memory, storage and admission commitments remain held; continuation is manual.")
         command.add_argument("job_id")
         command.add_argument("--preview", action="store_true", help="inspect readiness without creating or migrating Jobs state")
+        command.add_argument("--request-id", help="durable node control request UUID")
+        command.add_argument("--yes", action="store_true", help="confirm a node-selected suspend/continue request")
         command.add_argument("--reason", default="", help="optional literal operational reason; does not replace the job note")
         command.add_argument("--expected-revision", type=int, help="reject a request if suspension revision changed")
         command.add_argument("--expected-attempt-id", help="require this immutable attempt identity")
@@ -595,12 +611,16 @@ def inspect_progress(store, args):
 
 
 def handle(args):
-    if args.jobs_operation in {"submit", "request"} and not getattr(args, "node", None):
-        print("submit/request require an explicitly enrolled --node; no local fallback")
+    if args.jobs_operation in {"submit", "request", "fetch"} and not getattr(args, "node", None):
+        print("submit/request/fetch require an explicitly enrolled --node; no local fallback")
         return 2
-    if getattr(args, "node", None) or getattr(args, "queue", None):
+    if getattr(args, "node", None) or getattr(args, "queue", None) or getattr(args, "all_nodes", False):
         from cmw.nodes.jobs_cli import handle as handle_node
         return handle_node(args)
+    if (getattr(args, "request_id", None) is not None or
+            (getattr(args, "preview", False) and args.jobs_operation in {"start", "stop", "pause", "resume", "hold", "release", "move", "cancel"})):
+        print("These preview/request options require an explicitly enrolled --node")
+        return 2
     store = Store(args.state)
     operation = args.jobs_operation
     from .activity import project

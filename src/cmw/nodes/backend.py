@@ -29,7 +29,8 @@ from .protocol import NodeError, target_identity, MUTATIONS, identifier
 OPERATIONS = frozenset({'capabilities', 'status', 'lookup', 'show', 'observe',
     'progress', 'history', 'history.release', 'logs', 'locations', 'sources.inspect',
     'sources.validate', 'sources.activate', 'sources.clear', 'request', 'submit.preview',
-    'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup'})
+    'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup', 'control.preview', 'control',
+    'fetch.prepare', 'fetch.complete'})
 MAX_ROWS = 1000
 MAX_LOG_BYTES = 65536
 
@@ -48,7 +49,7 @@ def job_revision(job):
     """Revision of control-relevant persisted fields; observation clocks do not churn it."""
     keys = ('id', 'attempt_id', 'status', 'order', 'claim', 'claimed_at', 'worker',
             'group', 'started_at', 'finished_at', 'cancel_requested', 'termination_requested',
-            'scheduling', 'sharing_anchor', 'note_revision')
+            'scheduling', 'sharing_anchor', 'note_revision', 'node_control_revision')
     record = {key: job.get(key) for key in keys}
     suspension = job.get('suspension') or {}
     record['suspension'] = {key: suspension.get(key) for key in
@@ -57,7 +58,7 @@ def job_revision(job):
 
 
 def queue_revision(control):
-    return _digest({key: control.get(key) for key in ('schema', 'dispatch', 'stop', 'owner', 'scheduler')})
+    return _digest({key: control.get(key) for key in ('schema', 'dispatch', 'stop', 'owner', 'scheduler', 'node_control_revision')})
 
 
 def validate_target(target):
@@ -221,8 +222,9 @@ class LocalBackend:
             storage_ready = self.readiness.get('storages', {}).get(alias, {}).get('ready') if alias else None
             result.append({'node_id': self.config['node_id'], 'queue_id': self.queue['queue_id'],
                 'job_id': job['id'], 'attempt_id': job['attempt_id'], 'location_id': location.key,
-                'storage_id': storage.get('storage_id'), 'registered_root': storage.get('root'),
+                'storage_alias': alias, 'storage_id': storage.get('storage_id'), 'registered_root': storage.get('root'),
                 'relative_path': relative, 'node_path': location.path, 'declared_path': location.declared_path,
+                'target_identity': location.target_identity, 'directory_identity': location.directory_identity,
                 'role': location.role, 'kind': location.kind, 'stage': location.stage,
                 'origin': location.origin, 'accessibility': ('STORAGE_UNAVAILABLE' if alias and storage_ready is not True else location.accessibility),
                 'storage_ready': storage_ready,
@@ -313,7 +315,7 @@ class LocalBackend:
         return {'page': encode_typed(page), 'snapshot': encode_typed(snapshot) if snapshot is not None else None}
 
     def call(self, operation, params=None, target=None, *, request_id=None):
-        """Execute a known read-only operation against enrolled node-local services."""
+        """Execute a negotiated operation against the owning node-local services."""
         if not self._lock.acquire(blocking=False):
             raise BackendError('BUSY', 'This bounded observation session already has an in-flight request')
         try:
@@ -338,6 +340,19 @@ class LocalBackend:
                     raise BackendError('INVALID_TARGET', 'Submission/transfer is not a mutation of an existing attempt')
                 from .submission import dispatch
                 result = dispatch(self, operation, params, request_id=request_id)
+            elif operation in {'control.preview', 'control'}:
+                from .control import dispatch
+                result = dispatch(self, operation, params, target=target, request_id=request_id)
+            elif operation in {'fetch.prepare', 'fetch.complete'}:
+                from .fetch import prepare_fetch, complete_fetch
+                job = self._job(target)
+                if operation == 'fetch.prepare':
+                    _params(params, ('spec',), ('spec',))
+                    result = prepare_fetch(self, job, params['spec'], request_id)
+                else:
+                    _params(params, ('fetch_id', 'manifest_digest'), ('fetch_id', 'manifest_digest'))
+                    result = complete_fetch(self, job, params['fetch_id'], params['manifest_digest'])
+                self._job(target)
             elif operation in {'status', 'capabilities', 'lookup'}:
                 if target is not None:
                     raise BackendError('INVALID_TARGET', 'This operation does not accept an attempt target')

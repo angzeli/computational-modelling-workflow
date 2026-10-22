@@ -7,11 +7,41 @@ from .connections import connect
 from .protocol import NodeError
 
 
+def watch(args):
+    from .connections import ConnectedBackend, read_connections
+    try:
+        from .portal import NodesApp
+    except ModuleNotFoundError as exc:
+        raise NodeError('CONSOLE_UNAVAILABLE', 'Console dependency missing; install the CMW jobs extra') from exc
+    entries = read_connections(args.nodes_config)
+    if args.all_nodes:
+        if args.node or args.queue:
+            raise NodeError('INVALID_SELECTION', '--all-nodes cannot also select --node or --queue')
+        if not entries:
+            raise NodeError('UNKNOWN_NODE', 'No nodes are explicitly enrolled; ordinary jobs watch remains local')
+        selected = entries
+    else:
+        if not args.node or args.node not in entries:
+            raise NodeError('UNKNOWN_NODE', 'Select an explicitly enrolled node')
+        selected = {args.node: entries[args.node]}
+    backends = {}
+    try:
+        for alias, entry in selected.items():
+            backends[alias] = ConnectedBackend(alias, entry, args.queue if not args.all_nodes else None)
+        NodesApp(backends, request_root=args.nodes_config).run()
+    finally:
+        for backend in backends.values():
+            backend.close()
+    return 0
+
+
 def handle(args):
     backend = None
     try:
         if args.state is not None:
             raise NodeError('INVALID_SELECTION', '--state is local only; select an enrolled remote --queue')
+        if args.jobs_operation == 'watch':
+            return watch(args)
         if not args.node:
             raise NodeError('INVALID_SELECTION', '--queue and --all-nodes require explicit node selection')
         backend = connect(args.node, root=args.nodes_config, queue=args.queue)
@@ -24,6 +54,32 @@ def handle(args):
             envelope = backend.call('request', {'request_id': args.request_id})
         elif operation == 'status':
             envelope = backend.call('status')
+        elif operation == 'fetch':
+            from .client import fetch
+            from .cli import _read_spec
+            target = backend.call('lookup', {'id': args.job_id})['result']['target']
+            envelope = fetch(backend, target, _read_spec(args.spec), args.destination,
+                             root=args.nodes_config, request_id=args.request_id)
+        elif operation in {'hold', 'release', 'move', 'cancel', 'suspend', 'continue', 'start', 'stop', 'pause', 'resume'}:
+            from .client import apply_control
+            queue_actions = {'start': 'controller.start', 'stop': 'controller.stop',
+                             'pause': 'dispatch.pause', 'resume': 'dispatch.resume'}
+            target = None
+            if operation not in queue_actions:
+                selected = backend.call('lookup', {'id': args.job_id})['result']
+                target = selected['target']
+                if getattr(args, 'expected_attempt_id', None) not in (None, target['attempt_id']):
+                    raise NodeError('ATTEMPT_CHANGED', 'Expected attempt differs from the selected immutable target')
+                expected_suspension = getattr(args, 'expected_revision', None)
+                if expected_suspension is not None and expected_suspension != (selected['job'].get('suspension') or {}).get('revision'):
+                    raise NodeError('REVISION_CONFLICT', 'Suspension revision differs from the explicitly expected value')
+            params = {'action': queue_actions.get(operation, operation)}
+            if operation == 'move':
+                params['position'] = args.position
+            envelope = backend.call('control.preview', params, target)
+            if not args.preview:
+                envelope = apply_control(backend, envelope['result'], root=args.nodes_config,
+                    confirm=getattr(args, 'yes', False), reason=getattr(args, 'reason', ''), request_id=args.request_id)
         elif operation in {'show', 'observe', 'logs', 'files', 'progress'}:
             found = backend.call('lookup', {'id': args.job_id})
             target = found['result']['target']

@@ -619,9 +619,9 @@ def upload_local_bundle(spool, receipt):
 def sftp_quote(value, *, glob=False):
     if not isinstance(value, str) or any(ord(char) < 32 or ord(char) == 127 for char in value):
         _error('UNSAFE_TRANSFER_PATH', 'SFTP paths cannot contain control characters')
-    # put's destination is literal; get's source is a glob. Both parse quoted
-    # spaces and escaped quotes/backslashes before the selected path operation.
-    escaped = '\\"' + ('*?[]' if glob else '')
+    # Quoted OpenSSH SFTP tokens already protect glob metacharacters. Adding
+    # backslashes before brackets creates a different literal path on get.
+    escaped = '\\"'
     return '"' + ''.join('\\' + char if char in escaped else char for char in value) + '"'
 
 

@@ -286,6 +286,18 @@ class Store:
             return record
 
     @staticmethod
+    def record_request(con, request_id, operation, digest, result):
+        """Persist a receipt in the same transaction as its accepted queue change."""
+        if (operation not in {'submit', 'control'} or not re.fullmatch(r'[a-f0-9]{32}', request_id)
+                or not re.fullmatch(r'[a-f0-9]{64}', digest)):
+            raise JobsError('Invalid node request receipt identity')
+        con.execute('CREATE TABLE IF NOT EXISTS node_requests ('
+                    'request_id TEXT PRIMARY KEY, operation TEXT NOT NULL, '
+                    'digest TEXT NOT NULL, result TEXT NOT NULL)')
+        con.execute('INSERT INTO node_requests(request_id,operation,digest,result) VALUES (?,?,?,?)',
+                    (request_id, operation, digest, json.dumps(result, allow_nan=False)))
+
+    @staticmethod
     def _request_record(con, request_id):
         if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_requests'").fetchone() is None:
             return None
@@ -295,17 +307,19 @@ class Store:
             return None
         try:
             result = json.loads(row[2])
-            if (row[0] != 'submit' or not re.fullmatch(r'[a-f0-9]{64}', row[1])
-                    or not isinstance(result, dict)
-                    or result.get('node_submission', {}).get('request_id') != request_id
-                    or result['node_submission'].get('digest') != row[1]):
+            if (row[0] not in {'submit', 'control'} or not re.fullmatch(r'[a-f0-9]{64}', row[1])
+                    or not isinstance(result, dict)):
+                raise ValueError('Unsupported request receipt')
+            binding = result.get('node_submission', {}) if row[0] == 'submit' else result
+            if (binding.get('request_id') != request_id or binding.get('digest') != row[1]
+                    or row[0] == 'control' and result.get('status') not in {'ACCEPTED', 'COMPLETED'}):
                 raise ValueError('Request identity differs from its recorded outcome')
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise JobsError(f'Recorded node request is malformed: {exc}') from exc
         return {'request_id': request_id, 'operation': row[0], 'digest': row[1], 'result': result}
 
     def request_lookup(self, request_id):
-        """Read a durable registration outcome without creating or changing state."""
+        """Read a durable request outcome without creating or changing state."""
         if not isinstance(request_id, str) or not re.fullmatch(r'[a-f0-9]{32}', request_id):
             raise JobsError('Request ID must be a lowercase UUID hex identity')
         identity = self.queue_identity()
@@ -367,8 +381,39 @@ class Store:
         return control
 
     @staticmethod
+    def node_revision(record):
+        value = record.get('node_control_revision', 0)
+        if type(value) is not int or value < 0:
+            raise JobsError('Invalid node control revision')
+        return value
+
+    @staticmethod
+    def _job_control_state(job):
+        keys = ('id', 'attempt_id', 'display_id', 'name', 'engine', 'argv', 'cwd', 'env',
+                'status', 'order', 'claim', 'claimed_at', 'worker', 'worker_protocol', 'group',
+                'started_at', 'finished_at', 'cancel_requested', 'termination_requested',
+                'resources', 'scheduling', 'sharing_anchor', 'on_failure')
+        result = {key: job.get(key) for key in keys}
+        suspension = job.get('suspension') or {}
+        result['suspension'] = {key: suspension.get(key) for key in
+            ('backend', 'protocol', 'phase', 'desired', 'revision', 'request', 'inhibited', 'capability', 'clock')}
+        return result
+
+    @staticmethod
     def set_control(con, control):
+        current = Store.control(con)
+        if control['schema'] == 4:
+            keys = ('schema', 'dispatch', 'stop', 'owner', 'scheduler', 'runtime_protocol')
+            changed = any(current.get(key) != control.get(key) for key in keys)
+            control['node_control_revision'] = Store.node_revision(current) + int(changed)
         con.execute("UPDATE meta SET value=? WHERE key='control'", (json.dumps(control),))
+
+    @staticmethod
+    def bump_control_revision(con):
+        control = Store.control(con)
+        if control['schema'] == 4:
+            control['node_control_revision'] = Store.node_revision(control) + 1
+            con.execute("UPDATE meta SET value=? WHERE key='control'", (json.dumps(control),))
 
     @staticmethod
     def rows(con):
@@ -423,6 +468,11 @@ class Store:
         elif 'progress_sources' in job:
             from .source_declarations import recorded_sources
             recorded_sources(job)
+        if Store.control(con)['schema'] == 4:
+            changed = Store._job_control_state(current) != Store._job_control_state(job)
+            job['node_control_revision'] = Store.node_revision(current) + int(changed)
+            if changed:
+                Store.bump_control_revision(con)
         con.execute("UPDATE jobs SET data=? WHERE id=?", (json.dumps(job), job["id"]))
 
     @staticmethod
@@ -525,12 +575,7 @@ class Store:
             self.save(con, job)
             self.event(con, number, f"Enqueued at order {job['order']}")
             if remote_request is not None:
-                con.execute('CREATE TABLE IF NOT EXISTS node_requests ('
-                            'request_id TEXT PRIMARY KEY, operation TEXT NOT NULL, '
-                            'digest TEXT NOT NULL, result TEXT NOT NULL)')
-                con.execute('INSERT INTO node_requests(request_id,operation,digest,result) VALUES (?,?,?,?)',
-                            (remote_request['request_id'], 'submit', remote_request['digest'],
-                             json.dumps(job, allow_nan=False)))
+                self.record_request(con, remote_request['request_id'], 'submit', remote_request['digest'], job)
         return job
 
     def annotate(self, job_id, note, *, expected_revision=None, expected_attempt_id=None):
@@ -653,52 +698,58 @@ class Store:
 
     def dispatch(self, enabled):
         with self.transaction() as con:
-            control = self.control(con)
-            if enabled and any(j["status"] in {"Unknown", "Cancelling"} for j in self.rows(con)):
-                raise JobsError("Needs attention or cancellation is unresolved; dispatch remains paused")
-            control.update(dispatch=bool(enabled), reason="" if enabled else "User pause")
-            self.set_control(con, control)
-            self.event(con, None, "Dispatch resumed" if enabled else "Dispatch paused")
+            self._dispatch(con, enabled)
+
+    def _dispatch(self, con, enabled):
+        control = self.control(con)
+        if enabled and any(j["status"] in {"Unknown", "Cancelling"} for j in self.rows(con)):
+            raise JobsError("Needs attention or cancellation is unresolved; dispatch remains paused")
+        control.update(dispatch=bool(enabled), reason="" if enabled else "User pause")
+        self.set_control(con, control)
+        self.event(con, None, "Dispatch resumed" if enabled else "Dispatch paused")
 
     def change(self, job_id, action, *, position=None, confirm=False, expected=None):
         with self.transaction() as con:
-            job = self.get(con, job_id)
-            if expected is not None and job["status"] != expected:
-                raise JobsError("Job changed since selection; refresh and try again")
-            status = job["status"]
-            if action in {"hold", "release", "move"} and status not in PENDING:
-                raise JobsError("Only pending jobs can be held, released or reordered")
-            if action == "hold":
-                job["status"] = "Hold"
-            elif action == "release":
-                job["status"] = "Queue"
-            elif action == "move":
-                pending = sorted((j for j in self.rows(con) if j["status"] in PENDING), key=lambda j: j["order"])
-                if position is None or not 1 <= position <= len(pending):
-                    raise JobsError(f"Order must be between 1 and {len(pending)}")
-                pending = [j for j in pending if j["id"] != job["id"]]
-                pending.insert(position - 1, job)
-                for index, item in enumerate(pending, 1):
-                    item["order"] = index
-                    self.save(con, item)
-                job["order"] = position
-            elif action == "cancel":
-                if status in PENDING:
-                    job.update(status="Cancelled", finished_at=time.time(), order=None, reason="Cancelled before execution")
-                elif status in {"Starting", "Run"}:
-                    if not confirm:
-                        raise JobsError("Running cancellation requires --yes; it terminates the managed process group")
-                    job.update(status="Cancelling", cancel_requested=True, reason="Waiting for confirmed termination")
-                    control = self.control(con)
-                    control.update(dispatch=False, reason="Cancellation requested; resume manually after termination")
-                    self.set_control(con, control)
-                else:
-                    raise JobsError(f"Cannot cancel {status}; no unverified process will be signalled")
+            return self._change(con, job_id, action, position=position, confirm=confirm, expected=expected)
+
+    def _change(self, con, job_id, action, *, position=None, confirm=False, expected=None):
+        job = self.get(con, job_id)
+        if expected is not None and job["status"] != expected:
+            raise JobsError("Job changed since selection; refresh and try again")
+        status = job["status"]
+        if action in {"hold", "release", "move"} and status not in PENDING:
+            raise JobsError("Only pending jobs can be held, released or reordered")
+        if action == "hold":
+            job["status"] = "Hold"
+        elif action == "release":
+            job["status"] = "Queue"
+        elif action == "move":
+            pending = sorted((j for j in self.rows(con) if j["status"] in PENDING), key=lambda j: j["order"])
+            if position is None or not 1 <= position <= len(pending):
+                raise JobsError(f"Order must be between 1 and {len(pending)}")
+            pending = [j for j in pending if j["id"] != job["id"]]
+            pending.insert(position - 1, job)
+            for index, item in enumerate(pending, 1):
+                item["order"] = index
+                self.save(con, item)
+            job["order"] = position
+        elif action == "cancel":
+            if status in PENDING:
+                job.update(status="Cancelled", finished_at=time.time(), order=None, reason="Cancelled before execution")
+            elif status in {"Starting", "Run"}:
+                if not confirm:
+                    raise JobsError("Running cancellation requires --yes; it terminates the managed process group")
+                job.update(status="Cancelling", cancel_requested=True, reason="Waiting for confirmed termination")
+                control = self.control(con)
+                control.update(dispatch=False, reason="Cancellation requested; resume manually after termination")
+                self.set_control(con, control)
             else:
-                raise JobsError(f"Unknown operation: {action}")
-            self.save(con, job)
-            self.normalize(con)
-            self.event(con, job["id"], f"{action.capitalize()} requested")
+                raise JobsError(f"Cannot cancel {status}; no unverified process will be signalled")
+        else:
+            raise JobsError(f"Unknown operation: {action}")
+        self.save(con, job)
+        self.normalize(con)
+        self.event(con, job["id"], f"{action.capitalize()} requested")
         return job
 
     def snapshot(self, *, now=None):

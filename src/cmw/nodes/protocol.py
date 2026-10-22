@@ -13,7 +13,7 @@ OPERATIONS = frozenset({
     'capabilities', 'status', 'lookup', 'show', 'observe', 'progress', 'history',
     'history.release', 'logs', 'locations', 'sources.inspect', 'sources.validate',
     'sources.activate', 'sources.clear', 'request', 'submit.preview', 'submit',
-    'transfer.begin', 'transfer.publish', 'transfer.lookup', 'control',
+    'transfer.begin', 'transfer.publish', 'transfer.lookup', 'control.preview', 'control',
     'fetch.prepare', 'fetch.complete',
 })
 MUTATIONS = frozenset({'submit', 'transfer.begin', 'transfer.publish', 'control',

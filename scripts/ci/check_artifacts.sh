@@ -7,7 +7,7 @@ python_exe=${PYTHON_BIN:-python3}
 mkdir -m 700 "$check_root"
 check_root=$(cd "$check_root" && pwd -P)
 case "$check_root/" in "$source_root/"*) printf 'Artifact checks require a directory outside the checkout\n' >&2; exit 64;; esac
-mkdir -p "$check_root/dist" "$check_root/driver/tests/jobs" "$check_root/driver/tests/periodic/vasp" "$check_root/driver/tests/progress" "$check_root/tmp"
+mkdir -p "$check_root/dist" "$check_root/driver/tests/jobs" "$check_root/driver/tests/nodes" "$check_root/driver/tests/periodic/vasp" "$check_root/driver/tests/progress" "$check_root/tmp"
 export TMPDIR="$check_root/tmp" PYTHONDONTWRITEBYTECODE=1
 unset PYTHONPATH
 if [[ ${CMW_ARTIFACT_OFFLINE:-0} == 1 ]]; then
@@ -21,6 +21,8 @@ fi
 cp "$source_root/tests/installed_smoke.py" "$check_root/driver/smoke.py"
 : > "$check_root/driver/tests/__init__.py"
 : > "$check_root/driver/tests/jobs/__init__.py"
+: > "$check_root/driver/tests/nodes/__init__.py"
+cp "$source_root/tests/nodes/acceptance.py" "$check_root/driver/tests/nodes/"
 cp "$source_root/tests/jobs/"{isolated_runtime,lifecycle_evidence,progress_acceptance,progress_extension_fixture,suspension_acceptance}.py "$check_root/driver/tests/jobs/"
 : > "$check_root/driver/tests/periodic/__init__.py"
 : > "$check_root/driver/tests/periodic/vasp/__init__.py"

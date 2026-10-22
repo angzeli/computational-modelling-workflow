@@ -131,3 +131,109 @@ output directory. Prepared POSCAR provenance is registered only after target
 publication; source inode, attempt, staging and finalization records are never
 imported. Runtime, queue, storage, profile and destination working-directory
 identity are checked again through the existing local admission gate.
+
+## Explicit controls and outcome lookup
+
+Selected-node `hold`, `release`, `move`, `cancel`, `suspend`, `continue`, `start`,
+`stop`, `pause` and `resume` use the existing local services on that node. Append
+`--preview` to inspect the consequence and bound identity without changing state.
+Cancel and Suspend/Continue require `--yes` for node-selected CLI commands.
+Suspension remains limited to attempts already enrolled through an existing
+supported suspension contract; node enrollment does not qualify a native runner.
+
+```console
+cmw jobs --nodes-config FRONTEND_CONFIG --node mini release J1.1 --preview
+cmw jobs --nodes-config FRONTEND_CONFIG --node mini release J1.1
+cmw jobs --nodes-config FRONTEND_CONFIG --node mini start
+cmw jobs --nodes-config FRONTEND_CONFIG --node mini cancel J1.1 --yes
+```
+
+The preview binds the node/queue/attempt, current boot clock and monotonic
+control-relevant job/queue revisions. The frontend records that exact intent
+before sending it. Same-ID retries return the original durable receipt; changed
+semantics conflict. Relevant state transitions invalidate stale previews even
+when the state later returns to its old value. Heartbeats and telemetry do not
+consume confirmations. A reconnect never refreshes an old confirmation's clock
+or revisions. A supplied `--request-id` remains bound to its original preview;
+if a later preview differs, it refuses. Resolve an uncertain control with
+`request REQUEST_ID --json` on that same node and queue before issuing new intent.
+
+`ACCEPTED` records intent; it does not prove worker completion. Controller start
+records its intent before the detached launch, then reports launch-unconfirmed.
+Inspect status to establish that startup occurred. If the process fails between
+commit and launch, looking up or retrying that request does not spawn another
+controller; inspect the queue and issue a new explicit request with a fresh
+preview if appropriate. Stop pauses dispatch and stops the controller while
+existing detached workers continue. The endpoint never signals scientific PIDs
+from the frontend.
+
+## Portal and selected replicas
+
+```console
+cmw jobs --nodes-config FRONTEND_CONFIG watch --all-nodes
+cmw jobs --nodes-config FRONTEND_CONFIG --node mini --queue research watch
+```
+
+`--all-nodes` observes the default queue of each explicitly enrolled connection.
+Use `--node` and `--queue` for another enrolled named queue. It grants no
+cross-node control authority. The compact portal preserves the existing
+Scientific formatter and adds node identity to rows and selection. Each node
+refreshes independently; cached disconnected rows say Last reported and retain
+receipt-age qualifications. CPU, RAM, guards and external observations remain
+per-node. History and Sources use the selected endpoint, while Copy uses the
+frontend clipboard. Closing the portal closes observers only.
+
+Files displays owning-node declarations, Copy Location and explicit Fetch. An
+ordinary local folder opens only through a local connection and revalidated
+location identity. A remote path never invokes the frontend folder opener by
+spelling alone. Optional share mapping/opening is deliberately unavailable until
+its endpoint/share identity can be established; no SMB setup or mount is required.
+
+Fetch selects individual declared artifacts, not a recursive project tree:
+
+```json
+{
+  "schema": 1,
+  "storage": "scratch",
+  "purpose": "summaries",
+  "capture": "stable",
+  "large_files": false,
+  "files": [
+    {"location_id": "REPLACE_WITH_EXACT_FILES_LOCATION_ID", "relative": "result.txt", "path": "result.txt"}
+  ]
+}
+```
+
+`relative` is an explicit child of a declared directory, or empty for a declared
+file. `path` is the new replica-relative destination. Obtain the location ID
+from `files --json`. The portal Fetch dialog accepts this local JSON document and
+a new local destination; the equivalent CLI is:
+
+```console
+cmw jobs --nodes-config FRONTEND_CONFIG --node mini fetch J1.1 --spec fetch.json --destination /absolute/new/replica
+```
+
+Presets are semantic labels: `summaries`, `analysis`, `archive` or `restart`.
+Normal captures are bounded to 128 files, 64 MiB per file and 256 MiB total.
+Explicit large-file permission for archive/restart captures permits at most
+2 GiB per file and 4 GiB total.
+Stable/archive/restart captures require a completed attempt and stable selected
+source versions. Active sources require `capture: observation` and always retain
+`INCOMPLETE_OBSERVATIONAL` qualification. A stable capture is a `STABLE_REPLICA`,
+not an accepted scientific result or a relocated original.
+
+Origin verification and export capture occur on the execution node. A separate
+SFTP channel transfers immutable capture bytes; the frontend verifies their
+manifest and publishes into a new destination without overwriting. The
+`fetch-manifest.json` records node/queue/attempt, source evidence, digest and
+replica qualification. It conveys no source inode, process, staging or
+original-location finalization authority. Adoption and finalizer relocation are
+outside this MVP. Export evidence is retained for inspection and recovery.
+
+The frontend records capture and local promotion identity before publication.
+A lost completion acknowledgment reports `FETCHED` with
+`acknowledgment_pending: true`; it does not erase the verified local result.
+Retry the same `--request-id`, specification and destination to verify the owned
+replica and acknowledge it without copying or overwriting. Fetch capture records
+are separate from the Jobs registration/control `request` lookup. An existing
+unrelated or copied directory is never silently adopted.

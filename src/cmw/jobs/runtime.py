@@ -59,11 +59,8 @@ def start(store):
         if lock_held(store.root / "controller.lock"):
             raise JobsError("Controller ownership is uncertain; inspect controller.log")
         with store.transaction() as con:
-            control = store.control(con)
-            blocked = any(j["status"] in {"Unknown", "Cancelling"} for j in store.rows(con))
-            control.update(stop=False, dispatch=not blocked, reason="Needs attention" if blocked else "Starting controller")
-            store.set_control(con, control)
-        process = detached(["controller", str(store.root)], store.root / "controller.log")
+            _prepare_start(store, con)
+        process = _launch_controller(store)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -74,12 +71,27 @@ def start(store):
         raise JobsError("Controller startup not confirmed; inspect status before retrying")
 
 
+def _prepare_start(store, con):
+    control = store.control(con)
+    blocked = any(j['status'] in {'Unknown', 'Cancelling'} for j in store.rows(con))
+    control.update(stop=False, dispatch=not blocked, reason='Needs attention' if blocked else 'Starting controller')
+    store.set_control(con, control)
+
+
+def _launch_controller(store):
+    return detached(['controller', str(store.root)], store.root / 'controller.log')
+
+
+def _stop(store, con):
+    control = store.control(con)
+    control.update(stop=True, dispatch=False, reason='Controller stop requested; active execution state unchanged')
+    store.set_control(con, control)
+    store.event(con, None, control['reason'])
+
+
 def stop(store):
     with store.transaction() as con:
-        control = store.control(con)
-        control.update(stop=True, dispatch=False, reason="Controller stop requested; active execution state unchanged")
-        store.set_control(con, control)
-        store.event(con, None, control["reason"])
+        _stop(store, con)
 
 
 def mark_unknown(store, con, job, reason):
