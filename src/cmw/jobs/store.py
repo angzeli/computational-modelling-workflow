@@ -225,32 +225,37 @@ class Store:
         if not self.path.exists():
             return None
         try:
-            flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
-            descriptor = os.open(self.path, flags)
+            before = self.path.lstat()
+            if not stat.S_ISREG(before.st_mode):
+                raise JobsError('Queue database is not a regular file')
+            # A raw descriptor close would release another connection's POSIX
+            # writer lock. Let SQLite manage its descriptors, including deferred
+            # closes. This unlocked probe checks format only, never queue data.
             try:
-                before = os.fstat(descriptor)
-                if not stat.S_ISREG(before.st_mode):
-                    raise JobsError('Queue database is not a regular file')
-                header = os.read(descriptor, 20)
-                if header and (len(header) < 20 or header[18:20] != b'\x01\x01'):
-                    raise JobsError('Unsupported database journal format for read-only enrollment')
-                con = sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True, timeout=2)
+                probe = sqlite3.connect(self.path.as_uri() + '?mode=ro&nolock=1', uri=True, timeout=2)
                 try:
-                    con.execute('PRAGMA query_only=ON')
-                    con.execute('BEGIN')
-                    tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                    if not tables:
-                        return None
-                    control = self.control(con)
-                    record = self._queue_identity(con, control['schema'])
-                    after = self.path.lstat()
-                    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
-                        raise JobsError('Queue database changed while reading enrollment')
-                    return record
+                    journal_mode = probe.execute('PRAGMA journal_mode').fetchone()[0]
                 finally:
-                    con.close()
+                    probe.close()
+                if journal_mode != 'delete':
+                    raise JobsError('Unsupported database journal format for read-only enrollment')
+            except sqlite3.Error as exc:
+                raise JobsError('Unsupported database journal format for read-only enrollment') from exc
+            con = sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True, timeout=2)
+            try:
+                con.execute('PRAGMA query_only=ON')
+                con.execute('BEGIN')
+                tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if not tables:
+                    return None
+                control = self.control(con)
+                record = self._queue_identity(con, control['schema'])
+                after = self.path.lstat()
+                if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                    raise JobsError('Queue database changed while reading enrollment')
+                return record
             finally:
-                os.close(descriptor)
+                con.close()
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, IndexError) as exc:
             if isinstance(exc, JobsError):
                 raise

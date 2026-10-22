@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -73,6 +75,34 @@ class QueueIdentityTests(unittest.TestCase):
             values = list(pool.map(lambda _: self.enroll(), range(2)))
         self.assertEqual(values[0], values[1])
         self.assertEqual(len(self.store.snapshot()['events']), 2)
+
+    def test_readonly_identity_preserves_existing_writer_lock(self):
+        identity = self.enroll()
+        competing_writer = """
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1], timeout=0.2)
+try:
+    con.execute('BEGIN IMMEDIATE')
+except sqlite3.OperationalError as exc:
+    print('LOCKED' if 'locked' in str(exc).lower() else str(exc))
+else:
+    con.execute("INSERT INTO meta(key, value) VALUES ('competing_writer', 'unexpected')")
+    con.commit()
+    print('ACQUIRED_AND_COMMITTED')
+finally:
+    con.close()
+"""
+        with self.store.transaction() as con:
+            con.execute("INSERT INTO meta(key, value) VALUES ('outer_writer', 'retained')")
+            self.assertEqual(self.store.queue_identity(), identity)
+            result = subprocess.run([sys.executable, '-I', '-B', '-c', competing_writer,
+                                     str(self.store.path)], check=True, capture_output=True,
+                                    text=True, timeout=10)
+            self.assertEqual(result.stdout.strip(), 'LOCKED', result.stderr)
+        with closing(sqlite3.connect(self.store.path)) as con:
+            self.assertEqual(con.execute("SELECT value FROM meta WHERE key='outer_writer'").fetchone(),
+                             ('retained',))
+            self.assertIsNone(con.execute("SELECT value FROM meta WHERE key='competing_writer'").fetchone())
 
     def test_conflicting_node_or_host_is_refused_without_changes(self):
         self.enroll()
