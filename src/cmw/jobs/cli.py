@@ -341,6 +341,15 @@ def register(subcommands):
         if name != "watch":
             command.add_argument("--json", action="store_true")
         command.set_defaults(handler=handle)
+    submit = operations.add_parser("submit", help="explicit node only: transfer reviewed files and register a held job")
+    submit.add_argument("--spec", type=Path, required=True)
+    submit.add_argument("--preview", action="store_true", help="prepare a local manifest and inspect destination preflight; no remote mutation")
+    submit.add_argument("--json", action="store_true")
+    submit.set_defaults(handler=handle)
+    request = operations.add_parser("request", help="explicit node only: look up the original durable request identity")
+    request.add_argument("request_id")
+    request.add_argument("--json", action="store_true")
+    request.set_defaults(handler=handle)
     add = operations.add_parser("add", help="enqueue trusted foreground argv; never starts execution")
     add.add_argument("--name", required=True)
     add.add_argument("--note", default="", help="optional plain-text human annotation (4096 Unicode code points); before --")
@@ -586,6 +595,9 @@ def inspect_progress(store, args):
 
 
 def handle(args):
+    if args.jobs_operation in {"submit", "request"} and not getattr(args, "node", None):
+        print("submit/request require an explicitly enrolled --node; no local fallback")
+        return 2
     if getattr(args, "node", None) or getattr(args, "queue", None):
         from cmw.nodes.jobs_cli import handle as handle_node
         return handle_node(args)

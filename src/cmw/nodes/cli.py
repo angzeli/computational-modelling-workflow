@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 
-from .protocol import NodeError
+from .protocol import NodeError, decode
 
 
 def _read_spec(path):
     path = Path(path)
-    if path.stat().st_size > 128 * 1024:
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0))
+    with os.fdopen(fd, 'rb') as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise NodeError('INVALID_SPEC', 'Specification must be a regular JSON file')
+        raw = handle.read(128 * 1024 + 1)
+    if len(raw) > 128 * 1024:
         raise NodeError('INVALID_SPEC', 'Configuration specification exceeds 128 KiB')
-    value = json.loads(path.read_text())
+    value = decode(raw.rstrip(b'\n') + b'\n')
     if not isinstance(value, dict):
         raise NodeError('INVALID_SPEC', 'Specification must be an object')
     return value

@@ -48,6 +48,7 @@ class ProcessTransport:
         self._lock = threading.Lock()
         self._verified_key = host_key is None
         self._stderr_line = bytearray()
+        self._verified_channel = False
 
     def _start(self):
         if self.process is not None:
@@ -81,6 +82,8 @@ class ProcessTransport:
             raise NodeError('BUSY', 'Only one in-flight request is permitted per endpoint channel')
         try:
             self._start()
+            if operation in MUTATIONS and not self._verified_channel:
+                raise NodeError('HANDSHAKE_REQUIRED', 'Verify endpoint capabilities on this channel before mutation')
             deadline, sent = time.monotonic() + self.timeout, 0
             with selectors.DefaultSelector() as selector:
                 selector.register(self.process.stdin, selectors.EVENT_WRITE, 'in')
@@ -102,7 +105,10 @@ class ProcessTransport:
                                 pass
                         if not self._verified_key:
                             raise NodeError('SSH_IDENTITY_UNVERIFIED', 'No matching SSH host-key evidence was observed')
-                        return response(value, message['request_id'])
+                        result = response(value, message['request_id'])
+                        if operation == 'capabilities':
+                            self._verified_channel = True
+                        return result
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise NodeError('OUTCOME_UNKNOWN' if operation in MUTATIONS else 'UNREACHABLE',
@@ -141,6 +147,7 @@ class ProcessTransport:
         self._buffer.clear()
         self._stderr_line.clear()
         self._verified_key = self.host_key is None
+        self._verified_channel = False
         if process is None:
             return
         for handle in (process.stdin, process.stdout, process.stderr):

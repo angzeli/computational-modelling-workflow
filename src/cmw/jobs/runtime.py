@@ -105,6 +105,14 @@ def reconcile(store, con, job):
 
 
 def launch_blocker(job):
+    if 'node_submission' in job:
+        from cmw.nodes.submission import launch_blocker as node_launch_blocker
+        try:
+            blocker = node_launch_blocker(job)
+        except (OSError, ValueError) as exc:
+            return f'Node launch preflight refused: {exc}'
+        if blocker:
+            return str(blocker)
     if not Path(job["cwd"]).is_dir():
         return "Working directory no longer exists"
     command = job["argv"][0]

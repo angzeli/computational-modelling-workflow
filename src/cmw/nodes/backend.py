@@ -23,12 +23,13 @@ from cmw.jobs.source_selection import inspect_selection, validate_selection, act
 from cmw.progress.models import SourceDescriptor
 from cmw.progress.service import ObservationService
 from .codec import encode_typed, decode_typed
-from .protocol import NodeError, target_identity
+from .protocol import NodeError, target_identity, MUTATIONS, identifier
 
 
 OPERATIONS = frozenset({'capabilities', 'status', 'lookup', 'show', 'observe',
     'progress', 'history', 'history.release', 'logs', 'locations', 'sources.inspect',
-    'sources.validate', 'sources.activate', 'sources.clear'})
+    'sources.validate', 'sources.activate', 'sources.clear', 'request', 'submit.preview',
+    'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup'})
 MAX_ROWS = 1000
 MAX_LOG_BYTES = 65536
 
@@ -324,14 +325,27 @@ class LocalBackend:
             if type(params) is not dict:
                 raise BackendError('INVALID_PARAMS', 'Operation parameters must be an object')
             self._check()
-            if operation in {'status', 'capabilities', 'lookup'}:
+            if operation in MUTATIONS:
+                identifier(request_id, 'request ID')
+                expected = {'node_id': self.config['node_id'], 'queue_id': self.queue['queue_id'],
+                            'host_id': self.config['host_id'], 'runtime_id': self.config['runtime']['fingerprint'],
+                            'clock_id': self.clock_id}
+                if params.get('_endpoint') != expected:
+                    raise BackendError('ENDPOINT_CHANGED', 'Mutation lacks the exact verified endpoint/boot guard')
+                params = {key: value for key, value in params.items() if key != '_endpoint'}
+            if operation in {'request', 'submit.preview', 'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup'}:
+                if target is not None:
+                    raise BackendError('INVALID_TARGET', 'Submission/transfer is not a mutation of an existing attempt')
+                from .submission import dispatch
+                result = dispatch(self, operation, params, request_id=request_id)
+            elif operation in {'status', 'capabilities', 'lookup'}:
                 if target is not None:
                     raise BackendError('INVALID_TARGET', 'This operation does not accept an attempt target')
                 if operation == 'capabilities':
                     _params(params)
                     result = {'queue': deepcopy(self.queue), 'readiness': deepcopy(self.readiness),
                               'profiles': deepcopy(self.config.get('profiles', {})), 'operations': sorted(OPERATIONS),
-                              'mutations_supported': False, 'observer_session': self.session_id}
+                              'mutations_supported': True, 'observer_session': self.session_id}
                 elif operation == 'status':
                     result = self._status(params)
                 else:

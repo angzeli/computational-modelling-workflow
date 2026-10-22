@@ -124,6 +124,19 @@ class ConnectedBackend:
         from .protocol import MUTATIONS
         if operation in MUTATIONS and self.connection['read_only']:
             raise NodeError('READ_ONLY', 'This node connection is enrolled for observation only')
+        if operation in MUTATIONS:
+            if request_id is None:
+                from uuid import uuid4
+                request_id = uuid4().hex
+            verified = self.call('capabilities')
+            if not verified['result'].get('mutations_supported'):
+                raise NodeError('READ_ONLY', 'Endpoint does not support mutations')
+            if params is not None and '_endpoint' in params:
+                raise NodeError('INVALID_REQUEST', 'Endpoint guard is generated from the verified connection')
+            params = {**(params or {}), '_endpoint': {
+                'node_id': self.node_id, 'queue_id': self.queue_id,
+                'host_id': self.connection['host_id'], 'runtime_id': self.connection['runtime_id'],
+                'clock_id': verified['clock_id']}}
         if target is not None and (target.get('node_id') != self.node_id or target.get('queue_id') != self.queue_id):
             raise NodeError('WRONG_NODE', 'Selected target belongs to another node or queue')
         if self.transport:

@@ -16,7 +16,13 @@ def handle(args):
             raise NodeError('INVALID_SELECTION', '--queue and --all-nodes require explicit node selection')
         backend = connect(args.node, root=args.nodes_config, queue=args.queue)
         operation = args.jobs_operation
-        if operation == 'status':
+        if operation == 'submit':
+            from .client import submit
+            from .cli import _read_spec
+            envelope = submit(backend, _read_spec(args.spec), root=args.nodes_config, preview=args.preview)
+        elif operation == 'request':
+            envelope = backend.call('request', {'request_id': args.request_id})
+        elif operation == 'status':
             envelope = backend.call('status')
         elif operation in {'show', 'observe', 'logs', 'files', 'progress'}:
             found = backend.call('lookup', {'id': args.job_id})

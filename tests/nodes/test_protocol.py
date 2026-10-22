@@ -80,7 +80,9 @@ class ProtocolTests(unittest.TestCase):
             self.assertIsNone(channel.process)
 
     def test_timeout_after_mutation_is_unknown_outcome_not_job_failure(self):
-        channel = ProcessTransport([sys.executable, '-I', '-B', '-c', 'import time;time.sleep(3)'], timeout=.1)
+        script = "import sys,json,time\nfor line in sys.stdin:\n q=json.loads(line)\n if q['operation']=='submit': time.sleep(3)\n print(json.dumps(dict(protocol=1,request_id=q['request_id'],ok=True,result={})),flush=True)"
+        channel = ProcessTransport([sys.executable, '-I', '-B', '-c', script], timeout=.3)
+        channel.exchange('capabilities')
         with self.assertRaises(NodeError) as caught:
             channel.exchange('submit', request_id=uuid4().hex)
         self.assertEqual(caught.exception.code, 'OUTCOME_UNKNOWN')
@@ -107,3 +109,10 @@ class ProtocolTests(unittest.TestCase):
                 validate_envelope({**envelope, field: bad})
         with self.assertRaises(NodeError):
             validate_envelope({key: value for key, value in envelope.items() if key != 'session_id'})
+
+    def test_no_mutating_bytes_before_verified_capability_handshake(self):
+        channel = ProcessTransport([sys.executable, '-I', '-B', '-c', 'import sys;sys.stdin.read()'], timeout=1)
+        with self.assertRaises(NodeError) as caught:
+            channel.exchange('submit')
+        self.assertEqual(caught.exception.code, 'HANDSHAKE_REQUIRED')
+        self.assertIsNone(channel.process)

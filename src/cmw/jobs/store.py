@@ -190,7 +190,7 @@ class Store:
         row = con.execute("SELECT value FROM meta WHERE key='queue_identity'").fetchone()
         if row is None:
             if schema == 4:
-                raise JobsError('Enrolled queue identity is missing')
+                raise JobsError('Unsupported Jobs state schema: enrolled queue identity is missing')
             return None
         try:
             record = json.loads(row[0])
@@ -286,6 +286,78 @@ class Store:
             return record
 
     @staticmethod
+    def _request_record(con, request_id):
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_requests'").fetchone() is None:
+            return None
+        row = con.execute('SELECT operation,digest,result FROM node_requests WHERE request_id=?',
+                          (request_id,)).fetchone()
+        if row is None:
+            return None
+        try:
+            result = json.loads(row[2])
+            if (row[0] != 'submit' or not re.fullmatch(r'[a-f0-9]{64}', row[1])
+                    or not isinstance(result, dict)
+                    or result.get('node_submission', {}).get('request_id') != request_id
+                    or result['node_submission'].get('digest') != row[1]):
+                raise ValueError('Request identity differs from its recorded outcome')
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise JobsError(f'Recorded node request is malformed: {exc}') from exc
+        return {'request_id': request_id, 'operation': row[0], 'digest': row[1], 'result': result}
+
+    def request_lookup(self, request_id):
+        """Read a durable registration outcome without creating or changing state."""
+        if not isinstance(request_id, str) or not re.fullmatch(r'[a-f0-9]{32}', request_id):
+            raise JobsError('Request ID must be a lowercase UUID hex identity')
+        identity = self.queue_identity()
+        if identity is None:
+            return None
+        try:
+            con = sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True, timeout=2)
+            try:
+                con.execute('PRAGMA query_only=ON')
+                con.execute('BEGIN')
+                if self._queue_identity(con, self.control(con)['schema']) != identity:
+                    raise JobsError('Queue identity changed while reading request outcome')
+                result = self._request_record(con, request_id)
+                if self._queue_identity(con, self.control(con)['schema']) != identity:
+                    raise JobsError('Queue identity changed while reading request outcome')
+                return result
+            finally:
+                con.close()
+        except sqlite3.Error as exc:
+            raise JobsError(f'Queue request lookup unavailable: {exc}') from exc
+
+    def _prepare_node_request(self, request, metadata):
+        if (not isinstance(request, dict) or set(request) != {'request_id', 'digest'}
+                or not isinstance(request['request_id'], str)
+                or not re.fullmatch(r'[a-f0-9]{32}', request['request_id'])
+                or not isinstance(request['digest'], str)
+                or not re.fullmatch(r'[a-f0-9]{64}', request['digest'])):
+            raise JobsError('Remote registration requires one request ID and semantic SHA-256 digest')
+        required = {'schema', 'node_id', 'queue_id', 'request_id', 'digest'}
+        if (not isinstance(metadata, dict) or not required <= set(metadata)
+                or type(metadata['schema']) is not int or metadata['schema'] != 1
+                or metadata['request_id'] != request['request_id'] or metadata['digest'] != request['digest']):
+            raise JobsError('Node submission metadata does not match the registration request')
+        try:
+            encoded = json.dumps(metadata, allow_nan=False, ensure_ascii=True)
+            if len(encoded) > 65536:
+                raise ValueError('Node submission metadata exceeds 64 KiB')
+            metadata = json.loads(encoded)
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise JobsError(f'Invalid node submission metadata: {exc}') from exc
+        identity = self.queue_identity()
+        if identity is None or any(metadata[key] != identity[key] for key in ('node_id', 'queue_id')):
+            raise JobsError('Node submission requires the matching explicitly enrolled queue')
+        return metadata
+
+    @staticmethod
+    def _same_request(record, request):
+        if record['operation'] != 'submit' or record['digest'] != request['digest']:
+            raise JobsError('Request identity conflict: this request ID already names different semantics')
+        return record['result']
+
+    @staticmethod
     def control(con):
         control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
         if type(control.get('schema')) is not int or control['schema'] not in {1, 2, 3, 4}:
@@ -340,6 +412,14 @@ class Store:
                         or job.get('engine') != current.get('engine')):
                     raise JobsError('Progress source attempt and engine identity are immutable')
                 job['progress_sources'] = current['progress_sources']
+            if 'node_submission' in job and ('node_submission' not in current
+                    or job['node_submission'] != current['node_submission']):
+                raise JobsError('Node submission metadata is immutable; register a new attempt')
+            if 'node_submission' in current:
+                if (job.get('attempt_id') != current.get('attempt_id')
+                        or job.get('engine') != current.get('engine')):
+                    raise JobsError('Node submission attempt and engine identity are immutable')
+                job['node_submission'] = current['node_submission']
         elif 'progress_sources' in job:
             from .source_declarations import recorded_sources
             recorded_sources(job)
@@ -359,7 +439,13 @@ class Store:
             mpi_ranks=None, threads_per_rank=None, env=None, hold=False,
             on_failure="pause", layout=None, role="primary", allow_auxiliary=False,
             independent=False, resource_contract=None, write_scope=None, note='', suspension_backend=None,
-            progress_sources=()):
+            progress_sources=(), remote_request=None, node_submission=None):
+        if remote_request is not None or node_submission is not None:
+            node_submission = self._prepare_node_request(remote_request, node_submission)
+            previous = self.request_lookup(remote_request['request_id'])
+            if previous is not None:
+                return self._same_request(previous, remote_request)
+            hold = True
         from .source_declarations import declaration_record, validate_sources
         progress_sources = validate_sources(engine, progress_sources, require_complete=bool(progress_sources))
         note = validate_note(note)
@@ -404,6 +490,13 @@ class Store:
             independent=independent, resource_contract=resource_contract,
             write_scope=str(directory) if write_scope is None else write_scope), resources, directory)
         with self.transaction() as con:
+            if remote_request is not None:
+                identity = self._queue_identity(con, self.control(con)['schema'])
+                if identity is None or any(node_submission[key] != identity[key] for key in ('node_id', 'queue_id')):
+                    raise JobsError('Node submission queue identity changed before registration')
+                previous = self._request_record(con, remote_request['request_id'])
+                if previous is not None:
+                    return self._same_request(previous, remote_request)
             if suspension_backend:
                 from .suspension import enroll_state
                 enroll_state(self, con)
@@ -418,6 +511,8 @@ class Store:
                    "finished_at": None, "exit_code": None, "signal": None, "reason": "",
                    "worker": None, "group": None, "claim": None, "claimed_at": None,
                    "cancel_requested": False, "scheduling": scheduling, "sharing_anchor": None}
+            if node_submission is not None:
+                job['node_submission'] = node_submission
             from .input_sources import prepare_vasp_input
             vasp_input = prepare_vasp_input(job)
             if progress_sources or vasp_input is not None:
@@ -429,6 +524,13 @@ class Store:
             job["logs"] = {stream: str(self.root / "attempts" / job["attempt_id"] / f"{stream}.log") for stream in ("stdout", "stderr")}
             self.save(con, job)
             self.event(con, number, f"Enqueued at order {job['order']}")
+            if remote_request is not None:
+                con.execute('CREATE TABLE IF NOT EXISTS node_requests ('
+                            'request_id TEXT PRIMARY KEY, operation TEXT NOT NULL, '
+                            'digest TEXT NOT NULL, result TEXT NOT NULL)')
+                con.execute('INSERT INTO node_requests(request_id,operation,digest,result) VALUES (?,?,?,?)',
+                            (remote_request['request_id'], 'submit', remote_request['digest'],
+                             json.dumps(job, allow_nan=False)))
         return job
 
     def annotate(self, job_id, note, *, expected_revision=None, expected_attempt_id=None):
