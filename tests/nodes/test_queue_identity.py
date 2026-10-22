@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -104,6 +105,50 @@ finally:
                              ('retained',))
             self.assertIsNone(con.execute("SELECT value FROM meta WHERE key='competing_writer'").fetchone())
 
+    def test_format_and_identity_read_wait_for_concurrent_writer(self):
+        identity = self.enroll()
+        writer_code = """
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+try:
+    con.execute('BEGIN EXCLUSIVE')
+    con.execute("UPDATE meta SET value=value WHERE key='control'")
+    print('LOCKED', flush=True)
+    sys.stdin.readline()
+    con.commit()
+finally:
+    con.close()
+"""
+        writer = subprocess.Popen([sys.executable, '-I', '-B', '-c', writer_code,
+                                   str(self.store.path)], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        query_started, query_finished = threading.Event(), threading.Event()
+        class ObservedConnection(sqlite3.Connection):
+            def execute(self, statement, *args, **kwargs):
+                if statement == 'PRAGMA journal_mode':
+                    query_started.set()
+                result = super().execute(statement, *args, **kwargs)
+                if statement == 'PRAGMA journal_mode':
+                    query_finished.set()
+                return result
+        connect = sqlite3.connect
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            try:
+                self.assertEqual(writer.stdout.readline().strip(), 'LOCKED')
+                with patch('cmw.jobs.store.sqlite3.connect',
+                           side_effect=lambda *args, **kwargs:
+                               connect(*args, **kwargs, factory=ObservedConnection)):
+                    result = pool.submit(self.store.queue_identity)
+                    self.assertTrue(query_started.wait(2))
+                    self.assertFalse(query_finished.wait(.2), 'Format probe bypassed the writer lock')
+                    writer.communicate('release\n', timeout=5)
+                    self.assertEqual(writer.returncode, 0)
+                    self.assertEqual(result.result(timeout=5), identity)
+                    self.assertTrue(query_finished.is_set())
+            finally:
+                if writer.poll() is None:
+                    writer.communicate('release\n', timeout=5)
+
     def test_conflicting_node_or_host_is_refused_without_changes(self):
         self.enroll()
         before = self.store.path.read_bytes()
@@ -147,10 +192,38 @@ finally:
         saved.rename(self.store.path)
         with closing(sqlite3.connect(self.store.path)) as con:
             con.execute('PRAGMA journal_mode=WAL')
-        before = sorted(path.name for path in self.store.root.iterdir())
+        before = {path.name: path.read_bytes() for path in self.store.root.iterdir()}
         with self.assertRaisesRegex(JobsError, 'journal format'):
             self.store.queue_identity()
-        self.assertEqual(sorted(path.name for path in self.store.root.iterdir()), before)
+        self.assertEqual({path.name: path.read_bytes() for path in self.store.root.iterdir()}, before)
+
+    def test_existing_wal_sidecar_names_and_bytes_are_unchanged(self):
+        self.enroll()
+        writer_code = """
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+try:
+    con.execute('PRAGMA journal_mode=WAL')
+    con.execute("UPDATE meta SET value=value WHERE key='control'")
+    con.commit()
+    print('READY', flush=True)
+    sys.stdin.readline()
+finally:
+    con.close()
+"""
+        writer = subprocess.Popen([sys.executable, '-I', '-B', '-c', writer_code,
+                                   str(self.store.path)], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(writer.stdout.readline().strip(), 'READY')
+            before = {path.name: path.read_bytes() for path in self.store.root.iterdir()}
+            self.assertTrue({'queue.sqlite3-wal', 'queue.sqlite3-shm'} <= before.keys())
+            with self.assertRaisesRegex(JobsError, 'journal format'):
+                self.store.queue_identity()
+            self.assertEqual({path.name: path.read_bytes() for path in self.store.root.iterdir()}, before)
+        finally:
+            writer.communicate('release\n', timeout=5)
+        self.assertEqual(writer.returncode, 0)
 
     def test_active_or_unresolved_rows_prevent_legacy_schema_promotion(self):
         row = self.add()

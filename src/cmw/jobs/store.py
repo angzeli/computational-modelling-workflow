@@ -228,23 +228,20 @@ class Store:
             before = self.path.lstat()
             if not stat.S_ISREG(before.st_mode):
                 raise JobsError('Queue database is not a regular file')
-            # A raw descriptor close would release another connection's POSIX
-            # writer lock. Let SQLite manage its descriptors, including deferred
-            # closes. This unlocked probe checks format only, never queue data.
-            try:
-                probe = sqlite3.connect(self.path.as_uri() + '?mode=ro&nolock=1', uri=True, timeout=2)
-                try:
-                    journal_mode = probe.execute('PRAGMA journal_mode').fetchone()[0]
-                finally:
-                    probe.close()
-                if journal_mode != 'delete':
-                    raise JobsError('Unsupported database journal format for read-only enrollment')
-            except sqlite3.Error as exc:
-                raise JobsError('Unsupported database journal format for read-only enrollment') from exc
             con = sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True, timeout=2)
             try:
                 con.execute('PRAGMA query_only=ON')
+                # SQLite owns the descriptor and read lock throughout format and
+                # identity checks. Exclusive locking mode avoids WAL/SHM sidecars
+                # on unsupported WAL databases without disabling read locks.
+                con.execute('PRAGMA locking_mode=EXCLUSIVE')
                 con.execute('BEGIN')
+                try:
+                    journal_mode = con.execute('PRAGMA journal_mode').fetchone()[0]
+                except sqlite3.Error as exc:
+                    raise JobsError('Unsupported database journal format for read-only enrollment') from exc
+                if journal_mode != 'delete':
+                    raise JobsError('Unsupported database journal format for read-only enrollment')
                 tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 if not tables:
                     return None
