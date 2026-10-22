@@ -12,6 +12,8 @@ import sys
 import time
 from uuid import uuid4
 
+import psutil
+
 from cmw.jobs import runtime
 from cmw.jobs.ownership import identity, owner_alive
 from cmw.jobs.store import Store
@@ -65,7 +67,8 @@ printf 'completed\\n'
              'default_queue': 'research', 'read_only': False}
     store = Store(root / 'queue')
     frontend = root / 'frontend'
-    owners, endpoint_owners, checks = [], [], {}
+    owners, endpoint_owners, payload_owners, checks = [], [], [], {}
+    payload_census = None
     started_at = time.time()
     backend, work = None, None
     def connect():
@@ -121,7 +124,24 @@ printf 'completed\\n'
         wait_for(lambda: (work / 'started').exists())
         active = store.snapshot()
         assert active['jobs'][0]['status'] == 'Run'
-        owners.extend(item for item in (active['controller']['owner'], active['jobs'][0]['worker']) if item)
+        active_job = active['jobs'][0]
+        owners.extend(item for item in (active['controller']['owner'], active_job['worker'],
+                                       active_job['group']) if item)
+        anchor = active_job['group']
+        assert owner_alive(anchor)
+        parent = psutil.Process(anchor['pid'])
+        assert parent.create_time() == anchor['birth']
+        observed_at = time.time()
+        for child in parent.children(recursive=True):
+            try:
+                observed = identity(child.pid)
+                if observed['birth'] == child.create_time():
+                    payload_owners.append(observed)
+            except psutil.NoSuchProcess:
+                pass  # A short-lived fixture descendant may end during census.
+        assert owner_alive(anchor)
+        payload_census = {'scope': 'Observed descendants of the verified payload anchor; one census',
+                          'observed_at': observed_at, 'anchor': anchor}
         close_backend()
         backend = None
         time.sleep(.15)
@@ -150,11 +170,13 @@ printf 'completed\\n'
         checks['completed_snapshot_and_verified_replica'] = True
         control('controller.stop')
         wait_for(lambda: not store.snapshot()['controller']['online'])
-        wait_for(lambda: not any(owner_alive(owner) for owner in owners))
+        wait_for(lambda: not any(owner_alive(owner) for owner in [*owners, *payload_owners]))
         checks['owned_runtime_processes_exited'] = True
         return {'checks': checks, 'node_id': config['node_id'], 'queue_id': entry['queues']['research'],
                 'target': target, 'runtime': config['runtime'], 'package_origin': __import__('cmw').__file__,
-                'owners': owners, 'endpoint_owners': endpoint_owners, 'start_receipt': start_receipt, 'fetch': result,
+                'owners': owners, 'endpoint_owners': endpoint_owners,
+                'payload_owners': payload_owners, 'payload_census': payload_census,
+                'start_receipt': start_receipt, 'fetch': result,
                 'scientific_engine_executed': False}
     except BaseException as exc:
         # Preserve this isolated queue before the caller's temporary-directory
@@ -175,17 +197,21 @@ printf 'completed\\n'
         if store.path.exists():
             cleanup_state = store.snapshot()
             for owner in [cleanup_state['controller'].get('owner'),
-                          *[job.get('worker') for job in cleanup_state['jobs']]]:
+                          *[job.get(kind) for job in cleanup_state['jobs']
+                            for kind in ('worker', 'group')]]:
                 if owner and owner not in owners:
                     owners.append(owner)
             with install():
                 runtime.stop(store)
             deadline = time.monotonic() + 8
-            while any(owner_alive(owner) for owner in owners) and time.monotonic() < deadline:
+            while (any(owner_alive(owner) for owner in [*owners, *payload_owners])
+                   and time.monotonic() < deadline):
                 time.sleep(.05)
         if backend is not None:
             close_backend()
-        remaining = [owner for owner in [*owners, *endpoint_owners] if owner_alive(owner)]
-        (root / 'cleanup.json').write_text(json.dumps({'owners': owners, 'endpoint_owners': endpoint_owners, 'remaining_verified_owners': remaining}, indent=2) + '\n')
+        remaining = [owner for owner in [*owners, *endpoint_owners, *payload_owners] if owner_alive(owner)]
+        (root / 'cleanup.json').write_text(json.dumps({
+            'owners': owners, 'endpoint_owners': endpoint_owners, 'payload_owners': payload_owners,
+            'payload_census': payload_census, 'remaining_verified_owners': remaining}, indent=2) + '\n')
         if remaining:
             raise AssertionError('Verified owned fixture runtime remained live; evidence retained')

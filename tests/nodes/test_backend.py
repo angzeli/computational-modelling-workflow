@@ -202,7 +202,11 @@ class BackendObservationTests(unittest.TestCase):
         self.assertEqual(directory['registered_root'], str(self.root))
         self.assertEqual(directory['relative_path'], '.')
         self.assertFalse(directory['local_open_permitted'])
-        self.assertNotIn('target_identity', directory)
+        info = self.root.stat()
+        identity = [info.st_dev, info.st_ino]
+        self.assertEqual(directory['target_identity'], identity)
+        self.assertEqual(directory['directory_identity'], identity)
+        self.assertEqual(directory['storage_alias'], 'scratch')
         self.readiness['storages']['scratch']['ready'] = False
         unavailable = self.call('locations', job)['locations']
         self.assertTrue(all(item['accessibility'] == 'STORAGE_UNAVAILABLE'

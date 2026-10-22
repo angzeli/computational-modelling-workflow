@@ -21,6 +21,7 @@ from cmw.nodes.protocol import NodeError, encode, request
 from cmw.nodes.submission import submission_digest
 from cmw.nodes.transfer import prepare_local_bundle, upload_local_bundle
 from cmw.nodes.transport import ProcessTransport
+from tests.periodic.vasp.handoff_case import wait_for_fixture_sources
 
 
 class SubmissionEndpointTests(unittest.TestCase):
@@ -69,6 +70,7 @@ class SubmissionEndpointTests(unittest.TestCase):
         request_id = request_id or uuid4().hex
         source = node['root'] / ('selected-' + request_id + '.txt')
         source.write_text('Explicit selected benign input\n')
+        wait_for_fixture_sources([source], quiet_seconds=12, timeout=40)
         selections = [{'source': str(source), 'path': 'inputs/input.txt', 'role': 'input'}]
         prepared = prepare_local_bundle(node['root'] / ('spool-' + request_id), selections,
             node_id=node['config']['node_id'], queue_id=node['config']['queues'][queue]['queue_id'])

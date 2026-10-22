@@ -11,6 +11,7 @@ from cmw.periodic.vasp.result_finalization import (
 )
 from .result_case import make_case, write_json, digest
 from .runner_case import add_runner
+from .handoff_case import wait_for_fixture_sources
 
 
 class RunnerFinalizationTests(unittest.TestCase):
@@ -28,6 +29,8 @@ class RunnerFinalizationTests(unittest.TestCase):
 
     def finalize(self, **options):
         c = self.case
+        wait_for_fixture_sources([*c["run"].iterdir(), c["policy_path"], c["spec_path"],
+                                  c["snapshot"], c["receipt"]], quiet_seconds=6, timeout=20)
         return finalize_result(c["run"], policy_path=c["policy_path"], spec_path=c["spec_path"],
                                scratch_root=c["scratch"], record_directory=options.pop("record_directory", "accepted"), **options)
 
