@@ -28,7 +28,7 @@ from .protocol import NodeError, target_identity, MUTATIONS, identifier
 
 OPERATIONS = frozenset({'capabilities', 'status', 'lookup', 'show', 'observe',
     'progress', 'history', 'history.release', 'logs', 'locations', 'sources.inspect',
-    'sources.validate', 'sources.activate', 'sources.clear', 'request', 'submit.preview',
+    'sources.validate', 'sources.activate', 'sources.clear', 'request', 'submit.check', 'submit.preview',
     'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup', 'control.preview', 'control',
     'fetch.prepare', 'fetch.complete'})
 MAX_ROWS = 1000
@@ -274,7 +274,11 @@ class LocalBackend:
     def _selected(self, operation, params, job):
         if operation == 'show':
             _params(params)
-            return {'job': self._row(job)}
+            result = {'job': self._row(job)}
+            if job.get('molecular_submission') is not None:
+                from cmw.jobs.molecular import inspect_result
+                result['scientific_result'] = inspect_result(job)
+            return result
         if operation == 'observe':
             _params(params)
             from cmw.jobs.lifecycle import observe_execution
@@ -335,7 +339,7 @@ class LocalBackend:
                 if params.get('_endpoint') != expected:
                     raise BackendError('ENDPOINT_CHANGED', 'Mutation lacks the exact verified endpoint/boot guard')
                 params = {key: value for key, value in params.items() if key != '_endpoint'}
-            if operation in {'request', 'submit.preview', 'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup'}:
+            if operation in {'request', 'submit.check', 'submit.preview', 'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup'}:
                 if target is not None:
                     raise BackendError('INVALID_TARGET', 'Submission/transfer is not a mutation of an existing attempt')
                 from .submission import dispatch
@@ -360,6 +364,7 @@ class LocalBackend:
                     _params(params)
                     result = {'queue': deepcopy(self.queue), 'readiness': deepcopy(self.readiness),
                               'profiles': deepcopy(self.config.get('profiles', {})), 'operations': sorted(OPERATIONS),
+                              'molecular_submission': {'schema': 1, 'engines': ['ORCA', 'Multiwfn'], 'target_local_artifacts': 1},
                               'mutations_supported': True, 'observer_session': self.session_id}
                 elif operation == 'status':
                     result = self._status(params)

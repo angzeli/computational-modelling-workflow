@@ -12,7 +12,7 @@ MAX_DEPTH = 24
 OPERATIONS = frozenset({
     'capabilities', 'status', 'lookup', 'show', 'observe', 'progress', 'history',
     'history.release', 'logs', 'locations', 'sources.inspect', 'sources.validate',
-    'sources.activate', 'sources.clear', 'request', 'submit.preview', 'submit',
+    'sources.activate', 'sources.clear', 'request', 'submit.check', 'submit.preview', 'submit',
     'transfer.begin', 'transfer.publish', 'transfer.lookup', 'control.preview', 'control',
     'fetch.prepare', 'fetch.complete',
 })

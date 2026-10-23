@@ -20,7 +20,8 @@ from .storage import identify_storage, check_storage, validate_storage
 MAX_CONFIG_BYTES = 1024 * 1024
 _ALIAS = re.compile(r'[A-Za-z][A-Za-z0-9_-]{0,47}\Z')
 _CONFIG_FIELDS = {'schema', 'node_id', 'host_id', 'host', 'runtime', 'queues', 'storages', 'profiles'}
-_PROFILE_FIELDS = {'engine', 'runner', 'max_cpus', 'max_ranks', 'dependencies'}
+_PROFILE_FIELDS = {'engine', 'runner', 'max_cpus', 'max_ranks', 'dependencies', 'runtime'}
+MAX_PROFILE_FILE_BYTES = 2 * 1024**3
 
 
 def _object(value, allowed, required, label):
@@ -142,38 +143,76 @@ def runtime_identity():
     return record
 
 
+@lru_cache(maxsize=128)
+def _profile_file_digest(value, epoch):
+    path = Path(value)
+    digest, total = hashlib.sha256(), 0
+    with path.open('rb') as handle:
+        opened = os.fstat(handle.fileno())
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != epoch:
+            raise ValueError('Profile dependency changed while opening')
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            total += len(chunk)
+            if total > MAX_PROFILE_FILE_BYTES:
+                raise ValueError('Profile dependency exceeds its 2 GiB identity bound')
+            digest.update(chunk)
+        after = os.fstat(handle.fileno())
+    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != epoch or total != epoch[2]:
+        raise ValueError('Profile dependency changed while fingerprinting')
+    return digest.hexdigest()
+
+
 def _file_identity(value):
     if not isinstance(value, str) or not Path(value).is_absolute() or '\0' in value:
         raise ValueError('Profile dependency paths must be absolute')
     path = Path(value)
     resolved = path.resolve(strict=True)
     before = resolved.stat()
-    if not stat.S_ISREG(before.st_mode) or before.st_size > 64 * 1024**2:
+    if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_PROFILE_FILE_BYTES:
         raise ValueError('Profile dependency must be a bounded regular file')
-    digest = hashlib.sha256()
-    with resolved.open('rb') as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
-            digest.update(chunk)
+    epoch = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    digest = _profile_file_digest(str(resolved), epoch)
     after = resolved.stat()
     identity = [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns]
-    if identity != [after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns] or path.resolve(strict=True) != resolved:
+    if epoch != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or path.resolve(strict=True) != resolved:
         raise ValueError('Profile dependency changed during fingerprinting')
     return {'path': str(path), 'resolved_path': str(resolved), 'identity': identity,
-            'bytes': before.st_size, 'sha256': digest.hexdigest()}
+            'bytes': before.st_size, 'sha256': digest}
+
+
+def _runtime_spec(engine, value):
+    common = {'executable', 'sha256', 'version', 'qualification'}
+    required = common | ({'settings_source', 'settings_sha256', 'threads', 'menu_contract'} if engine == 'Multiwfn' else set())
+    _object(value, required | {'contract'}, required, 'molecular runtime')
+    if not isinstance(value['qualification'], str) or value['qualification'] not in {'recorded', 'synthetic'}:
+        raise ValueError('Runtime qualification must be recorded or explicitly synthetic')
+    for key in ('sha256', 'settings_sha256'):
+        if key in value and (not isinstance(value[key], str) or re.fullmatch(r'[a-f0-9]{64}', value[key]) is None):
+            raise ValueError('Runtime identity requires an exact SHA-256 digest')
+    from .molecular import RUNTIME_PATH_FIELDS
+    for key in RUNTIME_PATH_FIELDS[engine] & value.keys():
+        if not isinstance(value[key], str) or not Path(value[key]).is_absolute():
+            raise ValueError('Molecular runtime paths must be target-local absolute paths')
+    if not isinstance(value['version'], str) or not value['version'] or len(value['version']) > 128:
+        raise ValueError('Molecular runtime needs its recorded native version')
+    if engine == 'Multiwfn' and (type(value['threads']) is not int or not 1 <= value['threads'] <= 256
+                               or not isinstance(value['menu_contract'], str)):
+        raise ValueError('Multiwfn runtime needs explicit threads and menu contract')
+    return dict(value)
 
 
 def _profile(spec, runtime):
     _object(spec, _PROFILE_FIELDS, {'engine', 'runner', 'max_cpus'}, 'runner profile')
-    if spec['engine'] not in {'Command', 'VASP'}:
-        raise ValueError('Profile engine must be Command or VASP')
+    if not isinstance(spec['engine'], str) or spec['engine'] not in {'Command', 'VASP', 'ORCA', 'Multiwfn'}:
+        raise ValueError('Profile engine must be Command, VASP, ORCA or Multiwfn')
     cpus = spec['max_cpus']
     if type(cpus) is not int or not 1 <= cpus <= 256:
         raise ValueError('Profile max_cpus must be an integer in 1..256')
-    ranks = spec.get('max_ranks', 1 if spec['engine'] == 'Command' else min(8, cpus))
+    ranks = spec.get('max_ranks', min(8, cpus) if spec['engine'] == 'VASP' else cpus if spec['engine'] == 'ORCA' else 1)
     if type(ranks) is not int or not 1 <= ranks <= (8 if spec['engine'] == 'VASP' else cpus) or ranks > cpus:
         raise ValueError('VASP profiles retain the supported 1..8 rank limit')
     runner = _file_identity(spec['runner'])
-    if not os.access(spec['runner'], os.X_OK):
+    if not os.access(spec['runner'], os.R_OK if spec['engine'] == 'Multiwfn' else os.X_OK):
         raise ValueError('Configured runner is not executable')
     dependencies = spec.get('dependencies', [])
     if (not isinstance(dependencies, list) or len(dependencies) > 32
@@ -186,7 +225,25 @@ def _profile(spec, runtime):
         required = [str(Path(spec['runner']).parent / name)
                     for name in ('run_vasp.py', 'environment.sh', 'launch.py', 'observables.py')]
         dependencies = sorted(set(dependencies + required))
-    return {'engine': spec['engine'], 'runner': spec['runner'], 'max_cpus': cpus, 'max_ranks': ranks,
+    runtime_record = {}
+    if spec['engine'] in {'ORCA', 'Multiwfn'}:
+        from .molecular import RUNTIME_PATH_FIELDS
+        from cmw.jobs.runner_assets import runner_dependencies, runner_path
+        permitted = ({'orca/run_orca.sh', 'workflows/run_opt_freq_sp.sh'} if spec['engine'] == 'ORCA' else
+                     {'workflows/generate_homo_lumo_cubes.sh', 'workflows/generate_esp_cubes.sh',
+                      'workflows/generate_igmh_cubes.sh', 'multiwfn/run_ifct.sh'})
+        matching = [name for name in permitted if Path(runner_path(name)).resolve() == Path(spec['runner']).resolve()]
+        if len(matching) != 1:
+            raise ValueError('Molecular profile requires its packaged reviewed foreground runner')
+        engine_runtime = _runtime_spec(spec['engine'], spec.get('runtime'))
+        dependencies = sorted(set(dependencies + [item['path'] for item in runner_dependencies(matching[0])]
+                                  + [engine_runtime[key] for key in RUNTIME_PATH_FIELDS[spec['engine']] if key in engine_runtime]))
+        if spec['engine'] == 'Multiwfn':
+            dependencies = sorted(set(dependencies + ['/bin/bash']))
+        runtime_record['runtime'] = engine_runtime
+    elif 'runtime' in spec:
+        raise ValueError('Command/VASP profiles cannot carry a molecular runtime')
+    return {**runtime_record, 'engine': spec['engine'], 'runner': spec['runner'], 'max_cpus': cpus, 'max_ranks': ranks,
             'runner_identity': runner, 'dependencies': [_file_identity(path) for path in dependencies],
             'runtime_fingerprint': runtime['fingerprint'],
             'qualification': {'implementation': 'configured', 'synthetic_tested': False,
@@ -224,7 +281,7 @@ def _validate_file(value):
         if (not isinstance(value[key], str) or not Path(value[key]).is_absolute()
                 or len(value[key]) > 4096 or '\0' in value[key]):
             raise ValueError('Profile file paths must be bounded absolute paths')
-    if (type(value['bytes']) is not int or not 0 <= value['bytes'] <= 64 * 1024**2
+    if (type(value['bytes']) is not int or not 0 <= value['bytes'] <= MAX_PROFILE_FILE_BYTES
             or not isinstance(value['sha256'], str)
             or re.fullmatch(r'[0-9a-f]{64}', value['sha256']) is None):
         raise ValueError('Malformed pinned profile digest or size')
@@ -285,10 +342,13 @@ def _validate_config(value):
     for profile in _aliases(value['profiles'], 'Profiles').values():
         fields = {'engine', 'runner', 'max_cpus', 'max_ranks', 'runner_identity',
                   'dependencies', 'runtime_fingerprint', 'qualification'}
+        if isinstance(profile, dict) and isinstance(profile.get('engine'), str) and profile['engine'] in {'ORCA', 'Multiwfn'}:
+            fields |= {'runtime'}
+            _runtime_spec(profile['engine'], profile.get('runtime'))
         _object(profile, fields, fields, 'pinned runner profile')
         if profile['runtime_fingerprint'] != value['runtime']['fingerprint']:
             raise ValueError('Profile runtime does not match the node pin')
-        if (profile['engine'] not in {'Command', 'VASP'} or type(profile['max_cpus']) is not int
+        if (not isinstance(profile['engine'], str) or profile['engine'] not in {'Command', 'VASP', 'ORCA', 'Multiwfn'} or type(profile['max_cpus']) is not int
                 or not 1 <= profile['max_cpus'] <= 256 or type(profile['max_ranks']) is not int
                 or not 1 <= profile['max_ranks'] <= profile['max_cpus']
                 or profile['engine'] == 'VASP' and profile['max_ranks'] > 8):
@@ -296,7 +356,7 @@ def _validate_config(value):
         _validate_file(profile['runner_identity'])
         if profile['runner'] != profile['runner_identity']['path']:
             raise ValueError('Pinned runner path contradicts its identity')
-        if not isinstance(profile['dependencies'], list) or len(profile['dependencies']) > 36:
+        if not isinstance(profile['dependencies'], list) or len(profile['dependencies']) > 64:
             raise ValueError('Malformed pinned dependency list')
         for dependency in profile['dependencies']:
             _validate_file(dependency)
@@ -421,7 +481,7 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
             for expected in [profile['runner_identity'], *profile['dependencies']]:
                 if _file_identity(expected['path']) != expected:
                     raise ValueError('Pinned runner/dependency identity changed')
-            if not os.access(profile['runner'], os.X_OK):
+            if not os.access(profile['runner'], os.R_OK if profile['engine'] == 'Multiwfn' else os.X_OK):
                 raise ValueError('Pinned runner is no longer executable')
             result['profiles'][alias] = {'ready': True, 'error': None}
         except (OSError, ValueError, KeyError) as exc:

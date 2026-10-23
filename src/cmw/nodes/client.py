@@ -35,6 +35,34 @@ def _write_new(path, value):
         os.close(directory)
 
 
+def _molecular_capability(backend, specification):
+    if not isinstance(specification, dict):
+        raise NodeError('INVALID_SUBMISSION', 'Frontend specification must be an object')
+    if specification.get('engine') not in {'ORCA', 'Multiwfn'}:
+        return
+    capabilities = backend.call('capabilities')['result'].get('molecular_submission')
+    if (not isinstance(capabilities, dict) or capabilities.get('schema') != 1
+            or not isinstance(capabilities.get('engines'), list)
+            or specification['engine'] not in capabilities['engines']
+            or capabilities.get('target_local_artifacts') != 1):
+        raise NodeError('INCOMPATIBLE_ENGINE_SUBMISSION', 'The selected endpoint does not support the required molecular submission/source schema')
+
+
+def check(backend, specification):
+    """Pure pretransfer check: no local spool, registration or destination writes."""
+    if not isinstance(specification, dict) or 'manifest' in specification or 'files' not in specification:
+        raise NodeError('INVALID_SUBMISSION', 'Frontend specification requires explicit selected files')
+    if specification.get('node_id') != backend.node_id or specification.get('queue_id') != backend.queue_id:
+        raise NodeError('WRONG_NODE', 'Check differs from the explicitly selected node and queue')
+    _molecular_capability(backend, specification)
+    from .transfer import inspect_local_bundle
+    manifest = inspect_local_bundle(specification['files'], node_id=backend.node_id, queue_id=backend.queue_id,
+                                    potcar_authorized=specification.get('potcar_authorized', False))
+    portable = {key: value for key, value in specification.items() if key not in {'files', 'potcar_authorized'}}
+    portable['manifest'] = manifest
+    return backend.call('submit.check', {'spec': normalize_spec(portable)})
+
+
 def prepare_submission(backend, specification, *, root=None):
     """Persist ID, immutable local spool and semantic digest before any mutation.
 
@@ -73,6 +101,7 @@ def prepare_submission(backend, specification, *, root=None):
 
 
 def submit(backend, specification, *, root=None, preview=False):
+    _molecular_capability(backend, specification)
     record, spool = prepare_submission(backend, specification, root=root)
     spec = record['spec']
     request_id = spec['request_id']
