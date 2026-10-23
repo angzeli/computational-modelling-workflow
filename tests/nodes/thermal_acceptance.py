@@ -26,19 +26,21 @@ from tests.jobs.thermal_fixtures import write_fake_macmon
 from tests.periodic.vasp.result_fixtures import native_texts
 
 
-def endpoint(config, provider):
+def endpoint(config):
     from cmw.jobs.activity import Observer, collect
     from cmw.jobs.telemetry import Sampler
     from cmw.jobs.thermal import ThermalProvider
     from cmw.nodes.backend import LocalBackend
     from cmw.nodes.endpoint import serve
+    from cmw.nodes.thermal import configured_provider
 
     def factory(config_root, queue):
         backend = LocalBackend(config_root, queue)
         backend._activity_observer = Observer(collector=lambda store, state, deadline:
             collect(store, state, deadline, pids_provider=lambda: []))
-        backend._sampler = Sampler(thermal=ThermalProvider(
-            None if provider == 'disabled' else provider, system='Darwin', machine='arm64'))
+        backend._sampler = Sampler(thermal=configured_provider(config_root,
+            provider_factory=lambda *args, **kwargs: ThermalProvider(
+                *args, **kwargs, system='Darwin', machine='arm64')))
         return backend
     return serve(config, 'research', backend_factory=factory)
 
@@ -70,14 +72,21 @@ def thermal_node_surface(root, *, backend_builder=None):
             engine='VASP', hold=True, progress_sources=tuple(SourceDescriptor(role, str(storage / name))
                 for role, name in (('outcar', 'OUTCAR'), ('oszicar', 'OSZICAR'))))
         path = write_fake_macmon(here / 'fake-macmon', temperature=temperature) if temperature is not None else None
+        if path is not None:
+            settings = here / 'node' / 'thermal.env'
+            settings.write_text('CMW_THERMAL_MACMON=' + str(path) + '\nCMW_THERMAL_INTERVAL_SECONDS=20\n')
+            settings.chmod(0o600)
+        frontend_provider = write_fake_macmon(here / 'frontend-must-not-run', temperature=99.9)
         entry = {'transport': 'local', 'config_root': str(here / 'node'), 'node_id': config['node_id'],
             'host_id': config['host_id'], 'runtime_id': config['runtime']['fingerprint'],
             'queues': {'research': config['queues']['research']['queue_id']},
             'default_queue': 'research', 'read_only': True}
         argv = [sys.executable, '-B', '-m', 'tests.nodes.thermal_acceptance', 'endpoint',
-                str(here / 'node'), str(path) if path else 'disabled']
+                str(here / 'node')]
         env = {k: v for k, v in os.environ.items() if not k.startswith('CMW_THERMAL_')}
         env['PYTHONDONTWRITEBYTECODE'] = '1'
+        env['CMW_THERMAL_MACMON'] = str(frontend_provider)
+        env['CMW_THERMAL_INTERVAL_SECONDS'] = '15'
         def connect():
             if backend_builder is not None:
                 return backend_builder(entry, argv, env)
@@ -85,7 +94,7 @@ def thermal_node_surface(root, *, backend_builder=None):
         backend = connect()
         channels[alias] = backend
         return {'backend': backend, 'connect': connect, 'store': store, 'job': job,
-                'before': store.path.read_bytes(), 'provider': path}
+                'before': store.path.read_bytes(), 'provider': path, 'frontend_provider': frontend_provider}
     try:
         records = {name: make(name, value) for name, value in (('MBP', 63.2), ('MINI', 76.4), ('OFF', None))}
         assert len({record['job']['display_id'] for record in records.values()}) == 1
@@ -137,6 +146,8 @@ def thermal_node_surface(root, *, backend_builder=None):
             if record['provider']:
                 calls = [json.loads(line) for line in Path(str(record['provider'])+'.calls').read_text().splitlines()]
                 assert calls == [['--version'], ['pipe', '--help'], ['pipe', '--samples', '1', '--interval', '1000']], calls
+            assert not Path(str(record['frontend_provider']) + '.calls').exists()
+            checks[alias+'_endpoint_local_settings_not_frontend_environment'] = True
             checks[alias+'_machine_science_controls_files_isolated'] = True
         left, right = samples['MBP'], samples['MINI']
         assert left['target'] != right['target']
@@ -188,6 +199,6 @@ def thermal_node_surface(root, *, backend_builder=None):
 
 if __name__ == '__main__':
     if sys.argv[1] == 'endpoint':
-        raise SystemExit(endpoint(sys.argv[2], sys.argv[3]))
+        raise SystemExit(endpoint(sys.argv[2]))
     result = thermal_node_surface(sys.argv[1])
     print(json.dumps(result, indent=2))

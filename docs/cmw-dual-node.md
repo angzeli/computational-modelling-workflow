@@ -184,9 +184,28 @@ per-node. History and Sources use the selected endpoint, while Copy uses the
 frontend clipboard. Closing the portal closes observers only.
 
 Optional CPU average temperature uses the same node-local Jobs provider and
-`machine_usage.thermal` contract. Configure `CMW_THERMAL_MACMON` and, optionally,
-`CMW_THERMAL_INTERVAL_SECONDS` in the owning endpoint's environment; the MacBook's
-provider is never used for the mini. Enrollment, SSH/Tailscale configuration and
+`machine_usage.thermal` contract. Each endpoint explicitly reads only
+`<enrolled-config-root>/thermal.env` when creating its observer. For example:
+
+```text
+CMW_THERMAL_MACMON=/Applications/macmon/0.10.0/macmon
+CMW_THERMAL_INTERVAL_SECONDS=20
+```
+
+This optional file and its canonical parent directory must be owner-only (0600
+and 0700 respectively). It is limited to 4096 bytes, blank/comment lines and the
+two unique literal settings above; values are unquoted and never evaluated by a
+shell. A missing file disables temperature. Invalid settings produce a thermal
+Details/JSON diagnostic without changing node readiness or CPU/RAM availability.
+Closing and reopening the endpoint rereads the file and resets only that observer.
+CMW never writes the file or enrolls a node through this monitoring route.
+
+Ambient `CMW_THERMAL_*` variables are deliberately ignored by node endpoints,
+including local endpoint connections. The frontend's optional user settings file
+is not an endpoint configuration. The SSH bootstrap neither forwards these values
+nor requires an interactive shell startup file. The future mini must opt in using
+its own private file, provider installation and qualification; the MacBook's
+provider path cannot authorize it. Enrollment, SSH/Tailscale configuration and
 runner-profile dependencies are unchanged. An older peer with no thermal record
 or an unsupported provider remains operational under its existing readiness rules.
 The additive status record does not relax scientific-model decoding.
