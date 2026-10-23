@@ -50,8 +50,9 @@ class UsageAccountingTests(unittest.TestCase):
     def test_machine_formula_label_preserves_numbers_and_width(self):
         text = cli.machine_text(machine())
         self.assertIn('23.8 / 36.0 GiB', text)
-        self.assertIn('psutil', text)
-        self.assertIn('T−avail', text)
+        self.assertNotIn('psutil', text)
+        self.assertNotIn('T−avail', text)
+        self.assertIn('psutil T−avail', cli.machine_detail(machine()))
         self.assertLessEqual(len(text), 72)
         value = machine()
         value.update(ram_used_bytes=10**9, ram_total_bytes=2**30)

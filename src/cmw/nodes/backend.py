@@ -124,6 +124,7 @@ class LocalBackend:
         self._activity_projector = activity_projector
         self._activity_observer = None
         self._sampler = None
+        self._sampler_lock = threading.Lock()
         self._check()
 
     def _check(self):
@@ -194,9 +195,12 @@ class LocalBackend:
         if self._activity_projector is None:
             from cmw.jobs.activity import Observer, project
             from cmw.jobs.telemetry import Sampler
-            if self._activity_observer is None:
-                self._activity_observer = Observer()
-                self._sampler = Sampler()
+            with self._sampler_lock:
+                if self._closed:
+                    raise BackendError('CLOSED', 'Observation session has closed')
+                if self._activity_observer is None:
+                    self._activity_observer = Observer()
+                    self._sampler = Sampler()
             state = project(self.store, observer=self._activity_observer, sampler=self._sampler)
         else:
             state = self._activity_projector(self.store)
@@ -385,7 +389,11 @@ class LocalBackend:
             self._lock.release()
 
     def close(self):
-        self._closed = True
+        with self._sampler_lock:
+            self._closed = True
+            sampler = self._sampler
+        if sampler is not None:
+            sampler.close()
         self.observer.close()
         self._sessions.clear()
         self._validations.clear()

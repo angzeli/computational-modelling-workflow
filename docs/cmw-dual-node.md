@@ -183,6 +183,37 @@ receipt-age qualifications. CPU, RAM, guards and external observations remain
 per-node. History and Sources use the selected endpoint, while Copy uses the
 frontend clipboard. Closing the portal closes observers only.
 
+Optional CPU average temperature uses the same node-local Jobs provider and
+`machine_usage.thermal` contract. Configure `CMW_THERMAL_MACMON` and, optionally,
+`CMW_THERMAL_INTERVAL_SECONDS` in the owning endpoint's environment; the MacBook's
+provider is never used for the mini. Enrollment, SSH/Tailscale configuration and
+runner-profile dependencies are unchanged. An older peer with no thermal record
+or an unsupported provider remains operational under its existing readiness rules.
+The additive status record does not relax scientific-model decoding.
+
+Each node retains independent CPU/RAM/temperature observations, connection state
+and receipt age. At compact widths the portal gives concise node summaries and
+the selected node's full shared line:
+
+```text
+Machine: CPU 71%; avg 63°C RAM 27.1 / 36.0 GiB
+```
+
+Wide views can show both node readings. Details/scheduling and Copy retain host
+source, timestamp and freshness separately from scientific evidence. Thermal age
+starts with the source age and conservatively includes transport/receipt elapsed
+time; receipt never makes an old sample young. A disconnected node says Last
+reported, qualifies cached CPU/RAM and temperature, then hides expired temperature.
+Reconnection obtains new owning-node telemetry. Node/queue/session identities and
+selection generations still prevent delayed replies from changing another target.
+
+The [optional thermal contract](cmw-jobs.md#optional-average-cpu-temperature)
+defines the 20-second default (15–30 configurable), 30/60-second freshness limits,
+provider failure/cleanup bounds and pending physical hardware qualification.
+There is no thermal service, remote monitoring server, database migration or
+thermal admission/control policy. Isolated endpoint/loopback SSH acceptance does
+not qualify physical dual-Mac sensors.
+
 Files displays owning-node declarations, Copy Location and explicit Fetch. An
 ordinary local folder opens only through a local connection and revalidated
 location identity. A remote path never invokes the frontend folder opener by

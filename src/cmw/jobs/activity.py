@@ -366,10 +366,15 @@ def project(store, state=None, observer=None, sampler=None):
     if not permits(guard) and pending and pending[0]['status']=='Queue' and control['dispatch'] and not any(j['status'] in ACTIVE for j in state['jobs']):
         pending[0]['reason'] = guard['reason']
     from .telemetry import Sampler
+    owned_sampler = sampler is None
     sampler = sampler or Sampler()
     if state.get('scheduler', {}).get('mode') == 'bounded-sharing':
         sampler.swap_memory = psutil.swap_memory
-    usage = sampler.sample(store, state, guard, pids)
+    try:
+        usage = sampler.sample(store, state, guard, pids)
+    finally:
+        if owned_sampler:
+            sampler.close()
     state['machine_usage'] = usage['machine_usage']
     for job in state['jobs']:
         job['usage'] = usage['jobs'].get(job.get('attempt_id')) if job['status'] in ACTIVE else None

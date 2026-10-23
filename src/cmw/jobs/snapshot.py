@@ -19,6 +19,13 @@ _EXCLUDED_KEYS = {'argv', 'env', 'environ', 'environment', 'cmdline', 'command',
 _EXECUTION_FIELDS = ('schema', 'advisory', 'job_id', 'attempt_id', 'persisted_status', 'observed_execution',
                      'observation_quality', 'observed_at', 'age_seconds', 'stale', 'state_identity',
                      'evidence', 'limitations', 'reconciliation_required', 'summary')
+_MACHINE_FIELDS = ('cpu_percent', 'cpu_quality', 'ram_used_bytes', 'ram_total_bytes',
+                   'ram_available_bytes', 'memory_source', 'memory_semantics', 'memory_quality',
+                   'swap_used_bytes', 'swap_total_bytes', 'memory_categories_bytes',
+                   'observed_at', 'age_seconds', 'stale', 'reason')
+_THERMAL_FIELDS = ('temperature_celsius', 'temperature_kind', 'source', 'units',
+                   'sample_timestamp', 'sample_age', 'quality', 'availability_reason',
+                   'freshness_seconds', 'unavailable_seconds')
 _PATH_FIELDS = {'path', 'root_path', 'jobs_state', 'state_directory', 'cwd', 'executable', 'module', 'root', 'database'}
 
 
@@ -51,7 +58,7 @@ class HandoffSnapshot:
 
 
 def capture_snapshot(job, *, progress=None, execution=None, captured_at=None,
-                     runtime=None, read_error=None, execution_error=None):
+                     runtime=None, read_error=None, execution_error=None, machine_usage=None):
     from .suspension_presentation import effective_status
     now = time.time() if captured_at is None else captured_at
     if runtime is None:
@@ -79,6 +86,11 @@ def capture_snapshot(job, *, progress=None, execution=None, captured_at=None,
                'runtime': {key: runtime[key] for key in ('version', 'python', 'executable', 'module')
                            if runtime and key in runtime},
                'scientific_acceptance': 'not assessed'}
+    if machine_usage is not None:
+        from .thermal import age_thermal
+        thermal = age_thermal(machine_usage.get('thermal'), now=0.)
+        payload['machine_usage'] = {key: machine_usage[key] for key in _MACHINE_FIELDS if key in machine_usage}
+        payload['machine_usage']['thermal'] = {key: thermal[key] for key in _THERMAL_FIELDS if key in thermal}
     return HandoffSnapshot(json.dumps(_clean(payload), ensure_ascii=False, allow_nan=False, sort_keys=True))
 
 
@@ -162,6 +174,9 @@ def render_snapshot(snapshot, *, mode='summary', redact_paths=False):
         from .cli import usage_detail
         lines.append(usage_detail(job['usage']))
         lines.append('Usage observed_at: ' + str(job['usage'].get('observed_at')))
+    if data.get('machine_usage') is not None:
+        from .cli import machine_detail
+        lines.extend(['Host telemetry (independent observations):', machine_detail(data['machine_usage'])])
     progress = data.get('progress')
     if progress is None:
         lines.append('Scientific observations: unavailable.')

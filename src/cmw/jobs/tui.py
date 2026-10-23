@@ -1,8 +1,10 @@
 """Observation-only Textual client; all controls revalidate in the queue store."""
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+import threading
 import time
 import unicodedata
 from copy import deepcopy
@@ -478,6 +480,7 @@ class JobsApp(App):
         self.activity_projection = {}
         self.observer = observer
         self.sampler = sampler
+        self.sampler_lock = threading.Lock()
         self.job_usage = {}
         self.collecting = False
         self.empty_notice_shown = False
@@ -546,7 +549,7 @@ class JobsApp(App):
         self.set_interval(4, self.collect_progress)
         self.set_interval(4, self.collect_execution)
 
-    def on_unmount(self):
+    async def on_unmount(self):
         self.files_generation += 1
         self.execution_closed = True
         self.execution_generation += 1
@@ -556,6 +559,9 @@ class JobsApp(App):
         # busy gate until its real return, and let that worker release readers.
         if not self.progress_busy and self.progress_service is not None:
             self.progress_service.close()
+        # Await the bounded provider shutdown without blocking Textual's event loop.
+        # The lock also prevents an in-flight observer from creating it after close.
+        await asyncio.to_thread(self.close_sampler)
 
     def execution_identity(self):
         job = self.selected()
@@ -974,8 +980,14 @@ class JobsApp(App):
                     rendered.stylize('#5c8996', index, index + 1)
         widget.update(rendered)
 
+    def close_sampler(self):
+        with self.sampler_lock:
+            sampler = self.sampler
+        if sampler is not None:
+            sampler.close()
+
     def collect_activity(self):
-        if self.collecting:
+        if self.collecting or self.execution_closed:
             return
         self.collecting = True
         def collect():
@@ -983,9 +995,12 @@ class JobsApp(App):
                 from .activity import DEFAULT_OBSERVER, project
                 if self.observer is None:
                     self.observer = DEFAULT_OBSERVER
-                if self.sampler is None:
-                    from .telemetry import Sampler
-                    self.sampler = Sampler()
+                with self.sampler_lock:
+                    if self.execution_closed:
+                        return
+                    if self.sampler is None:
+                        from .telemetry import Sampler
+                        self.sampler = Sampler()
                 state = project(self.store, observer=self.observer, sampler=self.sampler)
                 projection = {key: state[key] for key in ("external_activity", "admission", "controller_guard", "machine_usage", "sharing_evidence", "scheduler", "mode") if key in state}
                 projection["job_usage"] = {j["attempt_id"]: j.get("usage") for j in state["jobs"] if j["status"] in ACTIVE}
@@ -996,7 +1011,15 @@ class JobsApp(App):
                              source="client", scope="current local user / recognized accessible executables")
                 guard.setdefault("observations", [])
                 projection = {**deepcopy(self.activity_projection), "external_activity": guard, "admission": {"permitted": False, "reason": guard["reason"]}}
-            self.call_from_thread(self.accept_activity, projection)
+            if self.execution_closed:
+                if self.sampler is not None:
+                    self.sampler.close()
+                return
+            try:
+                self.call_from_thread(self.accept_activity, projection)
+            except RuntimeError:
+                if self.sampler is not None:
+                    self.sampler.close()
         self.run_worker(collect, thread=True, group="external-observation", exit_on_error=False)
 
     def accept_activity(self, projection):
@@ -1594,7 +1617,8 @@ class JobsApp(App):
             return None
         return capture_snapshot(job, progress=self.selected_progress(job),
             execution=self.selected_execution(job), captured_at=self.clock() if self.clock else None,
-            read_error=self.progress_error, execution_error=self.execution_error)
+            read_error=self.progress_error, execution_error=self.execution_error,
+            machine_usage=self.activity_projection.get('machine_usage'))
 
     def action_copy_snapshot(self):
         snapshot = self.capture_copy_snapshot()

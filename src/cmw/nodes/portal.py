@@ -1,12 +1,12 @@
 """Compact federated client with independent, bounded node-local observation lanes."""
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
-import threading
 import time
 import sys
 from uuid import uuid4
@@ -17,7 +17,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Input, Static, TextArea
 
-from cmw.jobs.cli import elapsed, machine_text, usage_summary
+from cmw.jobs.cli import elapsed, machine_text, machine_detail, usage_summary
 from cmw.jobs.copy_ui import FrozenText, SelectableStatic
 from cmw.jobs.history_ui import ProgressHistory
 from cmw.jobs.snapshot import HandoffSnapshot, capture_snapshot
@@ -27,11 +27,12 @@ from cmw.jobs.tui import JobsApp, Prompt, ScientificProgress, detail, literal, t
 from cmw.progress.formatting import progress_text
 from cmw.progress.models import HistoryPage, ProgressSnapshot
 from .codec import decode_typed, encode_typed
+from .connections import observed_machine_usage
 from .protocol import NodeError
 from .portal_views import FetchDialog, NodeControlConfirm, NodeCopyPreview, NodeFiles
 
 
-_TRANSPORT_ERRORS = {'UNREACHABLE', 'OUTCOME_UNKNOWN', 'ENDPOINT_CHANGED', 'INVALID_RESPONSE',
+_TRANSPORT_ERRORS = {'DISCONNECTED', 'UNREACHABLE', 'OUTCOME_UNKNOWN', 'ENDPOINT_CHANGED', 'INVALID_RESPONSE',
                      'SSH_IDENTITY_CHANGED', 'SSH_IDENTITY_UNVERIFIED', 'CLOSED'}
 
 
@@ -51,6 +52,8 @@ class NodeLane:
     state: dict | None = None
     status_envelope: dict | None = None
     received: float | None = None
+    request_started: float | None = None
+    status_transport_age: float = 0.
     error: str | None = None
     failures: int = 0
     next_poll: float = 0
@@ -132,11 +135,11 @@ class NodesApp(App):
         self.tick()
         self.set_interval(.25, self.tick)
 
-    def on_unmount(self):
+    async def on_unmount(self):
         self.closed = True
         for lane in self.lanes.values():
             lane.pending.clear()
-            threading.Thread(target=lane.backend.close, daemon=True).start()
+        await asyncio.gather(*(asyncio.to_thread(lane.backend.close) for lane in self.lanes.values()))
 
     def on_resize(self):
         if self.is_mounted:
@@ -180,6 +183,7 @@ class NodesApp(App):
             if lane.pending and not lane.busy:
                 request = lane.pending.popleft()
                 lane.busy = True
+                lane.request_started = now
                 def collect(owner=owner, lane=lane, request=request):
                     operation, params, target, callback = request
                     try:
@@ -236,6 +240,7 @@ class NodesApp(App):
             if operation == 'status':
                 lane.state = envelope['result']['state']
                 lane.status_envelope, lane.received = envelope, now
+                lane.status_transport_age = max(0., now - lane.request_started) if lane.request_started is not None else 0.
                 for request_id, pending in tuple(self.unknown_controls.items()):
                     if pending[0] == owner:
                         self.check_control_result(owner, request_id, pending[1])
@@ -272,6 +277,11 @@ class NodesApp(App):
             state = 'Online'
         return state + (' · received —' if age is None else f' · received {age:.0f}s ago')
 
+    def machine_usage(self, owner):
+        lane = self.lanes[owner]
+        return observed_machine_usage(lane.status_envelope, lane.received, self.clock(),
+            connected=lane.fresh(self.clock()), transport_age=lane.status_transport_age)
+
     def render_state(self):
         if not self.is_mounted or not list(self.query('#node-summary')):
             return
@@ -284,14 +294,20 @@ class NodesApp(App):
             count = sum(job.get('status') == 'Run' for job in state.get('jobs', ()))
             condition = 'Online' if lane.fresh(now) else 'Unreachable' if lane.error else 'Connecting' if lane.received is None else 'Stale'
             control = 'ctrl on' if controller.get('online') else 'ctrl off'
-            summaries.append(f'{owner} {condition} · {control} · Run {count}' if lane.fresh(now) else
-                             f'{owner} {condition} · last Run {count}' if lane.state else f'{owner} {condition}')
+            age = lane.age(now)
+            received = '—' if age is None else f'{age:.0f}s'
+            identity = table_name(owner, 7 if self.size.width < 100 else 16)
+            status = f'{identity} {condition} {received}'
+            machine = machine_text(self.machine_usage(owner)).removeprefix('Machine: ')
+            if self.size.width >= 100:
+                status += f' · {control} · ' + (f'Run {count}' if lane.fresh(now) else f'last Run {count}')
+            summaries.append(status + ('\nMachine: ' if len(self.lanes) == 1 else ' · ') + machine)
             for job in state.get('jobs', ()):
                 target = job.get('target')
                 if target and (target['node_id'], target['queue_id']) == (lane.backend.node_id, lane.backend.queue_id):
                     rows[row_key(target)] = (owner, job)
         self.rows = rows
-        self.query_one('#node-summary', Static).update(literal('   |   '.join(summaries)))
+        self.query_one('#node-summary', Static).update(literal('\n'.join(summaries)))
         table = self.query_one('#table', DataTable)
         widths = [('node', 'NODE', 7), ('id', 'JOB ID', 8), ('files', 'FILES', 5),
                   ('name', 'NAME', max(12, self.size.width - 56)), ('status', 'STATUS', 12), ('elapsed', 'ELAPSED', 10)]
@@ -557,14 +573,14 @@ class NodesApp(App):
         if selected:
             owner, job = selected
             self.push_screen(FrozenText(self.label(owner, job) + '\n' + self.connection_text(owner) + '\n\n' +
-                detail(job) + '\n\n' + json.dumps({'target': job['target'], 'revision': job.get('revision')}, indent=2), 'JOB DETAILS · cached node report'))
+                detail(job) + '\n\n' + machine_detail(self.machine_usage(owner)) + '\n\n' + json.dumps({'target': job['target'], 'revision': job.get('revision')}, indent=2), 'JOB DETAILS · cached node report'))
 
     def action_scheduling(self):
         selected = self.selected()
         if selected:
             owner, job = selected
             state = self.lanes[owner].state or {}
-            text = self.label(owner, job) + '\n' + self.connection_text(owner) + '\n' + machine_text(state.get('machine_usage'))
+            text = self.label(owner, job) + '\n' + self.connection_text(owner) + '\n' + machine_detail(self.machine_usage(owner))
             text += '\n\n' + json.dumps({key: state.get(key) for key in ('controller', 'admission', 'external_activity', 'scheduler')}, indent=2)
             self.push_screen(FrozenText(text, 'NODE-LOCAL SCHEDULING · no cross-node resource pool'))
 
@@ -586,7 +602,8 @@ class NodesApp(App):
         captured = capture_snapshot(job, progress=progress, execution=execution,
             captured_at=envelope['observed_at'], runtime=envelope['runtime'],
             read_error=cache.get('progress.error') or lane.error,
-            execution_error=cache.get('observe.error') or lane.error)
+            execution_error=cache.get('observe.error') or lane.error,
+            machine_usage=self.machine_usage(owner))
         data = captured.to_dict()
         data['node_origin'] = {'alias': owner, 'queue_alias': lane.backend.queue, **target,
             'connection': self.connection_text(owner), 'runtime_id': envelope['runtime']['fingerprint'],

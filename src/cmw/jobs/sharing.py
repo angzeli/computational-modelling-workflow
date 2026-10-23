@@ -317,7 +317,7 @@ class AdmissionSampler:
     def __init__(self):
         from .telemetry import Sampler
         import psutil
-        self.sampler = Sampler(swap_memory=psutil.swap_memory)
+        self.sampler = Sampler(swap_memory=psutil.swap_memory, thermal=None)
         self.window = EvidenceWindow()
 
     def collect(self, store, *, source='controller', wait=False):

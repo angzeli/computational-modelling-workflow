@@ -1,7 +1,9 @@
 """Explicit frontend enrollment; aliases never silently resolve to localhost."""
 from __future__ import annotations
 
+from copy import deepcopy
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -9,6 +11,38 @@ import stat
 
 from .protocol import NodeError, identifier, validate_envelope
 from .transport import SSHTransport, ssh_command
+
+
+def observed_machine_usage(envelope, received_at, now, *, connected=True, transport_age=0.):
+    """Qualify one node's cached telemetry without comparing different host clocks.
+
+    The endpoint timestamp and thermal sample timestamp share a clock. Frontend
+    elapsed time and conservative request duration only age that evidence; they
+    never replace its sample timestamp or revive a disconnected reading.
+    """
+    from cmw.jobs.telemetry import MAX_AGE
+    from cmw.jobs.thermal import age_thermal
+
+    state = (envelope or {}).get('result', {}).get('state', {})
+    value = state.get('machine_usage')
+    if not isinstance(value, dict):
+        return None
+    result = deepcopy(value)
+    def seconds(value):
+        return float(value) if type(value) in (int, float) and math.isfinite(value) and value >= 0 else 0.
+    elapsed = seconds(now - received_at) if received_at is not None else 0.
+    elapsed += seconds(transport_age)
+    node_now = envelope.get('observed_at')
+    node_now = node_now if type(node_now) in (int, float) and math.isfinite(node_now) else 0.
+    sample_at = result.get('observed_at')
+    age = seconds(result.get('age_seconds'))
+    if type(sample_at) in (int, float) and math.isfinite(sample_at):
+        age = max(age, seconds(node_now - sample_at))
+    result['age_seconds'] = age + elapsed
+    result['stale'] = bool(result.get('stale') or not connected or result['age_seconds'] > MAX_AGE)
+    result['thermal'] = age_thermal(result.get('thermal'), now=node_now,
+                                    elapsed=elapsed, unavailable=not connected)
+    return result
 
 
 def default_config():

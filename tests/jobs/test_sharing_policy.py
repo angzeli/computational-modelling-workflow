@@ -86,6 +86,23 @@ class SharingPolicyTests(unittest.TestCase):
             observation,self.guard,6,8,write_scope=str(self.primary_dir))
         return observation
 
+    def test_thermal_observation_never_changes_admission_or_commitments(self):
+        for over_budget in (False, True):
+            self.auxiliary['resources']['cpus'] = 3 if over_budget else 2
+            baseline = self.evaluate()
+            state_before = copy.deepcopy(self.state)
+            for thermal in (None, {},
+                    {'temperature_celsius': 63.2, 'quality': 'fresh'},
+                    {'temperature_celsius': 120., 'quality': 'fresh'},
+                    {'temperature_celsius': 63.2, 'quality': 'stale'},
+                    {'temperature_celsius': None, 'quality': 'unavailable',
+                     'availability_reason': 'Provider timed out'}):
+                with self.subTest(over_budget=over_budget, thermal=thermal):
+                    for sample in self.evidence['samples']:
+                        sample['machine_usage']['thermal'] = copy.deepcopy(thermal)
+                    self.assertEqual(self.evaluate(), baseline)
+                    self.assertEqual(self.state, state_before)
+
     def test_exact_commitment_limits_and_no_low_usage_discount(self):
         result = self.evaluate()
         self.assertTrue(result['permitted'],result)

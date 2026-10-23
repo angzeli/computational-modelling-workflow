@@ -564,8 +564,9 @@ heartbeat age and stale/offline state are displayed independently of job state.
 The machine line describes the whole local Mac: CPU is a percentage from changes
 in host CPU-time counters. RAM shows used / total in GiB, with used defined as
 `total - available`. This is psutil's platform accounting, not a claim of byte-for-byte agreement
-with macOS Activity Monitor. The header labels this `psutil T−avail` and
-retains the existing admission quantity. On macOS, psutil available memory is
+with macOS Activity Monitor. Details retain the `psutil T−avail` source
+explanation; the compact header omits that badge and retains the existing
+admission quantity. On macOS, psutil available memory is
 inactive plus raw free pages; CMW does not use psutil's separate active-plus-wired
 `used` field. The total-minus-available result includes physical compressor
 occupancy within system accounting; no logical compressed amount or swap is
@@ -629,9 +630,74 @@ machine CPU alone cannot bypass BUSY. In explicitly enabled Bounded Sharing,
 fresh host telemetry adds admission vetoes after identity, declarations and
 commitment checks; it never releases an existing commitment. Existing ownership, guard, cancellation and
 completion evidence remain authoritative. There are no peaks, history, resource
-limits, automatic tuning, arbitrary parallel scheduling, IO/GPU/temperature metrics or
-ETA. The supported runtime boundary remains local macOS with the locked psutil
+limits, automatic tuning, arbitrary parallel scheduling, IO/GPU metrics or
+ETA. Optional CPU temperature below is independent host telemetry. The supported runtime boundary remains local macOS with the locked psutil
 dependency; tests use deterministic samples and owned benign processes.
+
+### Optional average CPU temperature
+
+The shared local and node-selected machine line is exactly:
+
+```text
+Machine: CPU 71%; avg 63°C RAM 27.1 / 36.0 GiB
+```
+
+These values are illustrative. CPU and RAM still use the psutil accounting above;
+macmon's CPU ratios and memory estimates are never substituted. Temperature is
+rounded to an integer Celsius value, from **the arithmetic average of supported
+CPU sensors reported by macmon**, not a maximum, GPU or SoC hotspot reading.
+No new panel, thermal warning colour or control is added.
+
+Temperature is disabled by default and has no package dependency. On macOS arm64,
+opt in for an observer using an explicitly trusted, absolute executable path:
+
+```sh
+CMW_THERMAL_MACMON=/opt/homebrew/bin/macmon cmw jobs watch
+```
+
+CMW does not install or discover an arbitrary PATH executable. The optional
+`CMW_THERMAL_INTERVAL_SECONDS` accepts 15–30 seconds (default 20). Executable
+version and pipe options are checked in the background before sampling. This
+adapter supports the inspected macmon 0.10.x interface: fixed argv
+`pipe --samples 1 --interval 1000`, one newline-delimited JSON object containing
+`temp.cpu_temp_avg`, in Celsius. Its native timestamp is retained when present;
+otherwise age conservatively starts at the sampling invocation. Other versions, null or
+missing sensors, incompatible units/schema, booleans, nonfinite numbers, zero
+sentinels and invalid readings produce unavailable diagnostics. No shell command
+is taken from telemetry JSON.
+
+The provider uses one worker and at most one direct child per observer, independent
+of redraws and scientific polling. Each version/help probe has a 2-second deadline, a sample has 3 seconds,
+and output is bounded to 64 KiB stdout / 4 KiB stderr. Stop allows 0.5 seconds
+after termination and 0.5 seconds after forced termination of its own child.
+Failures retry after 20 then 40 seconds at the default cadence; three consecutive
+failures disable the observer session. Closing the observer reaps its own
+provider child. Separate observers have separate provider bounds; no shared
+service is installed. An unconfigured provider creates no worker or child.
+One-shot CLI observation may finish before an optional thermal sample is ready.
+Blocked/missing thermal collection never waits in CPU/RAM sampling or control
+requests. Admission samplers do not start a thermal provider.
+
+Temperature has its own clock: up to 30 seconds is fresh, over 30 through 60
+seconds is stale (`avg 63°C~`), and older evidence displays `avg —`.
+Failures and invalid new samples can make temperature unavailable earlier.
+The source timestamp, age, Celsius units, kind, provider, quality and bounded
+reason remain in `machine_usage.thermal` and machine Details. JSON additionally
+retains the validated provider version. No previous
+boot or previous observer sample is restored. CPU/RAM and temperature are not an
+atomic observation. No raw provider stderr or environment is copied by default.
+
+This is ephemeral, optional host observation. It never changes admission,
+commitments, scheduling, process ownership, Hold/Release, Suspend/Continue,
+cancellation, scientific evidence/convergence or finalization, and is not stored
+in the Jobs database. It does not diagnose throttling or certify hardware health.
+
+The macmon interface is qualified with synthetic provider fixtures. Actual
+MacBook/Mac mini sensor qualification, including M5 Pro with its installed macOS
+and macmon combination, remains pending; upstream chip support alone does not
+establish usable sensors. Unsupported systems retain CPU/RAM with `avg —`.
+See the [upstream pipe and sensor contract](https://github.com/vladkens/macmon)
+for its private macOS API and version limitations.
 
 ## Integration and foreground command contract
 

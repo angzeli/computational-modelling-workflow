@@ -113,7 +113,13 @@ def machine_text(usage):
     memory = "—" if used is None or total is None else f"{used / 2**30:.1f} / {total / 2**30:.1f} GiB"
     if usage.get("stale"):
         memory += "~"
-    return f"Machine: CPU {cpu}   RAM {memory} [psutil T−avail]"
+    from .thermal import age_thermal
+    thermal = age_thermal(usage.get('thermal'), now=0.)
+    temperature = thermal.get('temperature_celsius')
+    temp = '—' if temperature is None or thermal['quality'] == 'unavailable' else f'{temperature:.0f}°C'
+    if thermal['quality'] == 'stale' and temp != '—':
+        temp += '~'
+    return f"Machine: CPU {cpu}; avg {temp} RAM {memory}"
 
 
 def machine_detail(usage):
@@ -125,6 +131,20 @@ def machine_detail(usage):
              'Machine RAM = total − available; availability follows psutil platform accounting.',
              f"Machine source: {value.get('memory_source', 'psutil.virtual_memory')}",
              f"System swap used: {gib(value.get('swap_used_bytes'))}; separate from physical RAM."]
+    from .thermal import age_thermal
+    thermal = age_thermal(value.get('thermal'), now=0.)
+    age = thermal.get('sample_age')
+    lines.extend([
+        'RAM convention: psutil T−avail; available is platform-defined and includes reclaimable/cache accounting.',
+        f"Machine CPU source: psutil.cpu_times(); quality: {value.get('cpu_quality', 'unavailable')}; "
+        f"CPU/RAM sample: {value.get('observed_at', '—')}; age: {value.get('age_seconds', '—')}s.",
+        f"CPU temperature: {thermal.get('temperature_celsius') if thermal['quality'] != 'unavailable' else '—'} "
+        f"{thermal.get('units', 'Celsius')}; kind: {thermal.get('temperature_kind', 'average CPU sensors')}; "
+        f"source: {thermal.get('source') or 'unavailable'}; quality: {thermal['quality']}.",
+        f"Thermal sample: {thermal.get('sample_timestamp')}; age: {'—' if age is None else f'{age:.1f}s'}; "
+        f"reason: {thermal.get('availability_reason') or 'available'}.",
+        'CPU, RAM and thermal observations have independent sample clocks; they are not atomic.'
+    ])
     categories = value.get('memory_categories_bytes') or {}
     if categories:
         lines.append('Native memory categories (overlapping; do not add): ' + '; '.join(

@@ -19,6 +19,7 @@ import psutil
 
 from .ownership import identity, observed_group_members
 from .native_memory import footprint_reader
+from .thermal import ThermalProvider, age_thermal, unavailable_thermal
 from .store import ACTIVE, JobsError
 
 MAX_AGE = 5.0
@@ -55,6 +56,8 @@ def age_usage(value, now=None):
     if result and result.get('observed_at') is not None:
         result['age_seconds'] = max(0, (time.time() if now is None else now)-result['observed_at'])
         result['stale'] = bool(result.get('stale') or result['age_seconds'] > MAX_AGE)
+    if result and 'thermal' in result:
+        result['thermal'] = age_thermal(result['thermal'], now=now)
     return result
 
 
@@ -67,13 +70,14 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
     def __init__(self, *, process_factory=psutil.Process, identity_provider=identity,
                  cpu_times=psutil.cpu_times, virtual_memory=psutil.virtual_memory,
                  monotonic=time.monotonic, wall_time=time.time, swap_memory=psutil.swap_memory,
-                 footprint=_AUTO):
+                 footprint=_AUTO, thermal=_AUTO):
         self.process_factory = process_factory
         self.identity = identity_provider
         self.cpu_times = cpu_times
         self.virtual_memory = virtual_memory
         self.swap_memory = swap_memory
         self.footprint = footprint_reader() if footprint is _AUTO else footprint
+        self.thermal = ThermalProvider.from_environment() if thermal is _AUTO else thermal
         self.monotonic = monotonic
         self.wall_time = wall_time
         self.baselines = {}
@@ -81,6 +85,13 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
         self.last = None
         self.thread = None
         self.lock = threading.Lock()
+
+    def close(self):
+        if self.thermal is not None:
+            try:
+                self.thermal.close()
+            except Exception:
+                pass
 
     def sample(self, store, state, guard, pids):
         with self.lock:
@@ -128,6 +139,11 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
 
     def _machine(self):
         result, baseline = self._empty_machine(), None
+        try:
+            result['thermal'] = (self.thermal.snapshot() if self.thermal is not None else
+                                 unavailable_thermal('CPU temperature observation disabled'))
+        except Exception:
+            result['thermal'] = unavailable_thermal('CPU temperature provider failed')
         reasons = []
         try:
             times = self.cpu_times()._asdict()
