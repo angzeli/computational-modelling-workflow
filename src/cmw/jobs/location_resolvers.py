@@ -212,6 +212,8 @@ def orca_workflow_locations(job):
     argv = _script_argv(job)
     if not argv or Path(argv[0]).name != 'run_opt_freq_sp.sh':
         return ()
+    if len(argv) == 3 and argv[1] == '--state':
+        return ()
     try:
         options = _options(argv, _WORKFLOW_PAIRS,
                            {'--require-minimum', '--no-require-minimum', '--new-attempt', '--plan', '--json'})
@@ -230,6 +232,9 @@ def orca_workflow_locations(job):
 
 
 def _workflow_state_argv(job):
+    script = _script_argv(job)
+    if script and Path(script[0]).name == 'run_opt_freq_sp.sh' and len(script) == 3 and script[1] == '--state':
+        return ('prepared-workflow', *script[1:])
     argv = _argv(job)
     if not argv or not Path(argv[0]).name.startswith('python'):
         return ()
@@ -313,6 +318,7 @@ def orca_workflow_state_locations(job):
 
 
 def builtin_resolvers():
+    from .molecular import locations as molecular_locations
     """Explicit registration; clients may add resolvers without engine branches."""
     return (vasp_runner_locations, orca_runner_locations, orca_workflow_locations,
-            orca_workflow_state_locations)
+            orca_workflow_state_locations, molecular_locations)

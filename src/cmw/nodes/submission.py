@@ -231,7 +231,7 @@ def register_held(backend, spec, request_id):
     return {'status': 'REGISTERED', 'replayed': False, 'job': job, 'request_id': request_id}
 
 
-def launch_blocker(job):
+def launch_blocker(job, *, final=False):
     """Destination-local preflight for enrolled jobs; no alternate dispatcher."""
     try:
         from .transfer import lookup_transfer

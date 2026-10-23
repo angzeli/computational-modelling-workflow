@@ -27,8 +27,9 @@ absence from the inspected surfaces, not a claim about all possible software.
 Legacy routes are marked separately. None of these labels certifies science.
 
 `cmw …` denotes the installed console entry point. `python -m …` denotes a Python
-module entry point, not a top-level `cmw` command. Paths under `scripts/` require
-the checkout or extracted sdist; a wheel alone does not supply that script tree.
+module entry point, not a top-level `cmw` command. Paths under `scripts/` generally require the checkout or extracted sdist. The
+reviewed ORCA/Multiwfn Jobs route packages its exact runner/helper closure inside
+the wheel; it does not expose the whole repository script tree.
 API rows are importable Python interfaces, not invented console commands.
 
 Tests below are **coverage references**, not evidence they ran in your session.
@@ -75,6 +76,7 @@ are distinct from commands that execute; consult the linked interface before use
 | Task | Existing entry point / availability | Scope and mechanism to reuse | Contract and evidence |
 | --- | --- | --- | --- |
 | Run OPT, OPT+SP, OPT+FREQ or OPT+FREQ+SP | `scripts/workflows/run_opt_freq_sp.sh` — IMPLEMENTED, checkout workflow | Explicit XYZ/electronic state/stage settings/resources and local ORCA; `--plan` is non-executing. Reuse stage validation, attempts and fail-closed resume. | [Guide](docs/molecular/orca-opt-freq-sp.md), [script](scripts/workflows/run_opt_freq_sp.sh), [tests](tests/workflows/test_opt_freq_sp.py) |
+| Check and submit reviewed ORCA/Multiwfn Jobs | `cmw jobs check --spec … --json`; `cmw jobs submit --spec … [--preview]`; explicit `--node` equivalents — IMPLEMENTED, bounded profiles | Pure engine-aware check, explicit no-clobber preparation, idempotent Hold registration, actual-admission byte checks and automatic native sources. ORCA SP/OPT/FREQ and existing compositions; Multiwfn FMO/ESP/IGMH/IFCT only. Existing runners/finalizers are packaged, not duplicated. Real-engine and physical-node qualification remain separate. | [Jobs guide](docs/molecular-jobs.md), [shared API](src/cmw/jobs/molecular.py), [node bindings](src/cmw/nodes/molecular.py), [tests](tests/jobs/test_molecular_submission.py) |
 | Suspend/continue a newly enrolled local managed attempt | `cmw jobs suspend JOB --preview --json`, `cmw jobs suspend JOB`, `cmw jobs continue JOB`; portal `U` — IMPLEMENTED, bounded qualification | Exact live worker/runner handshake; schema 3; same processes and retained resources. VASP port and ordinary ORCA SP/OPT only through their explicit controlled routes. Native MPI, scientific engine and physical sleep acceptance are separate; no external adoption or automatic continuation. | [Jobs contract](docs/cmw-jobs.md#controlled-suspension-of-an-enrolled-local-attempt), [worker authority](src/cmw/jobs/suspension.py), [runner protocol](src/cmw/jobs/suspension_protocol.py), [ORCA contract](docs/architecture/orca-runtime.md) |
 | Prepare/check/finalize/reuse one ORCA stage | `python -m cmw.molecular.orca.cli` operations `prepare`, `status`, `finalize`, `reuse`; runner `scripts/orca/run_orca.sh` — IMPLEMENTED | Use actual stage policy and typed target/attempt evidence. Parallel production needs the validated runtime contract; shell owns launch and signals. No `cmw orca` alias. | [Lifecycle](docs/architecture/orca-runtime.md), [module CLI](src/cmw/molecular/orca/cli.py), [runner](scripts/orca/run_orca.sh), [tests](tests/runtime/test_orca_shell.py) |
 | Convert validated ORCA wavefunction for downstream analysis | `scripts/orca/convert_orca_wavefunction.sh` — IMPLEMENTED, checkout workflow | Requires finalized source and supplied converter. Reuse source hashes, geometry/spin/frontier checks and conversion lineage; no guessed HOMO/LUMO indices. | [Source contract](docs/molecular/multiwfn-cubes.md#validated-source-contract), [script](scripts/orca/convert_orca_wavefunction.sh), [tests](tests/molecular/orca/test_wavefunction_conversion.py) |

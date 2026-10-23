@@ -1092,3 +1092,11 @@ suite uses a private fixture-observation seam to avoid dependence on research
 processes; there is no production bypass. The feature does not implement arbitrary
 N-job scheduling, HPC, automatic retry, global machine locking, process adoption,
 SIGSTOP/SIGCONT time slicing or hard resource enforcement.
+
+## Reviewed molecular submission
+
+ORCA SP/OPT/FREQ and supported compositions, and Multiwfn HOMO/LUMO, density/ESP,
+IGMH and two-fragment IFCT have a shared read-only `jobs check --spec` and explicit
+held `jobs submit --spec` route. See the [reviewed molecular Jobs contract](molecular-jobs.md)
+for exact schemas, automatic source binding, installed runners, resource semantics
+and the distinction between process outcome and scientific validation.

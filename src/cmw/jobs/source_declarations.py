@@ -142,6 +142,25 @@ def recorded_sources(job):
     if 'progress_sources' not in job:
         return ()
     record = job['progress_sources']
+    if isinstance(record, dict) and record.get('origin') == 'automatic-engine-plan':
+        binding = job.get('molecular_submission')
+        if (not isinstance(binding, dict) or binding.get('schema') != 1
+                or record.get('schema') != SOURCE_SCHEMA
+                or record.get('attempt_id') != job.get('attempt_id')
+                or record.get('engine') != str(job.get('engine', '')).upper()
+                or record.get('qualification') != 'reviewed engine plan; scientific acceptance remains separate'):
+            raise JobsError('Invalid automatic engine-plan source association')
+        try:
+            sources = validate_sources(job['engine'], tuple(SourceDescriptor(**value)
+                                       for value in binding['plan']['progress_sources']), require_complete=True)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise JobsError('Invalid reviewed engine-plan source descriptors') from exc
+        expected = [{'role': source.role, 'path': source.path, 'stage': source.stage,
+                     'optional': source.optional} for source in sources]
+        if record.get('sources') != expected:
+            raise JobsError('Recorded sources differ from the immutable engine plan')
+        return tuple(replace(source, qualification=record['qualification'],
+                             origins=('automatic-engine-plan',)) for source in sources)
     if (not isinstance(record, dict) or type(record.get('schema')) is not int
             or record['schema'] != SOURCE_SCHEMA
             or record.get('attempt_id') != job.get('attempt_id')

@@ -345,7 +345,11 @@ def register(subcommands):
             command.add_argument("--preview", action="store_true", help="node-selected control preview")
             command.add_argument("--request-id", help="durable node control UUID; inspect the original request after a timeout")
         command.set_defaults(handler=handle)
-    submit = operations.add_parser("submit", help="explicit node only: transfer reviewed files and register a held job")
+    check = operations.add_parser("check", help="read-only molecular input, provenance and resource preflight")
+    check.add_argument("--spec", type=Path, required=True)
+    check.add_argument("--json", action="store_true")
+    check.set_defaults(handler=handle)
+    submit = operations.add_parser("submit", help="reviewed held submission locally or on an explicit node")
     submit.add_argument("--spec", type=Path, required=True)
     submit.add_argument("--preview", action="store_true", help="prepare a local manifest and inspect destination preflight; no remote mutation")
     submit.add_argument("--json", action="store_true")
@@ -611,8 +615,8 @@ def inspect_progress(store, args):
 
 
 def handle(args):
-    if args.jobs_operation in {"submit", "request", "fetch"} and not getattr(args, "node", None):
-        print("submit/request/fetch require an explicitly enrolled --node; no local fallback")
+    if args.jobs_operation in {"request", "fetch"} and not getattr(args, "node", None):
+        print("request/fetch require an explicitly enrolled --node; no local fallback")
         return 2
     if getattr(args, "node", None) or getattr(args, "queue", None) or getattr(args, "all_nodes", False):
         from cmw.nodes.jobs_cli import handle as handle_node
@@ -621,6 +625,9 @@ def handle(args):
             (getattr(args, "preview", False) and args.jobs_operation in {"start", "stop", "pause", "resume", "hold", "release", "move", "cancel"})):
         print("These preview/request options require an explicitly enrolled --node")
         return 2
+    if args.jobs_operation in {"check", "submit"}:
+        from .molecular import handle as handle_molecular
+        return handle_molecular(args)
     store = Store(args.state)
     operation = args.jobs_operation
     from .activity import project
@@ -718,6 +725,9 @@ def handle(args):
                 raise JobsError(f"No such job: {args.job_id}")
             result = candidates[0]
             if operation == "show":
+                if result.get('molecular_submission'):
+                    from .molecular import inspect_result
+                    result = {**result, 'scientific_result': inspect_result(result)}
                 from .lifecycle import observe_execution
                 from .store import ACTIVE
                 if result['status'] in ACTIVE:

@@ -93,7 +93,11 @@ inside a single output. A prior native convergence marker never certifies a late
 incomplete run. Ambiguous compound steps remain unsupported.
 
 The ordinary workflow wrapper's root directory does not identify its hashed
-workflow-state file, so that argv-only route still needs explicit sources. External
+workflow-state file, so that legacy argv-only route still needs explicit sources.
+The reviewed Jobs route instead records and invokes the exact prepared
+`run_opt_freq_sp.sh --state PATH`; the existing workflow-state resolver follows
+that declared record as stages materialize, without freezing the first stage.
+See [reviewed ORCA Jobs integration](orca-jobs.md). External
 Scratch redirects native output to an execution path; its copyback destination is
 not assumed to be a live source. Declare the exact execution source explicitly.
 

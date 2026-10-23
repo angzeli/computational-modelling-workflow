@@ -283,8 +283,9 @@ class RunnerLocationTests(unittest.TestCase):
         for resolver in builtin_resolvers():
             tuple(resolver(job))
         self.assertEqual(job, original)
+        from cmw.jobs.molecular import locations as molecular_locations
         self.assertEqual(builtin_resolvers(), (vasp_runner_locations, orca_runner_locations,
-                         orca_workflow_locations, orca_workflow_state_locations))
+                         orca_workflow_locations, orca_workflow_state_locations, molecular_locations))
 
 
 if __name__ == '__main__':
