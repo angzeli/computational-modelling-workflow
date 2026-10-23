@@ -283,6 +283,10 @@ class PortalTests(unittest.IsolatedAsyncioTestCase):
             app.select(row_key(job['target']))
             app.action_cancel()
             await self.until(pilot, lambda: isinstance(app.screen, NodeControlConfirm))
+            await pilot.pause()
+            confirm_button = app.screen.query_one('#node-control-confirm')
+            self.assertTrue(confirm_button.region)
+            self.assertTrue(app.screen.region.contains_region(confirm_button.region))
             preview = deepcopy(app.screen.preview)
             self.assertEqual(preview['target'], job['target'])
             with patch('cmw.nodes.client.apply_control', side_effect=apply, create=True):
