@@ -25,7 +25,14 @@ _MACHINE_FIELDS = ('cpu_percent', 'cpu_quality', 'ram_used_bytes', 'ram_total_by
                    'observed_at', 'age_seconds', 'stale', 'reason')
 _THERMAL_FIELDS = ('temperature_celsius', 'temperature_kind', 'source', 'units',
                    'sample_timestamp', 'sample_age', 'quality', 'availability_reason',
-                   'freshness_seconds', 'unavailable_seconds')
+                   'freshness_seconds', 'unavailable_seconds', 'provider_version',
+                   'provider_status', 'observation_status', 'failure_category',
+                   'consecutive_failures', 'successful_samples', 'retry_after_seconds', 'retry_guidance',
+                   'native_timestamp', 'invocation_started_at', 'received_at', 'invocation_elapsed_seconds')
+_THERMAL_NESTED_FIELDS = {
+    'last_successful_observation': ('temperature_celsius', 'sample_timestamp', 'sample_age'),
+    'provider_identity': ('device', 'inode', 'size', 'modified_ns', 'changed_ns', 'owner_uid', 'group_gid', 'mode', 'sha256'),
+}
 _PATH_FIELDS = {'path', 'root_path', 'jobs_state', 'state_directory', 'cwd', 'executable', 'module', 'root', 'database'}
 
 
@@ -91,6 +98,12 @@ def capture_snapshot(job, *, progress=None, execution=None, captured_at=None,
         thermal = age_thermal(machine_usage.get('thermal'), now=0.)
         payload['machine_usage'] = {key: machine_usage[key] for key in _MACHINE_FIELDS if key in machine_usage}
         payload['machine_usage']['thermal'] = {key: thermal[key] for key in _THERMAL_FIELDS if key in thermal}
+        for key, fields in _THERMAL_NESTED_FIELDS.items():
+            value = thermal.get(key)
+            if isinstance(value, dict):
+                payload['machine_usage']['thermal'][key] = {name: value[name] for name in fields if name in value}
+            elif key in thermal:
+                payload['machine_usage']['thermal'][key] = None
     return HandoffSnapshot(json.dumps(_clean(payload), ensure_ascii=False, allow_nan=False, sort_keys=True))
 
 

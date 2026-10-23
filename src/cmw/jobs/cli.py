@@ -145,6 +145,30 @@ def machine_detail(usage):
         f"reason: {thermal.get('availability_reason') or 'available'}.",
         'CPU, RAM and thermal observations have independent sample clocks; they are not atomic.'
     ])
+    def diagnostic(item, fallback='—', limit=256):
+        return name_text(fallback if item is None else item)[:limit]
+    lines.extend([
+        f"Thermal provider: {diagnostic(thermal.get('provider_status'), 'not reported', 64)}; "
+        f"version: {diagnostic(thermal.get('provider_version'), limit=32)}; "
+        f"observation: {diagnostic(thermal.get('observation_status'), thermal['quality'], 32)}.",
+        f"Thermal failures: {diagnostic(thermal.get('consecutive_failures'), limit=16)} consecutive; "
+        f"category: {diagnostic(thermal.get('failure_category'), 'none', 64)}; "
+        f"successful samples: {diagnostic(thermal.get('successful_samples'), limit=16)}."
+    ])
+    last_success = thermal.get('last_successful_observation')
+    if isinstance(last_success, dict):
+        lines.append(
+            f"Thermal last success (historical, not current evidence): "
+            f"{diagnostic(last_success.get('temperature_celsius'), limit=32)} Celsius; "
+            f"sample: {diagnostic(last_success.get('sample_timestamp'), limit=32)}; "
+            f"reported age: {diagnostic(last_success.get('sample_age'), limit=32)}s.")
+    elif 'last_successful_observation' in thermal:
+        lines.append('Thermal last success: none in this observer session.')
+    retry = thermal.get('retry_after_seconds')
+    if retry is not None:
+        lines.append(f"Thermal retry delay (reported): {diagnostic(retry, limit=32)}s.")
+    if thermal.get('retry_guidance'):
+        lines.append('Thermal recovery: ' + diagnostic(thermal['retry_guidance']))
     categories = value.get('memory_categories_bytes') or {}
     if categories:
         lines.append('Native memory categories (overlapping; do not add): ' + '; '.join(

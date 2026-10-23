@@ -652,10 +652,15 @@ Temperature is disabled by default and has no package dependency. On macOS arm64
 opt in for an observer using an explicitly trusted, absolute executable path:
 
 ```sh
-CMW_THERMAL_MACMON=/opt/homebrew/bin/macmon cmw jobs watch
+CMW_THERMAL_MACMON=/Applications/macmon/0.10.0/macmon cmw jobs watch
 ```
 
-CMW does not install or discover an arbitrary PATH executable. The optional
+The executable must already be installed and trusted. CMW does not install or
+discover an arbitrary PATH executable. CMW reads these environment variables,
+not `~/.config/cmw/thermal.env` automatically; a separate observer launcher must
+explicitly load a reviewed configuration file before starting CMW. Changing the
+configuration requires reopening that observer and does not change a running
+controller or other observers. The optional
 `CMW_THERMAL_INTERVAL_SECONDS` accepts 15–30 seconds (default 20). Executable
 version and pipe options are checked in the background before sampling. This
 adapter supports the inspected macmon 0.10.x interface: fixed argv
@@ -671,9 +676,11 @@ of redraws and scientific polling. Each version/help probe has a 2-second deadli
 and output is bounded to 64 KiB stdout / 4 KiB stderr. Stop allows 0.5 seconds
 after termination and 0.5 seconds after forced termination of its own child.
 Failures retry after 20 then 40 seconds at the default cadence; three consecutive
-failures disable the observer session. Closing the observer reaps its own
-provider child. Separate observers have separate provider bounds; no shared
-service is installed. An unconfigured provider creates no worker or child.
+failures disable the observer session. Redraws do not reset this limit. After
+correcting the reported configuration or provider problem, close and reopen the
+observer to start a new bounded session; no service restart or job action is
+needed. Closing the observer reaps its own provider child. Separate observers
+have separate provider bounds; no shared service is installed. An unconfigured provider creates no worker or child.
 One-shot CLI observation may finish before an optional thermal sample is ready.
 Blocked/missing thermal collection never waits in CPU/RAM sampling or control
 requests. Admission samplers do not start a thermal provider.
@@ -682,20 +689,29 @@ Temperature has its own clock: up to 30 seconds is fresh, over 30 through 60
 seconds is stale (`avg 63°C~`), and older evidence displays `avg —`.
 Failures and invalid new samples can make temperature unavailable earlier.
 The source timestamp, age, Celsius units, kind, provider, quality and bounded
-reason remain in `machine_usage.thermal` and machine Details. JSON additionally
-retains the validated provider version. No previous
-boot or previous observer sample is restored. CPU/RAM and temperature are not an
-atomic observation. No raw provider stderr or environment is copied by default.
+reason remain in `machine_usage.thermal` and machine Details. Provider status,
+last failure category, consecutive failure and successful sample counts,
+last successful observation, retry delay and recovery guidance remain separate
+from observation freshness. Last-success age and retry delay are labelled as
+reported by the provider snapshot; cached or disconnected frontends do not turn
+these diagnostics into a live countdown. JSON retains the validated provider
+version and executable identity, including its content digest. Frozen Copy snapshots retain bounded recovery diagnostics
+and identity fields without copying provider environment, raw stderr or commands.
+No previous boot or previous observer sample is restored. CPU/RAM and temperature
+are not an atomic observation. No raw provider stderr or environment is copied by default.
 
 This is ephemeral, optional host observation. It never changes admission,
 commitments, scheduling, process ownership, Hold/Release, Suspend/Continue,
 cancellation, scientific evidence/convergence or finalization, and is not stored
 in the Jobs database. It does not diagnose throttling or certify hardware health.
 
-The macmon interface is qualified with synthetic provider fixtures. Actual
-MacBook/Mac mini sensor qualification, including M5 Pro with its installed macOS
-and macmon combination, remains pending; upstream chip support alone does not
-establish usable sensors. Unsupported systems retain CPU/RAM with `avg —`.
+The macmon interface is qualified with synthetic provider fixtures and a bounded
+Apple M3 Max / macOS 27.2 / macmon 0.10.0 observation: eight scheduled samples
+at the default cadence, two independent observers and disposable dashboard
+renders. This establishes that tested combination only. Physical Mac mini
+qualification, including M5 Pro with its installed macOS and provider combination,
+remains pending; upstream chip support alone does not establish usable sensors.
+Unsupported systems retain CPU/RAM with `avg —`.
 See the [upstream pipe and sensor contract](https://github.com/vladkens/macmon)
 for its private macOS API and version limitations.
 

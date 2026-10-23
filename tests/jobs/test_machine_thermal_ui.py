@@ -66,6 +66,60 @@ class MachineThermalFormatTests(unittest.TestCase):
                       'average CPU sensors', 'Celsius', 'macmon', 'fresh', '12.0s', 'not atomic'):
             self.assertIn(token, text)
 
+    def test_details_explain_provider_recovery_without_changing_machine_line(self):
+        value = machine(temp=None, quality='unavailable')
+        value['thermal'].update(
+            provider_status='disabled', provider_version='0.10.0', observation_status='unavailable',
+            failure_category='sample_timeout', consecutive_failures=3, successful_samples=2,
+            retry_after_seconds=None, retry_guidance='Close and reopen the observer after correcting the problem.',
+            last_successful_observation=dict(temperature_celsius=63.2, sample_timestamp=100., sample_age=145.))
+        text = machine_detail(value)
+        for token in ('Thermal provider: disabled', 'version: 0.10.0', 'observation: unavailable',
+                      '3 consecutive', 'category: sample_timeout', 'successful samples: 2',
+                      'historical, not current evidence', '63.2 Celsius', 'reported age: 145.0s',
+                      'Close and reopen'):
+            self.assertIn(token, text)
+        self.assertNotIn('Thermal retry delay', text)
+        self.assertEqual(machine_text(value), 'Machine: CPU 71%; avg — RAM 27.1 / 36.0 GiB')
+        value['thermal'].update(provider_status='backoff', consecutive_failures=1, retry_after_seconds=12.5)
+        self.assertIn('Thermal retry delay (reported): 12.5s.', machine_detail(value))
+
+    def test_details_bound_and_clean_recovery_text(self):
+        value = machine()
+        value['thermal'].update(retry_guidance='\x1b[31m' + 'x' * 300 + '\nprivate overflow')
+        text = machine_detail(value)
+        self.assertIn('Thermal recovery: ' + 'x' * 256, text)
+        self.assertNotIn('x' * 257, text)
+        self.assertNotIn('private overflow', text)
+        self.assertNotIn('\x1b', text)
+
+    def test_copy_keeps_recovery_and_identity_with_explicit_nested_allowlists(self):
+        value = machine(temp=None, quality='unavailable')
+        value['thermal'].update(
+            provider_status='disabled', provider_version='0.10.0', failure_category='sensors_unavailable',
+            consecutive_failures=3, successful_samples=1, retry_after_seconds=None,
+            retry_guidance='Close and reopen the observer.',
+            last_successful_observation=dict(temperature_celsius=63.2, sample_timestamp=100., sample_age=145.,
+                                             raw='private sensor dump', path='/private/provider/source'),
+            provider_identity=dict(device=1, inode=22, size=1000, modified_ns=123, changed_ns=124,
+                                   owner_uid=501, group_gid=20, mode=33261, sha256='a' * 64,
+                                   executable='/private/provider/executable', raw='private identity dump'))
+        job = dict(id=1, display_id='J1.1', attempt_id='immutable', name='Synthetic', engine='VASP', status='Hold')
+        snap = capture_snapshot(job, machine_usage=value, captured_at=245., runtime={})
+        copied = snap.to_dict()['machine_usage']['thermal']
+        self.assertEqual(copied['provider_status'], 'disabled')
+        self.assertEqual(copied['consecutive_failures'], 3)
+        self.assertEqual(copied['last_successful_observation'],
+                         dict(temperature_celsius=63.2, sample_timestamp=100., sample_age=145.))
+        self.assertEqual(copied['provider_identity']['inode'], 22)
+        self.assertEqual(copied['provider_identity']['sha256'], 'a' * 64)
+        for mode in ('summary', 'diagnostics', 'json'):
+            text = render_snapshot(snap, mode=mode)
+            self.assertIn('sensors_unavailable', text)
+            self.assertNotIn('private', text)
+        value['thermal']['provider_identity']['inode'] = 23
+        self.assertEqual(snap.to_dict()['machine_usage']['thermal']['provider_identity']['inode'], 22)
+
     def test_copy_freezes_host_telemetry_without_scientific_or_private_fields(self):
         value = machine(); value['thermal'].update(stderr='private raw stderr', argv=['private command'])
         job = dict(id=1, display_id='J1.1', attempt_id='immutable', name='Synthetic', engine='VASP', status='Hold')

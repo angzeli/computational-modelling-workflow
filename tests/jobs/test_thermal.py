@@ -1,6 +1,7 @@
 """Optional thermal observation from test-owned executables only."""
 from collections import namedtuple
 import json
+import os
 from pathlib import Path
 import tempfile
 import time
@@ -88,7 +89,9 @@ class ThermalTests(unittest.TestCase):
         for value in [None,[],{},'bad',dict(valid,source='other'),dict(valid,quality=[]),
                       dict(valid,units={}),dict(valid,sample_timestamp=False),dict(valid,sample_age=None)]:
             with self.subTest(value=value):
-                self.assertEqual(thermal.age_thermal(value,now=0)['quality'],'unavailable')
+                aged=thermal.age_thermal(value,now=0)
+                self.assertEqual(aged['quality'],'unavailable')
+                self.assertEqual(aged['observation_status'],'unavailable')
         self.assertEqual(thermal.age_thermal(valid,now=0),valid)
 
     def test_configuration_is_optional_and_platform_limited(self):
@@ -118,6 +121,13 @@ class ThermalTests(unittest.TestCase):
         calls=[json.loads(x) for x in Path(provider.executable+'.calls').read_text().splitlines()]
         self.assertEqual(calls,[['--version'],['pipe','--help'],['pipe','--samples','1','--interval','1000']])
         self.assertEqual(provider.launch_count,3)
+        diagnostic=provider.snapshot()
+        self.assertEqual(diagnostic['provider_status'],'ready')
+        self.assertEqual(diagnostic['observation_status'],'fresh')
+        self.assertEqual(diagnostic['successful_samples'],1)
+        self.assertEqual(diagnostic['consecutive_failures'],0)
+        self.assertEqual(diagnostic['last_successful_observation']['temperature_celsius'],63.2)
+        self.assertEqual(diagnostic['provider_identity']['inode'],Path(provider.executable).stat().st_ino)
         self.assertIsNone(provider.process)
         self.assertTrue(provider.thread.is_alive())
         provider.close()
@@ -127,6 +137,8 @@ class ThermalTests(unittest.TestCase):
         self.assertEqual(provider.launch_count,3)
 
     def test_failure_categories_and_no_raw_stderr(self):
+        categories=dict(null='sensors_unavailable', fail='execution_failed',
+                        version='unsupported_version',help='unsupported_version')
         for mode in ['null','missing','malformed','multiple','empty','fail','version','help','overflow','stderr']:
             with self.subTest(mode=mode):
                 provider=self.provider(mode)
@@ -134,6 +146,11 @@ class ThermalTests(unittest.TestCase):
                 self.wait_for(lambda:provider.failures==1)
                 value=provider.snapshot()
                 self.assertEqual(value['quality'],'unavailable')
+                self.assertEqual(value['provider_status'],'backoff')
+                self.assertEqual(value['failure_category'],categories.get(mode,'invalid_sensor_data'))
+                self.assertEqual(value['consecutive_failures'],1)
+                self.assertGreater(value['retry_after_seconds'],0)
+                self.assertIn('reopen',value['retry_guidance'])
                 self.assertIsNone(value['temperature_celsius'])
                 self.assertNotIn('PRIVATE',str(value))
                 provider.close()
@@ -150,6 +167,7 @@ class ThermalTests(unittest.TestCase):
         self.assertLess(time.monotonic()-before,.1)
         self.wait_for(lambda:provider.failures==1)
         self.assertIn('timed out',provider.snapshot()['availability_reason'])
+        self.assertEqual(provider.snapshot()['failure_category'],'sample_timeout')
         self.assertIsNotNone(process.poll())
         self.assertFalse(psutil.pid_exists(process.pid))
 
@@ -174,6 +192,9 @@ class ThermalTests(unittest.TestCase):
         self.assertFalse(provider.thread.is_alive())
         self.assertEqual(provider.launch_count,5)
         self.assertIn('disabled',provider.snapshot()['availability_reason'])
+        self.assertEqual(provider.snapshot()['provider_status'],'disabled')
+        self.assertEqual(provider.snapshot()['consecutive_failures'],3)
+        self.assertIsNone(provider.snapshot()['retry_after_seconds'])
         for _ in range(100):provider.snapshot()
         self.assertEqual(provider.launch_count,5)
 
@@ -185,6 +206,8 @@ class ThermalTests(unittest.TestCase):
         self.assertEqual(provider.snapshot()['temperature_celsius'],63.2)
         self.wait_for(lambda:provider.failures==1)
         self.assertIsNone(provider.snapshot()['temperature_celsius'])
+        self.assertEqual(provider.snapshot()['last_successful_observation']['temperature_celsius'],63.2)
+        self.assertGreater(provider.snapshot()['last_successful_observation']['sample_age'],.1)
 
     def test_changed_executable_is_not_run_again(self):
         provider=self.provider()
@@ -201,11 +224,124 @@ class ThermalTests(unittest.TestCase):
         self.wait_for(lambda:all(p.launch_count==3 and p.process is not None for p in providers))
         children=[p.process for p in providers]
         self.assertEqual(len({p.pid for p in children}),3)
+        providers[0].close()
+        self.assertIsNotNone(children[0].poll())
+        self.assertTrue(all(child.poll() is None for child in children[1:]))
+        self.assertTrue(all(provider.thread.is_alive() for provider in providers[1:]))
         for provider in providers:
             for _ in range(100):provider.snapshot()
             self.assertEqual(provider.launch_count,3)
             provider.close()
         self.assertTrue(all(p.poll() is not None for p in children))
+
+    def test_configuration_diagnostics_and_unavailable_endpoint(self):
+        cases=[({},'not_configured'),
+               ({'executable':str(self.root/'absent')},'missing_executable'),
+               ({'executable':'relative'},'invalid_configuration'),
+               ({'executable':str(self.root/'absent'),'system':'Linux'},'unsupported_platform')]
+        for kwargs,status in cases:
+            provider=thermal.ThermalProvider(**dict(system='Darwin',machine='arm64')|kwargs)
+            self.assertEqual(provider.snapshot()['provider_status'],status)
+            self.assertIsNone(provider.thread)
+            provider.close()
+        unavailable=thermal.ThermalProvider.unavailable('Invalid endpoint-local settings')
+        self.assertEqual(unavailable.snapshot()['provider_status'],'invalid_configuration')
+        self.assertIsNone(unavailable.thread)
+
+    def test_explicit_reopen_recovers_disabled_session(self):
+        provider=self.provider('fail')
+        provider.interval=.04
+        provider.snapshot()
+        self.wait_for(lambda:provider.failures==3)
+        provider.thread.join(.1)
+        write_fake_macmon(provider.executable)
+        for _ in range(30):
+            self.assertEqual(provider.snapshot()['provider_status'],'disabled')
+        self.assertEqual(provider.launch_count,5)
+        provider.close()
+        reopened=thermal.ThermalProvider(provider.executable,system='Darwin',machine='arm64')
+        self.addCleanup(reopened.close)
+        reopened.snapshot()
+        self.wait_for(lambda:reopened.sample_count==1)
+        self.assertEqual(reopened.snapshot()['provider_status'],'ready')
+        self.assertEqual(reopened.failures,0)
+        self.assertEqual(reopened.snapshot()['temperature_celsius'],63.2)
+
+    def test_metadata_restoration_does_not_trust_replaced_content(self):
+        provider=self.provider()
+        provider.interval=.2
+        provider.snapshot()
+        self.wait_for(lambda:provider.sample_count==1)
+        path=Path(provider.executable)
+        previous=path.stat()
+        path.write_bytes(path.read_bytes().replace(b'63.2',b'99.9'))
+        os.utime(path,ns=(previous.st_atime_ns,previous.st_mtime_ns))
+        self.assertEqual(path.stat().st_size,previous.st_size)
+        self.assertEqual(path.stat().st_mtime_ns,previous.st_mtime_ns)
+        self.wait_for(lambda:provider.failures==1)
+        self.assertEqual(provider.launch_count,3)
+        self.assertEqual(provider.snapshot()['failure_category'],'executable_changed')
+
+    def test_metadata_only_change_rechecks_original_bytes(self):
+        provider=self.provider()
+        baseline=provider.file_identity.copy()
+        changed=dict(baseline,changed_ns=baseline['changed_ns']+1)
+        with patch.object(provider,'_identity',return_value=changed), \
+                patch.object(provider,'_digest',wraps=provider._digest) as digest:
+            provider._check_identity()
+        digest.assert_called_once_with(Path(provider.executable))
+        self.assertEqual(provider.file_identity,changed)
+        self.assertEqual(provider.snapshot()['provider_identity']['sha256'],provider.file_digest)
+
+    def test_permission_change_is_not_trusted(self):
+        provider=self.provider()
+        provider.interval=.2
+        provider.snapshot()
+        self.wait_for(lambda:provider.sample_count==1)
+        Path(provider.executable).chmod(0o777)
+        self.wait_for(lambda:provider.failures==1)
+        self.assertEqual(provider.launch_count,3)
+        self.assertEqual(provider.snapshot()['failure_category'],'executable_changed')
+
+    def test_child_environment_does_not_inherit_caller_overrides(self):
+        provider=self.provider()
+        original=thermal.subprocess.Popen
+        with patch.dict(os.environ,{'PYTHONPATH':'PRIVATE','DYLD_INSERT_LIBRARIES':'PRIVATE',
+                                    'CMW_THERMAL_MACMON':'PRIVATE','AWS_SECRET_ACCESS_KEY':'PRIVATE'}), \
+                patch('cmw.jobs.thermal.subprocess.Popen',wraps=original) as launches:
+            provider.snapshot()
+            self.wait_for(lambda:provider.sample_count==1)
+            provider.close()
+        self.assertEqual(launches.call_count,3)
+        for call in launches.call_args_list:
+            self.assertEqual(call.kwargs['env'],{'PATH':'/usr/bin:/bin','LANG':'C','LC_ALL':'C'})
+            self.assertFalse(call.kwargs['shell'])
+
+    def test_monotonic_duration_and_age_survive_wall_clock_changes(self):
+        payload=json.dumps({'temp':{'cpu_temp_avg':63.2}})
+        result=thermal.parse_macmon(payload,started_at=100,received_at=50,elapsed_seconds=2)
+        self.assertEqual(result['sample_age'],2)
+        self.assertEqual(result['invocation_started_at'],100)
+        self.assertEqual(result['received_at'],50)
+        self.assertIsNone(result['native_timestamp'])
+        clock=Mock(return_value=100)
+        provider=thermal.ThermalProvider(monotonic=clock,wall_time=lambda:999999999)
+        provider.last=result
+        provider.sample_monotonic=100
+        clock.return_value=130
+        self.assertEqual(provider.snapshot()['observation_status'],'stale')
+        clock.return_value=160
+        self.assertEqual(provider.snapshot()['observation_status'],'expired')
+        self.assertIsNone(provider.snapshot()['temperature_celsius'])
+        native=self.parse(63.2,timestamp='1970-01-01T00:01:41Z')
+        self.assertEqual(native['native_timestamp'],'1970-01-01T00:01:41Z')
+        self.assertEqual(native['sample_timestamp'],101)
+        self.assertEqual(native['sample_age'],2)
+        for kwargs in [dict(started_at=float('nan'),received_at=100),
+                       dict(started_at=100,received_at=0),
+                       dict(started_at=100,received_at=100,elapsed_seconds=-1)]:
+            with self.subTest(kwargs=kwargs),self.assertRaises(thermal.ThermalError):
+                thermal.parse_macmon(payload,**kwargs)
 
     def test_thermal_failure_cannot_change_cpu_ram_or_admission_sampler(self):
         cpu=namedtuple('CPU','user system idle')
