@@ -32,6 +32,11 @@ def _vasp_card(snapshot):
     return vasp_card_groups(snapshot)
 
 
+def _multiwfn(context):
+    from .multiwfn import MultiwfnAdapter
+    return MultiwfnAdapter(context)
+
+
 def _orca(context):
     from .orca import OrcaAdapter
     return OrcaAdapter(context)
@@ -43,7 +48,11 @@ _REGISTRY = {'VASP': Registration(_vasp, (
     SourcePlan('incar', 'INCAR', 'inputs', True),
 ), (SourcePlan('stdout', None, optional=True),), _vasp_card), 'ORCA': Registration(_orca, (
     SourcePlan('orca_output', None, 'orca-output', stages=True),
-))}
+)), 'MULTIWFN': Registration(_multiwfn, (
+    SourcePlan('multiwfn_session', None),
+), (SourcePlan('multiwfn_events', None, optional=True),
+    SourcePlan('multiwfn_validation', None, optional=True),
+    SourcePlan('multiwfn_metadata', None, optional=True)))}
 
 
 def register_adapter(engine, factory, *, sources=(), source_roles=(), card_groups=None):

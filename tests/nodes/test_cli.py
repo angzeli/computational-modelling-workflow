@@ -22,7 +22,6 @@ class NodeCLISelectionTests(unittest.TestCase):
             with patch('cmw.jobs.store.Store.transaction', side_effect=AssertionError('No queue writes')):
                 for arguments in (['start', '--preview'], ['hold', 'J1.1', '--preview'],
                         ['release', 'J1.1', '--request-id', 'a' * 32],
-                        ['submit', '--spec', '/not/read.json'],
                         ['fetch', 'J1.1', '--spec', '/not/read.json', '--destination', '/not/created'],
                         ['request', 'a' * 32]):
                     with self.subTest(arguments=arguments):
@@ -30,6 +29,15 @@ class NodeCLISelectionTests(unittest.TestCase):
                         self.assertEqual(code, 2)
                         self.assertIn('--node', output)
                         self.assertFalse(state.exists())
+
+    def test_local_reviewed_submit_reports_input_error_without_queue_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'missing'
+            with patch('cmw.jobs.store.Store.transaction', side_effect=AssertionError('No queue writes')):
+                code, output = self.call(['jobs', '--state', str(state), 'submit', '--spec', '/not/read.json'])
+            self.assertEqual(code, 2)
+            self.assertIn('"status": "ERROR"', output)
+            self.assertFalse(state.exists())
 
     def test_ordinary_status_never_constructs_node_backend(self):
         with tempfile.TemporaryDirectory() as directory, patch('cmw.nodes.connections.ConnectedBackend',

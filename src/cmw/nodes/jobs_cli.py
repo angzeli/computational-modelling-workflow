@@ -48,7 +48,11 @@ def handle(args):
             raise NodeError('INVALID_SELECTION', '--queue and --all-nodes require explicit node selection')
         backend = connect(args.node, root=args.nodes_config, queue=args.queue)
         operation = args.jobs_operation
-        if operation == 'submit':
+        if operation == 'check':
+            from .client import check
+            from .cli import _read_spec
+            envelope = check(backend, _read_spec(args.spec))
+        elif operation == 'submit':
             from .client import submit
             from .cli import _read_spec
             envelope = submit(backend, _read_spec(args.spec), root=args.nodes_config, preview=args.preview)
@@ -128,6 +132,8 @@ def handle(args):
             print(envelope['result']['text'])
         else:
             print(json.dumps(envelope, indent=2, ensure_ascii=True, allow_nan=False))
+        if operation == 'check' and envelope['result'].get('status') != 'READY':
+            return 2
         return 0
     except (NodeError, OSError, ValueError) as exc:
         print(json.dumps({'code': getattr(exc, 'code', 'NODE_REFUSED'), 'message': str(exc)}))

@@ -7,7 +7,7 @@ set -euo pipefail
 CMW_WORKFLOW_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 CMW_ROOT=$(cd "$CMW_WORKFLOW_DIR/../.." && pwd -P)
 PYTHON_BIN=${PYTHON_BIN:-python3}
-export PYTHONPATH="$CMW_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+source "$CMW_ROOT/scripts/runtime_python.sh"
 
 # shellcheck source=scripts/multiwfn/multiwfn_runtime.sh
 source "$CMW_ROOT/scripts/multiwfn/multiwfn_runtime.sh"
@@ -25,9 +25,10 @@ multiwfn_cube_main() {
   shift
   local source_result="" output_root="" grid_spacing="" settings_source=""
   local fragment_path="" igmh_config=""
-  local cli_threads="" plan_only=0 plan_json prepare_json
+  local cli_threads="" plan_only=0 plan_json prepare_json prepared_plan="" prepared_json=""
   while (($#)); do
     case "$1" in
+      --prepared-plan) prepared_plan=${2:?}; shift 2 ;;
       --source) source_result=${2:?}; shift 2 ;;
       --output) output_root=${2:?}; shift 2 ;;
       --grid-spacing-bohr) grid_spacing=${2:?}; shift 2 ;;
@@ -42,11 +43,19 @@ multiwfn_cube_main() {
       *) printf 'Unknown argument: %s\n' "$1" >&2; multiwfn_cube_usage; return 64 ;;
     esac
   done
+  if [[ -n "$prepared_plan" ]]; then
+    prepared_json=$("$PYTHON_BIN" -m cmw.molecular.multiwfn.jobs verify-prepared "$prepared_plan") || return 64
+    source_result=$(printf '%s' "$prepared_json" | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["source_result"])')
+    output_root=$(printf '%s' "$prepared_json" | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["scientific_plan"]["output_root"])')
+    [[ $(printf '%s' "$prepared_json" | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["profile"])') == "$operation" ]] || return 64
+  fi
   if [[ -z "$source_result" || -z "$output_root" ]]; then
     multiwfn_cube_usage
     return 64
   fi
-  if [[ "$operation" == IGMH ]]; then
+  if [[ -n "$prepared_plan" ]]; then
+    : # The versioned prepared plan already checked its operation-specific inputs.
+  elif [[ "$operation" == IGMH ]]; then
     if [[ -z "$fragment_path" || -z "$igmh_config" ]]; then
       multiwfn_cube_usage
       return 64
@@ -66,7 +75,9 @@ multiwfn_cube_main() {
     plan_command+=(--grid-spacing-bohr "$grid_spacing")
   fi
   [[ -z "$cli_threads" ]] || plan_command+=(--threads "$cli_threads")
-  if ! plan_json=$("${plan_command[@]}"); then
+  if [[ -n "$prepared_plan" ]]; then
+    plan_json=$(printf '%s' "$prepared_json" | "$PYTHON_BIN" -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["scientific_plan"]))')
+  elif ! plan_json=$("${plan_command[@]}"); then
     printf '%s\n' "$plan_json"
     return 64
   fi
@@ -125,7 +136,9 @@ multiwfn_cube_main() {
     prepare_command+=(--grid-spacing-bohr "$grid_spacing")
   fi
   [[ -z "$cli_threads" ]] || prepare_command+=(--threads "$cli_threads")
-  if ! prepare_json=$("${prepare_command[@]}"); then
+  if [[ -n "$prepared_plan" ]]; then
+    prepare_json=$plan_json
+  elif ! prepare_json=$("${prepare_command[@]}"); then
     printf '%s\n' "$prepare_json"
     return 64
   fi
@@ -141,9 +154,13 @@ multiwfn_cube_main() {
   if [[ -n "$cli_threads" ]]; then
     MULTIWFN_NTHREADS=$cli_threads
   fi
-  multiwfn_runtime_prepare "$attempt_directory" "$runtime_path" "$settings_source"
-  "$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli menu \
-    --target "$target_path" --runtime "$runtime_path" --destination "$menu_path" >/dev/null
+  if [[ -n "$prepared_plan" ]]; then
+    multiwfn_runtime_load "$runtime_path"
+  else
+    multiwfn_runtime_prepare "$attempt_directory" "$runtime_path" "$settings_source"
+    "$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli menu \
+      --target "$target_path" --runtime "$runtime_path" --destination "$menu_path" >/dev/null
+  fi
 
   export CMW_MULTIWFN_OPERATION=$operation CMW_SOURCE_GEOMETRY=$source_geometry
   multiwfn_health_monitor() {
@@ -165,6 +182,7 @@ multiwfn_cube_main() {
       sleep_pid=""
     done
   }
+  multiwfn_jobs_event "$attempt_directory" launch_requested
   set +e
   (
     # The parent owns the stage lock; runtime must not restore its cleanup trap.
@@ -177,11 +195,20 @@ multiwfn_cube_main() {
   monitor_pid=$!
   wait "$child_pid"
   local process_status=$?
+  printf '%s\n' "$process_status" > "$attempt_directory/process.exitcode"
+  multiwfn_jobs_event "$attempt_directory" process_exited "$process_status"
   child_pid=""
   kill -TERM "$monitor_pid" 2>/dev/null || true
   wait "$monitor_pid" 2>/dev/null || true
   monitor_pid=""
   set -e
+  multiwfn_jobs_event "$attempt_directory" validation_started
+  if [[ -n "$prepared_plan" ]]; then
+    "$PYTHON_BIN" -m cmw.molecular.multiwfn.jobs verify-finalize "$prepared_plan" >/dev/null || {
+      multiwfn_jobs_event "$attempt_directory" validation_failed
+      return 70
+    }
+  fi
   if ((process_status != 0)); then
     local failure_json
     failure_json=$("$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli finalize \
@@ -191,6 +218,7 @@ multiwfn_cube_main() {
     printf 'Multiwfn %s attempt failed with status %d; diagnostics retained in %s\n' \
       "$operation" "$process_status" "$attempt_directory" >&2
     [[ -z "$failure_json" ]] || printf '%s\n' "$failure_json" >&2
+    multiwfn_jobs_event "$attempt_directory" validation_failed
     return "$process_status"
   fi
   "$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli normalize \
@@ -201,8 +229,10 @@ multiwfn_cube_main() {
     --attempt-directory "$attempt_directory" --process-exit-code "$process_status" \
     --repository "$CMW_ROOT") || {
       printf '%s\n' "$final_json"
+      multiwfn_jobs_event "$attempt_directory" validation_failed
       return 70
     }
+  multiwfn_jobs_event "$attempt_directory" validation_passed
   "$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli lock release \
     --lock "$lock_path" --token "$lock_token" >/dev/null
   lock_token=""

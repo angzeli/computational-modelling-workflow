@@ -459,6 +459,14 @@ class Store:
                         or job.get('engine') != current.get('engine')):
                     raise JobsError('Progress source attempt and engine identity are immutable')
                 job['progress_sources'] = current['progress_sources']
+            if 'molecular_submission' in job and ('molecular_submission' not in current
+                    or job['molecular_submission'] != current['molecular_submission']):
+                raise JobsError('Molecular submission metadata is immutable; register a new attempt')
+            if 'molecular_submission' in current:
+                if (job.get('attempt_id') != current.get('attempt_id')
+                        or job.get('engine') != current.get('engine')):
+                    raise JobsError('Molecular submission attempt identity is immutable')
+                job['molecular_submission'] = current['molecular_submission']
             if 'node_submission' in job and ('node_submission' not in current
                     or job['node_submission'] != current['node_submission']):
                 raise JobsError('Node submission metadata is immutable; register a new attempt')
@@ -491,12 +499,16 @@ class Store:
             mpi_ranks=None, threads_per_rank=None, env=None, hold=False,
             on_failure="pause", layout=None, role="primary", allow_auxiliary=False,
             independent=False, resource_contract=None, write_scope=None, note='', suspension_backend=None,
-            progress_sources=(), remote_request=None, node_submission=None):
+            progress_sources=(), remote_request=None, node_submission=None, molecular_submission=None):
         if remote_request is not None or node_submission is not None:
             node_submission = self._prepare_node_request(remote_request, node_submission)
             previous = self.request_lookup(remote_request['request_id'])
             if previous is not None:
                 return self._same_request(previous, remote_request)
+            hold = True
+        if molecular_submission is not None:
+            from .molecular import validate_binding
+            molecular_submission = validate_binding(molecular_submission)
             hold = True
         from .source_declarations import declaration_record, validate_sources
         progress_sources = validate_sources(engine, progress_sources, require_complete=bool(progress_sources))
@@ -549,6 +561,13 @@ class Store:
                 previous = self._request_record(con, remote_request['request_id'])
                 if previous is not None:
                     return self._same_request(previous, remote_request)
+            if molecular_submission is not None:
+                for existing in self.rows(con):
+                    prior = existing.get('molecular_submission', {})
+                    if prior.get('request_id') == molecular_submission['request_id']:
+                        if prior['digest'] != molecular_submission['digest']:
+                            raise JobsError('Request ID already belongs to a different molecular submission')
+                        return existing
             if suspension_backend:
                 from .suspension import enroll_state
                 enroll_state(self, con)
@@ -565,11 +584,22 @@ class Store:
                    "cancel_requested": False, "scheduling": scheduling, "sharing_anchor": None}
             if node_submission is not None:
                 job['node_submission'] = node_submission
+            if molecular_submission is not None:
+                job['molecular_submission'] = molecular_submission
+                from .molecular import launch_blocker
+                blocker = launch_blocker(job)
+                if blocker:
+                    raise JobsError(blocker)
             from .input_sources import prepare_vasp_input
             vasp_input = prepare_vasp_input(job)
             if progress_sources or vasp_input is not None:
                 job['progress_sources'] = declaration_record(engine, job['attempt_id'], progress_sources,
                                                              vasp_input=vasp_input)
+                if molecular_submission is not None:
+                    job['progress_sources']['origin'] = 'automatic-engine-plan'
+                    job['progress_sources']['qualification'] = 'reviewed engine plan; scientific acceptance remains separate'
+                    from .source_declarations import recorded_sources
+                    recorded_sources(job)
             if suspension_backend:
                 from .suspension import initial_state
                 job['suspension'] = initial_state(suspension_backend)

@@ -63,8 +63,8 @@ def normalize_manifest(value):
     if type(value['potcar_authorized']) is not bool:
         _error('INVALID_MANIFEST', 'POTCAR transfer authorization must be explicit boolean data')
     files = value['files']
-    if not isinstance(files, list) or not 1 <= len(files) <= MAX_FILES:
-        _error('TRANSFER_LIMIT', 'Select between 1 and 128 regular files explicitly; directory recursion is unsupported')
+    if not isinstance(files, list) or not 0 <= len(files) <= MAX_FILES:
+        _error('TRANSFER_LIMIT', 'Select at most 128 regular files explicitly; directory recursion is unsupported')
     normalized, names, total = [], set(), 0
     for item in files:
         if not isinstance(item, dict) or set(item) != _FILE_FIELDS:
@@ -197,12 +197,12 @@ def _scan_file(path, *, destination=None, expected=None, mode=0o600):
             output.close()
 
 
-def prepare_local_bundle(spool, selections, *, node_id, queue_id, potcar_authorized=False):
-    """Copy explicit stable source versions to a new private flat upload spool."""
+def _selected_files(selections, *, node_id, queue_id, potcar_authorized=False):
+    """Validate selected-file syntax and size limits before any copying."""
     identifier(node_id, 'target node')
     identifier(queue_id, 'target queue')
-    if not isinstance(selections, list) or not 1 <= len(selections) <= MAX_FILES:
-        _error('TRANSFER_LIMIT', 'Explicitly select 1..128 files')
+    if not isinstance(selections, list) or not 0 <= len(selections) <= MAX_FILES:
+        _error('TRANSFER_LIMIT', 'Explicitly select 0..128 files; target-local dependencies need no transfer')
     prepared = []
     for selection in selections:
         if (not isinstance(selection, dict) or not {'source', 'path', 'role'} <= set(selection)
@@ -222,6 +222,23 @@ def prepare_local_bundle(spool, selections, *, node_id, queue_id, potcar_authori
              'potcar_authorized': potcar_authorized,
              'files': [{key: value for key, value in item.items() if key != 'source'} for item in prepared]}
     normalize_manifest(probe)
+    return prepared, probe
+
+
+def inspect_local_bundle(selections, *, node_id, queue_id, potcar_authorized=False):
+    """Read-only selected-byte identity; no spool or destination materialization."""
+    prepared, probe = _selected_files(selections, node_id=node_id, queue_id=queue_id, potcar_authorized=potcar_authorized)
+    files = []
+    for item in prepared:
+        observed = _scan_file(item['source'])
+        files.append({**{key: value for key, value in item.items() if key != 'source'},
+                      'bytes': observed['bytes'], 'sha256': observed['sha256']})
+    return normalize_manifest({**probe, 'files': files})
+
+
+def prepare_local_bundle(spool, selections, *, node_id, queue_id, potcar_authorized=False):
+    """Copy explicit stable source versions to a new private flat upload spool."""
+    prepared, probe = _selected_files(selections, node_id=node_id, queue_id=queue_id, potcar_authorized=potcar_authorized)
     spool = Path(spool)
     if not spool.is_absolute() or spool != spool.resolve():
         _error('UNSAFE_TRANSFER_PATH', 'Spool must be a new canonical absolute directory')

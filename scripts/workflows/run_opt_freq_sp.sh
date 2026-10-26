@@ -8,7 +8,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd -P)
 PYTHON_BIN=${PYTHON_BIN:-python3}
 ORCA_RUNNER=${CMW_ORCA_RUNNER:-$REPO_ROOT/scripts/orca/run_orca.sh}
-export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+source "$REPO_ROOT/scripts/runtime_python.sh"
 
 forwarded=()
 plan=0
@@ -17,17 +17,21 @@ new_attempt=0
 controlled_suspension=0
 selected_mode=""
 output=""
+state_path=""
+runtime_contract=${CMW_ORCA_RUNTIME_CONTRACT:-}
 
 usage() {
   printf '%s\n' \
     "Usage: run_opt_freq_sp.sh --mode MODE --structure FILE --config FILE --output DIR" \
     "       [--orca-exe FILE] [--nprocs N] [--maxcore MB]" \
     "       [--require-minimum|--no-require-minimum] [--imaginary-tolerance CM-1]" \
-    "       [--new-attempt] [--plan [--json]] [--controlled-suspension (opt only)]" >&2
+    "       [--new-attempt] [--plan [--json]] [--controlled-suspension (opt only)]" \
+    "       or: run_opt_freq_sp.sh --state EXACT_PREPARED_WORKFLOW_STATE" >&2
 }
 
 while (($#)); do
   case "$1" in
+    --state) state_path=${2:?missing state path}; shift 2 ;;
     --controlled-suspension) controlled_suspension=1; shift ;;
     --mode|--structure|--config|--orca-exe|--nprocs|--maxcore|--imaginary-tolerance)
       [[ "$1" != --mode ]] || selected_mode=${2:?missing mode}
@@ -73,11 +77,19 @@ if ((json_plan)); then
   printf '%s\n' '--json is valid only with --plan' >&2
   exit 64
 fi
-init_command=("$PYTHON_BIN" -m cmw.molecular.workflows.cli init "${forwarded[@]}")
-((new_attempt == 0)) || init_command+=(--new-attempt)
-init_json=$("${init_command[@]}")
-state_path=$(printf '%s' "$init_json" | "$PYTHON_BIN" -c \
-  'import json,sys; print(json.load(sys.stdin)["state_path"])')
+if [[ -n "$state_path" ]]; then
+  if ((${#forwarded[@]} || plan || json_plan || new_attempt || controlled_suspension)); then
+    printf 'An exact prepared state cannot be combined with workflow initialization options\n' >&2
+    exit 64
+  fi
+  [[ -f "$state_path" ]] || { printf 'Prepared workflow state is unavailable\n' >&2; exit 64; }
+else
+  init_command=("$PYTHON_BIN" -m cmw.molecular.workflows.cli init "${forwarded[@]}")
+  ((new_attempt == 0)) || init_command+=(--new-attempt)
+  init_json=$("${init_command[@]}")
+  state_path=$(printf '%s' "$init_json" | "$PYTHON_BIN" -c \
+    'import json,sys; print(json.load(sys.stdin)["state_path"])')
+fi
 
 json_field() {
   local document=$1 field=$2
@@ -127,6 +139,7 @@ while true; do
     --output "$stage_output" --stderr "$stage_stderr"
   )
   ((controlled_suspension == 0)) || runner+=(--controlled-suspension)
+  [[ -z "$runtime_contract" ]] || runner+=(--runtime-contract "$runtime_contract" --require-runtime-contract)
   [[ -z "$layout" ]] || runner+=(--layout "$layout")
   [[ -z "$geometry_contract" ]] || runner+=(--geometry-contract "$geometry_contract")
   [[ -z "$final_geometry" ]] || runner+=(--artifact "final_geometry=$final_geometry")

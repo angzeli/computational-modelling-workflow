@@ -116,15 +116,20 @@ def reconcile(store, con, job):
     mark_unknown(store, con, job, "Worker ownership/completion cannot be verified; automatic progression stopped")
 
 
-def launch_blocker(job):
+def launch_blocker(job, *, final=False):
     if 'node_submission' in job:
         from cmw.nodes.submission import launch_blocker as node_launch_blocker
         try:
-            blocker = node_launch_blocker(job)
+            blocker = node_launch_blocker(job, final=final)
         except (OSError, ValueError) as exc:
             return f'Node launch preflight refused: {exc}'
         if blocker:
             return str(blocker)
+    if job.get('molecular_submission'):
+        from .molecular import launch_blocker as molecular_launch_blocker
+        blocker = molecular_launch_blocker(job, final=final)
+        if blocker:
+            return blocker
     if not Path(job["cwd"]).is_dir():
         return "Working directory no longer exists"
     command = job["argv"][0]
@@ -338,6 +343,8 @@ def worker(store, job_id, claim):
             else:
                 guard = activity.DEFAULT_OBSERVER.scan(store, before, source='supervisor-admission')
                 evidence = None
+            # Byte/provenance checks run once at actual admission, never on a UI poll.
+            final_blocker = launch_blocker(job, final=True) if job.get('molecular_submission') else None
             with store.transaction() as con:
                 record_guard(store, con, guard)
                 job = store.get(con, job_id)
@@ -348,7 +355,7 @@ def worker(store, job_id, claim):
                 decision = sharing.evaluate(decision_state, guard, evidence, candidate_id=job_id, final=True)
                 admitted = (job['claim'] == claim and job['status'] == 'Starting' and
                             not job['cancel_requested'] and dispatch_authority(store, control) and
-                            pending_ids == pending_now and decision['permitted'])
+                            pending_ids == pending_now and decision['permitted'] and not final_blocker)
                 if not admitted:
                     # Closing GO pipe ends only our not-yet-admitted shell. No
                     # payload or external process has been launched/signalled.
@@ -371,7 +378,8 @@ def worker(store, job_id, claim):
                             if item['order'] >= position:
                                 item['order'] += 1
                                 store.save(con, item)
-                        job.update(status='Queue', order=position, reason=decision['reason'] if not decision['permitted'] else 'Admission controls/order changed')
+                        job.update(status='Hold' if final_blocker else 'Queue', order=position,
+                                   reason=final_blocker or (decision['reason'] if not decision['permitted'] else 'Admission controls/order changed'))
                     job.update(worker=None, group=None, claim=None, claimed_at=None, sharing_anchor=None)
                     store.save(con, job)
                     store.normalize(con)

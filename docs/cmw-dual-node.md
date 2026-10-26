@@ -287,3 +287,105 @@ Retry the same `--request-id`, specification and destination to verify the owned
 replica and acknowledge it without copying or overwriting. Fetch capture records
 are separate from the Jobs registration/control `request` lookup. An existing
 unrelated or copied directory is never silently adopted.
+
+## Reviewed ORCA and Multiwfn routes
+
+The molecular submission schema is advertised separately as
+`molecular_submission: {schema: 1, engines: [ORCA, Multiwfn],
+target_local_artifacts: 1}`. An older endpoint refuses this route explicitly;
+changing a generic Command label is not engine support.
+
+Enroll one target-local profile per foreground runner. ORCA profiles select the
+packaged `orca/run_orca.sh` or `workflows/run_opt_freq_sp.sh`; Multiwfn profiles
+select the matching packaged cube workflow or `multiwfn/run_ifct.sh`. The profile
+`runtime` object uses the same recorded/synthetic engine runtime contract as local
+Jobs. All executable, settings and runtime-record paths belong to the target;
+clients cannot override them in a submission. Runner assets, their shared shell
+closure and runtime files are pinned. Multiwfn retains the existing Bash wrapper.
+Configured profiles do not establish real-engine qualification or suspension.
+Installed executable/dependency identity is streamed with a separate 2 GiB per-file
+bound, caching only a matching filesystem epoch. Portable input transfer remains
+limited to 64 MiB per file and 256 MiB total. An empty selected-file bundle is
+permitted when all scientific inputs are authoritative target-local artifacts.
+
+Use the existing node selection syntax:
+
+```sh
+cmw jobs --node mini --queue research check --spec molecular-submit.json --json
+cmw jobs --node mini --queue research submit --spec molecular-submit.json --preview --json
+cmw jobs --node mini --queue research submit --spec molecular-submit.json --json
+cmw jobs --node mini --queue research release J2.1 --preview --json
+cmw jobs --node mini --queue research release J2.1 --json
+cmw jobs --node mini --queue research start --preview --json
+cmw jobs --node mini --queue research start --json
+cmw jobs --node mini --queue research progress J2.1 --json
+cmw jobs --node mini --queue research progress J2.1 --history --json
+cmw jobs --node mini --queue research files J2.1 --json
+```
+
+`check` hashes only explicitly selected local inputs and contacts the selected
+endpoint without creating a spool or staging inputs. Pretransfer scientific-input
+checks are **UNASSESSED** because the endpoint cannot read files that have not been
+transferred. Runtime pins and target-local donor authority are checked separately. A route with
+only target-local donors and no portable inputs can run the full shared checker
+immediately, without staging or writing anything.
+`submit --preview` may create the established private client spool but never
+stages remote inputs or registers a job. Full shared engine preflight runs on the
+published destination bytes before held registration; unknown or unsupported
+inputs never become executable through this route. Registration prepares the
+exact scientific attempt and source locations. Release and dispatch remain
+separate explicit actions. Actual worker launch revalidates pinned dependencies
+and target-local donors; advisory dashboard polls do not hash large donors.
+
+Molecular portable specifications use the ordinary node/queue/storage/profile,
+request, resources, selected `files`, and `intent: "held"` fields. Replace generic
+`arguments` with `scientific`. ORCA inputs use typed references, for example:
+
+```json
+"scientific": {"profile": "sp", "input": {"bundle": "inputs/job.inp"}}
+```
+
+Relative external XYZ dependencies must be selected in the same input tree.
+Workflow `structure` and `config` use the same typed bundle references. The shared
+ORCA checker retains the bounded dialect, resources, runtime and stage policies.
+
+Multiwfn `source_result` must reference a validated original result on the chosen
+node. It cannot be a transferred manifest. Its donor Jobs record must bind the
+original ORCA stage result and scientific target through the molecular plan or
+the recognized installed ORCA stage runner's explicit metadata and target
+arguments. An arbitrary manifest in a generic Command working directory is not
+source authority. A supported existing GBW-to-Molden result must additionally
+prove its conversion-plan and original-result lineage. Compound workflow summaries
+are not direct wavefunction sources. Select an already declared Files location
+of that terminal managed donor attempt, then bind its exact path and digest:
+
+```json
+"source_result": {"artifact": {
+  "target": {"node_id": "<node UUID hex>", "queue_id": "<queue UUID hex>",
+             "job_id": 1, "attempt_id": "<Jobs attempt UUID hex>"},
+  "location_id": "<Files location SHA-256>",
+  "relative": "result.json", "role": "working-directory",
+  "node_path": "/target/local/original/result.json", "sha256": "<file SHA-256>",
+  "scientific_target_id": "<original scientific target SHA-256>",
+  "scientific_attempt_id": "attempt_001"
+}}
+```
+
+These are schema placeholders, not a runnable example. The endpoint resolves the
+location from its own immutable Jobs identity and compares the supplied path;
+the path is never MacBook filesystem authority. It checks enrolled storage,
+original result/attempt identity, actual bytes, geometry and wavefunction lineage
+using the existing source validator. A terminal Jobs status alone is not scientific
+acceptance. IFCT `orca_output` is another exact artifact reference, and its checker
+requires the source manifest's output. IGMH fragment/configuration files use
+explicit bundle references. The donor's wavefunction remains on the target and is
+not downloaded/re-uploaded. Donors on another host require a separately supported
+import-lineage contract; this route refuses cross-host adoption and does not
+rewrite result manifests.
+
+Native logs and result records are available through the existing Files and
+selected `fetch --spec ... --destination ...` path. Fetch replicas retain original
+node/attempt provenance and never acquire original-result authority. Live
+observation, process completion and scientific validation remain separate. No
+physical MacBook-to-mini or real ORCA/Multiwfn qualification is implied by isolated
+endpoint or loopback SSH acceptance.

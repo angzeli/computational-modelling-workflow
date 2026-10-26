@@ -21,8 +21,8 @@ from .storage import check_storage
 
 _SPEC_FIELDS = {'schema', 'request_id', 'node_id', 'queue_id', 'storage', 'profile', 'engine',
                 'name', 'resources', 'manifest', 'arguments', 'vasp', 'progress_sources',
-                'intent', 'dependencies_complete', 'note'}
-_REQUIRED = _SPEC_FIELDS - {'arguments', 'vasp', 'progress_sources', 'note'}
+                'intent', 'dependencies_complete', 'note', 'scientific'}
+_REQUIRED = _SPEC_FIELDS - {'arguments', 'vasp', 'progress_sources', 'note', 'scientific'}
 
 
 def _require(condition, message, code='INVALID_SUBMISSION'):
@@ -52,7 +52,7 @@ def normalize_spec(value):
     for key in ('storage', 'profile'):
         _require(isinstance(value[key], str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,47}', value[key]),
                  f'{key} must name an enrolled destination profile')
-    _require(isinstance(value['engine'], str) and value['engine'] in {'Command', 'VASP'}, 'MVP submission supports trusted Command or recognized managed VASP routes')
+    _require(isinstance(value['engine'], str) and value['engine'] in {'Command', 'VASP', 'ORCA', 'Multiwfn'}, 'Submission engine must select a supported explicit route')
     _require(isinstance(value['name'], str) and 0 < len(value['name'].strip()) <= 256 and '\0' not in value['name'],
              'Name must be bounded literal text')
     resources = value['resources']
@@ -93,6 +93,12 @@ def normalize_spec(value):
                  'Progress source must use a destination-local bundle or run reference')
         _relative(next(iter(source['path'].values())))
         _require(type(source.get('optional', False)) is bool, 'Source optional flag must be boolean')
+    if value['engine'] in {'ORCA', 'Multiwfn'}:
+        from .molecular import normalize_scientific
+        _require(not arguments and not sources and 'vasp' not in value, 'Molecular routes derive arguments and exact source declarations from their reviewed engine plan')
+        normalize_scientific(value['engine'], value.get('scientific'))
+    elif 'scientific' in value:
+        _require(False, 'Only molecular engine routes carry a scientific specification')
     if value['engine'] == 'VASP':
         _require(not arguments and isinstance(value.get('vasp'), dict), 'VASP uses the explicit managed runner settings')
         _require({item['path'] for item in manifest['files'] if item['path'].startswith('inputs/')} ==
@@ -171,11 +177,18 @@ def preview(config, queue, spec):
     _require(spec['resources']['cpus'] <= profile['max_cpus'] and spec['resources']['mpi_ranks'] <= profile['max_ranks'],
              'Requested resources exceed the pinned profile limits; VASP qualification remains at most eight ranks')
     bundle, work, native = _paths(config, spec)
-    argv = _argv(spec, profile, bundle, work, native)
+    molecular = spec['engine'] in {'ORCA', 'Multiwfn'}
+    if molecular:
+        from .molecular import check
+        checked = check(config, queue, spec, bundle, work)
+        argv = None
+    else:
+        checked = None
+        argv = _argv(spec, profile, bundle, work, native)
     return {'status': 'PREVIEW', 'intent': 'Hold', 'specification': spec, 'digest': submission_digest(spec),
             'argv': argv, 'cwd': str(work), 'input_bundle': str(bundle), 'native_output': str(native),
             'resources': spec['resources'], 'runtime_id': config['runtime']['fingerprint'],
-            'qualification': profile['qualification'],
+            'qualification': profile['qualification'], 'preflight': checked,
             'execution': 'Not authorized by submission; release and start/resume dispatch remain explicit',
             'queue_order': 'A held queue head blocks later entries under the existing order contract'}
 
@@ -202,6 +215,14 @@ def register_held(backend, spec, request_id):
         checked = check_inputs(bundle / 'inputs')
         _require(checked['status'] == 'valid', 'Published VASP inputs fail the existing four-file checker')
         _require(not native.exists() and not native.is_symlink(), 'VASP runner output must remain absent until its own staging')
+    molecular = spec['engine'] in {'ORCA', 'Multiwfn'}
+    resolved, checked = None, None
+    if molecular:
+        from .molecular import resolved_spec
+        from cmw.jobs.molecular import check as check_molecular
+        resolved = resolved_spec(backend.config, backend.queue, spec, bundle, work)
+        checked = check_molecular(resolved)
+        _require(checked['status'] == 'READY', 'Destination molecular preflight refused: ' + json.dumps(checked['findings']), 'MOLECULAR_PREFLIGHT')
     runs = work.parent
     runs.mkdir(mode=0o700, exist_ok=True)
     _require(runs.resolve() == runs and runs.stat().st_dev == bundle.stat().st_dev, 'Run directory must remain on the registered local volume')
@@ -212,7 +233,25 @@ def register_held(backend, spec, request_id):
                  'Unregistered request working directory is not empty; inspect retained evidence')
     _require(stat.S_IMODE(work.stat().st_mode) & 0o077 == 0, 'Working directory must be private')
     profile = backend.config['profiles'][spec['profile']]
-    sources = tuple(SourceDescriptor(source['role'], _resolve_argument(source['path'], bundle, work, profile, spec['manifest']),
+    molecular_binding, environment = None, None
+    actual_work = work
+    if molecular:
+        from cmw.jobs.molecular import prepare, binding
+        prepared = prepare(resolved, checked)
+        runner_argv = prepared['argv']
+        if spec['engine'] == 'Multiwfn':
+            _require(runner_argv[:1] == ['/bin/bash'] and len(runner_argv) > 1, 'Multiwfn requires its reviewed Bash foreground wrapper')
+            runner_argv = runner_argv[1:]
+        _require(Path(runner_argv[0]).resolve() == Path(profile['runner']).resolve(), 'Prepared molecular runner differs from the enrolled route')
+        molecular_binding = binding(resolved, prepared)
+        actual_work = Path(prepared['cwd'])
+        plan['argv'], environment = prepared['argv'], prepared['env']
+        source_values = prepared['progress_sources']
+        sources = tuple(SourceDescriptor(**source) for source in source_values)
+        with (work / 'cmw-submission.json').open('x') as handle:
+            json.dump(molecular_binding, handle, indent=2, allow_nan=False)
+    else:
+        sources = tuple(SourceDescriptor(source['role'], _resolve_argument(source['path'], bundle, work, profile, spec['manifest']),
                     stage=source.get('stage'), optional=source.get('optional', False)) for source in spec['progress_sources'])
     metadata = {'schema': 1, 'node_id': spec['node_id'], 'queue_id': spec['queue_id'],
                 'request_id': request_id, 'digest': digest, 'config_root': str(backend.config_root),
@@ -220,18 +259,21 @@ def register_held(backend, spec, request_id):
                 'profile': spec['profile'], 'transfer_request_id': request_id,
                 'manifest_digest': receipt['manifest_digest'], 'published_root': str(bundle),
                 'runtime_id': backend.config['runtime']['fingerprint'], 'target_profile_digest': stable_hash(profile),
-                'queue_state': str(backend.store.root), 'working_directory': str(work),
-                'working_identity': {'device': work.stat().st_dev, 'inode': work.stat().st_ino}}
+                'queue_state': str(backend.store.root), 'working_directory': str(actual_work),
+                'working_identity': {'device': actual_work.stat().st_dev, 'inode': actual_work.stat().st_ino}}
+    if molecular:
+        metadata['molecular_spec'] = spec
     # Recheck storage after directory preparation and immediately before the sole
     # queue transaction. The worker repeats this at final admission.
     _require(check_storage(backend.config['storages'][spec['storage']])['ready'], 'Storage disappeared before registration')
-    job = backend.store.add(argv=plan['argv'], cwd=work, name=spec['name'], engine=spec['engine'],
+    job = backend.store.add(argv=plan['argv'], cwd=actual_work, env=environment, name=spec['name'], engine=spec['engine'],
                             **spec['resources'], hold=True, note=spec['note'], progress_sources=sources,
-                            remote_request={'request_id': request_id, 'digest': digest}, node_submission=metadata)
+                            remote_request={'request_id': request_id, 'digest': digest}, node_submission=metadata,
+                            molecular_submission=molecular_binding)
     return {'status': 'REGISTERED', 'replayed': False, 'job': job, 'request_id': request_id}
 
 
-def launch_blocker(job):
+def launch_blocker(job, *, final=False):
     """Destination-local preflight for enrolled jobs; no alternate dispatcher."""
     try:
         from .transfer import lookup_transfer
@@ -252,6 +294,11 @@ def launch_blocker(job):
         receipt = lookup_transfer(config, binding['storage_alias'], binding['transfer_request_id'])
         _require(receipt and receipt['status'] == 'PUBLISHED' and receipt['manifest_digest'] == binding['manifest_digest']
                  and receipt['published_root'] == binding['published_root'], 'Published input identity changed')
+        if 'molecular_spec' in binding and final:
+            from .molecular import resolved_spec
+            original = job['molecular_submission']['spec']
+            resolved = resolved_spec(config, queues[0], binding['molecular_spec'], Path(binding['published_root']), Path(original['workdir']))
+            _require(resolved == {key: value for key, value in original.items() if key != 'note'}, 'Destination molecular source authority changed')
         return None
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return 'Node submission preflight: ' + str(exc)
@@ -263,9 +310,14 @@ def dispatch(backend, operation, params, *, request_id):
         _require(set(params) == {'request_id'}, 'Request lookup needs one original request ID')
         identifier(params['request_id'], 'request ID')
         return {'request': backend.store.request_lookup(params['request_id'])}
-    if operation in {'submit.preview', 'submit'}:
+    if operation in {'submit.check', 'submit.preview', 'submit'}:
         _require(set(params) == {'spec'}, 'Submission requires one portable specification')
-        return preview(backend.config, backend.queue, params['spec']) if operation == 'submit.preview' else register_held(backend, params['spec'], request_id)
+        if operation in {'submit.check', 'submit.preview'}:
+            planned = preview(backend.config, backend.queue, params['spec'])
+            if operation == 'submit.check':
+                return planned['preflight'] or {'status': 'UNASSESSED', 'findings': [{'domain': 'input', 'status': 'UNASSESSED', 'message': 'Generic command inputs have no engine-specific validator'}]}
+            return planned
+        return register_held(backend, params['spec'], request_id)
     allowed = {'storage', 'request_id'} | ({'manifest'} if operation == 'transfer.begin' else {'manifest_digest'} if operation == 'transfer.publish' else set())
     _require(set(params) == allowed, 'Transfer parameters differ from the negotiated schema')
     identifier(params['request_id'], 'transfer request ID')
