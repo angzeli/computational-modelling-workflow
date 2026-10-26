@@ -487,6 +487,9 @@ def register(subcommands):
     files.add_argument("--key", help="select the exact location key from files JSON")
     files.set_defaults(handler=handle)
 
+    from .review_cli import register as register_review
+    register_review(operations, handle)
+
     progress = operations.add_parser("progress", help="observe declared scientific progress; never controls execution")
     progress.add_argument("job_id")
     progress.add_argument("--json", action="store_true")
@@ -692,6 +695,9 @@ def handle(args):
             return inspect_reconciliation(store, args)
         if operation == "files":
             return inspect_files(store, args)
+        if operation == "review":
+            from .review_cli import local
+            return local(store, args)
         if operation == "progress":
             return inspect_progress(store, args)
         if operation == "watch":

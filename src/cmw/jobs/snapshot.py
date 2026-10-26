@@ -33,7 +33,7 @@ _THERMAL_NESTED_FIELDS = {
     'last_successful_observation': ('temperature_celsius', 'sample_timestamp', 'sample_age'),
     'provider_identity': ('device', 'inode', 'size', 'modified_ns', 'changed_ns', 'owner_uid', 'group_gid', 'mode', 'sha256'),
 }
-_PATH_FIELDS = {'path', 'root_path', 'jobs_state', 'state_directory', 'cwd', 'executable', 'module', 'root', 'database'}
+_PATH_FIELDS = {'path', 'root_path', 'jobs_state', 'state_directory', 'cwd', 'executable', 'module', 'root', 'database', 'absolute_path', 'policy_path', 'spec_path', 'export_path', 'directory'}
 
 
 def safe_snapshot_text(value):
@@ -65,7 +65,7 @@ class HandoffSnapshot:
 
 
 def capture_snapshot(job, *, progress=None, execution=None, captured_at=None,
-                     runtime=None, read_error=None, execution_error=None, machine_usage=None):
+                     runtime=None, read_error=None, execution_error=None, machine_usage=None, review=None):
     from .suspension_presentation import effective_status
     now = time.time() if captured_at is None else captured_at
     if runtime is None:
@@ -93,6 +93,14 @@ def capture_snapshot(job, *, progress=None, execution=None, captured_at=None,
                'runtime': {key: runtime[key] for key in ('version', 'python', 'executable', 'module')
                            if runtime and key in runtime},
                'scientific_acceptance': 'not assessed'}
+    if review is not None:
+        from .review_models import cached_review
+        if (review.job_id, review.attempt_id) != (job['id'], job['attempt_id']):
+            raise ValueError('Result review belongs to a different attempt')
+        target = job.get('target')
+        if target and (review.node_id, review.queue_id) != (target['node_id'], target['queue_id']):
+            raise ValueError('Result review belongs to another owner node or queue')
+        payload['result_review'] = cached_review(review).to_dict()
     if machine_usage is not None:
         from .thermal import age_thermal
         thermal = age_thermal(machine_usage.get('thermal'), now=0.)
@@ -245,6 +253,10 @@ def render_snapshot(snapshot, *, mode='summary', redact_paths=False):
                                                                 *progress.get('context', {}).get('limitations', [])))
     if data.get('progress_error'):
         lines.append('Read unavailable; cached evidence: ' + data['progress_error'])
+    if data.get('result_review') is not None:
+        from .review import from_dict
+        from .review_models import review_text
+        lines.extend(['', review_text(from_dict(data['result_review']))])
     lines.append('Scientific acceptance: not assessed.')
     if mode == 'diagnostics':
         lines += ['', 'DIAGNOSTICS · paths may be sensitive; use path redaction before sharing.',

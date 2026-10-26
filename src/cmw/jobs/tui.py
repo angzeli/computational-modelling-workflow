@@ -32,6 +32,8 @@ from .copy_ui import CopyPreview, FrozenText, SelectableStatic
 from .clipboard import copy_text
 from .suspension_ui import SuspensionConfirm
 from .sources_ui import Sources
+from .review_ui import ReviewScreen
+from .review_models import cached_review, review_text
 from .suspension_presentation import effective_status, intended_action, suspension_summary, suspension_detail, submission_text
 
 
@@ -142,7 +144,7 @@ class Inspect(ModalScreen):
     Inspect Static { height: auto; }
     """
 
-    def __init__(self, store, job_id, logs=False, job_provider=None, progress_provider=None, execution_provider=None, expected_attempt=None):
+    def __init__(self, store, job_id, logs=False, job_provider=None, progress_provider=None, execution_provider=None, expected_attempt=None, review_provider=None):
         super().__init__()
         self.expected_attempt = expected_attempt
         self.store, self.job_id, self.logs = store, job_id, logs
@@ -150,6 +152,7 @@ class Inspect(ModalScreen):
         self.job_provider = job_provider
         self.progress_provider = progress_provider
         self.execution_provider = execution_provider
+        self.review_provider = review_provider
 
     def compose(self):
         with Vertical():
@@ -208,6 +211,10 @@ class Inspect(ModalScreen):
                 text += "\n\nSCIENTIFIC EVIDENCE — parser success does not verify execution\n" + progress_text(snapshot, detailed=True)
                 if self.app.progress_error:
                     text += "\nObservation read unavailable; cached evidence: " + self.app.progress_error
+        if self.review_provider and not self.logs:
+            review = self.review_provider(job)
+            if review is not None:
+                text += "\n\n" + review_text(review)
         self.query_one("#body", Static).update(literal(text))
 
 
@@ -460,7 +467,7 @@ class JobsApp(NavigationApp):
     #suspension-summary { height: 1; width: 1fr; padding-left: 1; color: #b7d8dd; }
     #shortcuts { dock: none; height: auto; background: #22303d; color: #d7e0e8; padding: 0 1; }
     """
-    BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("g", "history", "Progress"), Binding("y", "copy_snapshot", "Copy"), Binding("s", "sources", "Sources"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"),
+    BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("g", "history", "Progress"), Binding("y", "copy_snapshot", "Copy"), Binding("s", "sources", "Sources"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"), Binding("r", "review", "Review"),
                 Binding("p", "dispatch", "Dispatch"), Binding("h", "hold", "Hold"),
                 Binding("o", "order", "Order"), Binding("x", "cancel", "Cancel"),
                 Binding("u", "suspension", "Suspend/Continue", show=False),
@@ -524,6 +531,8 @@ class JobsApp(NavigationApp):
         self.copy_result = None
         self.copy_mouse_dragged = False
         self.copy_mouse_start = None
+        self.review_service = None
+        self.review_cache = {}
 
     def job_target(self, job):
         return (str(getattr(self.store, 'root', self.store)), job['id'], job['attempt_id'])
@@ -578,7 +587,7 @@ class JobsApp(NavigationApp):
             with Horizontal(id="execution-controls"):
                 yield Button(literal("[U] Suspend job"), id="suspension-action")
                 yield Static("", id="suspension-summary", markup=False)
-            yield Static("Enter Details · F Files · G Progress · S Sources · Y Copy · N Note · L Logs\nP Dispatch · H Hold · O Order · X Cancel · B Scheduling · Q Detach", id="shortcuts", markup=False)
+            yield Static("Enter Details · F Files · G Progress · S Sources · Y Copy · N Note · L Logs\nP Dispatch · H Hold · O Order · X Cancel · B Queue · R Review · Q Detach", id="shortcuts", markup=False)
             yield Footer()
 
     def on_mount(self):
@@ -603,6 +612,8 @@ class JobsApp(NavigationApp):
         # Await the bounded provider shutdown without blocking Textual's event loop.
         # The lock also prevents an in-flight observer from creating it after close.
         await asyncio.to_thread(self.close_sampler)
+        if self.review_service is not None:
+            await asyncio.to_thread(self.review_service.close)
 
     def execution_identity(self):
         job = self.selected()
@@ -1393,13 +1404,13 @@ class JobsApp(NavigationApp):
 
     def check_action(self, action, parameters):
         # App priority bindings run before focused text widgets, including Q.
-        protected = {'details', 'files', 'history', 'sources', 'copy_snapshot', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'suspension'}
+        protected = {'details', 'files', 'history', 'sources', 'copy_snapshot', 'review', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'suspension'}
         if action in {'dispatch', 'hold', 'order', 'cancel', 'suspension'} and self.selected_copy_text():
             return False
         if isinstance(self.focused, (Input, TextArea)) and action in protected:
             return False
-        if isinstance(self.screen, (Inspect, ExternalInspect, SharingInspect, NoteEditor, FilesChooser, ProgressHistory, HistoryDetails, SuspensionConfirm, Sources, FrozenText)) and action in {
-            'details', 'files', 'history', 'sources', 'copy_snapshot', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'detach', 'suspension'
+        if isinstance(self.screen, (Inspect, ExternalInspect, SharingInspect, NoteEditor, FilesChooser, ProgressHistory, HistoryDetails, SuspensionConfirm, Sources, FrozenText, ReviewScreen)) and action in {
+            'details', 'files', 'history', 'sources', 'copy_snapshot', 'review', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'detach', 'suspension'
         }:
             return False
         return super().check_action(action, parameters)
@@ -1694,7 +1705,47 @@ class JobsApp(NavigationApp):
         return capture_snapshot(job, progress=self.selected_progress(job),
             execution=self.selected_execution(job), captured_at=self.clock() if self.clock else None,
             read_error=self.progress_error, execution_error=self.execution_error,
-            machine_usage=self.activity_projection.get('machine_usage'))
+            machine_usage=self.activity_projection.get('machine_usage'), review=self.selected_review(job))
+
+    def selected_review(self, job):
+        record = self.review_cache.get(self.job_target(job))
+        return cached_review(record) if record is not None else None
+
+    def action_review(self):
+        job = self.selected()
+        if job is None or self.external_selected_id:
+            return
+        from .review import ReviewService
+        from uuid import uuid4
+        if self.review_service is None:
+            self.review_service = ReviewService(self.store)
+        key, selected = self.job_target(job), deepcopy(job)
+        def request(operation, params, callback):
+            def collect():
+                try:
+                    kwargs = {'expected_attempt_id':selected['attempt_id']}
+                    if operation == 'review.preview':
+                        record = self.review_service.preview(selected['id'], **kwargs)
+                    elif operation == 'review.start':
+                        record = self.review_service.start(selected['id'], params['options'], uuid4().hex, **kwargs)
+                    else:
+                        method = self.review_service.poll if operation == 'review.poll' else self.review_service.cancel
+                        record = method(selected['id'], params['review_id'], **kwargs)
+                    error = None
+                except Exception as exc:
+                    record, error = None, exc
+                def accepted():
+                    if record is not None:
+                        self.review_cache[key] = record
+                        while len(self.review_cache) > 8:
+                            del self.review_cache[next(iter(self.review_cache))]
+                    callback(record, error)
+                try:
+                    self.call_from_thread(accepted)
+                except RuntimeError:
+                    pass
+            self.run_worker(collect, thread=True, group='result-review', exit_on_error=False)
+        self.push_screen(ReviewScreen(selected['display_id'], request, cached=self.selected_review(selected)))
 
     def action_copy_snapshot(self):
         snapshot = self.capture_copy_snapshot()
@@ -1721,7 +1772,7 @@ class JobsApp(NavigationApp):
             return
         job = self.selected()
         if job:
-            self.push_screen(Inspect(self.store, self.selected_id, job_provider=self.current_job, progress_provider=self.selected_progress, execution_provider=self.selected_execution, expected_attempt=job['attempt_id']))
+            self.push_screen(Inspect(self.store, self.selected_id, job_provider=self.current_job, progress_provider=self.selected_progress, execution_provider=self.selected_execution, expected_attempt=job['attempt_id'], review_provider=self.selected_review))
 
     def action_logs(self):
         if self.external_read_only():

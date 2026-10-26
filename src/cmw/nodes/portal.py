@@ -22,6 +22,8 @@ from cmw.jobs.copy_ui import FrozenText, SelectableStatic
 from cmw.jobs.history_ui import ProgressHistory
 from cmw.jobs.snapshot import HandoffSnapshot, capture_snapshot
 from cmw.jobs.sources_ui import Sources
+from cmw.jobs.review_ui import ReviewScreen
+from cmw.jobs.review_models import ReviewRecord, cached_review, review_text
 from cmw.jobs.suspension_presentation import effective_status
 from cmw.jobs.tui import JobsApp, Prompt, ScientificProgress, detail, literal, table_name
 from cmw.progress.formatting import progress_text
@@ -84,7 +86,7 @@ class NodesApp(NavigationApp):
     BINDINGS = [Binding('enter', 'details', 'Details'), Binding('f', 'files', 'Files'),
         Binding('g', 'history', 'Progress'), Binding('s', 'sources', 'Sources'),
         Binding('y', 'copy_snapshot', 'Copy'), Binding('l', 'logs', 'Logs'),
-        Binding('b', 'scheduling', 'Scheduling'), Binding('p', 'dispatch', 'Dispatch'),
+        Binding('b', 'scheduling', 'Scheduling'), Binding('r', 'review', 'Review'), Binding('p', 'dispatch', 'Dispatch'),
         Binding('h', 'hold', 'Hold'), Binding('o', 'order', 'Order'),
         Binding('x', 'cancel', 'Cancel'), Binding('u', 'suspension', 'Suspend/Continue'),
         Binding('q', 'quit', 'Detach', priority=True), Binding('ctrl+c', 'detach', 'Detach', priority=True)]
@@ -128,7 +130,7 @@ class NodesApp(NavigationApp):
         yield ScientificProgress(id='progress', markup=False)
         yield Static('Q / Ctrl-C detaches; destination-local execution continues.', id='message', markup=False)
         with Vertical(id='command-bar'):
-            yield Static('Enter Details · F Files · G Progress · S Sources · Y Copy · L Logs\nP Dispatch · H Hold · O Order · X Cancel · U Suspend · B Queue · Q Detach', id='shortcuts', markup=False)
+            yield Static('Enter Details · F Files · G Progress · S Sources · Y Copy · L Logs\nP Dispatch · H Hold · O Order · X Cancel · U Suspend · B Queue · R Review · Q Detach', id='shortcuts', markup=False)
 
     def on_mount(self):
         self.query_one(DataTable).focus()
@@ -588,6 +590,41 @@ class NodesApp(NavigationApp):
             lambda owner, job, result: self.push_screen(FrozenText(self.label(owner, job) + '\n' +
                 str(result.get('node_path', '')) + '\n\n' + result['text'], 'BOUNDED STDOUT · execution node')))
 
+    def selected_review(self, owner, job):
+        cache = self.lanes[owner].cache.get(target_key(job['target']), {})
+        entry = cache.get('review')
+        if entry is None:
+            return None
+        try:
+            record = decode_typed(entry[0]['result']['review'], ReviewRecord)
+        except ValueError:
+            return None
+        if (record.node_id, record.queue_id, record.job_id, record.attempt_id) != target_key(job['target']):
+            return None
+        return cached_review(record)
+
+    def action_review(self):
+        selected = self.selected()
+        if selected is None:
+            return
+        owner, job = selected
+        target = deepcopy(job['target'])
+        def request(operation, params, callback):
+            def accepted(envelope, error):
+                record = None
+                if error is None:
+                    try:
+                        record = decode_typed(envelope['result']['review'], ReviewRecord)
+                        if (record.node_id,record.queue_id,record.job_id,record.attempt_id) != target_key(target):
+                            raise NodeError('WRONG_TARGET','Review belongs to another selected attempt')
+                        self.lanes[owner].cache.setdefault(target_key(target), {})['review'] = (envelope,self.clock())
+                    except (ValueError,TypeError,KeyError) as exc:
+                        error = exc
+                callback(record,error)
+            if not self.queue(owner, operation, params, target, accepted):
+                callback(None,NodeError('BUSY','Owner observation queue is full or closed'))
+        self.push_screen(ReviewScreen(self.label(owner,job), request, cached=self.selected_review(owner,job)))
+
     def action_details(self):
         selected = self.selected()
         if selected:
@@ -604,6 +641,9 @@ class NodesApp(NavigationApp):
                 if cache.get('progress.error'):
                     text += 'Scientific read unavailable; earlier cached evidence. ' + cache['progress.error'] + '\n'
                 text += progress_text(snapshot, detailed=True, now=endpoint_now)
+            review = self.selected_review(owner,job)
+            if review is not None:
+                text += '\n\n' + review_text(review)
             self.push_screen(FrozenText(text, 'JOB DETAILS · cached node report'))
 
     def action_scheduling(self):
@@ -634,7 +674,7 @@ class NodesApp(NavigationApp):
             captured_at=envelope['observed_at'], runtime=envelope['runtime'],
             read_error=cache.get('progress.error') or lane.error,
             execution_error=cache.get('observe.error') or lane.error,
-            machine_usage=self.machine_usage(owner))
+            machine_usage=self.machine_usage(owner), review=self.selected_review(owner,job))
         data = captured.to_dict()
         data['node_origin'] = {'alias': owner, 'queue_alias': lane.backend.queue, **target,
             'connection': self.connection_text(owner), 'runtime_id': envelope['runtime']['fingerprint'],

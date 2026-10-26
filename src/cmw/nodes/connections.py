@@ -155,10 +155,11 @@ class ConnectedBackend:
         self.last_envelope = None
 
     def call(self, operation, params=None, target=None, *, request_id=None):
-        from .protocol import MUTATIONS
-        if operation in MUTATIONS and self.connection['read_only']:
+        from .protocol import is_mutation
+        mutation = is_mutation(operation, params)
+        if mutation and self.connection['read_only']:
             raise NodeError('READ_ONLY', 'This node connection is enrolled for observation only')
-        if operation in MUTATIONS:
+        if mutation:
             if request_id is None:
                 from uuid import uuid4
                 request_id = uuid4().hex
@@ -171,6 +172,15 @@ class ConnectedBackend:
                 'node_id': self.node_id, 'queue_id': self.queue_id,
                 'host_id': self.connection['host_id'], 'runtime_id': self.connection['runtime_id'],
                 'clock_id': verified['clock_id']}}
+        if operation in {'review.preview', 'review.start', 'review.poll', 'review.cancel'}:
+            capability = (verified if mutation else self.call('capabilities'))['result'].get('result_review')
+            expected = {'schema': 1, 'async': True, 'model': 'ReviewRecord'}
+            if (type(capability) is not dict or capability != expected or
+                    type(capability.get('schema')) is not int or type(capability.get('async')) is not bool):
+                raise NodeError('UNSUPPORTED_REVIEW', 'Endpoint does not advertise the supported result review contract')
+            if operation == 'review.start' and request_id is None:
+                from uuid import uuid4
+                request_id = uuid4().hex
         if target is not None and (target.get('node_id') != self.node_id or target.get('queue_id') != self.queue_id):
             raise NodeError('WRONG_NODE', 'Selected target belongs to another node or queue')
         if self.transport:
@@ -179,6 +189,10 @@ class ConnectedBackend:
             value = self.backend.call(operation, params, target, request_id=request_id)
         try:
             validate_envelope(value, operation)
+            if operation in {'review.preview', 'review.start', 'review.poll', 'review.cancel'} and target is not None:
+                record = value['result']['review']['value']
+                if any(record.get(key) != expected for key, expected in target.items()):
+                    raise NodeError('INVALID_RESPONSE', 'Review response differs from the selected immutable target')
             previous = self.last_envelope
             if previous and value['session_id'] == previous['session_id'] and value['sequence'] <= previous['sequence']:
                 raise NodeError('INVALID_RESPONSE', 'Observation sequence did not advance')

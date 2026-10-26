@@ -8,6 +8,7 @@ import types
 from typing import get_args, get_origin, get_type_hints, Union
 
 from cmw.progress import models
+from cmw.jobs.review_models import ReviewDomain, ReviewRecord
 from cmw.progress.registry import SourcePlan
 from cmw.jobs.source_selection import SourceInspection, SourceValidation, SessionSelection, SourceFingerprint
 
@@ -20,7 +21,8 @@ MAX_STRING = 256 * 1024
 _TYPES = {name: value for name, value in vars(models).items()
           if isinstance(value, type) and is_dataclass(value)}
 _TYPES.update({value.__name__: value for value in (
-    SourcePlan, SourceInspection, SourceValidation, SessionSelection, SourceFingerprint)})
+    SourcePlan, SourceInspection, SourceValidation, SessionSelection, SourceFingerprint,
+    ReviewDomain, ReviewRecord)})
 
 
 class CodecError(ValueError):

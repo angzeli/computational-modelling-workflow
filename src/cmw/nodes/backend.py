@@ -23,14 +23,14 @@ from cmw.jobs.source_selection import inspect_selection, validate_selection, act
 from cmw.progress.models import SourceDescriptor
 from cmw.progress.service import ObservationService
 from .codec import encode_typed, decode_typed
-from .protocol import NodeError, target_identity, MUTATIONS, identifier
+from .protocol import NodeError, target_identity, is_mutation, identifier
 
 
 OPERATIONS = frozenset({'capabilities', 'status', 'lookup', 'show', 'observe',
     'progress', 'history', 'history.release', 'logs', 'locations', 'sources.inspect',
     'sources.validate', 'sources.activate', 'sources.clear', 'request', 'submit.check', 'submit.preview',
     'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup', 'control.preview', 'control',
-    'fetch.prepare', 'fetch.complete'})
+    'fetch.prepare', 'fetch.complete', 'review.preview', 'review.start', 'review.poll', 'review.cancel'})
 MAX_ROWS = 1000
 MAX_LOG_BYTES = 65536
 
@@ -101,7 +101,7 @@ class LocalBackend:
 
     def __init__(self, config_root, queue_alias, *, clock=time.time,
                  identity_loader=None, identity_checker=None, observer=None,
-                 activity_projector=None, boot_provider=None):
+                 activity_projector=None, boot_provider=None, review_service=None):
         from .identity import load_node, check_node
         if type(queue_alias) is not str or not queue_alias or len(queue_alias) > 128:
             raise BackendError('UNKNOWN_QUEUE', 'Select an explicitly enrolled queue alias')
@@ -125,6 +125,7 @@ class LocalBackend:
         self._activity_observer = None
         self._sampler = None
         self._sampler_lock = threading.Lock()
+        self._review_service = review_service
         self._check()
 
     def _check(self):
@@ -276,6 +277,31 @@ class LocalBackend:
         self.observer.retain(())
         return {'cleared': True}
 
+    def _review(self, operation, params, job, request_id):
+        if self._review_service is None:
+            from cmw.jobs.review import ReviewService
+            self._review_service = ReviewService(self.store, origin={
+                'node_id': self.config['node_id'], 'queue_id': self.queue['queue_id'],
+                'host_id': self.config['host_id'], 'runtime_id': self.config['runtime']['fingerprint']})
+        options = {'expected_attempt_id': job['attempt_id']}
+        if operation == 'review.preview':
+            _params(params)
+            review = self._review_service.preview(job['id'], **options)
+        elif operation == 'review.start':
+            _params(params, ('options',), ('options',))
+            if type(params['options']) is not dict:
+                raise BackendError('INVALID_PARAMS', 'Review options must be an object')
+            identifier(request_id, 'review request ID')
+            review = self._review_service.start(job['id'], params['options'], request_id, **options)
+        else:
+            _params(params, ('review_id',), ('review_id',))
+            identifier(params['review_id'], 'review handle')
+            method = self._review_service.poll if operation == 'review.poll' else self._review_service.cancel
+            review = method(job['id'], params['review_id'], **options)
+        if (review.node_id, review.queue_id, review.job_id, review.attempt_id) != self._key(job):
+            raise BackendError('WRONG_TARGET', 'Review result belongs to another selected attempt')
+        return {'review': encode_typed(review)}
+
     def _selected(self, operation, params, job):
         if operation == 'show':
             _params(params)
@@ -336,7 +362,7 @@ class LocalBackend:
             if type(params) is not dict:
                 raise BackendError('INVALID_PARAMS', 'Operation parameters must be an object')
             self._check()
-            if operation in MUTATIONS:
+            if is_mutation(operation, params):
                 identifier(request_id, 'request ID')
                 expected = {'node_id': self.config['node_id'], 'queue_id': self.queue['queue_id'],
                             'host_id': self.config['host_id'], 'runtime_id': self.config['runtime']['fingerprint'],
@@ -362,6 +388,10 @@ class LocalBackend:
                     _params(params, ('fetch_id', 'manifest_digest'), ('fetch_id', 'manifest_digest'))
                     result = complete_fetch(self, job, params['fetch_id'], params['manifest_digest'])
                 self._job(target)
+            elif operation.startswith('review.'):
+                job = self._job(target)
+                result = self._review(operation, params, job, request_id)
+                self._job(target)
             elif operation in {'status', 'capabilities', 'lookup'}:
                 if target is not None:
                     raise BackendError('INVALID_TARGET', 'This operation does not accept an attempt target')
@@ -370,6 +400,7 @@ class LocalBackend:
                     result = {'queue': deepcopy(self.queue), 'readiness': deepcopy(self.readiness),
                               'profiles': deepcopy(self.config.get('profiles', {})), 'operations': sorted(OPERATIONS),
                               'molecular_submission': {'schema': 1, 'engines': ['ORCA', 'Multiwfn'], 'target_local_artifacts': 1},
+                              'result_review': {'schema': 1, 'async': True, 'model': 'ReviewRecord'},
                               'mutations_supported': True, 'observer_session': self.session_id}
                 elif operation == 'status':
                     result = self._status(params)
@@ -401,5 +432,7 @@ class LocalBackend:
         if sampler is not None:
             sampler.close()
         self.observer.close()
+        if self._review_service is not None:
+            self._review_service.close()
         self._sessions.clear()
         self._validations.clear()

@@ -15,9 +15,17 @@ OPERATIONS = frozenset({
     'sources.activate', 'sources.clear', 'request', 'submit.check', 'submit.preview', 'submit',
     'transfer.begin', 'transfer.publish', 'transfer.lookup', 'control.preview', 'control',
     'fetch.prepare', 'fetch.complete',
+    'review.preview', 'review.start', 'review.poll', 'review.cancel',
 })
 MUTATIONS = frozenset({'submit', 'transfer.begin', 'transfer.publish', 'control',
                        'fetch.prepare', 'fetch.complete'})
+
+
+def is_mutation(operation, params=None):
+    """Review export writes on its owner; ordinary inspection stays read-only."""
+    options = params.get('options') if isinstance(params, dict) else None
+    return operation in MUTATIONS or (operation == 'review.start' and
+        isinstance(options, dict) and options.get('export_path') is not None)
 
 
 class NodeError(ValueError):
@@ -184,6 +192,17 @@ def validate_envelope(value, operation=None):
                 raise NodeError('INVALID_RESPONSE', 'Status row belongs to another node or queue')
             if job.get('id') != target['job_id'] or job.get('attempt_id') != target['attempt_id']:
                 raise NodeError('INVALID_RESPONSE', 'Status row identity contradicts its target')
+    if operation in {'review.preview', 'review.start', 'review.poll', 'review.cancel'}:
+        from .codec import decode_typed
+        from cmw.jobs.review_models import ReviewRecord
+        try:
+            if set(result) != {'review'}:
+                raise ValueError('Unexpected review fields')
+            review = decode_typed(result['review'], ReviewRecord)
+            if (review.node_id, review.queue_id) != (value['node_id'], value['queue_id']):
+                raise ValueError('Review belongs to another node or queue')
+        except (KeyError, ValueError, TypeError) as exc:
+            raise NodeError('INVALID_RESPONSE', 'Malformed or misbound result review payload') from exc
     if operation in {'progress', 'history'}:
         from .codec import decode_typed
         from cmw.progress.models import ProgressSnapshot, HistoryPage

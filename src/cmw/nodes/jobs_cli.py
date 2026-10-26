@@ -48,6 +48,9 @@ def handle(args):
             raise NodeError('INVALID_SELECTION', '--queue and --all-nodes require explicit node selection')
         backend = connect(args.node, root=args.nodes_config, queue=args.queue)
         operation = args.jobs_operation
+        if operation == 'review':
+            from cmw.jobs.review_cli import remote
+            return remote(backend,args)
         if operation == 'check':
             from .client import check
             from .cli import _read_spec

@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 
-from .protocol import MAX_FRAME, MUTATIONS, NodeError, decode, encode, request, response
+from .protocol import MAX_FRAME, is_mutation, NodeError, decode, encode, request, response
 
 MAX_STDERR = 64 * 1024
 
@@ -77,12 +77,13 @@ class ProcessTransport:
 
     def exchange(self, operation, params=None, target=None, *, request_id=None):
         message = request(operation, params, target, request_id)
+        mutation = is_mutation(operation, params)
         packet = encode(message)
         if not self._lock.acquire(blocking=False):
             raise NodeError('BUSY', 'Only one in-flight request is permitted per endpoint channel')
         try:
             self._start()
-            if operation in MUTATIONS and not self._verified_channel:
+            if mutation and not self._verified_channel:
                 raise NodeError('HANDSHAKE_REQUIRED', 'Verify endpoint capabilities on this channel before mutation')
             deadline, sent = time.monotonic() + self.timeout, 0
             with selectors.DefaultSelector() as selector:
@@ -111,7 +112,7 @@ class ProcessTransport:
                         return result
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise NodeError('OUTCOME_UNKNOWN' if operation in MUTATIONS else 'UNREACHABLE',
+                        raise NodeError('OUTCOME_UNKNOWN' if mutation else 'UNREACHABLE',
                                         'Endpoint request timed out; query the original request ID before any retry')
                     for key, _ in selector.select(remaining):
                         if key.data == 'in':
@@ -123,7 +124,7 @@ class ProcessTransport:
                             if not data:
                                 selector.unregister(key.fileobj)
                                 if key.data == 'out':
-                                    raise NodeError('OUTCOME_UNKNOWN' if operation in MUTATIONS else 'DISCONNECTED',
+                                    raise NodeError('OUTCOME_UNKNOWN' if mutation else 'DISCONNECTED',
                                                     'Endpoint closed before a complete response')
                             elif key.data == 'err':
                                 self._diagnostic(data)
@@ -133,7 +134,7 @@ class ProcessTransport:
                                     raise NodeError('INVALID_RESPONSE', 'Endpoint response exceeds frame bound')
         except OSError as exc:
             self.close()
-            if operation in MUTATIONS:
+            if mutation:
                 raise NodeError('OUTCOME_UNKNOWN', 'Transport failed; query the original request ID before retrying') from exc
             raise NodeError('UNREACHABLE', str(exc)) from exc
         except NodeError:

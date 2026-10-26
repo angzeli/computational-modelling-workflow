@@ -45,7 +45,7 @@ def prepare(spec_path: Path, attempt: Path) -> dict:
     return record
 
 
-def finalize(attempt: Path, exit_code: int) -> dict:
+def _inspect(attempt: Path, exit_code: int, *, normalize: bool) -> dict:
     plan = json.loads((attempt / 'plan.json').read_text())
     if exit_code != 0:
         raise ValueError(f'Multiwfn exited with status {exit_code}')
@@ -60,7 +60,8 @@ def finalize(attempt: Path, exit_code: int) -> dict:
     if file_hash(Path(runtime['settings_path'])) != runtime['settings_sha256']:
         raise ValueError('Run-local settings changed during execution')
     outputs = tuple(MultiwfnOutputSpec.from_mapping(v) for v in rendered['outputs'])
-    normalize_output_paths(attempt, outputs)
+    if normalize:
+        normalize_output_paths(attempt, outputs)
     session = next(o for o in outputs if o.role == 'session_log')
     parsed = parse_multiwfn2026_ifct_session_file(
         attempt / session.output_path,
@@ -78,6 +79,16 @@ def finalize(attempt: Path, exit_code: int) -> dict:
     result = {'validation_status': 'PASSED', 'process_exit_code': exit_code,
               'analysis': 'IFCT numerical revalidation', 'parsed': asdict(parsed),
               'plan': str(attempt / 'plan.json')}
+    return result
+
+
+def inspect(attempt: Path, exit_code: int) -> dict:
+    """Revalidate already normalized outputs without writing or moving files."""
+    return _inspect(attempt, exit_code, normalize=False)
+
+
+def finalize(attempt: Path, exit_code: int) -> dict:
+    result = _inspect(attempt, exit_code, normalize=True)
     (attempt / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     return result
 
