@@ -740,12 +740,24 @@ class Store:
         self.set_control(con, control)
         self.event(con, None, "Dispatch resumed" if enabled else "Dispatch paused")
 
-    def change(self, job_id, action, *, position=None, confirm=False, expected=None):
+    def change(self, job_id, action, *, position=None, confirm=False, expected=None,
+               expected_attempt_id=None):
         with self.transaction() as con:
-            return self._change(con, job_id, action, position=position, confirm=confirm, expected=expected)
+            return self._change(con, job_id, action, position=position, confirm=confirm,
+                                expected=expected, expected_attempt_id=expected_attempt_id)
 
-    def _change(self, con, job_id, action, *, position=None, confirm=False, expected=None):
-        job = self.get(con, job_id)
+    def _change(self, con, job_id, action, *, position=None, confirm=False, expected=None,
+                expected_attempt_id=None):
+        # Captured UI/node targets use internal IDs, never mutable display aliases.
+        if expected_attempt_id is not None and type(job_id) is int:
+            row = con.execute("SELECT data FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise JobsError(f"No such job: {job_id}")
+            job = _job_defaults(json.loads(row[0]))
+        else:
+            job = self.get(con, job_id)
+        if expected_attempt_id is not None and job["attempt_id"] != expected_attempt_id:
+            raise JobsError("Attempt changed since selection; refresh and try again")
         if expected is not None and job["status"] != expected:
             raise JobsError("Job changed since selection; refresh and try again")
         status = job["status"]
