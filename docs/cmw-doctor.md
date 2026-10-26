@@ -83,7 +83,7 @@ shortcuts are unchanged.
 ## Private support capsule
 
 ```console
-cmw doctor --state /explicit/private/state --job J1.1 --export /Users/you/Desktop/new-cmw-capsule
+cmw doctor --state /explicit/private/state --job J1.1 --export /explicit/private/new-cmw-capsule
 ```
 
 Export is explicit. Select a new directory below your Desktop or a Scratch directory;
