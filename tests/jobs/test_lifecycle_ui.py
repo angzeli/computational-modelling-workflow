@@ -219,6 +219,13 @@ class LifecycleUiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(app.execution_observation)
                     self.assertIn('Observation pending', self.card(app))
                     release.set()
+                    if change == 'attempt':
+                        # An observed replacement must be explicitly selected;
+                        # the old attempt's late result grants no authority.
+                        await self.until(lambda: not app.execution_busy)
+                        self.assertIsNone(app.selected())
+                        self.assertIsNone(app.execution_observation)
+                        await pilot.press('enter', 'escape')
                     await self.settled(app, pilot)
                     self.assertEqual(provider.call_count, 2)
                     self.assertEqual(app.execution_observation.attempt_id, app.selected()['attempt_id'])

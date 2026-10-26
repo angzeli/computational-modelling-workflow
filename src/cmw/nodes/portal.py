@@ -12,11 +12,11 @@ import sys
 from uuid import uuid4
 
 from textual import events
-from textual.app import App
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Input, Static, TextArea
 
+from cmw.jobs.navigation import NavigationApp
 from cmw.jobs.cli import elapsed, machine_text, machine_detail, usage_summary
 from cmw.jobs.copy_ui import FrozenText, SelectableStatic
 from cmw.jobs.history_ui import ProgressHistory
@@ -70,7 +70,7 @@ class NodeLane:
         return self.error is None and age is not None and age <= 10
 
 
-class NodesApp(App):
+class NodesApp(NavigationApp):
     TITLE = 'CMW / JOBS'
     CSS = JobsApp.CSS + '''
     #node-summary { height: auto; max-height: 2; padding: 0 1; color: #b7d8dd; }
@@ -149,9 +149,24 @@ class NodesApp(App):
         self.exit()
 
     def check_action(self, action, parameters):
-        if action not in {'detach', 'quit'} and self.screen is not self.screen_stack[0]:
+        if self.screen is not self.screen_stack[0]:
             return False
         return True
+
+    def navigation_context(self, screen):
+        if screen is self.screen_stack[0]:
+            return (tuple((label, lane.backend.node_id, lane.backend.queue_id)
+                          for label, lane in self.lanes.items()),
+                    self.selected_key, self.selection_generation)
+        return super().navigation_context(screen)
+
+    def navigation_selection(self, screen):
+        return self.selected_key if screen is self.screen_stack[0] else super().navigation_selection(screen)
+
+    def navigation_restore_selection(self, screen, snapshot):
+        if screen is self.screen_stack[0]:
+            return snapshot.selection in self.rows
+        return super().navigation_restore_selection(screen, snapshot)
 
     def queue(self, owner, operation, params=None, target=None, callback=None, *, automatic=False):
         lane = self.lanes[owner]
@@ -285,6 +300,18 @@ class NodesApp(App):
     def render_state(self):
         if not self.is_mounted or not list(self.query('#node-summary')):
             return
+        origin = self.screen_stack[0]
+        view = self.capture_view(origin)
+        before = (self.columns, tuple(self.row_keys), self.card_height, self.viewport)
+        table = origin.query_one('#table', DataTable)
+        with table.prevent(DataTable.RowHighlighted):
+            self._render_state()
+        after = (self.columns, tuple(self.row_keys), self.card_height, self.viewport)
+        if (before != after and not self.navigation_origin_covered(origin)
+                and not self.navigation_pending(origin)):
+            self.restore_view(view)
+
+    def _render_state(self):
         now = self.clock()
         summaries = []
         rows = {}
@@ -337,6 +364,7 @@ class NodesApp(App):
             with table.prevent(DataTable.RowHighlighted):
                 table.move_cursor(row=keys.index(self.selected_key), animate=False, scroll=False)
         selected = self.selected()
+        table.set_class(selected is None, 'navigation-unavailable')
         if selected:
             owner, job = selected
             lane = self.lanes[owner]
@@ -368,12 +396,6 @@ class NodesApp(App):
             self.query_one('#selected', Static).update('Selected attempt is no longer in the current node snapshot.' if self.selected_key else 'No managed jobs reported. Select an enrolled node through the CLI to submit.')
             self.query_one('#execution', Static).update('')
             self.query_one('#progress', Static).display = False
-
-    def reveal_selection(self):
-        if self.selected_key in self.row_keys and list(self.query('#table')):
-            table = self.query_one('#table', DataTable)
-            with table.prevent(DataTable.RowHighlighted):
-                table.move_cursor(row=self.row_keys.index(self.selected_key), animate=False, scroll=True)
 
     def select(self, key):
         if key == self.selected_key:
@@ -422,6 +444,7 @@ class NodesApp(App):
         widget.display = True
         snapshot = self.selected_snapshot(owner, job)
         if snapshot is None:
+            self.card_height, self.viewport = 2, tuple(self.size)
             widget.update(literal('Scientific: ' + cache.get('progress.error', 'awaiting bounded observation…')))
             widget.styles.max_height = 2
             return
@@ -442,10 +465,7 @@ class NodesApp(App):
                 rendered.stylize('#5c8996', index, index + 1)
         widget.styles.max_height = max(budget, len(text.splitlines()))
         widget.update(rendered)
-        dimensions = (self.size.width, self.size.height)
-        if self.card_height != len(text.splitlines()) or self.viewport != dimensions:
-            self.card_height, self.viewport = len(text.splitlines()), dimensions
-            self.call_after_refresh(self.reveal_selection)
+        self.card_height, self.viewport = len(text.splitlines()), tuple(self.size)
 
     def collect_progress(self):
         selected = self.selected()

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from rich.cells import cell_len, set_cell_size
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual.app import ComposeResult
 from textual.binding import Binding
 from textual import events
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -24,6 +24,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Label, Static, Tex
 from .cli import elapsed, safe_text, name_text, tail, guard_text, external_detail, usage_cells, usage_detail, usage_summary, machine_text, machine_detail, sharing_text, job_sharing_detail, observation_sharing
 from .store import ACTIVE, PENDING, JobsError, Store
 from .status_presentation import admission_presentation, scheduling_detail
+from .navigation import NavigationApp
 from .locations import discover
 from .folder_opener import OpenResult, open_location, request_open
 from .history_ui import HistoryDetails, ProgressHistory
@@ -141,8 +142,9 @@ class Inspect(ModalScreen):
     Inspect Static { height: auto; }
     """
 
-    def __init__(self, store, job_id, logs=False, job_provider=None, progress_provider=None, execution_provider=None):
+    def __init__(self, store, job_id, logs=False, job_provider=None, progress_provider=None, execution_provider=None, expected_attempt=None):
         super().__init__()
+        self.expected_attempt = expected_attempt
         self.store, self.job_id, self.logs = store, job_id, logs
         self.log_stamps = None
         self.job_provider = job_provider
@@ -168,8 +170,8 @@ class Inspect(ModalScreen):
             return
         job = (self.job_provider(self.job_id) if self.job_provider and not self.logs else
                next((j for j in self.store.snapshot()["jobs"] if j["display_id"] == self.job_id), None))
-        if not job:
-            self.query_one("#body", Static).update("Job is no longer available")
+        if not job or self.expected_attempt is not None and job["attempt_id"] != self.expected_attempt:
+            self.query_one("#body", Static).update("Job/attempt is no longer available")
             return
         if self.logs:
             stamps = []
@@ -405,6 +407,7 @@ class JobsTable(DataTable):
                 self.app.suspension_selection_generation += 1
             self.app.external_selected_id = None
             self.app.selected_id = key
+            self.app.pin_selection()
             self.app.action_files()
 
     def on_focus(self):
@@ -430,7 +433,7 @@ class ScientificProgress(SelectableStatic):
         super().update(content, layout=layout)
 
 
-class JobsApp(App):
+class JobsApp(NavigationApp):
     TITLE = "CMW / JOBS"
     CSS = """
     Screen { background: #111820; color: #d7e0e8; }
@@ -472,6 +475,9 @@ class JobsApp(App):
         self.clock = clock
         self.state = None
         self.selected_id = None
+        self._selected_label = None
+        self._selected_target = None
+        self._row_targets = {}
         self.columns_mode = None
         self.row_ids = []
         self.external_selected_id = None
@@ -518,6 +524,41 @@ class JobsApp(App):
         self.copy_result = None
         self.copy_mouse_dragged = False
         self.copy_mouse_start = None
+
+    def job_target(self, job):
+        return (str(getattr(self.store, 'root', self.store)), job['id'], job['attempt_id'])
+
+    def pin_selection(self):
+        job = self.current_job(self.selected_id)
+        self._selected_label = self.selected_id if self.state is not None else None
+        self._selected_target = self.job_target(job) if job else None
+
+    def navigation_context(self, screen):
+        if screen is self.screen_stack[0]:
+            return (str(getattr(self.store, 'root', self.store)), self.selected_id, self.external_selected_id,
+                    self.suspension_selection_generation)
+        return super().navigation_context(screen)
+
+    def navigation_row_identity(self, table, key):
+        if table.screen is self.screen_stack[0]:
+            if table.id == 'table':
+                return self._row_targets.get(key)
+            if table.id == 'external':
+                return (str(getattr(self.store, 'root', self.store)), 'external', key)
+        return super().navigation_row_identity(table, key)
+
+    def navigation_selection(self, screen):
+        if screen is self.screen_stack[0]:
+            self.selected()  # Pin the current attempt before observing later snapshots.
+            return (self.selected_id, self.external_selected_id, self._selected_target)
+        return super().navigation_selection(screen)
+
+    def navigation_restore_selection(self, screen, snapshot):
+        if screen is self.screen_stack[0]:
+            self.selected_id, self.external_selected_id, self._selected_target = snapshot.selection
+            self._selected_label = self.selected_id
+            return self.external_selected() is not None if self.external_selected_id else self.selected() is not None
+        return super().navigation_restore_selection(screen, snapshot)
 
     def compose(self):
         yield Static("CMW / JOBS                                             LOCAL", id="heading")
@@ -641,10 +682,10 @@ class JobsApp(App):
         if not self.is_mounted or self.execution_closed:
             return
         widget = self.query_one('#execution', Static)
-        widget.display = self.execution_selection is not None
+        job = self.selected()
+        widget.display = self.execution_selection is not None and job is not None
         if not widget.display:
             return
-        job = self.selected()
         observation = self.selected_execution(job)
         if observation is None:
             summary = 'Observation unavailable' if self.execution_error else 'Observation pending'
@@ -1058,9 +1099,11 @@ class JobsApp(App):
                     f"{usage_summary(item.get('usage'), width=max(12, self.size.width - 8))}\n"
                     f"NPROC: {item.get('nproc', 1)} observed processes · Process age: {elapsed(item.get('age_seconds'))}\n"
                     f"Working directory: {item.get('cwd') or '—'}\nEnter: measurement quality and evidence")
+        if self.external_selected_id:
+            return "Selected external process is no longer observed; outcome is not known."
         job = self.selected()
         if not job:
-            return detail(None)
+            return "Selected job/attempt is no longer available. Select a current row explicitly." if self._selected_target else detail(None)
         width = max(12, self.size.width - 8)
         role = (f" [{job.get('scheduling', {}).get('role', 'primary').title()}]"
                 if self.state.get('mode') == 'Bounded Sharing' else '')
@@ -1150,8 +1193,8 @@ class JobsApp(App):
                     if table.get_cell(item['id'], column) != cell:
                         table.update_cell(item['id'], column, cell)
         if self.external_selected_id and self.external_selected_id not in ids:
-            self.external_selected_id = None
             self.query_one("#message", Static).update("Selected external process is no longer observed; outcome is not known.")
+        table.set_class(bool(self.external_selected_id and self.external_selected_id not in ids), 'navigation-unavailable')
         if self.external_selected_id in self.external_rows:
             table.move_cursor(row=self.external_rows.index(self.external_selected_id), animate=False, scroll=False)
 
@@ -1161,15 +1204,38 @@ class JobsApp(App):
             self.call_after_refresh(self.refresh_state)
 
     def selected(self):
-        return next((j for j in (self.state or {}).get("jobs", []) if j["display_id"] == self.selected_id), None)
+        if self._selected_label != self.selected_id:
+            self.pin_selection()
+        job = self.current_job(self.selected_id)
+        return job if job and self.job_target(job) == self._selected_target else None
 
     def refresh_state(self):
+        origin = self.screen_stack[0]
+        view = self.capture_view(origin)
+        before = (self.columns_mode, tuple(self._row_targets.items()),
+                  self.external_columns_mode, tuple(self.external_rows))
+        # Rebuild highlights are implementation effects, not a new selection.
+        table = origin.query_one('#table', DataTable)
+        external = origin.query_one('#external', DataTable)
+        with table.prevent(DataTable.RowHighlighted), external.prevent(DataTable.RowHighlighted):
+            self._refresh_state()
+        after = (self.columns_mode, tuple(self._row_targets.items()),
+                 self.external_columns_mode, tuple(self.external_rows))
+        if ((before[1] or before[3]) and before != after and not self.navigation_origin_covered(origin)
+                and not self.navigation_pending(origin)):
+            self.restore_view(view)
+
+    def _refresh_state(self):
         previous_job = self.selected()
         previous_files_context = self.files_context(previous_job) if previous_job else None
         table = self.query_one(DataTable)
         # Cursor movement precedes its queued highlight event; preserve that newer identity.
-        if table.has_focus and 0 <= table.cursor_row < len(self.row_ids):
-            self.selected_id = self.row_ids[table.cursor_row]
+        if (table.has_focus and not self.navigation_pending(self.screen_stack[0])
+                and 0 <= table.cursor_row < len(self.row_ids)):
+            key = self.row_ids[table.cursor_row]
+            if key != self.selected_id and self.selected() is not None:
+                self.selected_id = key
+                self.pin_selection()
         try:
             self.state = self.store.snapshot(now=self.clock() if self.clock else None)
         except (ValueError, OSError) as exc:
@@ -1213,14 +1279,19 @@ class JobsApp(App):
         self.query_one("#shortcuts", Static).display = not wide
         viewport_width = max(1, self.size.width - 2)
         columns = managed_columns(viewport_width, bounded=bounded)
-        # Rebuild only on layout/mode changes; refreshes update cells in place.
+        # Rebuild only for changed columns or row ordering; ordinary updates stay in place.
         layout_mode = tuple(columns)
+        row_targets = {job['display_id']: self.job_target(job) for job in jobs}
         if layout_mode != self.columns_mode:
             table.clear(columns=True)
             for key, label, width in columns:
                 table.add_column(label, key=key, width=width)
             self.columns_mode = layout_mode
             self.row_ids = []
+        elif list(row_targets)[:len(self.row_ids)] != self.row_ids:
+            table.clear()
+            self.row_ids = []
+        self._row_targets = row_targets
         for job in jobs:
             key = job['display_id']
             cpu_now, ram_now = usage_cells(job.get('usage'))
@@ -1247,6 +1318,8 @@ class JobsApp(App):
                         table.update_cell(key, column, cell)
         if not self.selected_id and jobs:
             self.selected_id = jobs[0]['display_id']
+            self.pin_selection()
+        table.set_class(self.selected() is None, 'navigation-unavailable')
         if self.selected_id in self.row_ids and table.cursor_row != self.row_ids.index(self.selected_id):
             table.move_cursor(row=self.row_ids.index(self.selected_id), animate=False, scroll=False)
         self.query_one("#selected", Static).update(literal(self.selected_text()))
@@ -1275,6 +1348,7 @@ class JobsApp(App):
         else:
             self.external_selected_id = None
             self.selected_id = event.row_key.value
+            self.pin_selection()
         self.action_details()
 
     def on_data_table_row_highlighted(self, event):
@@ -1297,6 +1371,8 @@ class JobsApp(App):
                 return
             self.external_selected_id = None
             self.selected_id = event.row_key.value
+            self.pin_selection()
+        event.data_table.remove_class('navigation-unavailable')
         if previous != (self.selected_id, self.external_selected_id):
             self.files_generation += 1
             self.suspension_selection_generation += 1
@@ -1322,7 +1398,7 @@ class JobsApp(App):
             return False
         if isinstance(self.focused, (Input, TextArea)) and action in protected:
             return False
-        if isinstance(self.screen, (NoteEditor, FilesChooser, ProgressHistory, HistoryDetails, SuspensionConfirm, Sources, FrozenText)) and action in {
+        if isinstance(self.screen, (Inspect, ExternalInspect, SharingInspect, NoteEditor, FilesChooser, ProgressHistory, HistoryDetails, SuspensionConfirm, Sources, FrozenText)) and action in {
             'details', 'files', 'history', 'sources', 'copy_snapshot', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'detach', 'suspension'
         }:
             return False
@@ -1643,14 +1719,16 @@ class JobsApp(App):
         if self.external_selected():
             self.push_screen(ExternalInspect(self.external_selected(), provider=self.external_observation))
             return
-        if self.selected_id:
-            self.push_screen(Inspect(self.store, self.selected_id, job_provider=self.current_job, progress_provider=self.selected_progress, execution_provider=self.selected_execution))
+        job = self.selected()
+        if job:
+            self.push_screen(Inspect(self.store, self.selected_id, job_provider=self.current_job, progress_provider=self.selected_progress, execution_provider=self.selected_execution, expected_attempt=job['attempt_id']))
 
     def action_logs(self):
         if self.external_read_only():
             return
-        if self.selected_id:
-            self.push_screen(Inspect(self.store, self.selected_id, logs=True))
+        job = self.selected()
+        if job:
+            self.push_screen(Inspect(self.store, self.selected_id, logs=True, expected_attempt=job['attempt_id']))
 
     def action_dispatch(self):
         self.apply(lambda: self.store.dispatch(not self.state['controller']['dispatch']))
@@ -1662,6 +1740,14 @@ class JobsApp(App):
         if job:
             self.apply(lambda: self.store.change(job['display_id'], 'release' if job['status']=='Hold' else 'hold', expected=job['status']))
 
+    def confirmation_current(self, job, generation):
+        selected = self.selected()
+        if (selected is None or self.job_target(selected) != self.job_target(job)
+                or generation != self.suspension_selection_generation):
+            self.query_one('#message', Static).update('Confirmation expired: selected job/attempt changed. Select the action again.')
+            return False
+        return True
+
     def action_order(self):
         if self.external_read_only():
             return
@@ -1671,8 +1757,9 @@ class JobsApp(App):
         if job['status'] not in PENDING:
             self.query_one("#message", Static).update("Only pending jobs can be reordered.")
             return
+        generation = self.suspension_selection_generation
         def submit(value):
-            if value is not None:
+            if value is not None and self.confirmation_current(job, generation):
                 self.apply(lambda: self.store.change(job['display_id'], 'move', position=int(value), expected=job['status']))
         self.push_screen(Prompt(f"Move {job['display_id']} / {name_text(job['name'])} to pending order:", order=True), submit)
 
@@ -1682,7 +1769,8 @@ class JobsApp(App):
         job = self.selected()
         if not job:
             return
+        generation = self.suspension_selection_generation
         def submit(value):
-            if value == 'CANCEL':
+            if value == 'CANCEL' and self.confirmation_current(job, generation):
                 self.apply(lambda: self.store.change(job['display_id'], 'cancel', confirm=True, expected=job['status']))
         self.push_screen(Prompt(f"Cancel {job['display_id']} / {name_text(job['name'])}?\nRunning cancellation terminates its managed process group. Dispatch pauses."), submit)
