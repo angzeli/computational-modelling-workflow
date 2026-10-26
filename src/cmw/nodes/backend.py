@@ -30,6 +30,7 @@ OPERATIONS = frozenset({'capabilities', 'status', 'lookup', 'show', 'observe',
     'progress', 'history', 'history.release', 'logs', 'locations', 'sources.inspect',
     'sources.validate', 'sources.activate', 'sources.clear', 'request', 'submit.check', 'submit.preview',
     'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup', 'control.preview', 'control',
+    'catalogue.query', 'catalogue.show', 'catalogue.relations', 'catalogue.edit', 'catalogue.relation.add', 'catalogue.relation.retract',
     'fetch.prepare', 'fetch.complete', 'review.preview', 'review.start', 'review.poll', 'review.cancel'})
 MAX_ROWS = 1000
 MAX_LOG_BYTES = 65536
@@ -164,7 +165,8 @@ class LocalBackend:
         target = validate_target(target)
         if (target['node_id'], target['queue_id']) != self._pinned[:2]:
             raise BackendError('WRONG_TARGET', 'Selected target belongs to another node or queue')
-        job, _ = _read_job(self.store, target['job_id'])
+        from cmw.jobs.lifecycle import read_job
+        job, _ = read_job(self.store, target['job_id'])
         if job['attempt_id'] != target['attempt_id']:
             raise BackendError('ATTEMPT_CHANGED', 'Selected immutable attempt differs; select the current target again')
         return job
@@ -208,9 +210,12 @@ class LocalBackend:
             state = self._activity_projector(self.store)
         jobs = state['jobs']
         total = len(jobs)
+        counts = {}
+        for job in jobs:
+            counts[job['status']] = counts.get(job['status'], 0) + 1
         state['jobs'] = [self._row(job) for job in jobs[offset:offset + limit]]
         return {'state': state, 'queue_revision': queue_revision(state['controller']),
-                'job_count': total, 'offset': offset, 'has_more': offset + limit < total}
+                'job_count': total, 'status_counts': counts, 'offset': offset, 'has_more': offset + limit < total}
 
     def _locations(self, job):
         found = discover(self.store, job['id'], expected_attempt_id=job['attempt_id'])
@@ -388,6 +393,9 @@ class LocalBackend:
                     _params(params, ('fetch_id', 'manifest_digest'), ('fetch_id', 'manifest_digest'))
                     result = complete_fetch(self, job, params['fetch_id'], params['manifest_digest'])
                 self._job(target)
+            elif operation.startswith('catalogue.'):
+                from .catalogue import dispatch
+                result = dispatch(self, operation, params, target, request_id=request_id)
             elif operation.startswith('review.'):
                 job = self._job(target)
                 result = self._review(operation, params, job, request_id)
@@ -400,6 +408,7 @@ class LocalBackend:
                     result = {'queue': deepcopy(self.queue), 'readiness': deepcopy(self.readiness),
                               'profiles': deepcopy(self.config.get('profiles', {})), 'operations': sorted(OPERATIONS),
                               'molecular_submission': {'schema': 1, 'engines': ['ORCA', 'Multiwfn'], 'target_local_artifacts': 1},
+                              'research_catalogue': {'schema': 1, 'query': 'CatalogueQuery', 'page': 'CataloguePage', 'record': 'CatalogueRecord'},
                               'result_review': {'schema': 1, 'async': True, 'model': 'ReviewRecord'},
                               'mutations_supported': True, 'observer_session': self.session_id}
                 elif operation == 'status':

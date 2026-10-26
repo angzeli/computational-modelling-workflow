@@ -172,6 +172,11 @@ class ConnectedBackend:
                 'node_id': self.node_id, 'queue_id': self.queue_id,
                 'host_id': self.connection['host_id'], 'runtime_id': self.connection['runtime_id'],
                 'clock_id': verified['clock_id']}}
+        if operation.startswith('catalogue.'):
+            from .catalogue import CAPABILITY
+            capability = (verified if mutation else self.call('capabilities'))['result'].get('research_catalogue')
+            if type(capability) is not dict or capability != CAPABILITY or type(capability.get('schema')) is not int:
+                raise NodeError('UNSUPPORTED_CATALOGUE', 'Endpoint does not advertise the supported research catalogue contract')
         if operation in {'review.preview', 'review.start', 'review.poll', 'review.cancel'}:
             capability = (verified if mutation else self.call('capabilities'))['result'].get('result_review')
             expected = {'schema': 1, 'async': True, 'model': 'ReviewRecord'}
@@ -193,6 +198,9 @@ class ConnectedBackend:
                 record = value['result']['review']['value']
                 if any(record.get(key) != expected for key, expected in target.items()):
                     raise NodeError('INVALID_RESPONSE', 'Review response differs from the selected immutable target')
+            if operation.startswith('catalogue.') and target is not None:
+                from .catalogue import validate_selected_result
+                validate_selected_result(value, operation, target)
             previous = self.last_envelope
             if previous and value['session_id'] == previous['session_id'] and value['sequence'] <= previous['sequence']:
                 raise NodeError('INVALID_RESPONSE', 'Observation sequence did not advance')

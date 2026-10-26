@@ -489,6 +489,8 @@ def register(subcommands):
 
     from .review_cli import register as register_review
     register_review(operations, handle)
+    from .catalogue_cli import register as register_catalogue
+    register_catalogue(operations, handle)
 
     progress = operations.add_parser("progress", help="observe declared scientific progress; never controls execution")
     progress.add_argument("job_id")
@@ -668,7 +670,7 @@ def handle(args):
     if getattr(args, "node", None) or getattr(args, "queue", None) or getattr(args, "all_nodes", False):
         from cmw.nodes.jobs_cli import handle as handle_node
         return handle_node(args)
-    if (getattr(args, "request_id", None) is not None or
+    if ((getattr(args, "request_id", None) is not None and args.jobs_operation != "catalogue") or
             (getattr(args, "preview", False) and args.jobs_operation in {"start", "stop", "pause", "resume", "hold", "release", "move", "cancel"})):
         print("These preview/request options require an explicitly enrolled --node")
         return 2
@@ -695,6 +697,12 @@ def handle(args):
             return inspect_reconciliation(store, args)
         if operation == "files":
             return inspect_files(store, args)
+        if operation in {"query", "catalogue"}:
+            from .catalogue_cli import local
+            try:
+                return local(store, args)
+            except ValueError as exc:
+                raise JobsError(str(exc)) from exc
         if operation == "review":
             from .review_cli import local
             return local(store, args)

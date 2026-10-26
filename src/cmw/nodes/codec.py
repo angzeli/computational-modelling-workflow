@@ -9,6 +9,8 @@ from typing import get_args, get_origin, get_type_hints, Union
 
 from cmw.progress import models
 from cmw.jobs.review_models import ReviewDomain, ReviewRecord
+from cmw.jobs.catalogue_models import CatalogueQuery, CatalogueRecord, CataloguePage
+from cmw.jobs.catalogue_relations import RelationRecord, RelationPage
 from cmw.progress.registry import SourcePlan
 from cmw.jobs.source_selection import SourceInspection, SourceValidation, SessionSelection, SourceFingerprint
 
@@ -22,7 +24,7 @@ _TYPES = {name: value for name, value in vars(models).items()
           if isinstance(value, type) and is_dataclass(value)}
 _TYPES.update({value.__name__: value for value in (
     SourcePlan, SourceInspection, SourceValidation, SessionSelection, SourceFingerprint,
-    ReviewDomain, ReviewRecord)})
+    ReviewDomain, ReviewRecord, CatalogueQuery, CatalogueRecord, CataloguePage, RelationRecord, RelationPage)})
 
 
 class CodecError(ValueError):

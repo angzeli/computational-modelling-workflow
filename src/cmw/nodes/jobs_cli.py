@@ -42,12 +42,18 @@ def handle(args):
     try:
         if args.state is not None:
             raise NodeError('INVALID_SELECTION', '--state is local only; select an enrolled remote --queue')
+        if args.jobs_operation == 'query' and args.all_nodes:
+            from cmw.jobs.catalogue_cli import federation
+            return federation(args)
         if args.jobs_operation == 'watch':
             return watch(args)
         if not args.node:
             raise NodeError('INVALID_SELECTION', '--queue and --all-nodes require explicit node selection')
         backend = connect(args.node, root=args.nodes_config, queue=args.queue)
         operation = args.jobs_operation
+        if operation in {'query', 'catalogue'}:
+            from cmw.jobs.catalogue_cli import remote
+            return remote(backend, args)
         if operation == 'review':
             from cmw.jobs.review_cli import remote
             return remote(backend,args)

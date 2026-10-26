@@ -182,7 +182,8 @@ def dispatch(backend, operation, params, *, target=None, request_id=None):
                 if action == 'cancel' and job['status'] in {'Cancelling', 'Cancelled'}:
                     changed = job
                 else:
-                    changed = store._change(con, job['id'], action, position=params.get('position'), confirm=params['confirm'])
+                    changed = store._change(con, job['id'], action, position=params.get('position'),
+                                            confirm=params['confirm'], expected_attempt_id=target['attempt_id'])
                 status = 'ACCEPTED' if changed['status'] == 'Cancelling' else 'COMPLETED'
                 result = {'status': changed['status'], 'order': changed['order']}
             elif action in {'suspend', 'continue'}:

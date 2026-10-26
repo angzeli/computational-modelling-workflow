@@ -80,6 +80,19 @@ class ControlFixture:
 
 
 class ControlTests(ControlFixture, unittest.TestCase):
+    def test_selected_internal_target_cannot_be_redirected_by_numeric_display_alias(self):
+        other = self.store.add(argv=['/unexecuted/fixture'], cwd=self.root, name='Other held attempt', hold=True)
+        with self.store.transaction() as con:
+            value = self.store.get(con, other['id'])
+            value['display_id'] = str(self.job['id'])
+            self.store.save(con, value)
+        response = self.apply(self.preview('release'))
+        self.assertEqual(response['target'], self.target)
+        jobs = {job['attempt_id']: job for job in self.store.snapshot()['jobs']}
+        self.assertEqual(jobs[self.job['attempt_id']]['status'], 'Queue')
+        self.assertEqual(jobs[other['attempt_id']]['status'], 'Hold')
+        self.spawn.assert_not_called()
+
     def test_preview_is_read_only_and_explicit(self):
         before = self.store.path.read_bytes()
         preview = self.preview('release')
