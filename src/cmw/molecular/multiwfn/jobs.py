@@ -8,11 +8,14 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import fcntl
 import json
 import math
 import os
 from pathlib import Path
 import sys
+import stat
+from uuid import uuid4
 
 from cmw.core.provenance import atomic_write_json, file_hash, read_json, stable_hash
 from cmw.molecular.orca.excited_states import parse_orca_tda_excited_states_file
@@ -20,12 +23,14 @@ from cmw.molecular.stacking.hole_electron import FragmentDefinition
 from cmw.molecular.workflows.source import validate_source_result, _validated_artifact
 from cmw.molecular.workflows.multiwfn_analysis import AnalysisOperation, plan_analysis, prepare_analysis, write_menu
 from cmw.structure.xyz import read_xyz
+from .adapter import RUNNER_EVENT_PREDECESSORS
 from .automation import Operation, menu_stream
 from .excited_states import Multiwfn2026IfctRenderer
 from .runtime import MENU_CONTRACT, MultiwfnRuntime, prepare_settings, render_settings, resolve_menu_contract, resolve_threads
 
 PROFILES = {'FMO', 'ESP', 'IGMH', 'IFCT'}
-EVENTS = {'prepared', 'launch_requested', 'process_exited', 'validation_started', 'validation_passed', 'validation_failed'}
+EVENTS = frozenset(RUNNER_EVENT_PREDECESSORS)
+MAX_EVENT_BYTES = 64 * 1024
 
 
 class Unsupported(ValueError):
@@ -301,20 +306,42 @@ def prepare(spec, checked):
                                 {'role': 'multiwfn_events', 'path': str(attempt / 'jobs-events.jsonl'), 'stage': profile, 'optional': True},
                                 {'role': 'multiwfn_validation', 'path': str(attempt / 'jobs-validation.jsonl'), 'stage': profile, 'optional': True}]
     atomic_write_json(Path(plan['prepared_path']), plan)
-    association = {'schema': 1, 'profile': profile,
+    events_path = attempt / 'jobs-events.jsonl'
+    with events_path.open('xb') as stream:
+        info = os.fstat(stream.fileno())
+    events_identity = [info.st_dev, info.st_ino]
+    association = {'schema': 2, 'profile': profile,
+        'stream_id': str(uuid4()), 'stream_generation': 1,
+        'request_id': spec['request_id'], 'events_identity': events_identity,
+        'native_path': str(log),
+        'source_wavefunction_path': plan['source_wavefunction'],
+        'source_geometry_path': plan['source_geometry'],
+        'source_wavefunction_sha256': file_hash(Path(plan['source_wavefunction'])),
+        'source_geometry_sha256': file_hash(Path(plan['source_geometry'])),
         'attempt_directory': str(attempt), 'scientific_attempt_id': plan['scientific_attempt_id'],
         'source_target_id': plan['source_target_id'], 'source_attempt_id': plan['source_attempt_id'],
         'source_result': plan['source_result'], 'prepared_path': plan['prepared_path'],
         'version': runtime['version'], 'threads': runtime['requested_nthreads'],
         'settings_sha256': runtime['settings_sha256'], 'menu_sha256': plan['menu_sha256'],
         'expected_roles': ', '.join(output['role'] for output in plan['expected_outputs'] if output.get('required', True)),
-        **({'state_index': spec['scientific']['state_index']} if profile == 'IFCT' else {})}
+        **({'state_index': spec['scientific']['state_index'],
+            'spin_manifold': spec['scientific']['spin_manifold']} if profile == 'IFCT' else {})}
+    if profile in {'IGMH', 'IFCT'}:
+        fragments = (spec['scientific']['fragments'] if profile == 'IFCT' else
+            [{'label': label, 'indices_one_based': plan['scientific_plan']['configuration'][key]}
+             for label, key in (('A', 'fragment_a'), ('B', 'fragment_b'))])
+        association.update(fragment_labels=[item['label'] for item in fragments],
+            fragment_counts=[len(item.get('indices_zero_based', item.get('indices_one_based', ()))) for item in fragments],
+            fragment_sha256=stable_hash(fragments))
     metadata = attempt / 'jobs-association.json'
     metadata.write_text(json.dumps(association, sort_keys=True) + '\n')
     plan['progress_sources'].append({'role': 'multiwfn_metadata', 'path': str(metadata), 'stage': profile,
         'optional': True, 'expected_sha256': file_hash(metadata), 'expected_size': metadata.stat().st_size})
     # Re-write only before this prepared plan becomes a registered immutable dependency.
     atomic_write_json(Path(plan['prepared_path']), plan)
+    atomic_write_json(attempt / 'jobs-events-cursor.json',
+        {'sequence': 0, 'size': 0, 'sha256': hashlib.sha256(b'').hexdigest(),
+         'event_source_identity': events_identity})
     event(attempt, 'prepared')
     immutable = [Path(plan['prepared_path']), attempt / 'runtime.json', attempt / 'menu.in',
                  attempt / 'jobs-association.json', Path(runtime['settings_path'])]
@@ -345,32 +372,115 @@ def verify_prepared(path, *, terminal=False):
     return plan
 
 
+def _event_json(path, *, limit=MAX_EVENT_BYTES):
+    """Read only a named, bounded regular record; never follow replacement links."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, 'O_NOFOLLOW', 0))
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise ValueError('Runner evidence record is not a bounded regular file')
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('Runner evidence record exceeds its bound')
+    result = json.loads(data)
+    if not isinstance(result, dict):
+        raise ValueError('Runner evidence record must be an object')
+    return result
+
+
+def _validator_projection(attempt, association):
+    plan = read_json(Path(association['prepared_path']))
+    result_path = Path(plan['result_path'])
+    result = read_json(result_path)
+    valid = result.get('validation_status') == 'PASSED' if plan['profile'] == 'IFCT' else result.get('scientific', {}).get('status') == 'VALID'
+    if not valid:
+        raise ValueError('Existing finalizer did not record scientific validation')
+    if plan['profile'] == 'IFCT':
+        matches = (result.get('process_exit_code') == 0
+            and result.get('plan') == str(attempt / 'plan.json'))
+    else:
+        matches = (result.get('execution', {}).get('process_exit_code') == 0
+            and result.get('attempt', {}).get('attempt_id') == plan['scientific_attempt_id']
+            and result.get('target', {}).get('target_id') == plan['scientific_plan']['target_id'])
+    if not matches:
+        raise ValueError('Validator result belongs to a different scientific attempt or process outcome')
+    native_path = Path(association['native_path'])
+    if str(native_path) != plan['native_log']:
+        raise ValueError('Validator native source differs from the prepared attempt')
+    native = native_path.stat()
+    if not stat.S_ISREG(native.st_mode):
+        raise ValueError('Validator native evidence must be a regular file')
+    return {**association, 'kind': 'validator_record', 'status': 'PASSED',
+            'native_path': str(native_path), 'native_identity': [native.st_dev, native.st_ino],
+            'native_file_version': [native.st_size, native.st_mtime_ns, native.st_ctime_ns],
+            'result_path': str(result_path), 'result_sha256': file_hash(result_path),
+            'validated_roles': [o['role'] for o in plan['expected_outputs']]}
+
+
 def event(attempt, kind, value=None):
+    """Append one actual lifecycle boundary to the prepared, identity-pinned stream."""
     if kind not in EVENTS:
         raise ValueError('Unknown runner lifecycle event')
-    association = read_json(attempt / 'jobs-association.json')
-    record = {**association, 'kind': kind, 'time': datetime.now(timezone.utc).isoformat(), 'value': value}
-    with (attempt / 'jobs-events.jsonl').open('a', encoding='utf-8') as handle:
-        handle.write(json.dumps(record, sort_keys=True) + '\n')
+    association = _event_json(attempt / 'jobs-association.json')
+    if association.get('schema') != 2 or association.get('attempt_directory') != str(attempt):
+        raise ValueError('Runner events require this exact schema-2 prepared attempt')
+    projection = None
     if kind == 'validation_passed':
-        plan = read_json(Path(association['prepared_path']))
-        result_path = Path(plan['result_path'])
-        result = read_json(result_path)
-        valid = result.get('validation_status') == 'PASSED' if plan['profile'] == 'IFCT' else result.get('scientific', {}).get('status') == 'VALID'
-        if not valid:
-            raise ValueError('Existing finalizer did not record scientific validation')
-        # This compact projection is written only after the established validator.
-        # The observer reports it as validator evidence, never performs finalization.
-        native_path = Path(next(source['path'] for source in plan['progress_sources'] if source['role'] == 'multiwfn_session'))
-        native = native_path.stat()
-        projection = {**association, 'kind': 'validator_record', 'status': 'PASSED',
-                      'native_path': str(native_path), 'native_identity': [native.st_dev, native.st_ino],
-                      'native_file_version': [native.st_size, native.st_mtime_ns, native.st_ctime_ns],
-                      'result_path': str(result_path), 'result_sha256': file_hash(result_path),
-                      'expected_roles': [o['role'] for o in plan['expected_outputs']],
-                      'source_target_id': plan['source_target_id'], 'source_attempt_id': plan['source_attempt_id']}
-        with (attempt / 'jobs-validation.jsonl').open('x', encoding='utf-8') as handle:
-            handle.write(json.dumps(projection, sort_keys=True) + '\n')
+        if (attempt / 'jobs-validation.jsonl').exists():
+            raise ValueError('Validator evidence already exists; never overwrite it')
+        # Verify the established finalizer result before publishing a success event.
+        projection = _validator_projection(attempt, association)
+    fd = os.open(attempt / 'jobs-events.jsonl', os.O_RDWR | os.O_APPEND | os.O_NONBLOCK | getattr(os, 'O_NOFOLLOW', 0))
+    with os.fdopen(fd, 'r+b') as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        info = os.fstat(stream.fileno())
+        identity = [info.st_dev, info.st_ino]
+        if not stat.S_ISREG(info.st_mode) or identity != association.get('events_identity'):
+            raise ValueError('Runner event source identity changed')
+        if info.st_size > MAX_EVENT_BYTES:
+            raise ValueError('Runner event stream exceeds its bound')
+        data = stream.read(MAX_EVENT_BYTES + 1)
+        cursor = _event_json(attempt / 'jobs-events-cursor.json', limit=4096)
+        if (cursor.get('event_source_identity') != identity or cursor.get('size') != len(data)
+                or cursor.get('sha256') != hashlib.sha256(data).hexdigest()):
+            raise ValueError('Runner event stream changed or was truncated')
+        records = [json.loads(line) for line in data.splitlines()]
+        if cursor.get('sequence') != len(records):
+            raise ValueError('Runner event sequence checkpoint differs')
+        for sequence, record in enumerate(records, 1):
+            if (not isinstance(record, dict) or record.get('sequence') != sequence
+                    or record.get('event_source_identity') != identity
+                    or any(record.get(key) != item for key, item in association.items())):
+                raise ValueError('Runner event sequence or association changed')
+        if kind == 'prepared' and records or kind != 'prepared' and not records:
+            raise ValueError('Runner event stream must begin with one prepared event')
+        if records and records[-1].get('kind') not in RUNNER_EVENT_PREDECESSORS[kind]:
+            raise ValueError('Runner lifecycle boundary is out of order or already recorded')
+        if kind in {'child_launched', 'process_exited'}:
+            if not isinstance(value, (str, int)) or isinstance(value, bool):
+                raise ValueError('Runner child/process evidence requires an integer')
+            parsed = int(value)
+            if (kind == 'child_launched' and parsed < 1) or (kind == 'process_exited' and not 0 <= parsed <= 255):
+                raise ValueError('Runner child/process evidence is outside its valid range')
+        if any(record.get('kind') == kind for record in records):
+            raise ValueError('Runner lifecycle boundary already recorded')
+        if any(record.get('kind') in {'validation_passed', 'validation_failed'} for record in records):
+            raise ValueError('Runner event stream is already terminal')
+        sequence = len(records) + 1
+        record = {**association, 'sequence': sequence, 'event_source_identity': identity,
+                  'kind': kind, 'time': datetime.now(timezone.utc).isoformat(), 'value': value}
+        encoded = (json.dumps(record, sort_keys=True) + '\n').encode()
+        if len(data) + len(encoded) > MAX_EVENT_BYTES:
+            raise ValueError('Runner event stream exceeds its bound')
+        stream.write(encoded)
+        stream.flush()
+        atomic_write_json(attempt / 'jobs-events-cursor.json',
+            {'sequence': sequence, 'size': len(data) + len(encoded),
+             'sha256': hashlib.sha256(data + encoded).hexdigest(), 'event_source_identity': identity})
+        if projection is not None:
+            projection.update(sequence=sequence, event_source_identity=identity)
+            with (attempt / 'jobs-validation.jsonl').open('x', encoding='utf-8') as handle:
+                handle.write(json.dumps(projection, sort_keys=True) + '\n')
 
 
 def main():

@@ -134,6 +134,19 @@ class CardFrameTests(unittest.TestCase):
             self.assertIn(value, text)
         self.assertNotIn('OUTCAR', text)
 
+    def test_stage_only_card_ages_new_evidence_instead_of_poll_time(self):
+        cell = lambda text: CardCell(kind='text', text=text)
+        snapshot = ProgressSnapshot(RunContext('stage-frame', 'FICTIONAL'), 'synthetic',
+            card_groups=(CardGroup('STAGE', ((cell('Native: input loaded'),),)),),
+            events=(ProgressEvent('loaded', 'native-stage', None, 1),),
+            read_health='OK', last_new_evidence_at=100, last_success_at=112)
+        text = self.render(snapshot, width=73, max_lines=5)
+        self.assertIn('data 12s ago', text)
+        later = replace(snapshot, last_success_at=130)
+        self.assertIn('data 30s ago', progress_text(later, framed=True, width=73, now=130))
+        empty = replace(snapshot, events=(), last_new_evidence_at=None)
+        self.assertNotIn('data ', self.render(empty, width=73, max_lines=5))
+
     def test_progressive_padding_separator_simplification_and_narrow_fallback(self):
         snapshot = example()
         padded = self.render(snapshot, width=95)

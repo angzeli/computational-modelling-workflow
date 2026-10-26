@@ -159,7 +159,7 @@ def verification_summary(snapshot, *, width, now, compact=False):
         # Other adapters retain generic observation wording without VASP assumptions.
         parts.append('source observation')
         stamps = [item.latest.observed_at for item in snapshot.metrics if item.latest.observed_at is not None]
-        stamp = max(stamps) if stamps else None
+        stamp = max(stamps) if stamps else snapshot.last_new_evidence_at if snapshot.events else None
     if not conflicts and (snapshot.context.source_conflicts or snapshot.status in ('SOURCE_CONFLICT', 'SOURCE_UNRESOLVED', 'UNSUPPORTED')):
         parts.insert(0, snapshot.status if snapshot.status != 'OBSERVED' else 'SOURCE_CONFLICT')
     if snapshot.read_health not in ('OK', 'PENDING'):

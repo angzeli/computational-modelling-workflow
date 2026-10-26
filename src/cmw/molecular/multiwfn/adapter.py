@@ -11,6 +11,18 @@ from cmw.core.provenance import file_hash
 
 MULTIWFN_ADAPTER_SCHEMA_VERSION = 1
 
+# Schema-2 runner evidence has one pass through the real foreground lifecycle.
+# A failed launch, or unavailable launch telemetry, may have no child event.
+RUNNER_EVENT_PREDECESSORS = {
+    'prepared': frozenset(),
+    'launch_requested': frozenset({'prepared'}),
+    'child_launched': frozenset({'launch_requested'}),
+    'process_exited': frozenset({'launch_requested', 'child_launched'}),
+    'validation_started': frozenset({'process_exited'}),
+    'validation_passed': frozenset({'validation_started'}),
+    'validation_failed': frozenset({'validation_started'}),
+}
+
 
 def _relative_path(value: str, *, name: str) -> str:
     path = Path(value)

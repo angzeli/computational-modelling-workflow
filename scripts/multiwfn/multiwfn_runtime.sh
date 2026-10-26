@@ -144,6 +144,9 @@ multiwfn_runtime_launch() {
   Multiwfnpath="$alias_path" OMP_NUM_THREADS="$MULTIWFN_NTHREADS" \
     "$MULTIWFN_EXE" "$@" <&9 &
   child_pid=$!
+  # Telemetry failure must never bypass drainage of the child we just launched.
+  multiwfn_jobs_event "$PWD" child_launched "$child_pid" || \
+    printf 'CMW runner launch evidence could not be recorded; child supervision continues\n' >&2
   # A trap can run between launch and assigning $!.
   if ((interrupted != 0)); then forward_multiwfn_signal "$interrupt_signal" "$interrupted"; fi
   # A signal just before a blocking wait would otherwise strand a resistant child.

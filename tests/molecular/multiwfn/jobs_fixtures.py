@@ -59,7 +59,14 @@ Apparent local excitation percentage, LE(%): 94.960 %'''
             "print('Loaded '+sys.argv[1]+' successfully!',flush=True)\ntime.sleep(float(os.environ.get('CMW_TEST_PAUSE','0.5')))\n"
             f'print({output!r},flush=True)\n')
     else:
-        shutil.copyfile(ROOT / 'tests/fixtures/fake_multiwfn.py', executable)
+        content = (ROOT / 'tests/fixtures/fake_multiwfn.py').read_text()
+        content = content.replace('commands = sys.stdin.read()',
+            "print('Version 3.8', flush=True)\n"
+            "print('Number of parallel threads: ' + os.environ['OMP_NUM_THREADS'], flush=True)\n"
+            "print('Loaded ' + sys.argv[1] + ' successfully!', flush=True)\n"
+            "time.sleep(float(os.environ.get('CMW_TEST_PAUSE', '0.5')))\n"
+            "commands = sys.stdin.read()")
+        executable.write_text(content)
     executable.chmod(0o755)
     science = {'profile': profile, 'source_result': str(source)}
     if profile in {'FMO', 'ESP'}:

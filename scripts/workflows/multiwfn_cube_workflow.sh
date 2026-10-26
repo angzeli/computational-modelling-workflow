@@ -222,7 +222,10 @@ multiwfn_cube_main() {
     return "$process_status"
   fi
   "$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli normalize \
-    --target "$target_path" --attempt-directory "$attempt_directory" >/dev/null
+    --target "$target_path" --attempt-directory "$attempt_directory" >/dev/null || {
+      multiwfn_jobs_event "$attempt_directory" validation_failed
+      return 70
+    }
   local final_json
   final_json=$("$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli finalize \
     --target "$target_path" --runtime "$runtime_path" --menu "$menu_path" \

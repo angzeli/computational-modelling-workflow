@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+
+import psutil
 from unittest.mock import patch
 
 from cmw.molecular.multiwfn.jobs import check, prepare, verify_prepared
@@ -34,14 +36,56 @@ class JobsProfileTests(unittest.TestCase):
                 spec, plan = self.prepared(profile)
                 self.assertEqual(plan['engine'], 'Multiwfn')
                 self.assertEqual(len(plan['progress_sources']), 4)
+                association = json.loads((Path(plan['attempt_directory']) / 'jobs-association.json').read_text())
+                self.assertEqual(association['schema'], 2)
+                self.assertEqual(association['request_id'], spec['request_id'])
+                self.assertEqual(association['threads'], spec['resources']['cpus'])
+                if profile in {'IGMH', 'IFCT'}:
+                    self.assertEqual(association['fragment_labels'], ['A', 'B'])
+                    self.assertEqual(association['fragment_counts'], [3, 2])
+                if profile == 'IFCT':
+                    self.assertEqual(association['spin_manifold'], 'singlet')
+                    self.assertEqual(association['state_index'], 1)
                 self.assertFalse(Path(plan['progress_sources'][0]['path']).exists())
                 self.assertEqual(Path(spec['runtime']['settings_source']).read_text(), 'nthreads= 8\n')
                 self.assertIn('nthreads= 2', Path(plan['runtime']['settings_path']).read_text())
                 self.assertFalse(plan['suspension']['eligible'])
                 verify_prepared(Path(plan['prepared_path']))
 
-    def test_real_wrappers_and_validators_cube_and_ifct(self):
-        for profile in ('FMO', 'IFCT'):
+    def test_all_profiles_pending_and_unsupported_native_card(self):
+        for profile in ('FMO', 'ESP', 'IGMH', 'IFCT'):
+            with self.subTest(profile=profile):
+                _, plan = self.prepared(profile)
+                context = RunContext(f'pending-{profile}', 'Multiwfn',
+                    tuple(SourceDescriptor(**source) for source in plan['progress_sources']),
+                    stage=profile, attempt_id=f'jobs-{profile}')
+                service = ObservationService()
+                self.addCleanup(service.close)
+                pending = service.poll(context)
+                self.assertEqual(pending.scientific_validation, 'not-assessed')
+                self.assertEqual([group.label for group in pending.card_groups],
+                    ['ANALYSIS', 'STAGE', 'OUTPUT'])
+                Path(plan['native_log']).write_text('Version 9.9\n')
+                unsupported = service.poll(context)
+                # A known prepared version makes the unknown dialect a source conflict.
+                self.assertEqual(unsupported.status, 'SOURCE_CONFLICT')
+                self.assertTrue(any('Unsupported native Multiwfn version' in message
+                    for message in unsupported.messages))
+                self.assertEqual(unsupported.scientific_validation, 'not-assessed')
+                self.assertFalse(unsupported.metrics)
+                self.assertEqual([group.label for group in unsupported.card_groups],
+                    ['ANALYSIS', 'STAGE', 'OUTPUT'])
+                explicit = RunContext(f'explicit-{profile}', 'Multiwfn',
+                    (SourceDescriptor('multiwfn_session', plan['native_log'], stage=profile),),
+                    stage=profile, attempt_id=f'explicit-jobs-{profile}')
+                unsupported_only = service.poll(explicit)
+                self.assertEqual(unsupported_only.status, 'UNSUPPORTED')
+                self.assertEqual(unsupported_only.scientific_validation, 'not-assessed')
+                self.assertEqual([group.label for group in unsupported_only.card_groups],
+                    ['ANALYSIS', 'STAGE', 'OUTPUT'])
+
+    def test_real_wrappers_and_validators_all_four_profiles(self):
+        for profile in ('FMO', 'ESP', 'IGMH', 'IFCT'):
             with self.subTest(profile=profile):
                 spec, plan = self.prepared(profile)
                 context = RunContext(f'binding-{profile}', 'Multiwfn',
@@ -50,11 +94,17 @@ class JobsProfileTests(unittest.TestCase):
                 service = ObservationService(); self.addCleanup(service.close)
                 before = service.poll(context)
                 self.assertEqual(before.scientific_validation, 'not-assessed')
+                self.assertEqual([group.label for group in before.card_groups], ['ANALYSIS', 'STAGE', 'OUTPUT'])
                 result = subprocess.run(plan['argv'], cwd=plan['cwd'], env={**os.environ, **plan['env'], 'PYTHONDONTWRITEBYTECODE': '1'}, capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 after = service.poll(context)
                 self.assertEqual(after.scientific_validation, 'validator-recorded-passed', after)
                 self.assertTrue(Path(plan['result_path']).is_file())
+                records = [json.loads(line) for line in (Path(plan['attempt_directory']) / 'jobs-events.jsonl').read_text().splitlines()]
+                self.assertEqual([record['sequence'] for record in records], list(range(1, 7)))
+                self.assertEqual([record['kind'] for record in records], ['prepared', 'launch_requested', 'child_launched', 'process_exited', 'validation_started', 'validation_passed'])
+                child = next(record for record in records if record['kind'] == 'child_launched')
+                self.assertFalse(psutil.pid_exists(int(child['value'])), 'Synthetic engine child must drain before wrapper exit')
                 with self.assertRaisesRegex(ValueError, 'already executed'):
                     verify_prepared(Path(plan['prepared_path']))
                 history = service.history(context)
@@ -82,19 +132,16 @@ class JobsProfileTests(unittest.TestCase):
                     self.assertEqual(context.binding_status, 'BOUND', context)
                     self.assertTrue(any(s.role == 'multiwfn_session' for s in context.sources))
                     self.assertEqual(submit(store, spec)['job']['attempt_id'], job['attempt_id'])
-                    if profile not in ('FMO', 'IFCT'):
-                        continue
                     service = ObservationService()
                     try:
                         self.assertEqual(service.poll(context).scientific_validation, 'not-assessed')
                         store.change(job['id'], 'release')
                         start(store)
-                        if profile == 'IFCT':
-                            native = Path(next(s.path for s in context.sources if s.role == 'multiwfn_session'))
-                            wait_for(lambda: native.exists() and 'Version 2026.7.15' in native.read_text(), timeout=20)
-                            live = service.poll(context)
-                            self.assertTrue(any(event.kind == 'native' for event in live.events))
-                            self.assertEqual(live.scientific_validation, 'not-assessed')
+                        native = Path(next(s.path for s in context.sources if s.role == 'multiwfn_session'))
+                        wait_for(lambda: native.exists() and 'Version ' in native.read_text(), timeout=20)
+                        live = service.poll(context)
+                        self.assertTrue(any(event.kind == 'native' for event in live.events))
+                        self.assertEqual(live.scientific_validation, 'not-assessed')
                         final = wait_for(lambda: next((j for j in store.snapshot()['jobs'] if j['status'] in {'Done', 'Fail'}), None), timeout=30)
                         self.assertEqual(final['status'], 'Done', Path(final['logs']['stderr']).read_text())
                         snapshot = service.poll(context)
