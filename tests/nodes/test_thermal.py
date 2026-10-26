@@ -138,6 +138,7 @@ class ThermalWireTests(unittest.TestCase):
 
     def test_backend_close_reaps_only_its_sampler_and_observer(self):
         backend = object.__new__(LocalBackend)
+        backend._review_service = None
         backend._sampler, backend.observer = Mock(), Mock()
         backend._sampler_lock = threading.Lock()
         backend._sessions, backend._validations = {}, {}
@@ -147,6 +148,7 @@ class ThermalWireTests(unittest.TestCase):
 
     def test_backend_close_serializes_first_sampler_creation(self):
         backend = object.__new__(LocalBackend)
+        backend._review_service = None
         backend._closed = False
         backend.config_root = '/unused-test-only'
         backend._sampler_lock = threading.Lock()
@@ -166,12 +168,17 @@ class ThermalWireTests(unittest.TestCase):
                 backend._status({})
             except Exception as exc:
                 errors.append(exc)
+        def close():
+            try:
+                backend.close()
+            except Exception as exc:
+                errors.append(exc)
         state = {'jobs': [], 'controller': {}}
         with patch('cmw.nodes.thermal.configured_provider') as provider, \
                 patch('cmw.jobs.telemetry.Sampler', side_effect=make_sampler), \
                 patch('cmw.jobs.activity.project', return_value=state):
             worker = threading.Thread(target=status)
-            closer = threading.Thread(target=backend.close)
+            closer = threading.Thread(target=close)
             worker.start()
             self.assertTrue(created.wait(2))
             closer.start()
