@@ -172,6 +172,7 @@ class SuccessorServiceTests(unittest.TestCase):
         from cmw.core.provenance import stable_hash
         from cmw.periodic.vasp.results import inspect_result
         from cmw.periodic.vasp.result_finalization import finalize_result
+        from tests.periodic.vasp.handoff_case import wait_for_fixture_sources
         from tests.periodic.vasp.test_result_policy import policy
         fixture = make_vasp_fixture(self.fixture['root'] / ('accepted-' + uuid4().hex), ionic_stop=True)
         snapshot = fixture['root'] / 'saved-native-snapshot.json'
@@ -191,12 +192,15 @@ class SuccessorServiceTests(unittest.TestCase):
                                       'jobs_receipt': file_identity(fixture['receipt'])['sha256']}}}
         binding_path = fixture['root'] / 'explicit-binding.json'
         binding_path.write_text(json.dumps(binding))
+        wait_for_fixture_sources([*fixture['run'].iterdir(), snapshot, policy_path,
+                                  binding_path, fixture['receipt']])
         finalized = finalize_result(fixture['run'], policy_path=policy_path, spec_path=binding_path,
                                     scratch_root=fixture['root'] / 'scratch', record_directory='accepted-record')
         spec = fixture['spec']
         spec['adapter'].update(source_mode='accepted', accepted_record=finalized['publication']['record_path'],
                                accepted_artifact_id=finalized['artifact_bundle']['artifacts'][0]['artifact_id'])
         fixture['spec_path'].write_text(json.dumps(spec))
+        wait_for_fixture_sources([fixture['spec_path'], Path(finalized['publication']['record_path'])])
         service = SuccessorService(fixture['store'])
         plan = service.plan(fixture['job']['id'], str(fixture['spec_path']), fixture['job']['attempt_id'])
         self.assertEqual(plan.status, 'READY', plan.payload_json)
