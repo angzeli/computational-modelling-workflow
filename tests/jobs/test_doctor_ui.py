@@ -191,8 +191,10 @@ class DoctorUiTests(unittest.IsolatedAsyncioTestCase):
                 await self.until(pilot, lambda: not app.navigation_pending())
                 for size in SIZES:
                     await pilot.resize_terminal(*size)
-                    await pilot.pause()
+                    app.render_state()
                     base = app.screen
+                    # Measure the baseline after the resized card and table settle.
+                    await self.until(pilot, lambda: app.viewport == size and not app.navigation_pending(base))
                     table = app.query_one('#table', DataTable)
                     table.scroll_to(y=max(0, table.cursor_row - 2), animate=False, immediate=True)
                     await pilot.pause()

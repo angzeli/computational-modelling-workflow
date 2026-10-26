@@ -52,7 +52,7 @@ def capture_layout(app, scenario, size, *, output=None, prefix):
     assert card_widget.region.bottom <= app.query_one('#command-bar').region.y, (prefix, scenario, size)
     assert card_widget.size.height >= len(card.splitlines()), (prefix, scenario, size, card)
     assert app.query_one('#command-bar').region.bottom <= size[1], (prefix, scenario, size)
-    assert 'Files' in text and 'Progress' in text and 'Detac' in text, (prefix, scenario, size, text)
+    assert 'Files' in text and 'Progress' in text and 'detach' in text.casefold(), (prefix, scenario, size, text)
     frame = card.splitlines()[next(i for i, line in enumerate(card.splitlines()) if line.startswith('┌─')):]
     assert len({cell_width(line) for line in frame}) == 1, (prefix, scenario, size, frame)
     if scenario in ('startup', 'empty'):
