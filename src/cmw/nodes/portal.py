@@ -592,8 +592,19 @@ class NodesApp(NavigationApp):
         selected = self.selected()
         if selected:
             owner, job = selected
-            self.push_screen(FrozenText(self.label(owner, job) + '\n' + self.connection_text(owner) + '\n\n' +
-                detail(job) + '\n\n' + machine_detail(self.machine_usage(owner)) + '\n\n' + json.dumps({'target': job['target'], 'revision': job.get('revision')}, indent=2), 'JOB DETAILS · cached node report'))
+            text = (self.label(owner, job) + '\n' + self.connection_text(owner) + '\n\n' +
+                detail(job) + '\n\n' + machine_detail(self.machine_usage(owner)) + '\n\n' +
+                json.dumps({'target': job['target'], 'revision': job.get('revision')}, indent=2))
+            snapshot = self.selected_snapshot(owner, job)
+            if snapshot is not None:
+                cache = self.lanes[owner].cache[target_key(job['target'])]
+                entry, received = cache['progress']
+                endpoint_now = entry['observed_at'] + max(0., self.clock() - received)
+                text += '\n\nSCIENTIFIC EVIDENCE — parser success does not verify execution\n'
+                if cache.get('progress.error'):
+                    text += 'Scientific read unavailable; earlier cached evidence. ' + cache['progress.error'] + '\n'
+                text += progress_text(snapshot, detailed=True, now=endpoint_now)
+            self.push_screen(FrozenText(text, 'JOB DETAILS · cached node report'))
 
     def action_scheduling(self):
         selected = self.selected()

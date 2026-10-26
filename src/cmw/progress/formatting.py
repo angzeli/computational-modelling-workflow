@@ -294,6 +294,57 @@ def _card_text(snapshot, *, compact, width, now, max_lines):
     return '\n'.join(fit_text(line, width) for line in lines[:-1][:limit-1] + [lines[-1]])
 
 
+def source_action(snapshot):
+    """Source editing follows declarations/identity, never parser availability."""
+    if (snapshot.context.binding_status == 'SOURCE_CONFLICT' or snapshot.context.source_conflicts
+            or any(source.health == 'BINDING_CHANGED' for source in snapshot.sources)):
+        return '[S] Review Sources'
+    if snapshot.context.binding_status == 'SOURCE_UNRESOLVED':
+        return '[S] Configure Sources'
+    if snapshot.status == snapshot.read_health == 'SOURCE_UNRESOLVED' and not snapshot.sources:
+        return '[S] Review Sources' if snapshot.context.sources else '[S] Configure Sources'
+    return ''
+
+
+def observation_problem(snapshot):
+    """Summarize existing evidence domains without interpreting native science."""
+    if snapshot.context.binding_status == 'SOURCE_CONFLICT' or snapshot.context.source_conflicts:
+        return 'Source conflict'
+    if snapshot.context.binding_status == 'SOURCE_UNRESOLVED':
+        return 'Sources unresolved'
+    if any(source.health == 'BINDING_CHANGED' for source in snapshot.sources):
+        return 'Source identity changed'
+    if snapshot.status == snapshot.read_health == 'SOURCE_UNRESOLVED' and not snapshot.sources:
+        return 'Sources unresolved'
+    if snapshot.status == 'SOURCE_CONFLICT':
+        return 'Source conflict'
+    if snapshot.read_health in {'READ_ERROR', 'ERROR', 'ADAPTER_ERROR', 'CLOSED', 'RETIRED'}:
+        return 'Reader unavailable'
+    required = {source.role for source in snapshot.context.sources if not source.optional}
+    missing = [source.role for source in snapshot.sources
+               if source.role in required and source.health in {'MISSING', 'VOLUME_UNAVAILABLE'}]
+    if missing:
+        return 'Waiting for output: ' + '/'.join(missing)
+    unavailable = [source.role for source in snapshot.sources
+                   if source.role in required and source.health not in {'OK', 'PENDING', 'MALFORMED'}]
+    if unavailable or snapshot.read_health in {'UNAVAILABLE', 'PARTIAL'}:
+        return 'Reader unavailable' + (': ' + '/'.join(unavailable) if unavailable else '')
+    if (not snapshot.metrics or snapshot.status == 'UNSUPPORTED') and any(
+            item.status in {'UNSUPPORTED', 'MALFORMED'} for item in snapshot.source_diagnostics):
+        return 'Native grammar unsupported'
+    if snapshot.status == 'UNSUPPORTED':
+        return 'Scientific scope unsupported'
+    if (snapshot.completeness == 'CATCHING_UP' or snapshot.read_health == 'BUSY'
+            or any(source.has_more for source in snapshot.sources)):
+        return 'Reader catching up'
+    if snapshot.status == 'SOURCE_UNRESOLVED':
+        return 'Cross-file correspondence pending'
+    if not snapshot.metrics and any(cell.kind == 'metric'
+            for group in snapshot.card_groups for row in group.rows for cell in row):
+        return 'Waiting for output: complete observations pending'
+    return ''
+
+
 def _unresolved_card(snapshot, *, width, max_lines):
     reasons = tuple(dict.fromkeys((*snapshot.messages, *snapshot.context.limitations, *snapshot.limitations)))
     # The association qualification stays in JSON and Details; reserve the card
@@ -303,11 +354,10 @@ def _unresolved_card(snapshot, *, width, max_lines):
     limit = max(3, max_lines)
     available = limit - 2
     shown = list(reasons[:available])
-    heading = 'Scientific: ' + snapshot.context.binding_status
+    heading = 'Scientific: ' + (observation_problem(snapshot) or snapshot.status)
     if len(reasons) > available:
         heading += f' (+{len(reasons) - available}; Enter details)'
-    action = ('[S] Review Sources' if snapshot.context.binding_status == 'SOURCE_CONFLICT'
-              else '[S] Configure Sources') + ' · Enter details'
+    action = ' · '.join(filter(None, (source_action(snapshot), 'Enter details')))
     lines = [heading, *shown, action]
     return '\n'.join(fit_text(line, width) for line in lines)
 
@@ -321,7 +371,7 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
     unresolved = snapshot.status in {'SOURCE_UNRESOLVED', 'SOURCE_CONFLICT'}
     if not detailed:
         limit = max_lines or (3 if width < 54 else 6 if compact else 11)
-        if unresolved and not snapshot.metrics:
+        if unresolved and not snapshot.metrics and not snapshot.card_groups:
             return _unresolved_card(snapshot, width=width, max_lines=limit)
         if snapshot.card_groups:
             from .card import card_text
@@ -351,7 +401,7 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
     if snapshot.completed_durations:
         lines.append('Completed evaluation timing · latest ← previous: ' + duration_pair(snapshot.completed_durations))
     lines.extend(dict.fromkeys(snapshot.messages))
-    if unresolved:
+    if source_action(snapshot):
         lines.append('Action: [S] Sources in the dashboard, or cmw jobs --state STATE progress JOB --source ROLE=/absolute/FILE. '
                      'Use the same Jobs state and attempt. Explicit sources apply only to that invocation; '
                      'they do not update the dashboard binding.')

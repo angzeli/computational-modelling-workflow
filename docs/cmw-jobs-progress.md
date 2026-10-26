@@ -43,6 +43,18 @@ label includes effective positive NSW when available, such as `Eval 7/20`; missi
 retains its evaluation (for example `@E6` while evaluation 7 is current), and a
 static calculation has no ionic force stopping target.
 
+VASP retains these groups for empty, pending and diagnostic observations, with
+unavailable values shown as `—`. Before any reader can run, its registered
+read-free descriptors provide the same skeleton without inventing settings or
+native context. `BOUND` describes a declaration only. The footer distinguishes
+missing declarations, source conflicts, waiting for declared output, reader
+failures/catch-up, unsupported grammar and pending correspondence. A source
+configuration action is shown only for a missing declaration or required binding
+review; a native evidence conflict directs the user to Details. Cached values
+remain qualified and conflict-invalidated values are omitted from current cells.
+Full resolver/parser diagnostics remain in Details and Copy/JSON, including a
+superseded automatic-route warning when compatible explicit declarations suffice.
+
 The card preserves units, source qualification, checked frontier and scientific-data
 age. Details/History retain previous values, trends, timing, rms(c), source positions
 and full warnings. Missing current rms(c) is absent; an older value cannot fill it.
@@ -309,7 +321,9 @@ releases contexts no longer displayed; `close` releases the client's readers.
 Neither affects execution. No durable history database or daemon is created.
 
 The explicit lazy registry accepts
-`register_adapter(engine, factory, sources=(), source_roles=())`.
+`register_adapter(engine, factory, sources=(), source_roles=(), card_groups=None)`.
+The optional `card_groups(snapshot)` callback is read-free and supplies descriptors
+for pre-adapter states; it must not infer settings or create readers.
 A factory receives `RunContext` and returns an object implementing
 `update(tuple[SourceUpdate, ...], now) -> ProgressSnapshot`. Source updates contain
 complete lines, bounded byte/line evidence, file identity/generation, reset reason,

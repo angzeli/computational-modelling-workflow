@@ -66,11 +66,15 @@ class ObservationService:
         self._sequence = 0
         self._closed = False
 
-    @staticmethod
-    def _empty(context, status, message):
-        return ProgressSnapshot(context, adapter=context.engine, status=status,
-                                phase=message, read_health=status,
-                                messages=(message,), limitations=tuple(dict.fromkeys(context.limitations)))
+    def _empty(self, context, status, message):
+        snapshot = ProgressSnapshot(context, adapter=context.engine, status=status,
+                                    phase=message, read_health=status,
+                                    messages=(message,), limitations=tuple(dict.fromkeys(context.limitations)))
+        registration = self.registration_getter(context.engine)
+        if registration and registration.card_groups and status != 'ADAPTER_UNAVAILABLE':
+            # Descriptors are read-free; unresolved declarations must not start readers.
+            snapshot = replace(snapshot, card_groups=registration.card_groups(snapshot))
+        return snapshot
 
     @staticmethod
     def _close_observation(observation):
@@ -80,10 +84,9 @@ class ObservationService:
             ObservationService._close_observation(observation.replay.observation)
             observation.replay = None
 
-    @staticmethod
-    def _unavailable(context, previous, status, message):
+    def _unavailable(self, context, previous, status, message):
         if previous is None:
-            return ObservationService._empty(context, status, message)
+            return self._empty(context, status, message)
         return replace(previous, read_health=status,
                        messages=tuple(dict.fromkeys((*previous.messages, message)))[-32:])
 

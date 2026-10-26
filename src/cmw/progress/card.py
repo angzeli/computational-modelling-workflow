@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import math
 
-from .formatting import age_text, cell_width, context_text, fit_text, value_text
+from .formatting import (age_text, cell_width, context_text, fit_text,
+                         observation_problem, source_action, value_text)
 
 
 def _metric(cell, snapshot):
     by_id = {item.latest.semantic_id: item.latest for item in snapshot.metrics}
-    return next((by_id[key] for key in cell.metric_ids if key in by_id), None)
+    metric = next((by_id[key] for key in cell.metric_ids if key in by_id), None)
+    # Do not substitute another scope beneath a conflicted primary's label.
+    return metric if metric is None or metric.qualification != 'conflict' else None
 
 
 def _reference(cell, metric):
@@ -101,6 +104,19 @@ def _cell(cell, snapshot, width, *, main_card=False):
 
 def verification_summary(snapshot, *, width, now, compact=False):
     """Keep actual rows, correspondence and observation timestamps independent."""
+    problem = observation_problem(snapshot)
+    action = source_action(snapshot)
+    if problem and (not snapshot.metrics or action or not snapshot.verification):
+        parts = [problem]
+        if snapshot.status == 'UNSUPPORTED' and 'unsupported' not in problem:
+            parts.append('UNSUPPORTED')
+        if snapshot.read_health not in {'OK', 'PENDING', snapshot.status}:
+            parts.append(snapshot.read_health)
+        if snapshot.metrics and (snapshot.read_health not in {'OK', 'PENDING'}
+                                 or any(item.status == 'UNAVAILABLE' for item in snapshot.source_diagnostics)):
+            parts.append('cached evidence')
+        parts.append(action or 'Enter Details')
+        return fit_text(' · '.join(parts), width)
     conflicts = [item for item in snapshot.verification if item.status == 'CONFLICT']
     primary = next((item for item in snapshot.verification if item.domain == 'electronic-row'), None)
     diagnostics = {item.role: item for item in snapshot.source_diagnostics}
@@ -231,7 +247,17 @@ def card_text(snapshot, *, width, now, max_lines=None, framed=False):
         notices.append('* provisional settings')
     if any('UNCERTAIN' in (item.latest.relation or '') for item in snapshot.metrics):
         notices.append('? uncertain')
-    heading = ' · '.join(('SCIENTIFIC', *notices))
+    problem = observation_problem(snapshot)
+    if problem and not notices:
+        # The footer carries the domain/reason; the title remains short enough
+        # for the existing frame even when sources cannot yet supply metrics.
+        notices.append('Source conflict' if 'conflict' in problem.lower() else
+                       'cached' if snapshot.metrics and snapshot.read_health not in {'OK', 'PENDING'} else
+                       'pending' if 'pending' in problem or problem.startswith('Waiting') else
+                       'unavailable' if 'unavailable' in problem else
+                       'unsupported' if 'unsupported' in problem else 'source review' if source_action(snapshot) else 'catching up')
+    cached = bool(snapshot.metrics and snapshot.read_health not in {'OK', 'PENDING'})
+    heading = ' · '.join(dict.fromkeys(('SCIENTIFIC', *(['cached'] if cached else []), *notices)))
     if framed:
         panel = _frame(snapshot, width=width, now=now, heading=heading, max_lines=max_lines)
         if panel is not None:
