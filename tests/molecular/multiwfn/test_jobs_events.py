@@ -104,7 +104,8 @@ class RunnerEventTests(unittest.TestCase):
 
     def test_launch_event_failure_still_drains_owned_child(self):
         _, plan, attempt = self.prepared()
-        runtime_helper = Path(__file__).resolve().parents[3] / 'scripts/multiwfn/multiwfn_runtime.sh'
+        from cmw.jobs.runner_assets import runner_path
+        runtime_helper = runner_path('multiwfn/run_ifct.sh').with_name('multiwfn_runtime.sh')
         command = 'source "$1"; multiwfn_runtime_load "$2"; multiwfn_jobs_event() { return 1; }; cd "$3"; multiwfn_runtime_launch "$4" < menu.in > multiwfn.log'
         result = subprocess.run(['/bin/bash', '-e', '-c', command, 'runner-test', str(runtime_helper),
             str(attempt / 'runtime.json'), str(attempt), plan['source_wavefunction']],

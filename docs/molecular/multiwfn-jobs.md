@@ -119,11 +119,35 @@ The existing Scientific frame uses adapter-defined **ANALYSIS**, **STAGE** and
 **OUTPUT** groups. Native version/source-load markers and the demonstrated IFCT
 state/matrix markers remain separate from runner actions. A launch-request event
 says only that the wrapper is about to call its existing foreground launch helper.
+A child-launched event is emitted after the helper forks its actual child; it is
+process evidence, not evidence that a native analysis operation has completed.
 No menu count, CPU usage, file age or log pause becomes a percentage, SCF count,
 ETA, completion or stall diagnosis. Partial lines remain pending; replacement,
 truncation, malformed complete records and incompatible source identities retain
 qualified observation states. History, source selection, Files and Copy use the
 same generic observation infrastructure.
+
+New preparations pin a schema-2 lifecycle stream UUID, generation, file identity,
+request ID, scientific attempt and source identities, source artifact hashes,
+menu/settings and declared scope. The Jobs attempt is associated by its existing
+immutable stored plan; the request ID is not presented as the Jobs attempt ID.
+Lifecycle records have contiguous sequences. The bounded writer refuses stream
+replacement, truncation, repeated or out-of-order boundaries. The observer retains
+native and runner evidence independently and fails closed on conflicting streams.
+A legacy schema-1 preparation remains observable with an explicit legacy
+qualification; its unsequenced validator record is historical evidence, not a
+current sequenced validation claim. Existing prepared plans retain their original
+pinned runtime and runner assets; replacing those assets fails pre-execution
+identity checks. New schema-2 execution requires explicit review and preparation
+of a new attempt, with no historical metadata backfill.
+
+The compact card remains three rows. ANALYSIS carries the supported profile and
+declared state/fragment/thread scope; STAGE separates native evidence from runner
+lifecycle; OUTPUT keeps expected roles separate from pending, unvalidated or
+validator-recorded status. Details and History retain full scope and provenance.
+The same read-free descriptors retain the frame while sources are pending,
+unavailable, unsupported or conflicting. The evidence age changes only when new
+evidence is observed, rather than on each successful poll.
 
 The established cube or IFCT finalizer runs in its existing wrapper after the
 child exits. Its compact validator projection names the result record and digest;

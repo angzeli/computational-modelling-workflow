@@ -68,15 +68,23 @@ def _fixture(root, profile):
         assert marker in original
         native_header="\nprint('Version 3.8',flush=True)\nprint('Loaded '+sys.argv[1]+' successfully!',flush=True)\n"
         original=original.replace(marker,marker+native_header+gate)
+    origin_probe=('import cmw as _cmw,json as _json,sys as _sys\nfrom pathlib import Path as _ProbePath\n'
+                  +f'_ProbePath({str(root / "engine-package-origin.json")!r}).write_text(_json.dumps({{"cmw":_cmw.__file__,"python":_sys.executable}}))\n')
+    if 'from __future__ import annotations\n' in original:
+        original=original.replace('from __future__ import annotations\n','from __future__ import annotations\n'+origin_probe,1)
+    else:
+        original=original.split('\n',1)[0]+'\n'+origin_probe+original.split('\n',1)[1]
     native.write_text(original);spec['runtime']['sha256']=file_hash(native)
-    return storage,spec,{'FMO':'workflows/generate_homo_lumo_cubes.sh','IFCT':'multiwfn/run_ifct.sh'}[profile]
+    return storage,spec,{'FMO':'workflows/generate_homo_lumo_cubes.sh','ESP':'workflows/generate_esp_cubes.sh',
+                         'IGMH':'workflows/generate_igmh_cubes.sh','IFCT':'multiwfn/run_ifct.sh'}[profile]
 
 
-def molecular_surface(root, *, backend_builder=None, cli_runner=None):
+def molecular_surface(root, *, backend_builder=None, cli_runner=None,
+                      profiles=('ORCA', 'FMO', 'IFCT'), multiwfn_progress=False):
     """Actual endpoint -> held engine plan -> owned execution -> progress -> fetch."""
     root=Path(root).resolve();root.mkdir(mode=0o700)
     checks,results,all_owners={},[],[]
-    for profile in ('ORCA','FMO','IFCT'):
+    for profile in profiles:
         case=root/profile;case.mkdir(mode=0o700)
         storage,local_spec,runner=_fixture(case,profile)
         config_root=case/'node'
@@ -105,6 +113,11 @@ def molecular_surface(root, *, backend_builder=None, cli_runner=None):
         else:
             science['source_result']=_reference(config,store,donor,science['source_result'],scientific=True)
             if profile=='IFCT':science['orca_output']=_reference(config,store,donor,science['orca_output'])
+            for field in ('fragments_file','configuration_file'):
+                if field in science:
+                    path=Path(science[field]);relative='inputs/'+path.name
+                    files.append({'source':str(path),'path':relative,'role':'input'})
+                    science[field]={'bundle':relative}
         entry={'transport':'local','config_root':str(config_root),'node_id':config['node_id'],'host_id':config['host_id'],
             'runtime_id':config['runtime']['fingerprint'],'queues':{'research':config['queues']['research']['queue_id']},
             'default_queue':'research','read_only':False}
@@ -126,17 +139,38 @@ def molecular_surface(root, *, backend_builder=None, cli_runner=None):
         def control(action,target=None):
             preview=backend.call('control.preview',{'action':action},target)['result']
             return apply_control(backend,preview,root=frontend)['result']
+        cli_selected=cli_runner is not None and (profile=='ORCA' or multiwfn_progress and profile=='FMO')
         try:
             backend=connect()
-            if cli_runner is not None and profile=='ORCA':
-                cli_runner(entry,case,['check','--spec',str(case/'submission-spec.json'),'--json'],expected=2)
+            if cli_selected:
+                cli_runner(entry,case,['check','--spec',str(case/'submission-spec.json'),'--json'],expected=2 if files else 0)
                 cli_runner(entry,case,['submit','--spec',str(case/'submission-spec.json'),'--preview','--json'])
-            checked=check(backend,spec)['result'];assert checked['status']==('UNASSESSED' if profile=='ORCA' else 'READY'),checked
+            checked=check(backend,spec)['result'];assert checked['status']==('UNASSESSED' if files else 'READY'),checked
             assert not list(storage.glob('cmw-*'))
             checks[profile+'_pure_pretransfer_check']=True
             preview=submit(backend,spec,root=frontend,preview=True)['result']
-            assert preview['preflight']['status']==('UNASSESSED' if profile=='ORCA' else 'READY') and not (case/'started').exists()
-            job=submit(backend,spec,root=frontend)['result']['job']
+            assert preview['preflight']['status']==('UNASSESSED' if files else 'READY') and not (case/'started').exists()
+            if multiwfn_progress:
+                # Lose only the client receipt after the endpoint commits. A retry
+                # must recover its immutable outcome without a second registration.
+                class LoseRegistrationReply:
+                    def __getattr__(self,name):return getattr(backend,name)
+                    def call(self,operation,*args,**kwargs):
+                        result=backend.call(operation,*args,**kwargs)
+                        if operation=='submit':
+                            raise NodeError('OUTCOME_UNKNOWN','Synthetic lost registration response')
+                        return result
+                try:submit(LoseRegistrationReply(),spec,root=frontend)
+                except NodeError as error:assert error.code=='OUTCOME_UNKNOWN',error
+                else:raise AssertionError('Fixture did not lose its registration response')
+                assert len(store.snapshot()['jobs'])==2
+                close();backend=connect()
+                recovered=submit(backend,spec,root=frontend)['result']
+                assert recovered['replayed'] and len(store.snapshot()['jobs'])==2
+                job=recovered['job']
+                checks[profile+'_lost_registration_reply_recovers_exact_attempt']=True
+            else:
+                job=submit(backend,spec,root=frontend)['result']['job']
             assert job['engine']==local_spec['engine'] and job['status']=='Hold' and job['display_id']=='J2.1'
             target={'node_id':entry['node_id'],'queue_id':entry['queues']['research'],'job_id':job['id'],'attempt_id':job['attempt_id']}
             replay=submit(backend,spec,root=frontend)['result'];assert replay['replayed'] and replay['job']['attempt_id']==job['attempt_id']
@@ -148,7 +182,18 @@ def molecular_surface(root, *, backend_builder=None, cli_runner=None):
             pending=decode_typed(backend.call('progress',target=target)['result']['snapshot'])
             assert not any(source.path.endswith('/stdout.log') for source in pending.context.sources)
             checks[profile+'_declared_future_native_sources']=True
-            if cli_runner is not None and profile=='ORCA':
+            if multiwfn_progress:
+                assert pending.context.engine.upper()=='MULTIWFN'
+                assert {item.role for item in pending.context.sources}=={
+                    'multiwfn_session','multiwfn_metadata','multiwfn_events','multiwfn_validation'}
+                assert all(str(case) in item.path for item in pending.context.sources)
+                assert [group.label for group in pending.card_groups]==['ANALYSIS','STAGE','OUTPUT']
+                pending_text=progress_text(pending,width=70,max_lines=8,framed=True)
+                assert 'ANALYSIS' in pending_text and '┌' in pending_text,pending_text
+                (case/'pending-progress.txt').write_text(pending_text)
+                (case/'pending-snapshot.json').write_text(json.dumps(pending.to_dict(),indent=2)+'\n')
+                checks[profile+'_held_pending_analysis_card']=True
+            if cli_selected:
                 cli_runner(entry,case,['release','J2.1','--preview','--json'])
                 cli_runner(entry,case,['release','J2.1','--json'])
                 cli_runner(entry,case,['start','--preview','--json'])
@@ -168,7 +213,21 @@ def molecular_surface(root, *, backend_builder=None, cli_runner=None):
             text=progress_text(snapshots[-1]);(case/'live-progress.txt').write_text(text)
             assert snapshots[-1].context.attempt_id==job['attempt_id']
             checks[profile+'_incremental_automatic_progress']=True
-            if cli_runner is not None and profile=='ORCA':
+            if multiwfn_progress:
+                from cmw.nodes.codec import encode_typed
+                snapshot=snapshots[-1]
+                assert not snapshot.metrics
+                for width in (70,73,93,133):
+                    card=progress_text(snapshot,width=width,max_lines=8,framed=True)
+                    assert all(label in card for label in ('ANALYSIS','STAGE','OUTPUT')),card
+                    assert '┌' in card and len(card.splitlines())<=8
+                    assert not any(label in card for label in ('SCF','Fmax','ETA'))
+                    (case/('live-card-'+str(width)+'.txt')).write_text(card)
+                (case/'live-wire.json').write_text(json.dumps(encode_typed(snapshot),indent=2)+'\n')
+                (case/'live-status.json').write_text(json.dumps(backend.call('status'),indent=2)+'\n')
+                (case/'live-progress-envelope.json').write_text(json.dumps(backend.call('progress',target=target),indent=2)+'\n')
+                checks[profile+'_actual_endpoint_codec_analysis_card']=True
+            if cli_selected:
                 for arguments in (['show','J2.1','--json'],['progress','J2.1','--json'],
                                   ['progress','J2.1','--history','--json'],['files','J2.1','--json']):
                     cli_runner(entry,case,arguments)
@@ -187,6 +246,13 @@ def molecular_surface(root, *, backend_builder=None, cli_runner=None):
             assert valid,record
             checks[profile+'_real_existing_terminal_validator']=True
             backend=connect()
+            if multiwfn_progress:
+                terminal=decode_typed(backend.call('progress',target=target)['result']['snapshot'])
+                assert terminal.context.attempt_id==job['attempt_id']
+                assert terminal.scientific_validation=='validator-recorded-passed',terminal.to_dict()
+                (case/'terminal-progress.txt').write_text(progress_text(terminal,width=93,max_lines=8,framed=True))
+                (case/'terminal-wire.json').write_text(json.dumps(encode_typed(terminal),indent=2)+'\n')
+                checks[profile+'_reconnect_uses_exact_attempt_and_recorded_validation']=True
             shown=backend.call('show',target=target)['result']['scientific_result']
             assert shown['status']=='RECORDED' and shown['record']==record,shown
             checks[profile+'_existing_finalizer_result_inspection']=True
@@ -201,13 +267,13 @@ def molecular_surface(root, *, backend_builder=None, cli_runner=None):
                 'files':[{'location_id':location['location_id'],'relative':str(result_path.relative_to(location['node_path'])),'path':'result.json'}]},
                 case/'replica',root=frontend)['result']
             assert copied['status']=='FETCHED' and file_hash(case/'replica/result.json')==file_hash(result_path)
-            if cli_runner is not None and profile=='ORCA':
+            if cli_selected:
                 fetch_spec={'schema':1,'storage':'scratch','purpose':'summaries','capture':'stable','large_files':False,
                     'files':[{'location_id':location['location_id'],'relative':str(result_path.relative_to(location['node_path'])),'path':'result.json'}]}
                 path=case/'fetch-spec.json';path.write_text(json.dumps(fetch_spec,indent=2))
                 cli_runner(entry,case,['fetch','J2.1','--spec',str(path),'--destination',str(case/'cli-replica'),'--json'])
                 assert file_hash(case/'cli-replica/result.json')==file_hash(result_path)
-                checks['ORCA_actual_installed_cli_over_ssh']=True
+                checks[profile+'_actual_installed_cli_over_ssh']=True
             history=backend.call('history',{'limit':10},target)['result'];assert history['page']
             checks[profile+'_history_files_selected_fetch']=True
             control('controller.stop');wait_for(lambda:not store.snapshot()['controller']['online'])
@@ -226,6 +292,6 @@ def molecular_surface(root, *, backend_builder=None, cli_runner=None):
             (case/'cleanup.json').write_text(json.dumps({'owners':owners,'remaining_verified_owners':remaining},indent=2))
             all_owners.extend(owners)
             assert not remaining,remaining
-    checks['same_display_ids_distinct_node_attempts']=len({(r['target']['node_id'],r['target']['attempt_id']) for r in results})==3
+    checks['same_display_ids_distinct_node_attempts']=len({(r['target']['node_id'],r['target']['attempt_id']) for r in results})==len(profiles)
     return {'checks':checks,'profiles':results,'package_origin':__import__('cmw').__file__,
             'owners':all_owners,'scientific_engine_executed':False,'qualification':'Synthetic L2/L3 only; no physical node or real engine qualification'}

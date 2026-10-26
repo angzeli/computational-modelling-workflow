@@ -18,3 +18,13 @@ class MolecularUiTests(unittest.TestCase):
         self.assertEqual(len(report['controls']), 6)
         self.assertTrue(report['queue_unchanged'])
         self.assertEqual(report['issues'], [])
+
+    def test_actual_endpoint_federated_four_profiles_and_controls(self):
+        from tests.jobs.molecular_ui_acceptance import molecular_federated_ui_surface
+        with tempfile.TemporaryDirectory(prefix='cmw-molecular-federated-ui-') as temporary:
+            report = molecular_federated_ui_surface(Path(temporary)/'fixtures')
+        self.assertEqual(len(report['views']), 16)
+        self.assertEqual(len(report['controls']), 4)
+        self.assertTrue(report['queue_unchanged'])
+        self.assertTrue(report['actual_json_endpoint'])
+        self.assertTrue(report['same_display_ids_isolated'])

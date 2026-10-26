@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -40,7 +42,8 @@ def fixtures(root):
 async def render_cases(store, cases, renders):
     from cmw.jobs.copy_ui import CopyPreview
     from cmw.jobs.history_ui import ProgressHistory
-    from cmw.jobs.tui import JobsApp, NoteEditor
+    from cmw.jobs.tui import JobsApp, NoteEditor, Inspect
+    from cmw.jobs.sources_ui import Sources
     from textual.widgets import DataTable, Footer, Static, TextArea
     report = {'views': [], 'controls': [], 'issues': []}
     base = store.snapshot(now=NOW)
@@ -74,7 +77,8 @@ async def render_cases(store, cases, renders):
                     card = str(app.query_one('#progress', Static).render())
                     footer = app.query_one(Footer) if app.query_one(Footer).display else app.query_one('#shortcuts', Static)
                     assert footer.region.bottom <= size[1], (profile, size, footer.region)
-                    assert table.size.height >= 3, (profile, size, table.size)
+                    assert table.size.height - table.header_height >= 3, (profile, size, table.size)
+                    assert app.query_one("#progress").region.bottom <= app.query_one("#command-bar").region.y
                     assert app.selected_id == selected['display_id']
                     assert 'SCIENTIFIC' in text and '┌' in card, (profile, size, text)
                     if profile.isupper():
@@ -85,7 +89,13 @@ async def render_cases(store, cases, renders):
                         (renders / f'{profile}-{size[0]}x{size[1]}.svg').write_text(svg)
                     report['views'].append({'profile': profile, 'size': list(size), 'table_height': table.size.height,
                         'footer_bottom': footer.region.bottom, 'card': card, 'selection': app.selected_id})
-                await pilot.press('y')
+                await pilot.press('enter')
+                assert isinstance(app.screen, Inspect)
+                await pilot.press('escape', 's')
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                assert isinstance(app.screen, Sources) and app.screen.inspection is not None
+                await pilot.press('escape', 'y')
                 assert isinstance(app.screen, CopyPreview)
                 assert selected['name'] in app.screen.query_one(TextArea).text
                 await pilot.press('escape', 'g')
@@ -111,3 +121,161 @@ def molecular_ui_surface(root, *, renders=None):
     assert store.path.read_bytes() == before
     report['queue_unchanged'] = True
     return report
+
+
+class JsonEndpointTransport:
+    """Real local endpoint results cross the same strict JSON/typed boundary."""
+    def __init__(self, backend):
+        self.backend = backend
+        self.block = None
+        self.started = threading.Event()
+
+    def exchange(self, operation, params, target, request_id=None):
+        if self.block is not None and operation == 'progress':
+            self.started.set()
+            assert self.block.wait(10), 'Synthetic delayed reply was not released'
+        result = self.backend.call(operation, params, target, request_id=request_id)
+        return json.loads(json.dumps(result, allow_nan=False))
+
+    def close(self):
+        self.backend.close()
+
+
+async def _until(pilot, condition):
+    for _ in range(160):
+        if condition():
+            return
+        await pilot.pause(.025)
+    raise AssertionError('The actual endpoint/frontend observation did not settle')
+
+
+def _endpoint_projection(store):
+    state = store.snapshot(now=NOW)
+    return {**state, **scenario_projection(state, 'no_external_complete')}
+
+
+async def federated_render_cases(root, renders=None):
+    from cmw.jobs.copy_ui import FrozenText
+    from cmw.jobs.history_ui import ProgressHistory
+    from cmw.jobs.sources_ui import Sources
+    from cmw.nodes.backend import LocalBackend
+    from cmw.nodes.connections import ConnectedBackend
+    from cmw.nodes.identity import enroll
+    from cmw.nodes.portal import NodesApp, row_key
+    from cmw.nodes.portal_views import NodeFiles, NodeCopyPreview
+    from textual.widgets import DataTable, Static
+
+    backends, all_cases, stores = {}, {}, {}
+    for owner in ('MBP', 'MINI'):
+        store, cases = fixtures(root / owner)
+        config_root = root / owner / 'node'
+        config = enroll(config_root, {'queues': {'research': str(store.root)},
+                                      'storages': {'fixtures': str(root / owner)},
+            'profiles': {'analysis': {'engine': 'Multiwfn', 'max_cpus': 2,
+                'runner': cases['FMO']['molecular_submission']['plan']['argv'][1],
+                'runtime': cases['FMO']['molecular_submission']['spec']['runtime']}}})
+        endpoint = LocalBackend(config_root, 'research', clock=lambda: NOW,
+            activity_projector=_endpoint_projection)
+        entry = {'transport': 'local', 'config_root': str(config_root),
+            'node_id': config['node_id'], 'host_id': config['host_id'],
+            'runtime_id': config['runtime']['fingerprint'],
+            'queues': {'research': config['queues']['research']['queue_id']},
+            'default_queue': 'research', 'read_only': True}
+        backends[owner] = ConnectedBackend(owner, entry, transport=JsonEndpointTransport(endpoint))
+        all_cases[owner], stores[owner] = cases, store
+    before = {owner: store.path.read_bytes() for owner, store in stores.items()}
+    views, controls = [], []
+    app = NodesApp(backends)
+    try:
+        async with app.run_test(size=SIZES[0]) as pilot:
+            await _until(pilot, lambda: len(app.rows) == 28)
+            for profile in ('FMO', 'ESP', 'IGMH', 'IFCT'):
+                job = all_cases['MINI'][profile]
+                peer = all_cases['MBP'][profile]
+                assert job['display_id'] == peer['display_id'] and job['attempt_id'] != peer['attempt_id']
+                target = dict(node_id=backends['MINI'].node_id, queue_id=backends['MINI'].queue_id,
+                              job_id=job['id'], attempt_id=job['attempt_id'])
+                app.select(row_key(target))
+                app.collect_progress()
+                await _until(pilot, lambda: app.selected_snapshot('MINI', {**job, 'target': target}) is not None)
+                for size in SIZES:
+                    await pilot.resize_terminal(*size)
+                    app.render_state()
+                    await pilot.pause()
+                    table = app.query_one('#table', DataTable)
+                    card = str(app.query_one('#progress', Static).render())
+                    assert table.size.height - table.header_height >= 3, (profile, size)
+                    assert app.query_one('#progress').region.bottom <= app.query_one('#command-bar').region.y
+                    assert app.query_one('#command-bar').region.bottom <= size[1]
+                    assert app.selected_key == row_key(target)
+                    assert '┌─' in card and all(label in card for label in ('ANALYSIS', 'STAGE', 'OUTPUT'))
+                    assert all(label not in card for label in ('FORCE', 'ELECTRONIC', 'SCF', '%'))
+                    assert 'MINI / research / ' + job['display_id'] in str(app.query_one('#selected').render())
+                    if renders:
+                        (renders / f'federated-{profile}-{size[0]}x{size[1]}.svg').write_text(app.export_screenshot())
+                    views.append({'profile': profile, 'size': size, 'card': card,
+                                  'useful_rows': table.size.height - table.header_height})
+                await pilot.press('enter')
+                assert isinstance(app.screen, FrozenText) and 'Multiwfn' in app.screen.text
+                await pilot.press('escape', 'g')
+                await _until(pilot, lambda: isinstance(app.screen, ProgressHistory) and app.screen.page is not None)
+                assert app.screen.page.entries
+                await pilot.press('escape', 's')
+                await _until(pilot, lambda: isinstance(app.screen, Sources) and app.screen.inspection is not None)
+                assert any(source.role == 'multiwfn_session' for source in app.screen.inspection.context.sources)
+                await pilot.press('escape', 'f')
+                await _until(pilot, lambda: isinstance(app.screen, NodeFiles))
+                await pilot.press('escape', 'y')
+                await _until(pilot, lambda: isinstance(app.screen, NodeCopyPreview))
+                await pilot.press('escape')
+                assert app.selected_key == row_key(target)
+                controls.append(profile)
+            # A delayed reply for one node cannot follow an equal display ID to another.
+            remote = backends['MINI']
+            job = all_cases['MINI']['FMO']
+            target = dict(node_id=remote.node_id, queue_id=remote.queue_id,
+                          job_id=job['id'], attempt_id=job['attempt_id'])
+            transport = remote.transport
+            gate = threading.Event()
+            transport.block = gate
+            try:
+                app.select(row_key(target))
+                app.collect_progress()
+                await _until(pilot, transport.started.is_set)
+                peer = all_cases['MBP']['FMO']
+                peer_target = dict(node_id=backends['MBP'].node_id, queue_id=backends['MBP'].queue_id,
+                                   job_id=peer['id'], attempt_id=peer['attempt_id'])
+                app.select(row_key(peer_target))
+                gate.set()
+                app.collect_progress()
+                await _until(pilot, lambda: app.selected_snapshot('MBP', {**peer, 'target': peer_target}) is not None)
+                assert app.selected_key == row_key(peer_target)
+                assert app.selected_snapshot('MBP', {**peer, 'target': peer_target}).context.attempt_id == peer['attempt_id']
+                await _until(pilot, lambda: not app.lanes['MINI'].busy)
+            finally:
+                gate.set()
+                transport.block = None
+            old_session = app.lanes['MINI'].session
+            transport.backend.close()
+            transport.backend = LocalBackend(root / 'MINI' / 'node', 'research', clock=lambda: NOW,
+                activity_projector=_endpoint_projection)
+            app.select(row_key(target))
+            app.lanes['MINI'].next_poll = 0
+            app.lanes['MINI'].next_progress = 0
+            await _until(pilot, lambda: app.lanes['MINI'].session != old_session
+                and app.selected_snapshot('MINI', {**job, 'target': target}) is not None)
+            assert app.selected_snapshot('MINI', {**job, 'target': target}).context.attempt_id == job['attempt_id']
+            await pilot.press('q')
+    finally:
+        for backend in backends.values():
+            backend.close()
+    assert all(store.path.read_bytes() == before[owner] for owner, store in stores.items())
+    return {'views': views, 'controls': controls, 'queue_unchanged': True,
+            'actual_json_endpoint': True, 'same_display_ids_isolated': True,
+            'delayed_reply_isolated': True, 'reconnected_attempt_preserved': True}
+
+
+def molecular_federated_ui_surface(root, *, renders=None):
+    if renders:
+        renders.mkdir(parents=True, exist_ok=True)
+    return asyncio.run(federated_render_cases(Path(root).resolve(), renders))
