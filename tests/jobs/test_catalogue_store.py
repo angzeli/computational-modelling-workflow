@@ -17,14 +17,17 @@ from cmw.jobs.catalogue_models import CatalogueQuery
 from cmw.jobs.store import JobsError, Store
 
 
-def populate_history(store, directory, count):
-    """One disposable transaction; all attempts remain held and metadata-only."""
-    first = store.add(argv=['/bin/echo', 'synthetic'], cwd=directory, name='Synthetic 00000', hold=True)
+def populate_history(store, directory, count, *, first=None):
+    """One disposable transaction; preserve an optional already-registered row."""
+    first = first or store.add(argv=['/bin/echo', 'synthetic'], cwd=directory, name='Synthetic 00000', hold=True)
     with store.transaction() as con:
         for index in range(1, count):
             job = {**first, 'id': index + 1, 'display_id': f'J{index + 1}.1',
                    'attempt_id': uuid4().hex, 'name': f'Synthetic {index:05d}',
                    'note': f'研究 series {index % 10}', 'order': index + 1}
+            if 'progress_sources' in job:
+                job.pop('progress_sources')
+                job.update(argv=['/bin/echo', 'synthetic'], cwd=str(directory), engine='Command')
             con.execute('INSERT INTO jobs(id,data) VALUES (?,?)', (job['id'], json.dumps(job)))
     return first
 
