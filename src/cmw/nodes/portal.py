@@ -23,6 +23,7 @@ from cmw.jobs.history_ui import ProgressHistory
 from cmw.jobs.snapshot import HandoffSnapshot, capture_snapshot
 from cmw.jobs.sources_ui import Sources
 from cmw.jobs.review_ui import ReviewScreen
+from cmw.jobs.catalogue_ui import NodeCatalogue
 from cmw.jobs.review_models import ReviewRecord, cached_review, review_text
 from cmw.jobs.suspension_presentation import effective_status
 from cmw.jobs.tui import JobsApp, Prompt, ScientificProgress, detail, literal, table_name
@@ -72,7 +73,7 @@ class NodeLane:
         return self.error is None and age is not None and age <= 10
 
 
-class NodesApp(NavigationApp):
+class NodesApp(NodeCatalogue, NavigationApp):
     TITLE = 'CMW / JOBS'
     CSS = JobsApp.CSS + '''
     #node-summary { height: auto; max-height: 2; padding: 0 1; color: #b7d8dd; }
@@ -86,7 +87,7 @@ class NodesApp(NavigationApp):
     BINDINGS = [Binding('enter', 'details', 'Details'), Binding('f', 'files', 'Files'),
         Binding('g', 'history', 'Progress'), Binding('s', 'sources', 'Sources'),
         Binding('y', 'copy_snapshot', 'Copy'), Binding('l', 'logs', 'Logs'),
-        Binding('b', 'scheduling', 'Scheduling'), Binding('r', 'review', 'Review'), Binding('p', 'dispatch', 'Dispatch'),
+        Binding('b', 'scheduling', 'Scheduling'), Binding('r', 'review', 'Review'), Binding('slash','search','Search'), Binding('t','catalogue','Catalogue'), Binding('p', 'dispatch', 'Dispatch'),
         Binding('h', 'hold', 'Hold'), Binding('o', 'order', 'Order'),
         Binding('x', 'cancel', 'Cancel'), Binding('u', 'suspension', 'Suspend/Continue'),
         Binding('q', 'quit', 'Detach', priority=True), Binding('ctrl+c', 'detach', 'Detach', priority=True)]
@@ -120,6 +121,7 @@ class NodesApp(NavigationApp):
         self.lookup_busy = set()
         self.card_height = None
         self.viewport = None
+        self.init_catalogue()
 
     def compose(self):
         yield Static('CMW / JOBS                                    ALL NODES', id='heading', markup=False)
@@ -128,7 +130,7 @@ class NodesApp(NavigationApp):
         yield SelectableStatic(id='selected', markup=False)
         yield Static(id='execution', markup=False)
         yield ScientificProgress(id='progress', markup=False)
-        yield Static('Q / Ctrl-C detaches; destination-local execution continues.', id='message', markup=False)
+        yield Static('/ Search · T Catalogue · Q / Ctrl-C detaches; execution continues.', id='message', markup=False)
         with Vertical(id='command-bar'):
             yield Static('Enter Details · F Files · G Progress · S Sources · Y Copy · L Logs\nP Dispatch · H Hold · O Order · X Cancel · U Suspend · B Queue · R Review · Q Detach', id='shortcuts', markup=False)
 
@@ -139,6 +141,8 @@ class NodesApp(NavigationApp):
 
     async def on_unmount(self):
         self.closed = True
+        self.catalogue_generation += 1
+        self.catalogue_cancel.set()
         for lane in self.lanes.values():
             lane.pending.clear()
         await asyncio.gather(*(asyncio.to_thread(lane.backend.close) for lane in self.lanes.values()))
@@ -216,6 +220,9 @@ class NodesApp(NavigationApp):
         self.render_state()
 
     def invalidate_session(self, owner):
+        if self.catalogue_query is not None:
+            self.catalogue_pages.pop(owner,None)
+            self.catalogue_errors[owner] = 'Owner disconnected or session changed; apply search again'
         lane = self.lanes[owner]
         prefix = (lane.backend.node_id, lane.backend.queue_id)
         self.session_sources = {key: value for key, value in self.session_sources.items() if key[:2] != prefix}
@@ -276,7 +283,8 @@ class NodesApp(NavigationApp):
         self.render_state()
 
     def selected(self):
-        return self.rows.get(self.selected_key)
+        selected = self.rows.get(self.selected_key)
+        return selected if selected and not selected[1].get("_catalogue_pending") else None
 
     def label(self, owner, job):
         return f"{owner} / {self.lanes[owner].backend.queue} / {job['display_id']}"
@@ -320,21 +328,29 @@ class NodesApp(NavigationApp):
         for owner, lane in self.lanes.items():
             state = lane.state or {}
             controller = state.get('controller', {})
-            count = sum(job.get('status') == 'Run' for job in state.get('jobs', ()))
+            counts = (lane.status_envelope or {}).get('result',{}).get('status_counts',{})
+            count = counts.get('Run',sum(job.get('status') == 'Run' for job in state.get('jobs', ())))
+            unknown = counts.get('Unknown',sum(job.get('status') == 'Unknown' for job in state.get('jobs', ())))
             condition = 'Online' if lane.fresh(now) else 'Unreachable' if lane.error else 'Connecting' if lane.received is None else 'Stale'
             control = 'ctrl on' if controller.get('online') else 'ctrl off'
             age = lane.age(now)
             received = '—' if age is None else f'{age:.0f}s'
             identity = table_name(owner, 7 if self.size.width < 100 else 16)
-            status = f'{identity} {condition} {received}'
+            result = (lane.status_envelope or {}).get('result',{})
+            partial_counts = 'status_counts' not in result and result.get('has_more',False)
+            count_scope = 'page Run' if partial_counts else 'Run' if lane.fresh(now) else 'last Run'
+            status = f'{identity} {condition} {received} · {count_scope} {count}' + (f' Unknown {unknown}' if unknown else '')
+            if partial_counts:
+                status += ' · other blockers unknown'
             machine = machine_text(self.machine_usage(owner)).removeprefix('Machine: ')
             if self.size.width >= 100:
-                status += f' · {control} · ' + (f'Run {count}' if lane.fresh(now) else f'last Run {count}')
+                status += f' · {control}'
             summaries.append(status + ('\nMachine: ' if len(self.lanes) == 1 else ' · ') + machine)
             for job in state.get('jobs', ()):
                 target = job.get('target')
                 if target and (target['node_id'], target['queue_id']) == (lane.backend.node_id, lane.backend.queue_id):
                     rows[row_key(target)] = (owner, job)
+        rows = self.catalogue_rows(rows)
         self.rows = rows
         self.query_one('#node-summary', Static).update(literal('\n'.join(summaries)))
         table = self.query_one('#table', DataTable)
@@ -360,7 +376,7 @@ class NodesApp(NavigationApp):
             values = (owner, job['display_id'], '[F]', job.get('name', ''), status, elapsed(job.get('elapsed')))
             for (column, _, width), value in zip(widths, values):
                 table.update_cell(key, column, table_name(value, width))
-        if self.selected_key is None and keys:
+        if self.selected_key is None and keys and self.catalogue_auto_select:
             self.select(keys[0])
         if self.selected_key in keys:
             with table.prevent(DataTable.RowHighlighted):
@@ -392,18 +408,21 @@ class NodesApp(NavigationApp):
             self.query_one('#execution', Static).update(literal(f'Execution: reported by {owner} · ' + suffix + (' (cached)' if not lane.fresh(now) or cache.get('observe.error') else '')))
             action = 'Continue' if effective_status(job) == 'Suspended' else 'Suspend'
             self.query_one('#shortcuts', Static).update('Enter Details · F Files · G Progress · S Sources · Y Copy · L Logs\n' +
-                f'P Dispatch · H Hold · O Order · X Cancel · U {action} · B Queue · Q Detach')
+                f'P Dispatch · H Hold · O Order · X Cancel · U {action} · B Queue · R Review · Q Detach')
             self.render_progress(owner, job, cache)
         else:
             self.query_one('#selected', Static).update('Selected attempt is no longer in the current node snapshot.' if self.selected_key else 'No managed jobs reported. Select an enrolled node through the CLI to submit.')
             self.query_one('#execution', Static).update('')
             self.query_one('#progress', Static).display = False
+        if self.catalogue_query is not None:
+            self.message(self.catalogue_summary())
 
     def select(self, key):
         if key == self.selected_key:
             return
         self.selected_key = key
         self.selection_generation += 1
+        self.catalogue_hydrate(key)
         if self.is_mounted and key in self.row_keys:
             table = self.query_one('#table', DataTable)
             with table.prevent(DataTable.RowHighlighted):

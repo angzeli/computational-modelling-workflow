@@ -33,6 +33,7 @@ from .clipboard import copy_text
 from .suspension_ui import SuspensionConfirm
 from .sources_ui import Sources
 from .review_ui import ReviewScreen
+from .catalogue_ui import LocalCatalogue, CatalogueSearch, CatalogueDetails
 from .review_models import cached_review, review_text
 from .suspension_presentation import effective_status, intended_action, suspension_summary, suspension_detail, submission_text
 
@@ -440,7 +441,7 @@ class ScientificProgress(SelectableStatic):
         super().update(content, layout=layout)
 
 
-class JobsApp(NavigationApp):
+class JobsApp(LocalCatalogue, NavigationApp):
     TITLE = "CMW / JOBS"
     CSS = """
     Screen { background: #111820; color: #d7e0e8; }
@@ -467,7 +468,7 @@ class JobsApp(NavigationApp):
     #suspension-summary { height: 1; width: 1fr; padding-left: 1; color: #b7d8dd; }
     #shortcuts { dock: none; height: auto; background: #22303d; color: #d7e0e8; padding: 0 1; }
     """
-    BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("g", "history", "Progress"), Binding("y", "copy_snapshot", "Copy"), Binding("s", "sources", "Sources"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"), Binding("r", "review", "Review"),
+    BINDINGS = [Binding("enter", "details", "Details"), Binding("f", "files", "Files"), Binding("g", "history", "Progress"), Binding("y", "copy_snapshot", "Copy"), Binding("s", "sources", "Sources"), Binding("n", "note", "Note"), Binding("l", "logs", "Logs"), Binding("b", "scheduling", "Scheduling"), Binding("r", "review", "Review"), Binding("slash", "search", "Search"), Binding("t", "catalogue", "Catalogue"),
                 Binding("p", "dispatch", "Dispatch"), Binding("h", "hold", "Hold"),
                 Binding("o", "order", "Order"), Binding("x", "cancel", "Cancel"),
                 Binding("u", "suspension", "Suspend/Continue", show=False),
@@ -533,6 +534,7 @@ class JobsApp(NavigationApp):
         self.copy_mouse_start = None
         self.review_service = None
         self.review_cache = {}
+        self.init_catalogue()
 
     def job_target(self, job):
         return (str(getattr(self.store, 'root', self.store)), job['id'], job['attempt_id'])
@@ -582,7 +584,7 @@ class JobsApp(NavigationApp):
         yield Static(id="execution", markup=False)
         yield ScientificProgress(id="progress", markup=False)
         yield Static(id="events", markup=False)
-        yield Static("Best-effort guard · Q / Ctrl-C detaches; execution state unchanged.", id="message", markup=False)
+        yield Static("/ Search · T Catalogue · Best-effort guard · Q / Ctrl-C detaches.", id="message", markup=False)
         with Vertical(id="command-bar"):
             with Horizontal(id="execution-controls"):
                 yield Button(literal("[U] Suspend job"), id="suspension-action")
@@ -601,6 +603,8 @@ class JobsApp(NavigationApp):
 
     async def on_unmount(self):
         self.files_generation += 1
+        self.catalogue_cancel.set()
+        self.catalogue_generation += 1
         self.execution_closed = True
         self.execution_generation += 1
         self.progress_closed = True
@@ -1218,6 +1222,8 @@ class JobsApp(NavigationApp):
         if self._selected_label != self.selected_id:
             self.pin_selection()
         job = self.current_job(self.selected_id)
+        if self.catalogue_query is not None and self.selected_id not in self.row_ids:
+            return None
         return job if job and self.job_target(job) == self._selected_target else None
 
     def refresh_state(self):
@@ -1268,6 +1274,10 @@ class JobsApp(NavigationApp):
         counts = (f"Run: {sum(j['status']=='Run' for j in jobs)}   Queue: {sum(j['status']=='Queue' for j in jobs)}   "
                   f"Hold: {sum(j['status']=='Hold' for j in jobs)}")
         short_counts = f"Run {sum(j['status']=='Run' for j in jobs)} Queue {sum(j['status']=='Queue' for j in jobs)} Hold {sum(j['status']=='Hold' for j in jobs)}"
+        unknown_count = sum(j['status']=='Unknown' for j in jobs)
+        if unknown_count:
+            short_counts += f' Unknown {unknown_count}'
+            counts += f' Unknown: {unknown_count}'
         header = (f"Controller: {status} · Dispatch {'ON' if control['dispatch'] else 'OFF'} · {short_counts} · {mode}" if compact else
                   f"Controller: {status}   Dispatch intent: {'ON' if control['dispatch'] else 'OFF'}   Mode: {mode}   Updated: {age}\n"
                   f"Managed requested: CPUs {cpu}   RAM: {ram} GiB   {counts}")
@@ -1286,6 +1296,8 @@ class JobsApp(NavigationApp):
         table.display = bool(jobs)
         wide = self.size.width >= 110
         self.refresh_external(wide)
+        jobs = self.catalogue_jobs(jobs)
+        table.display = bool(jobs)
         self.query_one(Footer).display = wide
         self.query_one("#shortcuts", Static).display = not wide
         viewport_width = max(1, self.size.width - 2)
@@ -1327,7 +1339,7 @@ class JobsApp(NavigationApp):
                 for (column, _, _), cell in zip(columns, cells):
                     if table.get_cell(key, column) != cell:
                         table.update_cell(key, column, cell)
-        if not self.selected_id and jobs:
+        if not self.selected_id and jobs and self.catalogue_auto_select:
             self.selected_id = jobs[0]['display_id']
             self.pin_selection()
         table.set_class(self.selected() is None, 'navigation-unavailable')
@@ -1343,6 +1355,8 @@ class JobsApp(NavigationApp):
         elif jobs:
             self.empty_notice_shown = False
 
+        if self.catalogue_query is not None:
+            self.query_one("#message", Static).update(self.catalogue_summary())
         self.refresh_suspension_controls()
         self.render_execution()
         current_job = self.selected()
@@ -1404,13 +1418,13 @@ class JobsApp(NavigationApp):
 
     def check_action(self, action, parameters):
         # App priority bindings run before focused text widgets, including Q.
-        protected = {'details', 'files', 'history', 'sources', 'copy_snapshot', 'review', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'suspension'}
+        protected = {'details', 'files', 'history', 'sources', 'copy_snapshot', 'review', 'search', 'catalogue', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'suspension'}
         if action in {'dispatch', 'hold', 'order', 'cancel', 'suspension'} and self.selected_copy_text():
             return False
         if isinstance(self.focused, (Input, TextArea)) and action in protected:
             return False
-        if isinstance(self.screen, (Inspect, ExternalInspect, SharingInspect, NoteEditor, FilesChooser, ProgressHistory, HistoryDetails, SuspensionConfirm, Sources, FrozenText, ReviewScreen)) and action in {
-            'details', 'files', 'history', 'sources', 'copy_snapshot', 'review', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'detach', 'suspension'
+        if isinstance(self.screen, (Inspect, ExternalInspect, SharingInspect, NoteEditor, FilesChooser, ProgressHistory, HistoryDetails, SuspensionConfirm, Sources, FrozenText, ReviewScreen, CatalogueSearch, CatalogueDetails)) and action in {
+            'details', 'files', 'history', 'sources', 'copy_snapshot', 'review', 'search', 'catalogue', 'note', 'logs', 'scheduling', 'dispatch', 'hold', 'order', 'cancel', 'quit', 'detach', 'suspension'
         }:
             return False
         return super().check_action(action, parameters)
@@ -1789,7 +1803,7 @@ class JobsApp(NavigationApp):
             return
         job = self.selected()
         if job:
-            self.apply(lambda: self.store.change(job['display_id'], 'release' if job['status']=='Hold' else 'hold', expected=job['status']))
+            self.apply(lambda: self.store.change(job['id'], 'release' if job['status']=='Hold' else 'hold', expected=job['status'], expected_attempt_id=job['attempt_id']))
 
     def confirmation_current(self, job, generation):
         selected = self.selected()
@@ -1811,7 +1825,7 @@ class JobsApp(NavigationApp):
         generation = self.suspension_selection_generation
         def submit(value):
             if value is not None and self.confirmation_current(job, generation):
-                self.apply(lambda: self.store.change(job['display_id'], 'move', position=int(value), expected=job['status']))
+                self.apply(lambda: self.store.change(job['id'], 'move', position=int(value), expected=job['status'], expected_attempt_id=job['attempt_id']))
         self.push_screen(Prompt(f"Move {job['display_id']} / {name_text(job['name'])} to pending order:", order=True), submit)
 
     def action_cancel(self):
@@ -1823,5 +1837,5 @@ class JobsApp(NavigationApp):
         generation = self.suspension_selection_generation
         def submit(value):
             if value == 'CANCEL' and self.confirmation_current(job, generation):
-                self.apply(lambda: self.store.change(job['display_id'], 'cancel', confirm=True, expected=job['status']))
+                self.apply(lambda: self.store.change(job['id'], 'cancel', confirm=True, expected=job['status'], expected_attempt_id=job['attempt_id']))
         self.push_screen(Prompt(f"Cancel {job['display_id']} / {name_text(job['name'])}?\nRunning cancellation terminates its managed process group. Dispatch pauses."), submit)
