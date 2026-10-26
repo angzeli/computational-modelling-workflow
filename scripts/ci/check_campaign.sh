@@ -20,7 +20,7 @@ case "$mode" in
     (cd "$source_root" && "$python_exe" -B -m unittest discover -s tests)
     ;;
   artifacts)
-    CMW_ARTIFACT_OFFLINE=1 PYTHON_BIN="$python_exe" bash "$source_root/scripts/ci/check_artifacts.sh" "$campaign_root/installed"
+    CMW_ARTIFACT_OFFLINE=1 CMW_ARTIFACT_QUIET=1 PYTHON_BIN="$python_exe" bash "$source_root/scripts/ci/check_artifacts.sh" "$campaign_root/installed"
     mkdir -p "$campaign_root/focused-driver"
     cp -R "$source_root/tests" "$campaign_root/focused-driver/tests"
     for kind in core jobs; do
