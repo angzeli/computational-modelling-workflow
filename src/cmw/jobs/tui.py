@@ -1244,7 +1244,12 @@ class JobsApp(LocalCatalogue, NavigationApp):
         return job if job and self.job_target(job) == self._selected_target else None
 
     def refresh_state(self):
+        if not self.screen_stack:
+            return
         origin = self.screen_stack[0]
+        # A pending timer can run while the base screen is being unmounted.
+        if not origin.query('#table') or not origin.query('#external'):
+            return
         view = self.capture_view(origin)
         before = (self.columns_mode, tuple(self._row_targets.items()),
                   self.external_columns_mode, tuple(self.external_rows))
