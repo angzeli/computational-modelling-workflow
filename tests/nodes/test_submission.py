@@ -235,9 +235,10 @@ class SubmissionEndpointTests(unittest.TestCase):
         backend = node['backends']['research']
         spec, prepared, _ = self.prepare(node)
         wrong = self.connect(node, runtime_id='wrong-runtime')
-        with self.assertRaisesRegex(NodeError, 'runtime identity changed'):
+        with self.assertRaises(NodeError) as refusal:
             wrong.call('transfer.begin', {'storage': 'scratch', 'request_id': spec['request_id'],
                                           'manifest': spec['manifest']})
+        self.assertEqual(refusal.exception.code, 'RUNTIME_MISMATCH')
         node['runner'].write_text('#!/bin/sh\nexit 7\n')
         with self.assertRaisesRegex(NodeError, 'preflight failed'):
             backend.call('submit.preview', {'spec': spec})
