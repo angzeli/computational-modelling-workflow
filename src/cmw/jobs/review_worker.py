@@ -144,7 +144,7 @@ def inspect(request):
         if record.status == 'STALE':
             raise JobsError('Stale review cannot be exported for reuse')
         forbidden = [directory,job['cwd'],str(store.root)]
-        review_metadata = {'policy','review_policy','finalization_spec','review_spec','jobs_snapshot','jobs_receipt'}
+        review_metadata = {'policy','acceptance_policy','review_policy','finalization_spec','review_spec','jobs_snapshot','jobs_receipt'}
         for source in sources:
             role = source.get('role','')
             if role not in review_metadata and role != 'prepared_dependency':

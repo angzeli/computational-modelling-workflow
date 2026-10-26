@@ -81,7 +81,7 @@ class ReviewServiceTests(unittest.TestCase):
         self.assertEqual(cached_review(record).status,'CACHED')
 
     def test_explicit_policy_export_and_source_mutation_invalidate_reuse(self):
-        settings,_=self.policy_spec(); destination=self.root/(uuid4().hex+'.json')
+        settings,_=self.policy_spec(); destination=Path(settings['policy_path']).parent/'new-review.json'
         record=self.start(settings|{'export_path':str(destination)})
         self.assertEqual(record.status,'COMPLETE',record.message)
         self.assertEqual(next(d.status for d in record.domains if d.name=='policy'),'PASS')
