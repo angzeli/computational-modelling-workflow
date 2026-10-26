@@ -147,6 +147,43 @@ class MultiwfnProgressTests(unittest.TestCase):
         fresh = ObservationService(); self.addCleanup(fresh.close)
         self.assertEqual(fresh.poll(self.context).scientific_validation, 'validator-recorded-passed')
 
+    def test_pinned_association_ctime_reverification_preserves_runner_prefix(self):
+        self.write_event(kind='prepared')
+        initial = self.service.poll(self.context)
+        metadata = Path(self.sources[3].path)
+        before = metadata.stat()
+        metadata.chmod(0o400)
+        after = metadata.stat()
+        self.assertEqual((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+                         (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns))
+        self.assertNotEqual(before.st_ctime_ns, after.st_ctime_ns)
+        self.validation()
+        validated = self.service.poll(self.context)
+        self.assertEqual(validated.status, 'OK', validated.messages)
+        self.assertEqual(validated.scientific_validation, 'validator-recorded-passed', validated.messages)
+        initial_generation = next(source.generation for source in initial.sources if source.role == 'multiwfn_metadata')
+        verified_source = next(source for source in validated.sources if source.role == 'multiwfn_metadata')
+        self.assertEqual(verified_source.generation, initial_generation + 1)
+        self.assertEqual(verified_source.bytes_read, metadata.stat().st_size)
+        metadata.chmod(0o600)
+        again = self.service.poll(self.context)
+        self.assertEqual(again.scientific_validation, 'validator-recorded-passed', again.messages)
+        self.assertEqual(again.events, validated.events)
+        self.assertTrue(all(item.evidence[0].generation == initial_generation + 2
+                            for item in again.settings if item.origin == 'pinned preparation association'))
+
+    def test_replaced_pinned_association_revokes_even_identical_bytes(self):
+        self.validation()
+        self.assertEqual(self.service.poll(self.context).scientific_validation, 'validator-recorded-passed')
+        metadata = Path(self.sources[3].path)
+        replacement = self.root / 'replacement-association.json'
+        replacement.write_bytes(metadata.read_bytes())
+        replacement.replace(metadata)
+        observed = self.service.poll(self.context)
+        self.assertEqual(observed.scientific_validation, 'not-assessed')
+        self.assertTrue(any('multiwfn_metadata source generation changed' in message
+                            for message in observed.messages))
+
     def test_append_after_validation_makes_record_historical(self):
         self.validation()
         self.assertEqual(self.service.poll(self.context).scientific_validation, 'validator-recorded-passed')

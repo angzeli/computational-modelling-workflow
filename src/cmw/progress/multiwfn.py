@@ -374,7 +374,16 @@ class MultiwfnAdapter:
             previous = self.generations.get(role)
             self.generations[role] = update.state.generation
             changed = update.reset or (previous is not None and previous != update.state.generation)
-            if changed and update.reason != 'initial':
+            # The pinned reader fully rehashes a ctime-only metadata change.
+            # Its unchanged association does not revoke the already consumed
+            # runner prefix: that independent reader has not rewound its cursor.
+            reverified_metadata = (role == 'multiwfn_metadata' and self.metadata_source is not None
+                and update.reason == 'pinned input signature changed' and update.state.health == 'OK'
+                and not update.state.has_more and previous_state is not None
+                and previous_state.identity == update.state.identity
+                and previous_state.file_version is not None and update.state.file_version is not None
+                and previous_state.file_version[:2] == update.state.file_version[:2])
+            if changed and update.reason != 'initial' and not reverified_metadata:
                 self._reset_role(role)
             if role == 'multiwfn_metadata' and update.state.health not in {'OK', 'MALFORMED'}:
                 if self.metadata:
