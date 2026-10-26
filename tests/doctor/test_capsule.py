@@ -175,7 +175,9 @@ class CapsuleTests(unittest.TestCase):
     def test_paths_must_be_explicit_safe_desktop_or_scratch_destinations(self):
         for destination in ('relative/capsule', self.root / 'unselected',
                             str(self.scratch) + '/../escape', str(self.scratch) + '/./escape'):
-            with self.subTest(destination=destination), self.assertRaises(ValueError):
+            # TMPDIR may itself be below Desktop; make the excluded home explicit.
+            with patch('cmw.doctor.capsule.Path.home', return_value=self.root / 'fixture-home'), \
+                    self.subTest(destination=destination), self.assertRaises(ValueError):
                 export_capsule(report(), destination)
         with self.assertRaises(FileNotFoundError):
             export_capsule(report(), self.scratch / 'missing' / 'capsule')
