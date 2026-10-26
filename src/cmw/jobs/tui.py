@@ -137,7 +137,7 @@ class Prompt(ModalScreen):
 
 
 class Inspect(ModalScreen):
-    BINDINGS = [("y", "select_text", "Select frozen text"), ("escape", "dismiss(None)", "Back"), ("q", "dismiss(None)", "Back"), ("ctrl+c", "dismiss(None)", "Back")]
+    BINDINGS = [Binding("d", "doctor", "Doctor", priority=True), ("y", "select_text", "Select frozen text"), ("escape", "dismiss(None)", "Back"), ("q", "dismiss(None)", "Back"), ("ctrl+c", "dismiss(None)", "Back")]
     DEFAULT_CSS = """
     Inspect { align: center middle; background: $background 70%; }
     Inspect > Vertical { width: 94%; height: 90%; border: round $accent; padding: 1 2; background: $surface; }
@@ -145,8 +145,9 @@ class Inspect(ModalScreen):
     Inspect Static { height: auto; }
     """
 
-    def __init__(self, store, job_id, logs=False, job_provider=None, progress_provider=None, execution_provider=None, expected_attempt=None, review_provider=None):
+    def __init__(self, store, job_id, logs=False, job_provider=None, progress_provider=None, execution_provider=None, expected_attempt=None, review_provider=None, doctor_target=None):
         super().__init__()
+        self.doctor_target = doctor_target
         self.expected_attempt = expected_attempt
         self.store, self.job_id, self.logs = store, job_id, logs
         self.log_stamps = None
@@ -160,7 +161,8 @@ class Inspect(ModalScreen):
             yield Label("LOG TAIL · stdout / stderr · bounded to 16 KiB each" if self.logs else "ATTEMPT DETAILS")
             with VerticalScroll():
                 yield SelectableStatic(id="body", markup=False)
-            yield Label("Esc / Q: back · Y: frozen selectable text · PgUp / PgDn: scroll")
+            yield Label(("D: Doctor · " if self.doctor_target and not self.logs else "")
+                        + "Esc / Q: back · Y: select text · PgUp / PgDn: scroll")
 
     def on_mount(self):
         self.refresh_content()
@@ -168,6 +170,19 @@ class Inspect(ModalScreen):
 
     def action_select_text(self):
         self.app.push_screen(FrozenText(str(self.query_one("#body", Static).render())))
+
+    def action_doctor(self):
+        if self.logs or self.doctor_target is None:
+            return
+        from cmw.doctor.presentation import DoctorReport
+        state, job_id, attempt_id = self.doctor_target
+
+        def inspect():
+            from cmw.doctor.service import inspect_local
+            return inspect_local(state=state, job_id=job_id, expected_attempt_id=attempt_id)
+
+        self.app.push_screen(DoctorReport(self.doctor_target, f'LOCAL / {self.job_id} / {attempt_id}',
+                                         loader=inspect))
 
     def refresh_content(self):
         if getattr(self.query_one("#body", Static), "_copy_selected", False):
@@ -1788,7 +1803,7 @@ class JobsApp(LocalCatalogue, NavigationApp):
             return
         job = self.selected()
         if job:
-            self.push_screen(Inspect(self.store, self.selected_id, job_provider=self.current_job, progress_provider=self.selected_progress, execution_provider=self.selected_execution, expected_attempt=job['attempt_id'], review_provider=self.selected_review))
+            self.push_screen(Inspect(self.store, self.selected_id, job_provider=self.current_job, progress_provider=self.selected_progress, execution_provider=self.selected_execution, expected_attempt=job['attempt_id'], review_provider=self.selected_review, doctor_target=self.job_target(job)))
 
     def action_logs(self):
         if self.external_read_only():

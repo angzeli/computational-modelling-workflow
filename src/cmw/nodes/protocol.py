@@ -14,7 +14,7 @@ OPERATIONS = frozenset({
     'history.release', 'logs', 'locations', 'sources.inspect', 'sources.validate',
     'sources.activate', 'sources.clear', 'request', 'submit.check', 'submit.preview', 'submit',
     'transfer.begin', 'transfer.publish', 'transfer.lookup', 'control.preview', 'control',
-    'fetch.prepare', 'fetch.complete',
+    'fetch.prepare', 'fetch.complete', 'doctor.inspect',
     'review.preview', 'review.start', 'review.poll', 'review.cancel',
     'successor.plan', 'successor.materialize', 'successor.register',
     'catalogue.query', 'catalogue.show', 'catalogue.relations', 'catalogue.edit', 'catalogue.relation.add', 'catalogue.relation.retract',
@@ -181,6 +181,22 @@ def validate_envelope(value, operation=None):
             raise NodeError('INVALID_RESPONSE', f'Invalid {key} observation')
     bounded_value(value)
     result = value['result']
+    if operation == 'doctor.inspect':
+        report = result.get('report')
+        if (set(result) != {'report'} or not isinstance(report, dict)
+                or type(report.get('schema')) is not int or report['schema'] != 1
+                or not isinstance(report.get('target'), dict)
+                or not isinstance(report.get('runtime'), dict)
+                or not isinstance(report.get('findings'), list)):
+            raise NodeError('INVALID_RESPONSE', 'Unsupported or malformed doctor report')
+        _validate_doctor_report(report)
+        selected = report['target']
+        if any(selected.get(key) != value[key] for key in ('node_id', 'queue_id')):
+            raise NodeError('INVALID_RESPONSE', 'Doctor report belongs to another node or queue')
+        if selected.get('job_id') is not None:
+            target_identity({key: selected.get(key) for key in ('node_id', 'queue_id', 'job_id', 'attempt_id')})
+        if report['runtime'].get('identity') != value['runtime']:
+            raise NodeError('INVALID_RESPONSE', 'Doctor runtime contradicts its endpoint envelope')
     if operation == 'status':
         state = result.get('state')
         if not isinstance(state, dict) or not isinstance(state.get('jobs'), list) or not isinstance(state.get('controller'), dict):
@@ -229,3 +245,55 @@ def validate_envelope(value, operation=None):
         except (KeyError, ValueError, TypeError) as exc:
             raise NodeError('INVALID_RESPONSE', 'Malformed scientific observation payload') from exc
     return value
+
+
+def _validate_doctor_report(report):
+    """Doctor schema is negotiated independently of scientific dataclass codecs."""
+    fields = {'scope', 'worker', 'capabilities', 'observation', 'scientific_policy'}
+    if (not fields <= set(report) or not isinstance(report['scope'], str)
+            or report['scope'] not in {'local', 'job', 'node'}
+            or report['scientific_policy'] != 'NOT_ASSESSED'):
+        raise NodeError('INVALID_RESPONSE', 'Doctor report lacks its scope or policy qualification')
+    worker = report['worker']
+    if (not isinstance(worker, dict) or not {'status', 'runtime'} <= set(worker)
+            or not isinstance(worker['status'], str) or worker['status'] not in {'UNKNOWN', 'RECORDED'}
+            or not (worker['runtime'] is None or isinstance(worker['runtime'], dict))
+            or worker['status'] == 'UNKNOWN' and worker['runtime'] is not None
+            or worker['status'] == 'RECORDED' and worker['runtime'] is None):
+        raise NodeError('INVALID_RESPONSE', 'Malformed recorded worker runtime evidence')
+    if worker['runtime'] is not None:
+        from .identity import _validate_runtime
+        try:
+            _validate_runtime(worker['runtime'])
+        except (ValueError, TypeError) as exc:
+            raise NodeError('INVALID_RESPONSE', 'Malformed recorded worker implementation identity') from exc
+    capabilities = report['capabilities']
+    if not isinstance(capabilities, list) or len(capabilities) > 64:
+        raise NodeError('INVALID_RESPONSE', 'Malformed doctor capability list')
+    for capability in capabilities:
+        if (not isinstance(capability, dict) or not {'name', 'status', 'qualification'} <= set(capability)
+                or any(not isinstance(capability[key], str) for key in ('name', 'status', 'qualification'))):
+            raise NodeError('INVALID_RESPONSE', 'Malformed doctor capability')
+    observation = report['observation']
+    required = {'status', 'observed_at', 'coverage', 'transport', 'progress', 'binding', 'controller'}
+    if (not isinstance(observation, dict) or not required <= set(observation)
+            or not isinstance(observation['status'], str) or not isinstance(observation['coverage'], str)
+            or not isinstance(observation['transport'], dict)
+            or any(observation[key] is not None and not isinstance(observation[key], dict)
+                   for key in ('progress', 'binding', 'controller'))):
+        raise NodeError('INVALID_RESPONSE', 'Malformed doctor observation qualifications')
+    timestamp = observation['observed_at']
+    if timestamp is not None and (type(timestamp) not in (int, float) or not math.isfinite(timestamp)):
+        raise NodeError('INVALID_RESPONSE', 'Invalid doctor observation timestamp')
+    fields = {'code', 'domain', 'scope', 'severity', 'summary', 'evidence', 'next_check', 'capability', 'caused_by'}
+    if len(report['findings']) > 128:
+        raise NodeError('INVALID_RESPONSE', 'Doctor findings exceed the bounded report limit')
+    for finding in report['findings']:
+        if (not isinstance(finding, dict) or set(finding) != fields
+                or any(not isinstance(finding[key], str) for key in (
+                    'code', 'domain', 'scope', 'severity', 'summary', 'next_check'))
+                or finding['severity'] not in {'INFO', 'WARNING', 'ERROR'}
+                or not isinstance(finding['evidence'], dict)
+                or any(finding[key] is not None and not isinstance(finding[key], str)
+                       for key in ('capability', 'caused_by'))):
+            raise NodeError('INVALID_RESPONSE', 'Malformed actionable doctor finding')

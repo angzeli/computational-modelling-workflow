@@ -10,7 +10,7 @@ from .protocol import MAX_FRAME, PROTOCOL, NodeError, decode, encode, validate_r
 def serve(config_root, queue, *, input_stream=None, output_stream=None, backend_factory=None):
     if backend_factory is None:
         from .backend import LocalBackend
-        backend_factory = LocalBackend
+        backend_factory = lambda root, alias: LocalBackend(root, alias, defer_check=True)
     incoming = sys.stdin.buffer if input_stream is None else input_stream
     outgoing = sys.stdout.buffer if output_stream is None else output_stream
     backend = None

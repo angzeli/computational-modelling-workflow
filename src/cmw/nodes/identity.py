@@ -441,10 +441,15 @@ def enroll(config_root, spec, *, host_provider=None, runtime_provider=None,
 
 
 def check_node(config, *, host_provider=None, runtime_provider=None,
-               storage_provider=None, store_factory=None):
+               storage_provider=None, store_factory=None, operation=None, queue_alias=None):
     """Observe readiness; missing storage does not erase independent queue evidence."""
     from cmw.jobs.store import Store
     _validate_config(config)
+    diagnostic = operation == 'doctor.inspect'
+    if operation is not None and not diagnostic:
+        raise ValueError('Unsupported operation-scoped readiness check')
+    if diagnostic and queue_alias not in config['queues']:
+        raise ValueError('Doctor requires one explicitly enrolled queue')
     result = {'ready': False, 'identity_ready': True, 'runtime_ready': True,
               'storage_ready': True, 'profiles_ready': True, 'identity_errors': [],
               'runtime_errors': [], 'errors': [], 'host': None, 'runtime': None,
@@ -462,7 +467,8 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
         result['runtime_errors'].append(str(exc))
     store_type = Store if store_factory is None else store_factory
-    for alias, expected in config['queues'].items():
+    queues = {queue_alias: config['queues'][queue_alias]} if diagnostic else config['queues']
+    for alias, expected in queues.items():
         try:
             observed = store_type(expected['state']).queue_identity()
             if observed != {key: value for key, value in expected.items() if key != 'state'}:
@@ -470,13 +476,19 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
             result['queues'][alias] = observed
         except (OSError, ValueError, RuntimeError) as exc:
             result['identity_errors'].append(f'{alias}: {exc}')
-    for alias, expected in config['storages'].items():
+    if diagnostic:
+        # Observation is not execution preflight: never hash runner payloads or
+        # touch unrelated queue/storage roots to explain one selected endpoint.
+        result['storage_ready'] = result['profiles_ready'] = None
+        result['coverage'] = {'operation': operation, 'queue': queue_alias,
+                              'storage': 'NOT_CHECKED', 'profiles': 'NOT_CHECKED'}
+    for alias, expected in (() if diagnostic else config['storages'].items()):
         observed = (check_storage(expected) if storage_provider is None else storage_provider(expected))
         result['storages'][alias] = observed
         if observed.get('ready') is not True:
             result['storage_ready'] = False
             result['errors'].append(f'{alias}: {observed.get("error", "Storage unavailable")}')
-    for alias, profile in config['profiles'].items():
+    for alias, profile in (() if diagnostic else config['profiles'].items()):
         try:
             for expected in [profile['runner_identity'], *profile['dependencies']]:
                 if _file_identity(expected['path']) != expected:
@@ -491,5 +503,7 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
     result['identity_ready'] = not result['identity_errors']
     result['runtime_ready'] = not result['runtime_errors']
     result['errors'] += result['identity_errors'] + result['runtime_errors']
-    result['ready'] = all(result[key] for key in ('identity_ready', 'runtime_ready', 'storage_ready', 'profiles_ready'))
+    required = ('identity_ready', 'runtime_ready') if diagnostic else (
+        'identity_ready', 'runtime_ready', 'storage_ready', 'profiles_ready')
+    result['ready'] = all(result[key] for key in required)
     return result

@@ -665,7 +665,46 @@ class NodesApp(NodeCatalogue, NavigationApp):
             review = self.selected_review(owner,job)
             if review is not None:
                 text += '\n\n' + review_text(review)
-            self.push_screen(FrozenText(text, 'JOB DETAILS · cached node report'))
+            from cmw.doctor.presentation import DoctorDetails
+            target = deepcopy(job['target'])
+            self.push_screen(DoctorDetails(text, 'JOB DETAILS · cached node report', target_key(target),
+                lambda: self.open_doctor(owner, target, self.label(owner, job))))
+
+    def open_doctor(self, owner, target, label):
+        from cmw.doctor.presentation import DoctorReport
+        captured_target = deepcopy(target)
+        backend = self.lanes[owner].backend
+        cached = deepcopy(self.lanes[owner].status_envelope)
+        started = self.clock()
+        view = DoctorReport(target_key(captured_target), label,
+                            context='Cached status at request: ' + self.connection_text(owner))
+        self.push_screen(view)
+
+        def inspected(envelope, error):
+            if not view.is_mounted or view not in self.screen_stack:
+                return
+            if error:
+                def refused():
+                    from cmw.doctor.nodes import compose_refusal
+                    return compose_refusal(backend, error, target=captured_target, cached=cached)
+                view.load(refused)
+                return
+            captured_envelope = deepcopy(envelope)
+            request_seconds = max(0., self.clock() - started)
+            received_at = time.time()
+
+            def compose():
+                from cmw.doctor.nodes import compose_report
+                return compose_report(backend, captured_envelope, target=captured_target,
+                                      request_seconds=request_seconds, received_at=received_at)
+
+            view.load(compose)
+
+        # This bounded operation rejects old endpoints explicitly. A broad
+        # capabilities probe also hashes unrelated runner profiles and storages.
+        if not self.queue(owner, 'doctor.inspect', {}, captured_target, inspected):
+            self.call_after_refresh(view.unavailable,
+                'Observation queue is busy; reopen Doctor after pending requests finish.')
 
     def action_scheduling(self):
         selected = self.selected()

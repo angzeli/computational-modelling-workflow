@@ -32,7 +32,7 @@ OPERATIONS = frozenset({'capabilities', 'status', 'lookup', 'show', 'observe',
     'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup', 'control.preview', 'control',
     'successor.plan', 'successor.materialize', 'successor.register',
     'catalogue.query', 'catalogue.show', 'catalogue.relations', 'catalogue.edit', 'catalogue.relation.add', 'catalogue.relation.retract',
-    'fetch.prepare', 'fetch.complete', 'review.preview', 'review.start', 'review.poll', 'review.cancel'})
+    'fetch.prepare', 'fetch.complete', 'review.preview', 'review.start', 'review.poll', 'review.cancel', 'doctor.inspect'})
 MAX_ROWS = 1000
 MAX_LOG_BYTES = 65536
 
@@ -103,13 +103,14 @@ class LocalBackend:
 
     def __init__(self, config_root, queue_alias, *, clock=time.time,
                  identity_loader=None, identity_checker=None, observer=None,
-                 activity_projector=None, boot_provider=None, review_service=None):
+                 activity_projector=None, boot_provider=None, review_service=None, defer_check=False):
         from .identity import load_node, check_node
         if type(queue_alias) is not str or not queue_alias or len(queue_alias) > 128:
             raise BackendError('UNKNOWN_QUEUE', 'Select an explicitly enrolled queue alias')
         self.config_root, self.queue_alias = Path(config_root), queue_alias
         self._load_identity = identity_loader or load_node
         self._check_identity = identity_checker or check_node
+        self._custom_identity_checker = identity_checker is not None
         self.clock = clock
         self.session_id = uuid4().hex
         import psutil
@@ -128,11 +129,15 @@ class LocalBackend:
         self._sampler = None
         self._sampler_lock = threading.Lock()
         self._review_service = review_service
-        self._check()
+        if not defer_check:
+            self._check()
 
-    def _check(self):
+    def _check(self, operation=None):
         config = self._load_identity(self.config_root)
-        readiness = self._check_identity(config)
+        if operation == 'doctor.inspect' and not self._custom_identity_checker:
+            readiness = self._check_identity(config, operation=operation, queue_alias=self.queue_alias)
+        else:
+            readiness = self._check_identity(config)
         if not readiness.get('identity_ready', False):
             raise BackendError('IDENTITY_CHANGED', '; '.join(readiness.get('identity_errors') or readiness.get('errors') or ['Node/queue identity is unavailable']))
         if not readiness.get('runtime_ready', False):
@@ -367,7 +372,7 @@ class LocalBackend:
             params = {} if params is None else params
             if type(params) is not dict:
                 raise BackendError('INVALID_PARAMS', 'Operation parameters must be an object')
-            self._check()
+            self._check(operation)
             if is_mutation(operation, params):
                 identifier(request_id, 'request ID')
                 expected = {'node_id': self.config['node_id'], 'queue_id': self.queue['queue_id'],
@@ -376,7 +381,27 @@ class LocalBackend:
                 if params.get('_endpoint') != expected:
                     raise BackendError('ENDPOINT_CHANGED', 'Mutation lacks the exact verified endpoint/boot guard')
                 params = {key: value for key, value in params.items() if key != '_endpoint'}
-            if operation in {'request', 'submit.check', 'submit.preview', 'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup'}:
+            if operation == 'doctor.inspect':
+                _params(params, ('job_id', 'capability'))
+                if target is not None and 'job_id' in params:
+                    raise BackendError('INVALID_PARAMS', 'Use one immutable target or one initial job selection')
+                if 'job_id' in params and (type(params['job_id']) not in (str, int)
+                        or not 1 <= len(str(params['job_id'])) <= 128):
+                    raise BackendError('INVALID_PARAMS', 'Doctor requires a bounded local job identifier')
+                capability = params.get('capability')
+                if capability is not None and (not isinstance(capability, str) or not 1 <= len(capability) <= 128):
+                    raise BackendError('INVALID_PARAMS', 'Doctor capability must be a bounded name')
+                job = self._job(target) if target is not None else (
+                    _read_job(self.store, params['job_id'])[0] if 'job_id' in params else None)
+                from cmw.doctor.service import inspect_local
+                report = inspect_local(state=self.store.root, job_id=job['id'] if job else None,
+                    expected_attempt_id=job['attempt_id'] if job else None, capability=capability)
+                report['target'].update(node_id=self.config['node_id'], queue_id=self.queue['queue_id'])
+                report['scope'] = 'node'
+                if job:
+                    self._job(self.target(job))
+                result = {'report': report}
+            elif operation in {'request', 'submit.check', 'submit.preview', 'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup'}:
                 if target is not None:
                     raise BackendError('INVALID_TARGET', 'Submission/transfer is not a mutation of an existing attempt')
                 from .submission import dispatch
@@ -415,6 +440,7 @@ class LocalBackend:
                               'successor_planner': {'schema': 1, 'model': 'SuccessorResult', 'geometry_only': True},
                               'research_catalogue': {'schema': 1, 'query': 'CatalogueQuery', 'page': 'CataloguePage', 'record': 'CatalogueRecord'},
                               'result_review': {'schema': 1, 'async': True, 'model': 'ReviewRecord'},
+                              'doctor': {'schema': 1, 'operation': 'doctor.inspect'},
                               'mutations_supported': True, 'observer_session': self.session_id}
                 elif operation == 'status':
                     result = self._status(params)
@@ -428,7 +454,7 @@ class LocalBackend:
                 job = self._job(target)
                 result = self._selected(operation, params, job)
                 self._job(target)
-            self._check()
+            self._check(operation)
             self.sequence += 1
             envelope = {'schema': 1, 'node_id': self.config['node_id'], 'queue_id': self.queue['queue_id'],
                     'queue_alias': self.queue_alias, 'session_id': self.session_id, 'sequence': self.sequence,
