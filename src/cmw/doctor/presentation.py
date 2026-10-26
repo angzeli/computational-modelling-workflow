@@ -49,7 +49,12 @@ class DoctorReport(FrozenText):
             self.call_after_refresh(self.load, self.loader)
 
     def load(self, loader):
-        if self.started or not self.is_mounted or self not in self.app.screen_stack:
+        if self.started:
+            return
+        if not self.is_mounted:
+            self.loader = loader  # A fast endpoint reply can precede Mount.
+            return
+        if self not in self.app.screen_stack:
             return
         self.started = True
         app = self.app

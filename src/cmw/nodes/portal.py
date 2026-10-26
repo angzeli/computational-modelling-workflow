@@ -36,7 +36,7 @@ from .portal_views import FetchDialog, NodeControlConfirm, NodeCopyPreview, Node
 
 
 _TRANSPORT_ERRORS = {'DISCONNECTED', 'UNREACHABLE', 'OUTCOME_UNKNOWN', 'ENDPOINT_CHANGED', 'INVALID_RESPONSE',
-                     'SSH_IDENTITY_CHANGED', 'SSH_IDENTITY_UNVERIFIED', 'CLOSED'}
+                     'SSH_IDENTITY_CHANGED', 'SSH_IDENTITY_UNVERIFIED', 'RUNTIME_MISMATCH', 'CLOSED'}
 
 
 def target_key(target):
@@ -241,8 +241,18 @@ class NodesApp(NodeCatalogue, NavigationApp):
                 lane.error = str(error)
                 lane.failures += 1
                 lane.next_poll = now + min(30, 2 ** min(5, lane.failures))
+                abandoned = tuple(lane.pending)
                 lane.pending.clear()
                 self.invalidate_session(owner)
+                # These requests were never sent; complete their waiting views
+                # without replaying operations after a transport/identity change.
+                for queued_operation, _, queued_target, queued_callback in abandoned:
+                    if queued_target is not None:
+                        cache = lane.cache.setdefault(target_key(queued_target), {})
+                        cache[queued_operation + '.error'] = str(error)
+                    if queued_callback is not None:
+                        queued_callback(None, NodeError(getattr(error, 'code', 'DISCONNECTED'),
+                            'Queued request was not sent because the owner connection changed: ' + str(error)))
             if target is not None:
                 cache = lane.cache.setdefault(target_key(target), {})
                 cache[operation + '.error'] = str(error)
@@ -681,7 +691,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
         self.push_screen(view)
 
         def inspected(envelope, error):
-            if not view.is_mounted or view not in self.screen_stack:
+            if view not in self.screen_stack:
                 return
             if error:
                 def refused():

@@ -101,6 +101,9 @@ class FakeBackend:
             result = {'ready': True, 'reasons': [], 'confirmation_required': True, 'node_id': self.node_id,
                 'queue_id': self.queue_id, 'target': target, 'action': params['action'], 'expected_clock_id': 'clock-' + self.alias,
                 'expected_revision': {'job': 3 if target else None, 'queue': 9}, **({'position': params['position']} if 'position' in params else {})}
+        elif operation.startswith('review.'):
+            from cmw.nodes.protocol import NodeError
+            raise NodeError('UNSUPPORTED_REVIEW', 'Synthetic older endpoint has no review capability')
         elif operation == 'logs':
             result = {'text': 'bounded stdout of ' + self.alias, 'node_path': '/remote/stdout'}
         else:
