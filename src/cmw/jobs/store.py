@@ -786,6 +786,7 @@ class Store:
 
     def snapshot(self, *, now=None):
         now = time.time() if now is None else now
+        queue_identity = None
         empty = {"schema": 2, "scheduler": scheduler_defaults(), "dispatch": False, "stop": False, "owner": None, "heartbeat": None, "reason": "No queue; use cmw jobs add, then start"}
         if not self.path.exists():
             control, jobs, events = empty, [], []
@@ -805,7 +806,7 @@ class Store:
                 else:
                     control, jobs = self.control(con), self.rows(con)
                     if control['schema'] == 4:
-                        self._queue_identity(con, control['schema'])
+                        queue_identity = self._queue_identity(con, control['schema'])
                     events = [dict(zip(("id", "time", "job_id", "message"), row)) for row in con.execute("SELECT * FROM events ORDER BY id DESC LIMIT 30")][::-1]
             except sqlite3.Error as exc:
                 raise JobsError(f"Queue database unavailable: {exc}") from exc
@@ -838,7 +839,8 @@ class Store:
                 from .suspension import project_timing
                 project_timing(job)
             job["check"] = None
-        return {"schema": control["schema"], "state_directory": str(self.root), "controller_log": str(self.root / "controller.log"),
+        return {"schema": control["schema"], **({"queue_identity": queue_identity} if queue_identity else {}),
+                "state_directory": str(self.root), "controller_log": str(self.root / "controller.log"),
                 "controller": {**control, "online": online, "stale": stale, "age_seconds": age},
                 "mode": "Bounded Sharing" if control["scheduler"]["mode"] == "bounded-sharing" else "Sequential",
                 "scheduler": control["scheduler"], "observed_at": now, "jobs": jobs, "events": events}

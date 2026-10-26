@@ -56,6 +56,7 @@ class QueueIdentityTests(unittest.TestCase):
         self.assertEqual(self.enroll(), result)
         snapshot = self.store.snapshot()
         self.assertEqual(snapshot['schema'], 4)
+        self.assertEqual(snapshot['queue_identity'], result)
         current = snapshot['jobs'][0]
         for field in job:
             if field != 'reason':
