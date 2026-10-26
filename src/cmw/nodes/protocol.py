@@ -16,9 +16,10 @@ OPERATIONS = frozenset({
     'transfer.begin', 'transfer.publish', 'transfer.lookup', 'control.preview', 'control',
     'fetch.prepare', 'fetch.complete',
     'review.preview', 'review.start', 'review.poll', 'review.cancel',
+    'successor.plan', 'successor.materialize', 'successor.register',
     'catalogue.query', 'catalogue.show', 'catalogue.relations', 'catalogue.edit', 'catalogue.relation.add', 'catalogue.relation.retract',
 })
-MUTATIONS = frozenset({'submit', 'transfer.begin', 'transfer.publish', 'control',
+MUTATIONS = frozenset({'successor.materialize', 'successor.register', 'submit', 'transfer.begin', 'transfer.publish', 'control',
                        'fetch.prepare', 'fetch.complete', 'catalogue.edit',
                        'catalogue.relation.add', 'catalogue.relation.retract'})
 
@@ -201,6 +202,9 @@ def validate_envelope(value, operation=None):
                 raise NodeError('INVALID_RESPONSE', 'Status row belongs to another node or queue')
             if job.get('id') != target['job_id'] or job.get('attempt_id') != target['attempt_id']:
                 raise NodeError('INVALID_RESPONSE', 'Status row identity contradicts its target')
+    if operation and operation.startswith('successor.'):
+        from .successor import validate_result
+        validate_result(value, operation)
     if operation and operation.startswith('catalogue.'):
         from .catalogue import validate_result
         validate_result(value, operation)

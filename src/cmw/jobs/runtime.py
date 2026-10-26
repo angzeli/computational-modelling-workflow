@@ -344,7 +344,8 @@ def worker(store, job_id, claim):
                 guard = activity.DEFAULT_OBSERVER.scan(store, before, source='supervisor-admission')
                 evidence = None
             # Byte/provenance checks run once at actual admission, never on a UI poll.
-            final_blocker = launch_blocker(job, final=True) if job.get('molecular_submission') else None
+            final_blocker = launch_blocker(job, final=True) if (job.get('molecular_submission')
+                or job.get('node_submission', {}).get('successor')) else None
             with store.transaction() as con:
                 record_guard(store, con, guard)
                 job = store.get(con, job_id)

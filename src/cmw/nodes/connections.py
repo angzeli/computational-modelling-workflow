@@ -172,6 +172,12 @@ class ConnectedBackend:
                 'node_id': self.node_id, 'queue_id': self.queue_id,
                 'host_id': self.connection['host_id'], 'runtime_id': self.connection['runtime_id'],
                 'clock_id': verified['clock_id']}}
+        if operation.startswith('successor.'):
+            from .successor import CAPABILITY
+            capability = (verified if mutation else self.call('capabilities'))['result'].get('successor_planner')
+            if (type(capability) is not dict or capability != CAPABILITY or
+                    type(capability.get('schema')) is not int or type(capability.get('geometry_only')) is not bool):
+                raise NodeError('UNSUPPORTED_SUCCESSOR', 'Endpoint does not advertise the supported successor planning contract')
         if operation.startswith('catalogue.'):
             from .catalogue import CAPABILITY
             capability = (verified if mutation else self.call('capabilities'))['result'].get('research_catalogue')
@@ -198,6 +204,9 @@ class ConnectedBackend:
                 record = value['result']['review']['value']
                 if any(record.get(key) != expected for key, expected in target.items()):
                     raise NodeError('INVALID_RESPONSE', 'Review response differs from the selected immutable target')
+            if operation.startswith('successor.'):
+                from .successor import validate_result
+                validate_result(value, operation, target)
             if operation.startswith('catalogue.') and target is not None:
                 from .catalogue import validate_selected_result
                 validate_selected_result(value, operation, target)

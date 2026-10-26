@@ -30,6 +30,7 @@ OPERATIONS = frozenset({'capabilities', 'status', 'lookup', 'show', 'observe',
     'progress', 'history', 'history.release', 'logs', 'locations', 'sources.inspect',
     'sources.validate', 'sources.activate', 'sources.clear', 'request', 'submit.check', 'submit.preview',
     'submit', 'transfer.begin', 'transfer.publish', 'transfer.lookup', 'control.preview', 'control',
+    'successor.plan', 'successor.materialize', 'successor.register',
     'catalogue.query', 'catalogue.show', 'catalogue.relations', 'catalogue.edit', 'catalogue.relation.add', 'catalogue.relation.retract',
     'fetch.prepare', 'fetch.complete', 'review.preview', 'review.start', 'review.poll', 'review.cancel'})
 MAX_ROWS = 1000
@@ -393,6 +394,9 @@ class LocalBackend:
                     _params(params, ('fetch_id', 'manifest_digest'), ('fetch_id', 'manifest_digest'))
                     result = complete_fetch(self, job, params['fetch_id'], params['manifest_digest'])
                 self._job(target)
+            elif operation.startswith('successor.'):
+                from .successor import dispatch
+                result = dispatch(self, operation, params, target, request_id=request_id)
             elif operation.startswith('catalogue.'):
                 from .catalogue import dispatch
                 result = dispatch(self, operation, params, target, request_id=request_id)
@@ -408,6 +412,7 @@ class LocalBackend:
                     result = {'queue': deepcopy(self.queue), 'readiness': deepcopy(self.readiness),
                               'profiles': deepcopy(self.config.get('profiles', {})), 'operations': sorted(OPERATIONS),
                               'molecular_submission': {'schema': 1, 'engines': ['ORCA', 'Multiwfn'], 'target_local_artifacts': 1},
+                              'successor_planner': {'schema': 1, 'model': 'SuccessorResult', 'geometry_only': True},
                               'research_catalogue': {'schema': 1, 'query': 'CatalogueQuery', 'page': 'CataloguePage', 'record': 'CatalogueRecord'},
                               'result_review': {'schema': 1, 'async': True, 'model': 'ReviewRecord'},
                               'mutations_supported': True, 'observer_session': self.session_id}

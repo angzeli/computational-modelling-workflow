@@ -561,6 +561,12 @@ class Store:
                 previous = self._request_record(con, remote_request['request_id'])
                 if previous is not None:
                     return self._same_request(previous, remote_request)
+            successor = (node_submission or {}).get('successor')
+            if successor:
+                for existing in self.rows(con):
+                    prior = existing.get('node_submission', {}).get('successor', {})
+                    if prior.get('record_path') == successor.get('record_path'):
+                        raise JobsError('Successor materialization already registered; reuse its original request ID')
             if molecular_submission is not None:
                 for existing in self.rows(con):
                     prior = existing.get('molecular_submission', {})

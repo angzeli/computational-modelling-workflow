@@ -140,7 +140,7 @@ def _resolve_argument(argument, bundle, work, profile, manifest):
     return str(work / value)
 
 
-def _argv(spec, profile, bundle, work, native):
+def _argv(spec, profile, bundle, work, native, *, input_directory=None):
     if spec['engine'] == 'Command':
         return [profile['runner'], *[_resolve_argument(item, bundle, work, profile, spec['manifest'])
                                      for item in spec['arguments']]]
@@ -152,7 +152,7 @@ def _argv(spec, profile, bundle, work, native):
         _require(type(options[key]) is int and options[key] > 0, f'{key} must be a positive integer')
     for key in ('timeout', 'stop_before'):
         _require(type(options[key]) in (int, float) and math.isfinite(options[key]), f'{key} must be finite')
-    argv = [profile['runner'], '--input', str(bundle / 'inputs'), '--output', str(native),
+    argv = [profile['runner'], '--input', str(bundle / 'inputs' if input_directory is None else input_directory), '--output', str(native),
             '--binary', 'std', '--ranks', str(spec['resources']['mpi_ranks']),
             '--ncore', str(options['ncore']), '--kpar', str(options['kpar']),
             '--mpi-mode', options['mpi_mode'], '--restart', 'none',
@@ -275,6 +275,9 @@ def register_held(backend, spec, request_id):
 
 def launch_blocker(job, *, final=False):
     """Destination-local preflight for enrolled jobs; no alternate dispatcher."""
+    if 'successor' in job.get('node_submission', {}):
+        from cmw.jobs.successor import launch_blocker as successor_blocker
+        return successor_blocker(job)
     try:
         from .transfer import lookup_transfer
         binding = job['node_submission']
