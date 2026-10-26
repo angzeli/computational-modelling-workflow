@@ -328,7 +328,7 @@ class CatalogueUiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press('q')
 
     async def test_bounded_portal_refresh_for_1000_and_10000_metadata_histories(self):
-        timings = []
+        timings,diagnostics = [],[]
         for count in (1000,10000):
             backend = CatalogueBackend()
             template = deepcopy(backend.jobs[1])
@@ -357,14 +357,45 @@ class CatalogueUiTests(unittest.IsolatedAsyncioTestCase):
                 table = app.query_one('#table',DataTable)
                 table.focus()
                 await pilot.press(*(['down']*30))
+                base = app.screen
+                # Match the prerequisite navigation gate: a pause alone does not
+                # settle owner responses or the deferred structural restoration.
+                await self.until(pilot,lambda:app.selected() is not None
+                    and app.selected_snapshot(*app.selected()) is not None)
+                await self.until(pilot,lambda:not app.navigation_pending(base))
                 await pilot.pause()
-                selected,offset = app.selected_key,table.scroll_y
+                selected = app.selected_key
+                before = {'offset':table.scroll_y,'height':table.scrollable_content_region.height,
+                          'pending':app.navigation_pending(base),'selected':selected,'card_height':app.card_height}
                 await pilot.press('t')
                 await self.until(pilot,lambda:isinstance(app.screen,CatalogueDetails) and app.screen.record is not None)
+                origin = next(saved for saved in app._navigation_frames[-1].view.tables if saved.table is table)
+                saved = {'offset':origin.scroll.y,'height':origin.visible_height,
+                         'selected':origin.cursor_identity,'cursor_visible':origin.cursor_visible}
                 await pilot.click('#catalogue-detail-back')
+                await self.until(pilot,lambda:app.screen is base and not app.navigation_pending(base))
                 await pilot.pause()
+                height = table.scrollable_content_region.height
+                expected = origin.scroll.y
+                if height < origin.visible_height and origin.cursor_visible:
+                    # Preserve the prerequisite's minimum movement when a
+                    # smaller viewport would otherwise hide a visible cursor.
+                    row = next(row for row in app._table_rows(table) if row[0] == origin.cursor_identity)
+                    fixed = table.header_height if table.show_header else 0
+                    fixed += sum(row[2] for row in app._table_rows(table)[:table.fixed_rows])
+                    expected = max(min(expected,row[1]-fixed),row[1]+row[2]-height)
+                returned = {'offset':table.scroll_y,'height':height,'pending':app.navigation_pending(base),
+                            'selected':app.selected_key,'card_height':app.card_height,'expected_offset':expected}
+                diagnostics.append({'history_jobs':count,'before_key':before,'saved_modal_origin':saved,
+                                    'settled_return':returned})
+                diagnostic_path = os.environ.get('CMW_CATALOGUE_VIEWPORT_FILE')
+                if diagnostic_path:
+                    Path(diagnostic_path).write_text(json.dumps(diagnostics,indent=2)+'\n')
                 self.assertEqual(app.selected_key,selected)
-                self.assertEqual(table.scroll_y,offset)
+                self.assertEqual(origin.cursor_identity,selected)
+                self.assertEqual(tuple(app.row_keys),origin.rows)
+                self.assertEqual(table.scroll_x,origin.scroll.x)
+                self.assertEqual(table.scroll_y,expected)
                 rows = tuple(table.ordered_rows)
                 start = time.perf_counter()
                 for _ in range(10):
