@@ -9,6 +9,7 @@ import time
 
 from .review import ReviewService, options, source_changed
 from .review_models import DOMAIN_NAMES, ReviewDomain
+from .lifecycle import read_job
 from .store import Store, JobsError
 
 
@@ -66,7 +67,13 @@ def inspect(request):
     record = replace(service._preview(job,owner),review_id=request['review_id'],
         max_bytes=settings['max_bytes'],timeout_seconds=settings['timeout_seconds'])
     directory = _directory(store,job)
-    snapshot = store.snapshot()
+    selected, controller = read_job(store, job['id'])
+    if selected['attempt_id'] != job['attempt_id']:
+        raise JobsError('Review attempt changed before execution evidence capture')
+    # Execution evidence is scoped to the selected attempt, not queue history.
+    snapshot = {'schema': controller['schema'], 'state_directory': str(store.root),
+                'controller': controller, 'observed_at': time.time(), 'jobs': [selected],
+                'scope': 'selected-attempt', **({'queue_identity': owner} if owner else {})}
     receipt = str(store.root/'attempts'/job['attempt_id']/'payload-exit.json')
     expected = None
     if owner:
@@ -108,6 +115,7 @@ def inspect(request):
     else:
         execution = inspect_execution_snapshot(snapshot,receipt,job_id=job['id'],attempt_id=job['attempt_id'],
             run_directory=directory,expected_target=expected)
+        execution['snapshot_scope'] = 'selected-attempt'
     domain_values = adapter['domains']
     operation_status = 'PASS' if execution['operational_success'] is True else 'FAIL' if execution['operational_success'] is False else 'UNKNOWN'
     domain_values['operational'] = {'status':operation_status,
