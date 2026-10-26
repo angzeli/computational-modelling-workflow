@@ -115,7 +115,7 @@ def catalogue_text(record, relations=None):
 
 class CatalogueDetails(ModalScreen):
     BINDINGS = [Binding('escape','dismiss(None)','Back',priority=True), Binding('q','dismiss(None)','Back'),
-                Binding('m','series_members','Series members')]
+                Binding('m','series_members','Series members'), Binding('s','study','Study')]
     DEFAULT_CSS = """
     CatalogueDetails { align: center middle; background: $background 70%; }
     CatalogueDetails > Vertical { width: 96%; max-width: 138; height: 94%; border: round $accent; padding: 0 1; background: $surface; }
@@ -126,9 +126,10 @@ class CatalogueDetails(ModalScreen):
     CatalogueDetails #catalogue-detail-status { height: auto; max-height: 2; }
     """
 
-    def __init__(self,label,request):
+    def __init__(self,label,request,study_request=None):
         super().__init__()
         self.label,self.request,self.record,self.relations = label,request,None,None
+        self.study_request = study_request
 
     def compose(self):
         with Vertical():
@@ -138,6 +139,7 @@ class CatalogueDetails(ModalScreen):
             yield Static('Intent and recorded artifact links never satisfy a scientific policy.',id='catalogue-detail-status',markup=False)
             with Horizontal(id='catalogue-detail-actions'):
                 yield Button('M Series members',id='catalogue-members',disabled=True)
+                yield Button('S Study',id='catalogue-study',disabled=self.study_request is None)
                 yield Button('Back',id='catalogue-detail-back')
 
     def on_mount(self):
@@ -157,8 +159,16 @@ class CatalogueDetails(ModalScreen):
         if self.record and self.record.series:
             self.dismiss(('apply',CatalogueQuery(series=self.record.series,limit=50),None))
 
+    def action_study(self):
+        if self.study_request is not None:
+            from .study_ui import StudyScreen
+            self.app.push_screen(StudyScreen(self.label,self.study_request))
+
     def on_button_pressed(self,event):
-        if event.button.id == 'catalogue-members':
+        if event.button.id == 'catalogue-study':
+            event.stop()
+            self.action_study()
+        elif event.button.id == 'catalogue-members':
             self.action_series_members()
         else:
             self.dismiss(None)
@@ -298,7 +308,19 @@ class LocalCatalogue(CatalogueCommon):
                 except RuntimeError:
                     pass
             self.run_worker(collect,thread=True,group='catalogue-details',exit_on_error=False)
-        self.push_screen(CatalogueDetails(job['display_id'],request),self.catalogue_changed)
+        def study_request(callback):
+            def collect():
+                from .study import StudyService
+                try:
+                    result,error = StudyService(self.store).view_for_job(job['id'],expected_attempt_id=job['attempt_id']),None
+                except Exception as exc:
+                    result,error = None,exc
+                try:
+                    self.call_from_thread(callback,result,error)
+                except RuntimeError:
+                    pass
+            self.run_worker(collect,thread=True,group='study-view',exit_on_error=False)
+        self.push_screen(CatalogueDetails(job['display_id'],request,study_request),self.catalogue_changed)
 
 
 class NodeCatalogue(CatalogueCommon):
@@ -418,4 +440,19 @@ class NodeCatalogue(CatalogueCommon):
                     callback(record,relations,error)
                 self.queue(owner,'catalogue.relations',target=target,callback=relations_accepted)
             self.queue(owner,'catalogue.show',target=target,callback=record_accepted)
-        self.push_screen(CatalogueDetails(self.label(owner,job),request),self.catalogue_changed)
+        def study_request(callback):
+            from .study_models import StudyResult
+            import json
+            def accepted(envelope,error):
+                try:
+                    result = decode_typed(envelope['result']['study'],StudyResult) if error is None else None
+                    if result is not None and (
+                        (result.node_id,result.queue_id) != (target['node_id'],target['queue_id']) or
+                        json.loads(result.payload_json).get('selected_target') != target):
+                        raise ValueError('Study response belongs to another immutable attempt')
+                except (ValueError,TypeError,KeyError) as exc:
+                    result,error = None,exc
+                callback(result,error)
+            if not self.queue(owner,'study.view',target=target,callback=accepted):
+                callback(None,ValueError('Owner observation queue full or closed'))
+        self.push_screen(CatalogueDetails(self.label(owner,job),request,study_request),self.catalogue_changed)

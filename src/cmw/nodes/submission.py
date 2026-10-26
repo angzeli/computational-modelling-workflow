@@ -275,6 +275,9 @@ def register_held(backend, spec, request_id):
 
 def launch_blocker(job, *, final=False):
     """Destination-local preflight for enrolled jobs; no alternate dispatcher."""
+    if 'study' in job.get('node_submission', {}):
+        from cmw.jobs.study import launch_blocker as study_blocker
+        return study_blocker(job)
     if 'successor' in job.get('node_submission', {}):
         from cmw.jobs.successor import launch_blocker as successor_blocker
         return successor_blocker(job)

@@ -57,6 +57,9 @@ def handle(args):
         if operation in {'plan-next', 'materialize-next', 'register-next'}:
             from cmw.jobs.successor_cli import remote
             return remote(backend, args)
+        if operation == 'study':
+            from cmw.jobs.study_cli import remote
+            return remote(backend, args)
         if operation == 'review':
             from cmw.jobs.review_cli import remote
             return remote(backend,args)
