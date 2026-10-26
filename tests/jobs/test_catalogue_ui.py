@@ -137,6 +137,7 @@ class CatalogueUiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(app.selected_id,chosen)
             self.assertEqual(len(app.row_ids),8)
+            self.assertIn('Filter cleared',str(app.query_one('#message',Static).render()))
             self.assertEqual([(job['id'],job['order'],job['status']) for job in self.store.snapshot()['jobs']],before)
             await pilot.press('q')
 
@@ -377,3 +378,21 @@ class CatalogueUiTests(unittest.IsolatedAsyncioTestCase):
         destination = os.environ.get('CMW_CATALOGUE_PERFORMANCE_FILE')
         if destination:
             Path(destination).write_text(json.dumps(timings,indent=2)+'\n')
+
+    async def test_next_owner_page_reissues_unfinished_peer_generation(self):
+        first,second = CatalogueBackend('PRO'),CatalogueBackend('MINI')
+        second.wait_query = threading.Event()
+        app = NodesApp({'PRO':first,'MINI':second})
+        async with app.run_test(size=(100,30)) as pilot:
+            await self.until(pilot,lambda:len(app.rows)==10)
+            app.catalogue_changed(('apply',CatalogueQuery(text='literal.*'),None))
+            await self.until(pilot,lambda:'PRO' in app.catalogue_pages and bool(second.queries))
+            app.catalogue_pages['PRO'] = replace(app.catalogue_pages['PRO'],next_cursor='synthetic-next')
+            app.catalogue_changed(('next',app.catalogue_query,'PRO'))
+            second.wait_query.set()
+            await self.until(pilot,lambda:len(app.catalogue_pages)==2)
+            self.assertEqual(len(second.queries),2)
+            self.assertEqual(first.queries[-1].cursor,'synthetic-next')
+            self.assertFalse(app.catalogue_errors)
+            self.assertNotIn('pending',app.catalogue_summary())
+            await pilot.press('q')

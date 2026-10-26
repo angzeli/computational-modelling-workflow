@@ -217,6 +217,7 @@ class CatalogueCommon:
             self.catalogue_query = None
             self.catalogue_pages = {}
             self.catalogue_pending = None
+            self.query_one('#message',Static).update('/ Search · T Catalogue · Filter cleared; normal queue view restored.')
             self.catalogue_refresh()
             return
         cursor = self.catalogue_pages[owner].next_cursor if action == 'next' else None
@@ -309,7 +310,12 @@ class NodeCatalogue(CatalogueCommon):
 
     def catalogue_request(self,owner=None,cursor=None):
         from cmw.nodes.codec import encode_typed,decode_typed
-        for label in ([owner] if owner else self.lanes):
+        # Advancing one owner supersedes the generation of any unfinished peers.
+        # Reissue only those peers so coverage cannot remain pending forever.
+        owners = ([label for label,lane in self.lanes.items()
+                   if label == owner or (label not in self.catalogue_pages and lane.error is None)]
+                  if owner else self.lanes)
+        for label in owners:
             lane = self.lanes[label]
             generation,session = self.catalogue_generation,lane.session
             lane.pending = type(lane.pending)(request for request in lane.pending if request[0] != 'catalogue.query')

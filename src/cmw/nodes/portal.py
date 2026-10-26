@@ -415,6 +415,8 @@ class NodesApp(NodeCatalogue, NavigationApp):
             self.query_one('#execution', Static).update('')
             self.query_one('#progress', Static).display = False
         if self.catalogue_query is not None:
+            if selected is None:
+                self.query_one('#selected',Static).update('No current visible attempt selected. Select a catalogue row explicitly.')
             self.message(self.catalogue_summary())
 
     def select(self, key):
