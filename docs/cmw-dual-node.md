@@ -63,6 +63,15 @@ cursor or silently retarget a selection. Readiness distinguishes implementation,
 configuration and qualification; no real-engine or physical dual-Mac acceptance
 is implied by an isolated endpoint test.
 
+## Selected-owner diagnosis
+
+`cmw doctor --node ALIAS --queue QUEUE [--job JOB]` uses the explicit
+`doctor.inspect` schema-1 operation. It checks the selected host/runtime/queue
+without reading unrelated profile payloads or storage. Older endpoints refuse
+this operation; ordinary control and submission retain their full checks. See
+[doctor and private capsule contract](cmw-doctor.md) for runtime distinctions,
+cached evidence, selected-job Details access and export limitations.
+
 ## Reviewed held submission
 
 Submission uses the same selected backend as observation. `submit --preview`

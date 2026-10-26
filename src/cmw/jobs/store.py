@@ -220,39 +220,43 @@ class Store:
             raise JobsError(f'Enrolled queue identity is malformed or unavailable: {exc}') from exc
         return record
 
+    @contextmanager
+    def read_transaction(self):
+        """Observe an existing rollback-journal database without sidecar creation."""
+        before = self.path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise JobsError('Queue database is not a regular file')
+        con = sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True, timeout=2)
+        try:
+            con.execute('PRAGMA query_only=ON')
+            # SQLite retains its read lock across format and identity checks.
+            # Exclusive mode refuses WAL without creating SHM/WAL sidecars.
+            con.execute('PRAGMA locking_mode=EXCLUSIVE')
+            con.execute('BEGIN')
+            try:
+                journal_mode = con.execute('PRAGMA journal_mode').fetchone()[0]
+            except sqlite3.Error as exc:
+                raise JobsError('Unsupported database journal format for read-only observation') from exc
+            if journal_mode != 'delete':
+                raise JobsError('Unsupported database journal format for read-only observation')
+            yield con
+            after = self.path.lstat()
+            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                raise JobsError('Queue database changed while reading observation')
+        finally:
+            con.close()
+
     def queue_identity(self):
         """Read enrollment without initializing, migrating or probing execution."""
         if not self.path.exists():
             return None
         try:
-            before = self.path.lstat()
-            if not stat.S_ISREG(before.st_mode):
-                raise JobsError('Queue database is not a regular file')
-            con = sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True, timeout=2)
-            try:
-                con.execute('PRAGMA query_only=ON')
-                # SQLite owns the descriptor and read lock throughout format and
-                # identity checks. Exclusive locking mode avoids WAL/SHM sidecars
-                # on unsupported WAL databases without disabling read locks.
-                con.execute('PRAGMA locking_mode=EXCLUSIVE')
-                con.execute('BEGIN')
-                try:
-                    journal_mode = con.execute('PRAGMA journal_mode').fetchone()[0]
-                except sqlite3.Error as exc:
-                    raise JobsError('Unsupported database journal format for read-only enrollment') from exc
-                if journal_mode != 'delete':
-                    raise JobsError('Unsupported database journal format for read-only enrollment')
+            with self.read_transaction() as con:
                 tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 if not tables:
                     return None
                 control = self.control(con)
-                record = self._queue_identity(con, control['schema'])
-                after = self.path.lstat()
-                if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
-                    raise JobsError('Queue database changed while reading enrollment')
-                return record
-            finally:
-                con.close()
+                return self._queue_identity(con, control['schema'])
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, IndexError) as exc:
             if isinstance(exc, JobsError):
                 raise

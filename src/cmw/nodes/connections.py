@@ -149,7 +149,7 @@ class ConnectedBackend:
             self.backend, self.transport = None, transport
         elif entry['transport'] == 'local':
             from .backend import LocalBackend
-            self.backend, self.transport = LocalBackend(entry['config_root'], self.queue), None
+            self.backend, self.transport = LocalBackend(entry['config_root'], self.queue, defer_check=True), None
         else:
             self.backend, self.transport = None, SSHTransport({**entry, 'queue': self.queue})
         self.last_envelope = None
@@ -190,9 +190,12 @@ class ConnectedBackend:
             raise NodeError('ENDPOINT_CHANGED', 'Endpoint node or queue identity changed')
         host = value.get('host') or {}
         runtime = value.get('runtime') or {}
-        if str(host.get('platform')) + ':' + str(host.get('hardware_id')) != self.connection['host_id'] or runtime.get('fingerprint') != self.connection['runtime_id']:
+        if str(host.get('platform')) + ':' + str(host.get('hardware_id')) != self.connection['host_id']:
             self.close()
-            raise NodeError('ENDPOINT_CHANGED', 'Pinned host or runtime identity changed; explicit reenrollment is required')
+            raise NodeError('ENDPOINT_CHANGED', 'Pinned host identity changed; inspect enrollment before any reconnect')
+        if runtime.get('fingerprint') != self.connection['runtime_id']:
+            self.close()
+            raise NodeError('RUNTIME_MISMATCH', 'Pinned endpoint runtime differs; inspect compatibility before any runtime switch')
         self.last_envelope = value
         return value
 
