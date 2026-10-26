@@ -1117,6 +1117,8 @@ class JobsApp(LocalCatalogue, NavigationApp):
         if self.external_selected_id:
             return "Selected external process is no longer observed; outcome is not known."
         job = self.selected()
+        if not job and self.catalogue_query is not None:
+            return 'No visible attempt selected. Select a catalogue row explicitly.'
         if not job:
             return "Selected job/attempt is no longer available. Select a current row explicitly." if self._selected_target else detail(None)
         width = max(12, self.size.width - 8)
