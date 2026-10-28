@@ -222,6 +222,55 @@ class ObservationTests(unittest.TestCase):
             self.assertEqual(bad['returncode'], 7)
             self.assertFalse(bad['remaining'])
 
+    def test_top_level_runner_enforces_sampled_resource_limits_and_missing_frontend(self):
+        from tests.campaign import owned_run
+        from tests.campaign.support import BUDGETS
+        baseline = {'pid': os.getpid(), 'birth': 1.0, 'rss_bytes': 1024, 'fds': 10}
+        variants = [
+            ('boundary', {**baseline, 'rss_bytes': BUDGETS['process_rss_bytes'], 'fds': 26}, None),
+            ('rss', {**baseline, 'rss_bytes': BUDGETS['process_rss_bytes']+1}, 'Per-process RSS budget exceeded'),
+            ('prior_peak', dict(baseline), 'Per-process RSS budget exceeded'),
+            ('fds', {**baseline, 'fds': BUDGETS['process_fds']+1}, 'Per-process FD budget exceeded'),
+            ('growth', {**baseline, 'fds': 27}, 'Frontend descriptor growth budget exceeded'),
+            ('missing', None, 'Frontend initial/final descriptor observation missing'),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            for name, final, violation in variants:
+                with self.subTest(name=name):
+                    initial = {'at': 1., 'processes': [baseline], 'observations': []}
+                    if name == 'prior_peak':
+                        initial['processes'].append({**baseline, 'pid': baseline['pid']+1, 'birth': 2.,
+                                                     'rss_bytes': BUDGETS['process_rss_bytes']+1})
+                    last = {'at': 2., 'processes': [final] if final else [], 'observations':
+                            [] if final else [{'classification': 'access_denied', 'required_live': True}]}
+                    ledger = Mock(frontend=baseline)
+                    ledger.sample.side_effect = [initial, last]
+                    ledger.cleanup.return_value = []
+                    ledger.report.return_value = {'coverage_passed': True, 'cleanup_errors': []}
+                    context = Mock()
+                    context.__enter__ = Mock(return_value=ledger)
+                    context.__exit__ = Mock(return_value=False)
+                    # The runner uses its original ledger object across the context.
+                    context.frontend = baseline
+                    context.sample = ledger.sample; context.cleanup = ledger.cleanup; context.report = ledger.report
+                    process = Mock(); process.wait.return_value = process.poll.return_value = 0
+                    sampler = Mock(ident=None); sampler.is_alive.return_value = False
+                    with patch.object(owned_run, 'ProcessLedger', return_value=context), \
+                         patch.object(owned_run.threading, 'Thread', return_value=sampler), \
+                         patch.object(owned_run.subprocess, 'Popen', return_value=process):
+                        result = owned_run.run(['/unexecuted/fixture'], Path(directory)/name, 1)
+                    self.assertEqual(result['passed'], violation is None)
+                    self.assertEqual(result['samples'][-1]['observations'], last['observations'])
+                    if violation:
+                        self.assertIn(violation, result['resource_budget_violations'])
+                    if final is None:
+                        self.assertIsNone(result['frontend_descriptors']['growth'])
+                        self.assertIsNone(result['frontend_descriptors']['final'])
+                    else:
+                        observed = [*initial['processes'], final]
+                        self.assertEqual(result['resource_peaks']['rss_bytes'], max(row['rss_bytes'] for row in observed))
+                        self.assertEqual(result['resource_peaks']['fds'], max(row['fds'] for row in observed))
+
     def test_top_level_runner_timeout_has_separate_cleanup_and_reaping(self):
         from tests.campaign.owned_run import run
         with tempfile.TemporaryDirectory() as directory:

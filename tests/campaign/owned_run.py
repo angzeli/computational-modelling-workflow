@@ -34,6 +34,7 @@ def run(argv, output, timeout, *, max_owned=BUDGETS['owned_subprocesses']):
     ledger = ProcessLedger('command:' + Path(argv[0]).name)
     started = time.monotonic()
     process = None
+    final_sample = None
     with ledger:
         def sample():
             while not stopped.wait(OBSERVATION_RULES['sample_cadence_seconds']):
@@ -68,6 +69,11 @@ def run(argv, output, timeout, *, max_owned=BUDGETS['owned_subprocesses']):
                 stopped.set()
                 if sampler.ident is not None:
                     sampler.join(timeout=min(2., max(0., cleanup_deadline-time.monotonic())))
+            try:
+                final_sample = ledger.sample()
+                report['samples'].append(final_sample)
+            except BaseException as exc:
+                report['sampling_errors'].append('Final resource observation: '+repr(exc))
             report['sampler_stopped'] = not sampler.is_alive()
             report['cleanup_seconds'] = time.monotonic()-workload_ended
             if process is not None and process.poll() is not None:
@@ -77,12 +83,37 @@ def run(argv, output, timeout, *, max_owned=BUDGETS['owned_subprocesses']):
         (sum(row['pid'] != os.getpid() for row in sample['processes']) for sample in report['samples']), default=0)
     report['sample_cadence_seconds'] = summary([after['at']-before['at']
         for before, after in zip(report['samples'], report['samples'][1:])])
+    resources = [row for sample in report['samples'] for row in sample['processes']]
+    def frontend(sample):
+        return next((row for row in (sample or {}).get('processes', ())
+                     if all(row[key] == ledger.frontend[key] for key in ('pid', 'birth'))), None)
+    initial_frontend = frontend(report['samples'][0])
+    final_frontend = frontend(final_sample)
+    growth = final_frontend['fds']-initial_frontend['fds'] if initial_frontend and final_frontend else None
+    report['resource_peaks'] = {'rss_bytes': max((row['rss_bytes'] for row in resources), default=None),
+                               'fds': max((row['fds'] for row in resources), default=None)}
+    report['frontend_descriptors'] = {'initial': initial_frontend, 'final': final_frontend, 'growth': growth}
+    report['resource_limits'] = {key: BUDGETS[key] for key in
+                                ('process_rss_bytes', 'process_fds', 'frontend_fd_growth')}
+    violations = []
+    if not resources:
+        violations.append('No successful resource observations')
+    if any(row['rss_bytes'] > BUDGETS['process_rss_bytes'] for row in resources):
+        violations.append('Per-process RSS budget exceeded')
+    if any(row['fds'] > BUDGETS['process_fds'] for row in resources):
+        violations.append('Per-process FD budget exceeded')
+    if growth is None:
+        violations.append('Frontend initial/final descriptor observation missing')
+    elif growth > BUDGETS['frontend_fd_growth']:
+        violations.append('Frontend descriptor growth budget exceeded')
+    report['resource_budget_violations'] = violations
+    report['resource_limits_passed'] = not violations
     report['passed'] = (report.get('returncode') == 0 and 'error' not in report
         and 'cleanup_error' not in report and not report.get('remaining', [])
         and not report['sampling_errors'] and report['ownership']['coverage_passed']
         and not report['ownership']['cleanup_errors'] and report['sampler_stopped']
         and report['cleanup_seconds'] <= OBSERVATION_RULES['cleanup_seconds']
-        and report['peak_sampled_owned_subprocesses'] <= max_owned)
+        and report['peak_sampled_owned_subprocesses'] <= max_owned and report['resource_limits_passed'])
     (output/'result.json').write_text(json.dumps(report, indent=2)+'\n')
     return report
 
