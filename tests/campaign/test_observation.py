@@ -1,6 +1,8 @@
 """Narrow regression checks for campaign evidence, never scientific execution."""
+import builtins
 import json
 import os
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -18,6 +20,19 @@ from tests.campaign.support import MeterTransport, ProcessLedger, protocol_repor
 
 
 class ObservationTests(unittest.TestCase):
+    def test_ledger_import_does_not_require_new_catalogue_or_fixture_modules(self):
+        original_import = builtins.__import__
+        unavailable = ('cmw.jobs.catalogue_models', 'tests.jobs.test_catalogue_store',
+                       'tests.periodic.vasp.result_fixtures')
+        def import_without_features(name, *args, **kwargs):
+            if name in unavailable:
+                raise ModuleNotFoundError(name)
+            return original_import(name, *args, **kwargs)
+        with patch('builtins.__import__', side_effect=import_without_features):
+            namespace = runpy.run_path(str(Path(__file__).with_name('support.py')))
+            ledger = namespace['ProcessLedger'](self.id())
+            self.assertEqual(ledger.observe(ledger.frontend)['classification'], 'sampled_live')
+
     def test_original_rank_quantile_is_preserved(self):
         self.assertEqual(summary(list(range(14)))['p95'], 13)
         self.assertEqual(summary(list(range(40)))['p95'], 38)
@@ -47,6 +62,25 @@ class ObservationTests(unittest.TestCase):
             self.assertTrue(observed['required_live'])
             ledger.observations.append(observed)
         self.assertFalse(ledger.report()['coverage_passed'])
+
+    def test_resource_exit_race_distinguishes_observed_zombie_from_live_uncertainty(self):
+        for status, classification, required, reused in ((psutil.STATUS_ZOMBIE, 'zombie_reaping_pending', False, False),
+                (psutil.STATUS_RUNNING, 'transient_read_error', True, False),
+                (psutil.STATUS_ZOMBIE, 'identity_mismatch', True, True)):
+            with self.subTest(status=status, reused=reused):
+                ledger = ProcessLedger(self.id())
+                process = Mock(pid=ledger.frontend['pid'])
+                process.create_time.return_value = ledger.frontend['birth']
+                if reused:
+                    process.create_time.side_effect = [ledger.frontend['birth'], ledger.frontend['birth'], ledger.frontend['birth']+1]
+                process.status.side_effect = [psutil.STATUS_RUNNING, status]
+                with patch('tests.campaign.support.psutil.Process', return_value=process), \
+                     patch('tests.campaign.support.resource_sample', side_effect=psutil.NoSuchProcess(process.pid)):
+                    observed = ledger.observe(ledger.frontend)
+                self.assertEqual(observed['classification'], classification)
+                self.assertEqual(observed['required_live'], required)
+                self.assertNotIn('sample', observed)
+                self.assertNotIn(ledger.frontend['ledger_id'], ledger.terminal)
 
     def test_missing_birth_requires_original_popen_reap_not_later_adoption(self):
         ledger = ProcessLedger(self.id())

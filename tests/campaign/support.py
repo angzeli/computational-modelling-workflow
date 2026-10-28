@@ -19,16 +19,9 @@ from uuid import uuid4
 
 import psutil
 
-from cmw.jobs.catalogue_models import CatalogueQuery
-from cmw.jobs.store import Store
 from cmw.jobs.ownership import identity as process_identity
-from cmw.nodes.connections import ConnectedBackend
-from cmw.nodes.identity import enroll
 from cmw.nodes.protocol import encode, request
 from cmw.nodes.transport import ProcessTransport
-from cmw.progress.models import SourceDescriptor
-from tests.jobs.test_catalogue_store import populate_history
-from tests.periodic.vasp.result_fixtures import native_texts, structure_text
 
 
 # Fixed before execution. These bounds describe this fixture, not production SLA.
@@ -187,7 +180,8 @@ class ProcessLedger:
             if process.create_time() != row['birth']:
                 result.update(classification='identity_mismatch', required_live=True)
                 return result
-            if process.status() == psutil.STATUS_ZOMBIE:
+            result['pre_read_status'] = process.status()
+            if result['pre_read_status'] == psutil.STATUS_ZOMBIE:
                 result['classification'] = 'zombie_reaping_pending'
                 return result
             result['required_live'] = True
@@ -200,6 +194,9 @@ class ProcessLedger:
             try:
                 current = psutil.Process(row['pid'])
                 same = current.create_time() == row['birth']
+                result['post_error_status'] = current.status() if same else None
+                if same and result['post_error_status'] == psutil.STATUS_ZOMBIE:
+                    same = psutil.Process(row['pid']).create_time() == row['birth']
             except psutil.NoSuchProcess:
                 result.update(classification='verified_exited', required_live=False,
                               exit_evidence='recorded identity absent on follow-up observation')
@@ -207,8 +204,12 @@ class ProcessLedger:
             except (psutil.Error, OSError) as exc:
                 result.update(classification='genuinely_unobservable', required_live=True, error=str(exc))
             else:
-                result.update(classification='transient_read_error' if same else 'identity_mismatch',
-                              required_live=True, error='Process changed during resource read')
+                if same and result['post_error_status'] == psutil.STATUS_ZOMBIE:
+                    result.update(classification='zombie_reaping_pending', required_live=False,
+                                  exit_evidence='same recorded birth observed zombie after resource read')
+                else:
+                    result.update(classification='transient_read_error' if same else 'identity_mismatch',
+                                  required_live=True, error='Process changed during resource read')
         except psutil.AccessDenied as exc:
             result.update(classification='access_denied', required_live=True, error=str(exc))
         except (psutil.Error, OSError) as exc:
@@ -398,6 +399,11 @@ class MeterTransport(ProcessTransport):
 
 
 def fixture(root, count):
+    from cmw.jobs.store import Store
+    from cmw.nodes.identity import enroll
+    from cmw.progress.models import SourceDescriptor
+    from tests.jobs.test_catalogue_store import populate_history
+    from tests.periodic.vasp.result_fixtures import native_texts, structure_text
     root.mkdir(mode=0o700)
     science = root/'native-fixture'
     science.mkdir(mode=0o700)
@@ -438,6 +444,7 @@ def endpoint_command(config):
 
 
 def connect(record, *, server=None):
+    from cmw.nodes.connections import ConnectedBackend
     entry = dict(record['entry'])
     argv = endpoint_command(entry['config_root'])
     if server is not None:
@@ -454,7 +461,7 @@ def connect(record, *, server=None):
 
 def catalogue_query(client, *, cursor=None):
     from cmw.nodes.codec import encode_typed, decode_typed
-    from cmw.jobs.catalogue_models import CataloguePage
+    from cmw.jobs.catalogue_models import CataloguePage, CatalogueQuery
     query = CatalogueQuery(limit=BUDGETS['page_rows'], cursor=cursor)
     value = client.call('catalogue.query', {'query': encode_typed(query)})['result']['page']
     page = decode_typed(value, CataloguePage)
@@ -466,6 +473,8 @@ def catalogue_query(client, *, cursor=None):
 def changing_log(root):
     """Actual bounded reader I/O over one long native-shaped append-only log."""
     from cmw.progress.reader import RegularFileReader
+    from cmw.progress.models import SourceDescriptor
+    from tests.periodic.vasp.result_fixtures import native_texts
     root.mkdir(mode=0o700)
     path = root/'OUTCAR'
     original = native_texts()['OUTCAR'].encode()
