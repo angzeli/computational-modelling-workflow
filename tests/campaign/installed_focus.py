@@ -11,6 +11,7 @@ from cmw.nodes.identity import runtime_identity
 
 
 MODULES = [
+    'tests.nodes.test_runtime_observation', 'tests.progress.test_vasp_setting_context',
     'tests.campaign.test_observation', 'tests.campaign.test_catalogue_writer',
     'tests.progress.test_generated_schedules', 'tests.progress.test_multiwfn',
     'tests.jobs.test_research_invariants',
@@ -29,9 +30,10 @@ def main():
     assert Path(cmw.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()), cmw.__file__
     assert not (Path(__file__).resolve().parents[2]/'src').exists()
     assert (importlib.util.find_spec('textual') is not None) == (kind == 'jobs')
-    result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames(MODULES))
+    modules = MODULES + (['tests.campaign.test_geometry', 'tests.nodes.test_portal_navigation'] if kind == 'jobs' else [])
+    result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames(modules))
     report = {'kind': kind, 'python': sys.executable, 'package_origin': cmw.__file__,
-        'runtime': runtime_identity(), 'modules': MODULES, 'tests': result.testsRun, 'failures': len(result.failures),
+        'runtime': runtime_identity(), 'modules': modules, 'tests': result.testsRun, 'failures': len(result.failures),
         'errors': len(result.errors), 'skips': len(result.skipped),
         'successful': result.wasSuccessful() and (kind != 'jobs' or not result.skipped)}
     output.write_text(json.dumps(report, indent=2)+'\n')
