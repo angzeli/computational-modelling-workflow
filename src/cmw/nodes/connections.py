@@ -172,6 +172,12 @@ class ConnectedBackend:
                 'node_id': self.node_id, 'queue_id': self.queue_id,
                 'host_id': self.connection['host_id'], 'runtime_id': self.connection['runtime_id'],
                 'clock_id': verified['clock_id']}}
+        if operation.startswith('study.'):
+            from .study import CAPABILITY
+            capability = (verified if mutation else self.call('capabilities'))['result'].get('convergence_study')
+            if (type(capability) is not dict or capability != CAPABILITY or
+                    type(capability.get('schema')) is not int or type(capability.get('max_cases')) is not int):
+                raise NodeError('UNSUPPORTED_STUDY', 'Endpoint does not advertise the supported convergence-study contract')
         if operation.startswith('successor.'):
             from .successor import CAPABILITY
             capability = (verified if mutation else self.call('capabilities'))['result'].get('successor_planner')
@@ -204,6 +210,10 @@ class ConnectedBackend:
                 record = value['result']['review']['value']
                 if any(record.get(key) != expected for key, expected in target.items()):
                     raise NodeError('INVALID_RESPONSE', 'Review response differs from the selected immutable target')
+            if operation.startswith('study.'):
+                from .study import validate_result
+                validate_result(value, operation, target,
+                    approved_digest=(params or {}).get('approved_digest'), request_id=request_id)
             if operation.startswith('successor.'):
                 from .successor import validate_result
                 validate_result(value, operation, target)

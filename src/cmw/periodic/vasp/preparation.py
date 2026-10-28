@@ -356,7 +356,20 @@ def _baseline(value: object, base: Path, files: dict, runtime: dict) -> tuple[di
 def resolve_preparation(spec_path: str | Path, *, output: str | Path, scratch_root: str | Path,
                         record_directory: str | Path, scratch_mount: str | Path | None = None) -> tuple[dict, dict, dict]:
     """Resolve and check candidate bytes without creating any files."""
-    spec = load_spec(spec_path)
+    return resolve_preparation_spec(load_spec(spec_path), output=output, scratch_root=scratch_root,
+                                    record_directory=record_directory, scratch_mount=scratch_mount)
+
+
+def resolve_preparation_spec(spec: PreparationSpec, *, output: str | Path, scratch_root: str | Path,
+                             record_directory: str | Path,
+                             scratch_mount: str | Path | None = None) -> tuple[dict, dict, dict]:
+    """Resolve a typed caller-owned specification without a temporary sidecar.
+
+    Study planners derive explicit cases from a previously loaded specification;
+    the same scientific validation and split-publication rules apply to each.
+    """
+    if not isinstance(spec, PreparationSpec):
+        raise TypeError("A loaded PreparationSpec is required")
     incar, mesh, potentials, runtime, origins = _resolve_settings(spec)
     source = _source(spec.data["structure"], spec.path.parent)
     poscar = source.read_bytes()

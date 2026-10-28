@@ -17,9 +17,10 @@ OPERATIONS = frozenset({
     'fetch.prepare', 'fetch.complete', 'doctor.inspect',
     'review.preview', 'review.start', 'review.poll', 'review.cancel',
     'successor.plan', 'successor.materialize', 'successor.register',
+    'study.plan', 'study.materialize', 'study.register', 'study.compare', 'study.view',
     'catalogue.query', 'catalogue.show', 'catalogue.relations', 'catalogue.edit', 'catalogue.relation.add', 'catalogue.relation.retract',
 })
-MUTATIONS = frozenset({'successor.materialize', 'successor.register', 'submit', 'transfer.begin', 'transfer.publish', 'control',
+MUTATIONS = frozenset({'study.materialize', 'study.register', 'successor.materialize', 'successor.register', 'submit', 'transfer.begin', 'transfer.publish', 'control',
                        'fetch.prepare', 'fetch.complete', 'catalogue.edit',
                        'catalogue.relation.add', 'catalogue.relation.retract'})
 
@@ -27,7 +28,8 @@ MUTATIONS = frozenset({'successor.materialize', 'successor.register', 'submit', 
 def is_mutation(operation, params=None):
     """Review export writes on its owner; ordinary inspection stays read-only."""
     options = params.get('options') if isinstance(params, dict) else None
-    return operation in MUTATIONS or (operation == 'review.start' and
+    return operation in MUTATIONS or (operation == 'study.compare' and
+        isinstance(params, dict) and params.get('export_directory') is not None) or (operation == 'review.start' and
         isinstance(options, dict) and options.get('export_path') is not None)
 
 
@@ -218,6 +220,9 @@ def validate_envelope(value, operation=None):
                 raise NodeError('INVALID_RESPONSE', 'Status row belongs to another node or queue')
             if job.get('id') != target['job_id'] or job.get('attempt_id') != target['attempt_id']:
                 raise NodeError('INVALID_RESPONSE', 'Status row identity contradicts its target')
+    if operation and operation.startswith('study.'):
+        from .study import validate_result
+        validate_result(value, operation)
     if operation and operation.startswith('successor.'):
         from .successor import validate_result
         validate_result(value, operation)
