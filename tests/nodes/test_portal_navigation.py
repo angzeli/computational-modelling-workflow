@@ -52,22 +52,38 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
         backends = {'MBP': many_jobs('MBP'), 'MINI': many_jobs('MINI', remote=True)}
         return NodesApp(backends), backends
 
-    async def until(self, pilot, predicate, description):
+    async def until(self, pilot, predicate, description, diagnostics=None):
         for _ in range(160):
             if predicate():
                 return
             await pilot.pause(.025)
-        self.fail('Frontend condition did not become true: ' + description)
+        detail = '; state=' + repr(diagnostics()) if diagnostics is not None else ''
+        self.fail('Frontend condition did not become true: ' + description + detail)
 
     async def position(self, app, backends, pilot, number=25, *, where='middle'):
-        await self.until(pilot, lambda: len(app.rows) == 72, 'both nodes populated')
+        await self.until(pilot, lambda: len(app.rows) == 72 and not app.navigation_pending(),
+                         'both nodes populated and startup restoration completed')
+        predecessor = backends['MINI'].jobs[number - 2]
+        predecessor_key = row_key(predecessor['target'])
         target = backends['MINI'].jobs[number - 1]['target']
-        app.select(row_key(backends['MINI'].jobs[number - 2]['target']))
+        app.select(predecessor_key)
         app.render_state()
+        def setup_state():
+            return {**table_view(app), 'pending_restores': len(app._navigation_restores),
+                    'pending_layout': app.screen_stack[0]._layout_required,
+                    'predecessor_progress': app.selected_snapshot('MINI', predecessor) is not None}
+        # This is fixture positioning, before the real keyboard interaction.
+        # A programmatic selection can precede a queued structural restoration.
+        await self.until(pilot, lambda: app.selected_key == predecessor_key
+                         and table_view(app)['cursor'] == predecessor_key
+                         and app.selected_snapshot('MINI', predecessor) is not None
+                         and not app.navigation_pending()
+                         and not app.screen_stack[0]._layout_required,
+                         'synthetic predecessor selection and card layout settled', setup_state)
         await pilot.press('down')
         await self.until(pilot, lambda: app.selected_key == row_key(target)
                          and app.selected_snapshot('MINI', backends['MINI'].jobs[number - 1]) is not None,
-                         'keyboard selection and scientific observation')
+                         'keyboard selection and scientific observation', setup_state)
         await pilot.pause()
         await self.until(pilot, lambda: not app.navigation_pending(), 'initial structural layout settled')
         table = app.query_one('#table', DataTable)
