@@ -86,6 +86,9 @@ class CatalogueStore:
             if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
                 raise JobsError('Queue database changed while opening catalogue')
             yield con
+            after = self.store.path.lstat()
+            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                raise JobsError('Queue database changed during catalogue read')
         except sqlite3.Error as exc:
             raise JobsError(f'Catalogue database unavailable: {exc}') from exc
         finally:
@@ -258,9 +261,23 @@ class CatalogueStore:
                 self.request_record(con, request_id, 'catalogue.edit', digest, asdict(result))
             return result
 
-    def _generation(self):
+    def _generation(self, con, identity, check):
+        # Bind cursor validity to the same SQLite read snapshot as its rows.
+        # Controller/worker heartbeat writes do not change this projection.
         info = self.store.path.stat()
-        return ':'.join(str(value) for value in (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size))
+        digest = hashlib.sha256(_canonical((info.st_dev, info.st_ino, identity)).encode())
+        annotated = 'catalogue_annotations' in self._tables(con)
+        join = (" LEFT JOIN catalogue_annotations a ON a.job_id=j.id AND a.attempt_id=json_extract(j.data,'$.attempt_id')"
+                if annotated else '')
+        metadata = 'a.data, a.revision, a.updated_at' if annotated else 'NULL, NULL, NULL'
+        fields = ','.join(f"json_extract(j.data,'$.{key}')" for key in
+            ('attempt_id', 'display_id', 'name', 'engine', 'status', 'note', 'note_revision', 'order'))
+        for row in con.execute(f'SELECT j.id,{fields},{metadata} FROM jobs j{join} ORDER BY j.id'):
+            if reason := check():
+                raise JobsError(reason)
+            digest.update(_canonical(tuple(row)).encode())
+            digest.update(b'\n')
+        return digest.hexdigest()
 
     @staticmethod
     def _cursor(query, generation, offset):
@@ -308,7 +325,7 @@ class CatalogueStore:
             con.create_function('cmw_literal_key', 1, _literal, deterministic=True)
             identity = self._check(con)
             node_id, queue_id = ((identity['node_id'], identity['queue_id']) if identity else (None, None))
-            generation = self._generation()
+            generation = self._generation(con, identity, check)
             offset = self._offset(query, generation)
             tables = self._tables(con)
             annotated = 'catalogue_annotations' in tables

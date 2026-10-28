@@ -34,10 +34,17 @@ progress checks; lock acquisition is separately bounded. They never inspect
 scientific outputs or directories. These are page/query bounds, not a claim of
 constant-time searching: literal matching and counts can scan queue metadata.
 
-Use the returned `next_cursor` with the same query and `--cursor`. A database
-change invalidates the cursor, including annotation edits, lifecycle changes,
-row appends and queue reorders. Restart the query when instructed. Paging is
-stable within the recorded owner generation, not a permanent database snapshot.
+Use the returned `next_cursor` with the same query and `--cursor`. A change to
+catalogue rows invalidates the cursor, including annotations, displayed lifecycle
+status, row membership, queue order and attempt identity. Database replacement
+and owner-identity changes also invalidate it. Controller/worker heartbeats and
+other operational writes that leave those fields unchanged do not interrupt paging.
+
+Each page binds a digest of the catalogue projection read in its SQLite transaction;
+no persistent snapshot, cache, additional database schema or retained view state is
+created. Restart the query when instructed. Paging is stable while that relevant
+owner generation is unchanged, not a permanent database snapshot. Projection
+validation scans metadata within the existing cancellable two-second query bound.
 
 Federation queries up to eight explicitly connected default owner queues. Each
 owner retains its own generation, cursor, timestamp and coverage; use repeated
