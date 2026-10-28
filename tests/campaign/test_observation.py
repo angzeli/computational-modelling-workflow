@@ -1,6 +1,8 @@
 """Narrow regression checks for campaign evidence, never scientific execution."""
+import builtins
 import json
 import os
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -18,6 +20,19 @@ from tests.campaign.support import MeterTransport, ProcessLedger, protocol_repor
 
 
 class ObservationTests(unittest.TestCase):
+    def test_ledger_import_does_not_require_new_catalogue_or_fixture_modules(self):
+        original_import = builtins.__import__
+        unavailable = ('cmw.jobs.catalogue_models', 'tests.jobs.test_catalogue_store',
+                       'tests.periodic.vasp.result_fixtures')
+        def import_without_features(name, *args, **kwargs):
+            if name in unavailable:
+                raise ModuleNotFoundError(name)
+            return original_import(name, *args, **kwargs)
+        with patch('builtins.__import__', side_effect=import_without_features):
+            namespace = runpy.run_path(str(Path(__file__).with_name('support.py')))
+            ledger = namespace['ProcessLedger'](self.id())
+            self.assertEqual(ledger.observe(ledger.frontend)['classification'], 'sampled_live')
+
     def test_original_rank_quantile_is_preserved(self):
         self.assertEqual(summary(list(range(14)))['p95'], 13)
         self.assertEqual(summary(list(range(40)))['p95'], 38)
