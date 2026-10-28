@@ -32,7 +32,7 @@ from cmw.nodes.protocol import NodeError
 from cmw.progress.models import ProgressSnapshot
 from tests.campaign.loopback import LoopbackSSHD
 from tests.campaign.support import (BUDGETS, assert_native, assert_review, catalogue_query, changing_log, connect, fixture,
-                                    owned_sample, resource_sample, summary)
+                                    OBSERVATION_RULES, ProcessLedger, protocol_report, resource_sample, summary)
 
 
 def review(client, target, *, relaxation=False):
@@ -87,24 +87,48 @@ def run(root, mode, expected_runtime):
     root.mkdir(mode=0o700)
     (root/'tmp').mkdir(mode=0o700)
     (root/'budgets.json').write_text(json.dumps(BUDGETS, indent=2)+'\n')
-    report = {'schema': 1, 'mode': mode, 'budgets': BUDGETS,
-        'runtime': runtime_identity(), 'expected_runtime_fingerprint': expected_runtime['fingerprint'], 'python': sys.executable, 'package': cmw.__file__,
+    report = {'schema': 2, 'mode': mode, 'budgets': BUDGETS,
+        'observation_rules': OBSERVATION_RULES, 'runtime': None,
+        'expected_runtime_fingerprint': expected_runtime['fingerprint'],
+        'python': sys.executable, 'package': cmw.__file__,
         'qualification': 'Synthetic native-shaped files and metadata; no scientific acceptance or physical-node claim.',
-        'payloads_started': 0, 'histories': [], 'resources': [], 'checks': {}, 'passed': False,
+        'payloads_started': 0, 'histories': [], 'workload_progress': [], 'resources': [],
+        'checks': {}, 'passed': False, 'sampling_errors': [],
         'source_byte_scope': 'Progress reader actual pread counters and deduplicated review source evidence; not total OS or repeated parser I/O.'}
     clients, records, protected = [], [], {}
     server = None
     sampling = threading.Event()
     own = psutil.Process()
-    initial = resource_sample(own)
-    started = time.monotonic()
-    sampler = None
+    initial = None
+    started = timed_out_at = None
+    observation_started = time.monotonic()
     old_handler = signal.getsignal(signal.SIGALRM)
+    failure = None
+    ledger = ProcessLedger('original-history-' + mode)
+    ledger.__enter__()
     def timeout(signum, frame):
+        nonlocal timed_out_at
+        timed_out_at = time.monotonic()
         raise TimeoutError('Fixed campaign wall deadline exceeded')
-    signal.signal(signal.SIGALRM, timeout)
-    signal.setitimer(signal.ITIMER_REAL, BUDGETS['wall_seconds'])
+    def sample():
+        while not sampling.wait(OBSERVATION_RULES['sample_cadence_seconds']):
+            try:
+                observed = ledger.sample()
+                observed['at_seconds'] = observed['at'] - (started or observation_started)
+                report['resources'].append(observed)
+            except BaseException as exc:
+                report['sampling_errors'].append({'phase': ledger.phase, 'error': repr(exc)})
+                return
+    sampler = threading.Thread(target=sample, name='campaign-resource-sampler', daemon=True)
     try:
+        sampler.start()
+        # Keep this original pre-alarm fingerprint boundary. Its children are
+        # now tracked, even when enrollment refuses before the workload starts.
+        report['runtime'] = runtime_identity()
+        initial = resource_sample(own)
+        started = time.monotonic()
+        signal.signal(signal.SIGALRM, timeout)
+        signal.setitimer(signal.ITIMER_REAL, BUDGETS['wall_seconds'])
         assert report['runtime']['fingerprint'] == expected_runtime['fingerprint']
         load = os.getloadavg()
         cpu_count = os.cpu_count() or 1
@@ -125,23 +149,17 @@ def run(root, mode, expected_runtime):
                     capture_output=True, text=True, check=True, timeout=10).stdout.split()[1]
                 server.fingerprint = key
             clients = [connect(record, server=server) for record in records]
-            def sample():
-                while not sampling.wait(.1):
-                    roots = [own]
-                    if server and server.process and server.process.poll() is None:
-                        roots.append(psutil.Process(server.process.pid))
-                    report['resources'].append({'at_seconds': time.monotonic()-started,
-                        'processes': owned_sample(roots)})
-            sampler = threading.Thread(target=sample, daemon=True)
-            sampler.start()
             for client, row in zip(clients, records):
                 capabilities = client.call('capabilities')
                 assert capabilities['result']['readiness']['identity_ready']
                 count = row['rows']
                 cycles = BUDGETS['cycles_per_history'] if mode == 'soak' else 2
+                progress = {'rows': count, 'required_cycles': cycles, 'cycles_completed': 0, 'selected_review': False}
+                report['workload_progress'].append(progress)
                 progress_bytes, page_bytes, timings = [], [], []
                 selected = row['target']
-                for _ in range(cycles):
+                for cycle in range(cycles):
+                    ledger.phase = client.transport.phase = f'history-{count}-cycle-{cycle+1}'
                     tick = time.perf_counter()
                     status = client.call('status', {'limit': BUDGETS['page_rows']})['result']
                     assert status['job_count'] == count
@@ -160,14 +178,18 @@ def run(root, mode, expected_runtime):
                     assert_native(snap, 2 if count == 10000 else 1)
                     progress_bytes.append(sum(s.total_bytes_read for s in snap.sources))
                     timings.append(time.perf_counter()-tick)
+                    progress['cycles_completed'] += 1
                     if mode == 'soak':
                         time.sleep(BUDGETS['cycle_pause_seconds'])
+                ledger.phase = client.transport.phase = f'history-{count}-review'
                 reviewed = review(client, selected, relaxation=count == 10000)
+                progress['selected_review'] = True
                 wrong = {**selected, 'queue_id': 'f'*32}
                 try:
                     client.call('show', target=wrong)
                 except NodeError:
-                    pass
+                    client.transport.samples[-1]['expected_refusal'] = True
+                    client.transport.samples[-1]['refusal_reason'] = 'deliberate wrong-queue target'
                 else:
                     raise AssertionError('Wrong queue target was accepted')
                 # An error deliberately closes the transport. Reconnect through
@@ -182,6 +204,7 @@ def run(root, mode, expected_runtime):
                 # Two endpoints during observation; close one before the
                 # separate SFTP connection so the fixture keeps two clients.
                 clients[-1].close()
+                ledger.phase = clients[0].transport.phase = 'sftp'
                 report['sftp'] = fetch_source(clients[0], records[0], root, server)
                 report['checks']['actual_sftp_native_replica'] = True
                 for client in clients:
@@ -192,8 +215,10 @@ def run(root, mode, expected_runtime):
                     settings = root/'terminal-settings.json'
                     settings.write_text(json.dumps({'view': 'nodes', 'fixtures': records,
                         'unavailable_port': unavailable.getsockname()[1]}))
+                    ledger.phase = 'federated-pty'
                     report['pty'] = run_terminal(settings, root/'pty')
                 settings.write_text(json.dumps({'view': 'local', 'fixtures': records}))
+                ledger.phase = 'local-pty'
                 report['local_pty'] = run_terminal(settings, root/'local-pty')
                 report['checks']['native_endpoint_to_real_terminal_review_and_unavailable_owner'] = True
             assert all(Path(path).read_bytes() == data for path, data in protected.items())
@@ -204,78 +229,125 @@ def run(root, mode, expected_runtime):
                 assert not state['controller']['online'] and not state['controller']['dispatch']
             report['checks']['queues_and_sources_unchanged_no_dispatch'] = True
     except BaseException as exc:
+        failure = exc
         report['error'] = f'{type(exc).__name__}: {exc}'
-        raise
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old_handler)
-        for client in clients:
-            client.close()
-        if server:
-            server.close()
-        sampling.set()
-        if sampler:
-            sampler.join(timeout=2)
+        workload_ended = timed_out_at or time.monotonic()
+        cleanup_started = workload_ended
+        cleanup_deadline = cleanup_started + OBSERVATION_RULES['cleanup_seconds']
+        cleanup_errors, remaining = [], []
+        ledger.phase = 'cleanup'
+        def cleanup_timeout(signum, frame):
+            raise TimeoutError('Separate fixed safety-cleanup deadline exceeded')
+        signal.signal(signal.SIGALRM, cleanup_timeout)
+        signal.setitimer(signal.ITIMER_REAL, max(.001, cleanup_deadline-time.monotonic()))
+        try:
+            for client in clients:
+                try:
+                    client.close()
+                except Exception as exc:
+                    cleanup_errors.append({'component': 'client', 'error': repr(exc)})
+            if server:
+                try:
+                    server.close()
+                except Exception as exc:
+                    cleanup_errors.append({'component': 'listener', 'error': repr(exc)})
+            sampling.set()
+            if sampler.ident is not None:
+                sampler.join(timeout=min(2, max(0., cleanup_deadline-time.monotonic())))
+            remaining = ledger.cleanup(cleanup_deadline)
+        except BaseException as exc:
+            cleanup_errors.append({'component': 'cleanup', 'error': repr(exc)})
+        finally:
+            sampling.set()
+            if sampler.ident is not None:
+                sampler.join(timeout=min(.1, max(0., cleanup_deadline-time.monotonic())))
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old_handler)
+            ledger.__exit__(None, None, None)
         samples = [sample for client in clients for sample in client.transport.samples]
-        pty_report = report.get('pty', {}).get('metrics', {})
-        samples += [sample for rows in pty_report.get('requests', {}).values() for sample in rows]
+        pty_metrics = {}
+        for key, directory in (('pty', 'pty'), ('local_pty', 'local-pty')):
+            path = root/directory/'metrics.json'
+            if path.is_file():
+                try:
+                    metrics = json.loads(path.read_text())
+                    pty_metrics[key] = metrics
+                    for owner, rows in metrics.get('requests', {}).items():
+                        samples.extend({**sample, 'terminal_view': key, 'owner': owner} for sample in rows)
+                except (OSError, ValueError) as exc:
+                    cleanup_errors.append({'component': str(path), 'error': repr(exc)})
+        report['persisted_pty_metrics'] = pty_metrics
         report['requests'] = samples
-        report['protocol'] = {'encoded_attempted_request_bytes': sum(s['request_bytes'] for s in samples),
-            'encoded_successful_response_bytes': sum(s['response_bytes'] for s in samples),
-            'latency_by_operation': {operation: summary([s['seconds'] for s in samples if s['operation'] == operation and s['outcome'] == 'ok'])
-                for operation in sorted({s['operation'] for s in samples})},
-            'ssh_wire_sessions': [wire for client in clients for wire in client.transport.wire_sessions]
-                + pty_report.get('ssh_wire_sessions', [])}
-        identities = [owner for client in clients for owner in client.transport.owners]
-        identities += pty_report.get('owned_transports', [])
-        identities += [process for sample in report['resources'] for process in sample['processes']
-                       if process['pid'] != own.pid]
-        if server:
-            identities += server.identities
-        remaining = []
-        checked_identities = set()
-        for owner in identities:
-            key = (owner['pid'], owner['birth'])
-            if key in checked_identities:
-                continue
-            checked_identities.add(key)
-            try:
-                process = psutil.Process(owner['pid'])
-                if process.create_time() == owner['birth'] and process.status() != psutil.STATUS_ZOMBIE:
-                    remaining.append(owner)
-            except psutil.NoSuchProcess:
-                pass
+        report['protocol'] = protocol_report(samples)
+        report['protocol']['ssh_wire_sessions'] = [wire for client in clients for wire in client.transport.wire_sessions]
+        report['protocol']['ssh_wire_sessions'] += [wire for metrics in pty_metrics.values()
+                                                    for wire in metrics.get('ssh_wire_sessions', [])]
         listener_closed = None
-        if server:
-            with socket.socket() as sock:
-                sock.settimeout(.3)
-                listener_closed = sock.connect_ex(('127.0.0.1', server.port)) != 0
+        if server and hasattr(server, 'port'):
+            try:
+                with socket.socket() as sock:
+                    sock.settimeout(.3)
+                    listener_closed = sock.connect_ex(('127.0.0.1', server.port)) != 0
+            except OSError as exc:
+                cleanup_errors.append({'component': 'listener-observation', 'error': repr(exc)})
+        try:
+            final_frontend = resource_sample(own)
+        except (psutil.Error, OSError) as exc:
+            final_frontend = None
+            cleanup_errors.append({'component': 'frontend-sample', 'error': repr(exc)})
+        report['ownership'] = ledger.report()
+        cleanup_ended = time.monotonic()
         report['cleanup'] = {'remaining_owned_processes': remaining, 'listener_closed': listener_closed,
-            'sampler_stopped': sampler is None or not sampler.is_alive(),
-            'frontend_before': initial, 'frontend_after': resource_sample(own)}
+            'sampler_stopped': not sampler.is_alive(), 'errors': cleanup_errors,
+            'frontend_before': initial, 'frontend_after': final_frontend,
+            'seconds': cleanup_ended-cleanup_started,
+            'deadline_seconds': OBSERVATION_RULES['cleanup_seconds']}
         report['peak_owned_subprocesses'] = max((sum(p['pid'] != own.pid for p in sample['processes'])
             for sample in report['resources']), default=0)
-        report['wall_seconds'] = time.monotonic()-started
+        report['workload_seconds'] = workload_ended-started if started is not None else None
+        report['wall_seconds'] = time.monotonic()-(started or observation_started)
+        report['deadline_exceeded'] = timed_out_at is not None
+        report['sample_cadence_seconds'] = summary([after['at']-before['at']
+            for before, after in zip(report['resources'], report['resources'][1:])])
         violations = []
-        if remaining or listener_closed is False or not report['cleanup']['sampler_stopped']:
-            violations.append('Owned process, listener or sampling thread remained')
+        if remaining or listener_closed is False or not report['cleanup']['sampler_stopped'] or cleanup_errors or ledger.cleanup_errors:
+            violations.append('Owned process, listener, sampler or cleanup evidence incomplete')
+        if cleanup_ended > cleanup_deadline:
+            violations.append('Separate safety-cleanup budget exceeded')
+        if not report['ownership']['coverage_passed'] or report['sampling_errors']:
+            violations.append('Required live resource observation coverage incomplete')
         if report['peak_owned_subprocesses'] > BUDGETS['owned_subprocesses']:
             violations.append('Owned subprocess count budget exceeded')
         all_resources = [p for sample in report['resources'] for p in sample['processes']]
         if any(p['rss_bytes'] > BUDGETS['process_rss_bytes'] or p['fds'] > BUDGETS['process_fds'] for p in all_resources):
             violations.append('Per-process RSS/FD budget exceeded')
-        if report['cleanup']['frontend_after']['fds']-initial['fds'] > BUDGETS['frontend_fd_growth']:
-            violations.append('Frontend descriptor growth exceeded')
-        if any(max(s['request_bytes'], s['response_bytes']) > BUDGETS['protocol_frame_bytes'] for s in samples):
+        if initial is None or final_frontend is None or final_frontend['fds']-initial['fds'] > BUDGETS['frontend_fd_growth']:
+            violations.append('Frontend descriptor observation/growth failed')
+        if any(max([s['request_bytes'], *s.get('response_frame_bytes', [s['response_bytes']])]) > BUDGETS['protocol_frame_bytes'] for s in samples):
             violations.append('Protocol frame budget exceeded')
         if sum(s['request_bytes']+s['response_bytes'] for s in samples) > BUDGETS['protocol_total_bytes']:
             violations.append('Protocol traffic budget exceeded')
+        if any(s['outcome'] != 'ok' and not s.get('expected_refusal') for s in samples):
+            violations.append('Unexpected request failure retained')
         for operation, timing in report['protocol']['latency_by_operation'].items():
             if operation in {'status', 'catalogue.query', 'progress'} and timing.get('p95', 0) > BUDGETS['request_p95_seconds']:
                 violations.append(operation+' latency budget exceeded')
+        required_cycles = BUDGETS['cycles_per_history'] if mode == 'soak' else 2
+        if ([row['rows'] for row in report['histories']] != BUDGETS['history_rows'] or
+                any(row['cycles_completed'] != required_cycles or not row['selected_review'] for row in report['workload_progress'])):
+            violations.append('Required history cycles or selected reviews incomplete')
+        if mode == 'soak' and not all(report['checks'].get(key) for key in
+                ('actual_sftp_native_replica', 'native_endpoint_to_real_terminal_review_and_unavailable_owner')):
+            violations.append('Required original SFTP/PTY phases incomplete')
+        if not report['checks'].get('queues_and_sources_unchanged_no_dispatch'):
+            violations.append('Required final fixture-protection checks incomplete')
         report['budget_violations'] = violations
-        report['passed'] = 'error' not in report and not violations
+        report['passed'] = 'error' not in report and not violations and not report['deadline_exceeded']
         (root/'result.json').write_text(json.dumps(report, indent=2)+'\n')
+    if failure is not None:
+        raise failure
     assert report['passed'], report['budget_violations']
     return report
 

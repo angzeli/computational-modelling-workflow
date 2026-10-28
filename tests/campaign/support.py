@@ -11,12 +11,17 @@ import re
 import select
 import sys
 import time
+import socket
+import subprocess
+import threading
+from unittest.mock import patch
 from uuid import uuid4
 
 import psutil
 
 from cmw.jobs.catalogue_models import CatalogueQuery
 from cmw.jobs.store import Store
+from cmw.jobs.ownership import identity as process_identity
 from cmw.nodes.connections import ConnectedBackend
 from cmw.nodes.identity import enroll
 from cmw.nodes.protocol import encode, request
@@ -43,6 +48,11 @@ BUDGETS = {
 }
 
 
+# New observation/cleanup rules, separate from the retained workload bounds.
+OBSERVATION_RULES = {'sample_cadence_seconds': .1, 'required_live_coverage': 1.0,
+                     'cleanup_seconds': 30}
+
+
 def summary(values):
     if not values:
         return {'count': 0}
@@ -52,28 +62,246 @@ def summary(values):
 
 
 def resource_sample(process):
-    try:
-        cpu = process.cpu_times()
-        return {'pid': process.pid, 'birth': process.create_time(),
-                'rss_bytes': process.memory_info().rss, 'fds': process.num_fds(),
-                'threads': process.num_threads(), 'cpu_seconds': cpu.user + cpu.system}
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return None
+    """A live sample is never a fabricated zero for an exited/inaccessible PID."""
+    cpu = process.cpu_times()
+    return {'pid': process.pid, 'birth': process.create_time(),
+            'rss_bytes': process.memory_info().rss, 'fds': process.num_fds(),
+            'threads': process.num_threads(), 'cpu_seconds': cpu.user + cpu.system}
+
+
+class ProcessLedger:
+    """Task-local launch/reaping records and classified sampled observations.
+
+    Direct Popen children are captured at launch. Descendants are recorded only
+    when discovered from verified owned roots; this is not continuous census.
+    """
+    def __init__(self, owning_test):
+        self.owning_test = owning_test
+        self.phase = 'setup'
+        self.host, self.boot = socket.gethostname(), psutil.boot_time()
+        self.records, self.launch_failures, self.observations = [], [], []
+        self.discovery_errors, self.cleanup_errors = [], []
+        self.direct, self.terminal = {}, set()
+        self.lock = threading.RLock()
+        self.frontend = self._register(psutil.Process(), 'frontend', 'explicit-root')
+        self._patch = None
+
+    def _register(self, process, role, origin, direct=None):
+        row = {'pid': process.pid, 'host': self.host, 'boot': self.boot, 'birth': None,
+               'parent': os.getpid() if direct is not None else None,
+               'role': role, 'owning_test': self.owning_test, 'phase': self.phase,
+               'capture_origin': origin, 'recorded_at': time.monotonic()}
+        try:
+            row.update(process_identity(process.pid))
+            row['parent'] = process.ppid()
+        except (psutil.Error, OSError) as exc:
+            row['identity_error'] = type(exc).__name__ + ': ' + str(exc)
+        with self.lock:
+            for prior in reversed(self.records):
+                if prior['ledger_id'] in self.terminal or prior['pid'] != process.pid:
+                    continue
+                original = self.direct.get(prior['ledger_id'])
+                if direct is not None:
+                    # Every original Popen is a launch. PID reuse must not hide
+                    # a new child while an old exit awaits the next sampler tick.
+                    if original is direct:
+                        return prior
+                    if original is None and row['birth'] is not None and prior['birth'] == row['birth']:
+                        prior.update(row)
+                        self.direct[prior['ledger_id']] = direct
+                        return prior
+                elif (original is not None and prior['birth'] is None) or prior['birth'] == row['birth']:
+                    # Unavailable launch identity is never repaired by later PID
+                    # observation. Only that original Popen can close its record.
+                    return prior
+            row['ledger_id'] = len(self.records)
+            self.records.append(row)
+            if direct is not None:
+                self.direct[row['ledger_id']] = direct
+            return row
+
+    def __enter__(self):
+        ledger, original = self, subprocess.Popen
+        class RecordedPopen(original):
+            def __init__(self, *args, **kwargs):
+                argv = kwargs.get('args', args[0] if args else None)
+                try:
+                    super().__init__(*args, **kwargs)
+                except BaseException as exc:
+                    ledger.launch_failures.append({'argv': argv, 'phase': ledger.phase,
+                        'owning_test': ledger.owning_test, 'error': type(exc).__name__ + ': ' + str(exc)})
+                    raise
+                # Popen owns this child even if it exits before psutil can open it.
+                try:
+                    process = psutil.Process(self.pid)
+                except psutil.NoSuchProcess:
+                    process = type('ExitedChild', (), {'pid': self.pid})()
+                ledger._register(process, Path(str(argv[0])).name if isinstance(argv, (list, tuple)) else 'subprocess',
+                                 'direct-launch', direct=self)
+        self._patch = patch('subprocess.Popen', RecordedPopen)
+        self._patch.start()
+        return self
+
+    def __exit__(self, *_):
+        self._patch.stop()
+
+    def observe(self, row):
+        result = {'ledger_id': row['ledger_id'], 'pid': row['pid'], 'birth': row['birth'],
+                  'phase': self.phase, 'at': time.monotonic(), 'required_live': False}
+        direct = self.direct.get(row['ledger_id'])
+        if direct is not None and direct.poll() is not None:
+            result.update(classification='verified_exited', returncode=direct.wait(timeout=0),
+                          exit_evidence='original Popen wait/reap')
+            row['exit'] = {k: result[k] for k in ('returncode', 'exit_evidence', 'at')}
+            self.terminal.add(row['ledger_id'])
+            return result
+        if row['birth'] is None:
+            result.update(classification='genuinely_unobservable', required_live=True,
+                          error='Birth unavailable; no later PID adoption')
+            return result
+        try:
+            process = psutil.Process(row['pid'])
+            if process.create_time() != row['birth']:
+                result.update(classification='identity_mismatch', required_live=True)
+                return result
+            if process.status() == psutil.STATUS_ZOMBIE:
+                result['classification'] = 'zombie_reaping_pending'
+                return result
+            result['required_live'] = True
+            sample = resource_sample(process)
+            if psutil.Process(row['pid']).create_time() != row['birth']:
+                result['classification'] = 'identity_mismatch'
+                return result
+            result.update(classification='sampled_live', sample=sample)
+        except psutil.NoSuchProcess:
+            try:
+                current = psutil.Process(row['pid'])
+                same = current.create_time() == row['birth']
+            except psutil.NoSuchProcess:
+                result.update(classification='verified_exited', required_live=False,
+                              exit_evidence='recorded identity absent on follow-up observation')
+                self.terminal.add(row['ledger_id'])
+            except (psutil.Error, OSError) as exc:
+                result.update(classification='genuinely_unobservable', required_live=True, error=str(exc))
+            else:
+                result.update(classification='transient_read_error' if same else 'identity_mismatch',
+                              required_live=True, error='Process changed during resource read')
+        except psutil.AccessDenied as exc:
+            result.update(classification='access_denied', required_live=True, error=str(exc))
+        except (psutil.Error, OSError) as exc:
+            result.update(classification='transient_read_error', required_live=True,
+                          error=type(exc).__name__ + ': ' + str(exc))
+        return result
+
+    def sample(self):
+        with self.lock:
+            roots = [row for row in self.records if row['ledger_id'] not in self.terminal
+                     and row['capture_origin'] in {'explicit-root', 'direct-launch'}]
+        for row in roots:
+            if row['birth'] is None:
+                continue
+            try:
+                process = psutil.Process(row['pid'])
+                if process.create_time() != row['birth']:
+                    continue  # The classified observation below records the mismatch.
+                for child in process.children(recursive=True):
+                    self._register(child, 'owned descendant', 'first-observed-descendant')
+            except psutil.NoSuchProcess:
+                pass
+            except (psutil.Error, OSError) as exc:
+                self.discovery_errors.append({'phase': self.phase, 'root': row['ledger_id'],
+                    'classification': 'access_denied' if isinstance(exc, psutil.AccessDenied) else 'transient_read_error',
+                    'error': type(exc).__name__ + ': ' + str(exc)})
+        with self.lock:
+            rows = [row for row in self.records if row['ledger_id'] not in self.terminal]
+        observations = [self.observe(row) for row in rows]
+        self.observations.extend(observations)
+        return {'at': time.monotonic(), 'phase': self.phase, 'observations': observations,
+                'processes': [item['sample'] for item in observations if item['classification'] == 'sampled_live']}
+
+    def cleanup(self, deadline):
+        """Reap direct children and stop only still-matching recorded owners."""
+        self.phase = 'cleanup'
+        signalled = set()
+        while True:
+            remaining = []
+            for row in reversed(self.records):
+                if row['ledger_id'] == self.frontend['ledger_id']:
+                    continue
+                observed = self.observe(row)
+                row['cleanup_observation'] = observed
+                if observed['classification'] == 'verified_exited':
+                    continue
+                remaining.append({**row, 'observation': observed})
+                if observed['classification'] != 'sampled_live' or row['ledger_id'] in signalled:
+                    continue
+                try:
+                    process = psutil.Process(row['pid'])
+                    if process.create_time() == row['birth']:
+                        process.terminate()
+                        signalled.add(row['ledger_id'])
+                except psutil.NoSuchProcess:
+                    pass
+                except (psutil.Error, OSError) as exc:
+                    self.cleanup_errors.append({'ledger_id': row['ledger_id'], 'error': str(exc)})
+            if not remaining or time.monotonic() >= deadline:
+                break
+            time.sleep(min(.05, max(0., deadline - time.monotonic())))
+        return remaining
+
+    def report(self):
+        required = [row for row in self.observations if row['required_live']]
+        covered = sum(row['classification'] == 'sampled_live' for row in required)
+        return {'records': self.records, 'launch_failures': self.launch_failures,
+                'discovery_errors': self.discovery_errors, 'cleanup_errors': self.cleanup_errors,
+                'required_live_observations': len(required), 'sampled_live_observations': covered,
+                'live_coverage': covered / len(required) if required else None,
+                'coverage_passed': bool(required) and covered == len(required) and not self.discovery_errors,
+                'scope': 'Launch records plus sampled owned descendants; not continuous short-lived descendant coverage'}
 
 
 def owned_sample(roots):
-    """Only explicit fixture roots and descendants; no global process inventory."""
+    """Legacy helper: errors now propagate instead of erasing live observations."""
     records = {}
     for process in roots:
-        try:
-            children = process.children(recursive=True)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            children = []
-        for child in [process, *children]:
+        for child in [process, *process.children(recursive=True)]:
             value = resource_sample(child)
-            if value is not None:
-                records[(value['pid'], value['birth'])] = value
+            records[(value['pid'], value['birth'])] = value
     return list(records.values())
+
+
+_frame_scope = threading.local()
+_frame_hook_lock = threading.Lock()
+
+
+def _install_frame_meter():
+    # One transparent hook, with thread-local attribution, preserves concurrent
+    # native exchanges and strict decoding. No call is serialized or bypassed.
+    import cmw.nodes.transport as transport
+    with _frame_hook_lock:
+        if getattr(transport.decode, '_campaign_frame_meter', False):
+            return
+        original = transport.decode
+        def measured(frame):
+            current = getattr(_frame_scope, 'current', None)
+            if current is not None:
+                current.append(len(frame))
+            return original(frame)
+        measured._campaign_frame_meter = True
+        transport.decode = measured
+
+
+def protocol_report(samples):
+    operations = sorted({sample['operation'] for sample in samples})
+    return {'encoded_attempted_request_bytes': sum(s['request_bytes'] for s in samples),
+            'encoded_received_response_bytes': sum(s['response_bytes'] for s in samples),
+            'encoded_successful_response_bytes': sum(s['response_bytes'] for s in samples if s['outcome'] == 'ok'),
+            'latency_by_operation': {op: summary([s['seconds'] for s in samples
+                if s['operation'] == op and s['outcome'] == 'ok']) for op in operations},
+            'all_attempt_latency_by_operation': {op: summary([s['seconds'] for s in samples
+                if s['operation'] == op]) for op in operations},
+            'outcomes_by_operation': {op: {outcome: sum(s['operation'] == op and s['outcome'] == outcome for s in samples)
+                for outcome in sorted({s['outcome'] for s in samples if s['operation'] == op})} for op in operations}}
 
 
 class MeterTransport(ProcessTransport):
@@ -83,29 +311,41 @@ class MeterTransport(ProcessTransport):
         self.samples = []
         self.owners = []
         self.wire_sessions = []
+        self.phase = 'unspecified'
+        _install_frame_meter()
 
     def _start(self):
         super()._start()
-        value = resource_sample(psutil.Process(self.process.pid))
-        if value and not any(row['pid'] == value['pid'] and row['birth'] == value['birth'] for row in self.owners):
+        try:
+            value = process_identity(self.process.pid)
+        except psutil.Error as exc:
+            value = {'pid': self.process.pid, 'birth': None, 'identity_error': type(exc).__name__}
+        if not any(row['pid'] == value['pid'] and row['birth'] == value['birth'] for row in self.owners):
             self.owners.append(value)
 
     def exchange(self, operation, params=None, target=None, *, request_id=None):
         request_id = request_id or uuid4().hex
         sent = len(encode(request(operation, params, target, request_id)))
         started = time.perf_counter()
-        received, outcome = 0, 'ok'
+        frames, outcome = [], 'ok'
+        cold = self.process is None
+        previous = getattr(_frame_scope, 'current', None)
+        _frame_scope.current = frames
         try:
-            value = super().exchange(operation, params, target, request_id=request_id)
-            received = len(encode({'protocol': 1, 'request_id': request_id, 'ok': True, 'result': value}))
-            return value
-        except Exception as exc:
+            return super().exchange(operation, params, target, request_id=request_id)
+        except BaseException as exc:
             outcome = getattr(exc, 'code', type(exc).__name__)
             raise
         finally:
-            self.samples.append({'operation': operation, 'target': target,
+            _frame_scope.current = previous
+            self.samples.append({'operation': operation, 'target': target, 'request_id': request_id,
+                'phase': self.phase, 'temperature': 'cold' if cold else 'warm',
                 'seconds': time.perf_counter()-started, 'request_bytes': sent,
-                'response_bytes': received, 'outcome': outcome})
+                'response_bytes': sum(frames), 'response_frame_bytes': frames,
+                'response_scope': 'actual complete frames passed to the unchanged strict decoder',
+                'outcome': outcome,
+                'expected_refusal': outcome != 'ok' and bool(getattr(self, 'expected_refusal_reason', None)),
+                'refusal_reason': getattr(self, 'expected_refusal_reason', None) if outcome != 'ok' else None})
 
     def close(self):
         # OpenSSH emits its own encrypted channel byte counts at orderly EOF.
