@@ -36,6 +36,14 @@ retain names, eV units and evaluation/source references. Native convergence,
 reconstructed dE **and** d eps comparisons, iteration budget, and history coverage
 remain separate. EDIFF=0 is fixed-count behavior. Reaching NELM can coincide with
 convergence; fewer iterations do not establish it. Missing rms(c) is preserved.
+
+Effective settings require typed native records in the `Startparameter for this run:`
+section or the exact native NCORE distribution record, with source references.
+The separately delimited INCAR echo is requested-input evidence. Boxed advice,
+line-leading recommendations outside that section and later prose assignments
+do not supply effective values. Malformed native records and genuine contradictory
+records remain conflicts; concatenated segments never share settings.
+
 An empty electronic table is unavailable evidence, not an observed contradiction;
 numeric acceptance remains unknown. A nonempty conflicting table is still refused.
 

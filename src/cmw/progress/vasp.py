@@ -16,7 +16,7 @@ from cmw.periodic.vasp.inputs import parse_poscar
 from cmw.periodic.vasp.results import (
     BANNER, ITERATION, NUMBER, SET_RE, _force_summary, _same_printed,
     _scalar, _scope, below_printed, number, parse_electronic_row,
-    parse_ionic_summary,
+    outcar_setting_records, parse_ionic_summary,
 )
 from .models import (Criterion, IterationLevel, Metric, MetricSeries,
                      ProgressEvent, ProgressSnapshot, HistoryEntry, HistoryColumn, Timing, Verification, SettingObservation, SourceDiagnostic, comparable)
@@ -211,7 +211,7 @@ class VaspAdapter:
         self.pending_electronic_history.clear()
         self.out_segment += 1
         self.out = {'version': version, 'settings': {}, 'echoed_incar': {},
-                    'in_echo': False, 'nions': None, 'evaluations': deque(),
+                    'in_echo': False, 'in_parameters': False, 'nions': None, 'evaluations': deque(),
                     'next': 1, 'current': None, 'force': None,
                     'forces': deque(maxlen=2), 'conflicts': [], 'in_energy': False,
                     'fatal': False, 'interrupted': False, 'footer': False,
@@ -248,23 +248,27 @@ class VaspAdapter:
         if evaluation is not None:
             evaluation['revision'] += 1
             self.history_dirty.add(evaluation['serial'])
-        if 'INCAR:' in text:
+        if re.fullmatch(r'\s*INCAR:\s*', text):
             out['in_echo'] = True
-        if 'POTCAR:' in text:
+        if re.match(r'^\s*POTCAR:', text):
             out['in_echo'] = False
-        if evaluation is None:
-            for match in SET_RE.finditer(text):
+        if re.fullmatch(r'\s*Startparameter for this run:\s*', text):
+            out['in_parameters'] = True
+            out['in_echo'] = False
+        for key, value in outcar_setting_records(text, echoed=out['in_echo'],
+                                                parameters=out['in_parameters']):
+            if value is None:
+                self._out_conflict('malformed effective/echoed setting: ' + key)
+            elif evaluation is None:
                 target = out['echoed_incar'] if out['in_echo'] else out['settings']
-                key, value = match[1].upper(), _scalar(match[2])
                 if key in target and target[key]['value'] != value:
                     self._out_conflict('conflicting effective/echoed setting: ' + key)
                 target[key] = {'value': value, 'reference': line.evidence}
                 self.last_structural = line.observed_at
-        if evaluation is not None:
-            for match in SET_RE.finditer(text):
-                previous = out['settings'].get(match[1].upper())
-                if previous is not None and previous['value'] != _scalar(match[2]):
-                    self._out_conflict('effective setting changed after SCF began: ' + match[1])
+            else:
+                previous = out['settings'].get(key)
+                if previous is not None and previous['value'] != value:
+                    self._out_conflict('effective setting changed after SCF began: ' + key)
         count = re.search(r'\bNIONS\s*=\s*(\d+)', text)
         if count:
             if out['nions'] is not None and out['nions'] != int(count[1]):
@@ -1334,6 +1338,19 @@ class VaspAdapter:
             scope = _scope(self.out)
             calculation = scope['calculation']
             evaluation = self.out['current']
+            if not evaluation:
+                # Missing header fields are pending, but explicit unsupported
+                # controls already limit scope before the first electronic row.
+                values = self._values()
+                explicit = [reason for reason in scope['reasons'] if
+                    reason.startswith(('unsupported_mode:', 'unsupported_control:'))
+                    or reason in {'unsupported_requested_algorithm', 'unsupported_meta_gga'}
+                    or reason == 'unsupported_electronic_mode' and any(
+                        key in values and values[key] not in allowed for key, allowed in
+                        (('IALGO', (38, 48)), ('ISPIN', (1, 2)), ('ICHARG', (0, 1, 2))))]
+                if explicit:
+                    status = 'UNSUPPORTED'
+                    limitations.extend(explicit)
             if evaluation:
                 electronic = evaluation['rows'][-1]['label'] if evaluation['rows'] else None
                 iteration = self._levels(evaluation, electronic)

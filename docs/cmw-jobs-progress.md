@@ -419,9 +419,15 @@ evaluation, its latest values remain in the card, Details and Copy; navigable
 History waits for that native context. Retention stays bounded, and no guessed
 outer-evaluation identity is assigned.
 
-Effective current-segment OUTCAR settings take precedence. A separately declared
-current INCAR supplies provisional input evidence only; differences from effective
-settings remain explicit. No historical launch-input linkage or default threshold
+Effective current-segment OUTCAR settings take precedence. The shared result/live
+parser requires typed records in the native parameter section or the exact NCORE
+distribution line; advice text cannot supply settings or resolve conflicts.
+Incomplete lines wait for completion, and source generations/segments retain
+independent setting evidence. Explicit unsupported controls, including hybrid
+LHFCALC or IALGO 53, remain visible before the first SCF row.
+
+A separately declared current INCAR supplies provisional input evidence only;
+differences from effective settings remain explicit. No historical launch-input linkage or default threshold
 is invented. EDIFF applies to supported |dE| and |d eps|, never rms or rms(c).
 EDIFF=0 is not ordinary threshold convergence. Negative EDIFFG is a conditional
 force criterion only within the supported relaxation/constraint contract;
