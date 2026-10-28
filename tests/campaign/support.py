@@ -91,15 +91,18 @@ class ProcessLedger:
                'parent': os.getpid() if direct is not None else None,
                'role': role, 'owning_test': self.owning_test, 'phase': self.phase,
                'capture_origin': origin, 'recorded_at': time.monotonic()}
+        identity_mismatch = False
         try:
             expected_birth = process.create_time()
             observed = process_identity(process.pid)
-            parent = process.ppid()
             if observed['birth'] != expected_birth:
+                identity_mismatch = True
                 raise psutil.NoSuchProcess(process.pid, msg='Birth changed while assembling ownership')
+            parent = process.ppid()
         except (psutil.Error, OSError, AttributeError) as exc:
             # A partially read replacement identity never gains signal authority.
             row['identity_error'] = type(exc).__name__ + ': ' + str(exc)
+            row['registration_disappearance'] = isinstance(exc, psutil.NoSuchProcess) and not identity_mismatch
         else:
             row.update(observed)
             row['parent'] = parent
@@ -165,6 +168,19 @@ class ProcessLedger:
         if row['birth'] is None:
             result.update(classification='genuinely_unobservable', required_live=True,
                           error='Birth unavailable; no later PID adoption')
+            if direct is None and row.get('registration_disappearance'):
+                try:
+                    # Absence can close a vanished enumerated descendant; a
+                    # present PID never supplies replacement birth authority.
+                    psutil.Process(row['pid']).create_time()
+                except psutil.NoSuchProcess:
+                    result.update(classification='verified_exited', required_live=False,
+                                  exit_evidence='registration disappearance and follow-up PID absence')
+                    result.pop('error')
+                    self.terminal.add(row['ledger_id'])
+                except (psutil.Error, OSError) as exc:
+                    result.update(classification='access_denied' if isinstance(exc, psutil.AccessDenied)
+                                  else 'transient_read_error', error=type(exc).__name__ + ': ' + str(exc))
             return result
         try:
             process = psutil.Process(row['pid'])

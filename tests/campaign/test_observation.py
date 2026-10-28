@@ -93,6 +93,40 @@ class ObservationTests(unittest.TestCase):
         self.assertIn('NoSuchProcess', row['identity_error'])
         self.assertEqual(ledger.observe(row)['classification'], 'genuinely_unobservable')
 
+    def test_registration_disappearance_requires_confirmed_absence(self):
+        ledger = ProcessLedger(self.id())
+        process = Mock(pid=123456)
+        process.create_time.side_effect = psutil.NoSuchProcess(process.pid)
+        row = ledger._register(process, 'descendant', 'first-observed-descendant')
+        self.assertTrue(row['registration_disappearance'])
+        with patch('tests.campaign.support.psutil.Process', side_effect=psutil.NoSuchProcess(process.pid)):
+            observed = ledger.observe(row)
+        self.assertEqual(observed['classification'], 'verified_exited')
+        self.assertFalse(observed['required_live'])
+        self.assertNotIn('sample', observed)
+        self.assertIsNone(row['birth'])
+
+    def test_registration_disappearance_cannot_adopt_reused_or_denied_pid(self):
+        for denied in (False, True):
+            with self.subTest(denied=denied):
+                ledger = ProcessLedger(self.id())
+                process = Mock(pid=123456)
+                process.create_time.side_effect = psutil.NoSuchProcess(process.pid)
+                row = ledger._register(process, 'descendant', 'first-observed-descendant')
+                replacement = Mock()
+                replacement.create_time.return_value = 9.0
+                with patch('tests.campaign.support.psutil.Process', return_value=replacement,
+                           side_effect=psutil.AccessDenied(process.pid) if denied else None):
+                    observed = ledger.observe(row)
+                    remaining = ledger.cleanup(time.monotonic())
+                self.assertEqual(observed['classification'], 'access_denied' if denied else 'genuinely_unobservable')
+                self.assertTrue(observed['required_live'])
+                self.assertTrue(remaining)
+                self.assertIsNone(row['birth'])
+                replacement.terminate.assert_not_called()
+                ledger.observations.append(observed)
+                self.assertFalse(ledger.report()['coverage_passed'])
+
     def test_failed_start_is_retained(self):
         with ProcessLedger(self.id()) as ledger:
             with self.assertRaises(FileNotFoundError):
