@@ -11,12 +11,15 @@ from cmw.nodes.identity import runtime_identity
 
 
 MODULES = [
+    'tests.campaign.test_observation', 'tests.campaign.test_catalogue_writer',
     'tests.progress.test_generated_schedules', 'tests.progress.test_multiwfn',
     'tests.jobs.test_research_invariants',
     'tests.nodes.test_integrated_portal', 'tests.jobs.test_integrated_navigation',
     'tests.doctor.test_service', 'tests.doctor.test_capsule', 'tests.nodes.test_doctor',
     'tests.jobs.test_doctor_ui', 'tests.jobs.test_review_service', 'tests.jobs.test_review_history',
     'tests.jobs.test_catalogue_store', 'tests.nodes.test_catalogue',
+    'tests.jobs.test_successor', 'tests.jobs.test_study_plan',
+    'tests.jobs.test_study_comparison', 'tests.jobs.test_study', 'tests.nodes.test_study',
 ]
 
 

@@ -178,6 +178,45 @@ class CatalogueStoreTests(unittest.TestCase):
         self.catalogue.query(CatalogueQuery(sort='id_desc'))
         self.assertEqual([(job['id'], job['order']) for job in self.store.snapshot()['jobs']], order)
 
+    def test_cursor_rejects_relevant_lifecycle_deletion_and_identity_changes(self):
+        jobs = [self.add(name=f'Job {index}') for index in range(4)]
+        query = CatalogueQuery(limit=2)
+        for key, value in (('status', 'Done'), ('engine', 'ORCA'), ('name', 'changed'),
+                           ('display_id', 'J7.1'), ('attempt_id', uuid4().hex)):
+            page = self.catalogue.query(query)
+            with self.store.transaction() as con:
+                job = self.store.get(con, jobs[2]['id'])
+                job[key] = value
+                con.execute('UPDATE jobs SET data=? WHERE id=?', (json.dumps(job), job['id']))
+            with self.assertRaisesRegex(JobsError, 'cursor invalidated'):
+                self.catalogue.query(replace(query, cursor=page.next_cursor))
+        page = self.catalogue.query(query)
+        with self.store.transaction() as con:
+            con.execute('DELETE FROM jobs WHERE id=?', (jobs[-1]['id'],))
+        with self.assertRaisesRegex(JobsError, 'cursor invalidated'):
+            self.catalogue.query(replace(query, cursor=page.next_cursor))
+        page = self.catalogue.query(query)
+        replacement = self.store.path.with_name('replacement.sqlite3')
+        with closing(sqlite3.connect(self.store.path)) as source, closing(sqlite3.connect(replacement)) as target:
+            source.backup(target)
+        replacement.replace(self.store.path)
+        with self.assertRaisesRegex(JobsError, 'cursor invalidated'):
+            self.catalogue.query(replace(query, cursor=page.next_cursor))
+
+    def test_database_replacement_during_projection_refuses_returned_page(self):
+        self.add()
+        generation = self.catalogue._generation
+        replacement = self.store.path.with_name('replaced-during-read.sqlite3')
+        with closing(sqlite3.connect(self.store.path)) as source, closing(sqlite3.connect(replacement)) as target:
+            source.backup(target)
+        def replace_after_projection(*args):
+            result = generation(*args)
+            replacement.replace(self.store.path)
+            return result
+        with patch.object(self.catalogue, '_generation', replace_after_projection):
+            with self.assertRaisesRegex(JobsError, 'changed during catalogue read'):
+                self.catalogue.query()
+
     def test_filtered_running_and_unknown_remain_in_unfiltered_counts(self):
         first, other, unknown = self.add(name='visible'), self.add(name='hidden'), self.add(name='uncertain')
         with self.store.transaction() as con:
