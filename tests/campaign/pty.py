@@ -21,32 +21,54 @@ from tests.campaign.geometry import GeometryProbe, RESIZE_SEQUENCE
 
 
 class Session:
-    def __init__(self, settings, directory):
-        self.directory = directory
+    def __init__(self, settings, directory, *, module='tests.campaign.pty', deadline=None):
+        self.deadline, self.directory = deadline, directory
+        self.process = self.thread = None
+        self.buffer, self.output_bytes = b'', 0
+        self._fds, self.cleanup_notes = set(), []
+        self._drain_stop = threading.Event()
         directory.mkdir(mode=0o700)
-        self.master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 0, 0))
-        control_in, self.writer = os.pipe()
-        self.reader, control_out = os.pipe()
-        env = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'PYTHONHOME', 'TEXTUAL_DRIVER')}
-        env.update(TERM='xterm-256color', PYTHONDONTWRITEBYTECODE='1',
-            CMW_JOBS_STATE=str(directory/'unused-default'), CMW_CAMPAIGN_IN=str(control_in),
-            CMW_CAMPAIGN_OUT=str(control_out))
-        driver = Path(__file__).resolve().parents[2]
-        self.process = subprocess.Popen([sys.executable, '-I', '-B', '-c',
-            'import sys,runpy;sys.path.insert(0,sys.argv.pop(1));runpy.run_module("tests.campaign.pty",run_name="__main__")',
-            str(driver), str(settings), str(directory)], stdin=slave, stdout=slave, stderr=slave,
-            pass_fds=(control_in, control_out), start_new_session=True, env=env, cwd=driver)
-        os.close(slave); os.close(control_in); os.close(control_out)
-        self.buffer = b''
-        self.output_bytes = 0
-        self.thread = threading.Thread(target=self.drain, daemon=True)
-        self.thread.start()
+        try:
+            self.master, slave = pty.openpty()
+            self._fds.update((self.master, slave))
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 0, 0))
+            control_in, self.writer = os.pipe()
+            self._fds.update((control_in, self.writer))
+            self.reader, control_out = os.pipe()
+            self._fds.update((self.reader, control_out))
+            env = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'PYTHONHOME', 'TEXTUAL_DRIVER')}
+            env.update(TERM='xterm-256color', PYTHONDONTWRITEBYTECODE='1',
+                CMW_JOBS_STATE=str(directory/'unused-default'), CMW_CAMPAIGN_IN=str(control_in),
+                CMW_CAMPAIGN_OUT=str(control_out))
+            driver = Path(__file__).resolve().parents[2]
+            self.process = subprocess.Popen([sys.executable, '-I', '-B', '-c',
+                'import sys,runpy;sys.path.insert(0,sys.argv.pop(1));runpy.run_module(sys.argv.pop(1),run_name="__main__")',
+                str(driver), module, str(settings), str(directory)], stdin=slave, stdout=slave, stderr=slave,
+                pass_fds=(control_in, control_out), start_new_session=True, env=env, cwd=driver)
+            for fd in (slave, control_in, control_out):
+                self._close_fd(fd)
+            self.thread = threading.Thread(target=self.drain, daemon=True)
+            self.thread.start()
+        except BaseException as exc:
+            try:
+                self.close()
+            finally:
+                (directory/'session-startup-failure.json').write_text(json.dumps({
+                    'error': repr(exc), 'cleanup_notes': self.cleanup_notes}, indent=2)+'\n')
+            raise
+
+    def _close_fd(self, fd):
+        if fd in self._fds:
+            self._fds.remove(fd)
+            try:
+                os.close(fd)
+            except OSError as exc:
+                self.cleanup_notes.append(repr(exc))
 
     def drain(self):
         tail = b''
         with (self.directory/'terminal.ansi').open('wb') as output:
-            while True:
+            while not self._drain_stop.is_set():
                 try:
                     ready, _, _ = select.select([self.master], [], [], .2)
                     if not ready:
@@ -63,7 +85,7 @@ class Session:
                     if b'\x1b[6n' in tail + data:
                         os.write(self.master, b'\x1b[1;1R')
                     tail = data[-3:]
-                except OSError:
+                except (OSError, ValueError):
                     return
 
     def send(self, keys):
@@ -75,7 +97,7 @@ class Session:
 
     def request(self, operation, **values):
         os.write(self.writer, (json.dumps({'operation': operation, **values})+'\n').encode())
-        deadline = time.monotonic()+25
+        deadline = min(time.monotonic()+25, self.deadline or float("inf"))
         while b'\n' not in self.buffer:
             remaining = deadline-time.monotonic()
             if remaining <= 0:
@@ -93,20 +115,47 @@ class Session:
         return value['result']
 
     def close(self):
-        # EOF releases the child control reader even when the app exits on a key.
-        os.close(self.writer)
-        if self.process.poll() is None:
-            self.send(b'q')
+        errors = []
+        try:
+            # EOF releases the control reader even when the app exits on a key.
+            self._close_fd(getattr(self, 'writer', None))
+            if self.process is not None and self.process.poll() is None:
+                try:
+                    self.send(b'q')
+                except OSError as exc:
+                    self.cleanup_notes.append(repr(exc))
+                try:
+                    remaining = max(.01, (self.deadline or time.monotonic()+10)-time.monotonic())
+                    self.process.wait(timeout=min(10, remaining))
+                except subprocess.TimeoutExpired:
+                    self.process.terminate()  # Original Popen-owned child only.
+                    try:
+                        self.process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        self.process.kill()
+                        self.process.wait(timeout=2)
+        except BaseException as exc:
+            errors.append(repr(exc))
+        finally:
+            self._drain_stop.set()
             try:
-                self.process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.process.terminate()  # Only this Popen-owned terminal child.
-                self.process.wait(timeout=10)
-        self.thread.join(timeout=2)
-        for fd in (self.master, self.reader):
-            os.close(fd)
-        assert not self.thread.is_alive()
-        return self.process.returncode
+                if self.thread is not None and self.thread.ident is not None:
+                    self.thread.join(timeout=2)
+            except BaseException as exc:
+                errors.append(repr(exc))
+            for fd in tuple(self._fds):
+                self._close_fd(fd)
+            if self.thread is not None and self.thread.is_alive():
+                self.thread.join(timeout=2)
+                if self.thread.is_alive():
+                    errors.append('PTY drain thread did not stop')
+            (self.directory/'session-cleanup.json').write_text(json.dumps({
+                'errors': errors, 'notes': self.cleanup_notes,
+                'returncode': self.process.returncode if self.process is not None else None,
+                'open_descriptors': len(self._fds),
+                'drain_alive': self.thread is not None and self.thread.is_alive()}, indent=2)+'\n')
+        assert not errors, errors
+        return self.process.returncode if self.process is not None else None
 
 
 def run(settings, directory):
