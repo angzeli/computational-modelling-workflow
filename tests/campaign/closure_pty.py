@@ -232,8 +232,7 @@ def child(settings_path, directory):
     from cmw.jobs.study_ui import StudyScreen
     from cmw.jobs.tui import Inspect, JobsApp
     from cmw.nodes.connections import ConnectedBackend
-    from cmw.nodes.portal import NodesApp, row_key
-    from cmw.nodes.protocol import target_key
+    from cmw.nodes.portal import NodesApp, row_key, target_key
     from tests.campaign.support import MeterTransport
     from textual import events
     from textual.widgets import Button, DataTable, Input, Static, TextArea
