@@ -149,6 +149,35 @@ class ControlTests(ControlFixture, unittest.TestCase):
         self.assertFalse(state['controller']['dispatch'])
         self.spawn.assert_not_called()
 
+    def test_bound_release_accepts_empty_successful_readiness_and_records_original_request(self):
+        selected = {**self.current(), 'node_submission': {'fixture': True}}
+        self.backend._job = Mock(return_value=selected)
+        request_id = uuid4().hex
+        with patch('cmw.jobs.runtime.launch_blocker', return_value='') as readiness:
+            result = self.apply(self.preview('release'), request_id=request_id)
+        readiness.assert_called_once_with(selected, final=True)
+        self.assertEqual(result['status'], 'COMPLETED')
+        self.assertEqual(result['target'], self.target)
+        self.assertEqual(self.current()['status'], 'Queue')
+        self.assertEqual(self.store.request_lookup(request_id)['result'], result)
+        self.assertFalse(self.store.snapshot()['controller']['dispatch'])
+        self.spawn.assert_not_called()
+
+    def test_bound_release_keeps_required_readiness_refusal_before_mutation(self):
+        selected = {**self.current(), 'node_submission': {'fixture': True}}
+        self.backend._job = Mock(return_value=selected)
+        request_id = uuid4().hex
+        with patch('cmw.jobs.runtime.launch_blocker', return_value='Required input changed') as readiness:
+            with self.assertRaises(NodeError) as caught:
+                self.apply(self.preview('release'), request_id=request_id)
+        readiness.assert_called_once_with(selected, final=True)
+        self.assertEqual(caught.exception.code, 'CONTROL_UNAVAILABLE')
+        self.assertEqual(str(caught.exception), 'Required input changed')
+        self.assertEqual(self.current()['status'], 'Hold')
+        self.assertIsNone(self.store.request_lookup(request_id))
+        self.assertFalse(self.store.snapshot()['controller']['dispatch'])
+        self.spawn.assert_not_called()
+
     def test_duplicate_returns_original_receipt_after_later_state_change(self):
         preview = self.preview('release'); request_id = uuid4().hex
         receipt = self.apply(preview, request_id=request_id)
