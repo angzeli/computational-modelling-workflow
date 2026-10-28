@@ -320,6 +320,7 @@ def child(settings_path, directory):
                 argv = list(backend.transport.argv)
                 argv[argv.index('-p')+1] = str(settings['unavailable_port'])
                 backend.transport.argv = argv
+                backend.transport.expected_refusal_reason = 'deliberate unavailable-owner control'
                 first_refusal = len(backend.transport.samples)
                 self.queue(owner, 'status')
                 await self.until(lambda: self.lanes[owner].error is not None)
