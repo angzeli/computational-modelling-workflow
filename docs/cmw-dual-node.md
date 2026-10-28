@@ -68,7 +68,8 @@ is implied by an isolated endpoint test.
 `cmw doctor --node ALIAS --queue QUEUE [--job JOB]` uses the explicit
 `doctor.inspect` schema-1 operation. It checks the selected host/runtime/queue
 without reading unrelated profile payloads or storage. Older endpoints refuse
-this operation; ordinary control and submission retain their full checks. See
+this operation. Endpoint reads also scope checks to the selected owner/runtime/queue;
+execution retains its required profile, storage and input checks. See
 [doctor and private capsule contract](cmw-doctor.md) for runtime distinctions,
 cached evidence, selected-job Details access and export limitations.
 
@@ -398,3 +399,45 @@ node/attempt provenance and never acquire original-result authority. Live
 observation, process completion and scientific validation remain separate. No
 physical MacBook-to-mini or real ORCA/Multiwfn qualification is implied by isolated
 endpoint or loopback SSH acceptance.
+
+## Runtime metadata and operation authority
+
+New enrollment retains an optional original runtime_observation in its private
+configuration. Existing configurations remain readable; missing original
+object/security evidence never grants metadata-recovery authority. Semantic
+runtime fingerprints and durable request digests are unchanged. Older endpoints
+may refuse this new optional configuration field; retain their original enrollment
+for rollback or peer checks rather than silently stripping the trust record.
+
+Observations cover bounded package members and intermediate directories, root and
+executable identities, security metadata, sizes and timestamps. Full package
+hashing is cached only by the exact complete metadata epoch (two entries); there
+is no time-based or indefinitely trusted runtime/storage result. Inventory is
+rechecked around reads. Bounds are 4,096 files, 8,192 tree entries, 16 MiB per file
+and 128 MiB per package. Identical bytes never authorize a replacement inode.
+
+One eligible ctime-only change may be completely reverified against original
+enrollment. Changed content/membership/object/security state, incomplete baseline,
+in-flight change or a second recovery refuses. Supplemental epochs never rewrite
+enrollment. Current disk coherence does not prove imported-code coherence:
+recovery requires a fresh isolated observer started after the changed epoch,
+source imports from enrolled members, and no unverified cached bytecode. Existing
+controllers/workers are never restarted by verification.
+
+A null macOS ACL read is not proof of ACL absence. Unavailable ACL evidence
+preserves ordinary exact-epoch checking but prohibits metadata recovery. Fixed
+sleep or quiet-window settings cannot resolve this uncertainty. check_node
+retains structured refusal evidence, including original/current metadata, phase,
+path where known, digests and category. LocalBackend retains it in the session's
+runtime_diagnostic; the bounded wire error schema remains unchanged.
+
+Owner-side code derives operation dependencies, never a client skip list.
+Selected reads check current host/runtime/queue before and after each call. Files
+checks implicated storage roots; transfer/fetch retain their exact volume and
+publication checks. Submission/final launch check selected profile/storage.
+Release/Continue revalidate bound execution inputs outside the SQLite write
+transaction, then existing revisions and ownership govern intent. Cancel/Hold/
+pause do not depend on unrelated archive health. Legacy unbound controls retain
+their behavior. Study/successor services still conservatively check aggregate
+configuration readiness as well as exact source/input/owner checks; dependency
+narrowing for those routes is not claimed.

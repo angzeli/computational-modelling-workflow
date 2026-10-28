@@ -15,6 +15,8 @@ from uuid import UUID, uuid4
 
 from cmw.core.provenance import canonical_json_bytes, stable_hash
 from .storage import identify_storage, check_storage, validate_storage
+from .runtime_observation import (RuntimeRefusal, RuntimeVerifier, file_epoch, inventory,
+                                  observation, validate_observation)
 
 
 MAX_CONFIG_BYTES = 1024 * 1024
@@ -87,42 +89,40 @@ def host_evidence():
 
 @lru_cache(maxsize=2)
 def _package_digest(root, epoch):
-    """Reuse only a matching complete package stat epoch; never cache file data."""
+    """Cache only exact complete metadata epochs, with bounded full-read evidence."""
     digest = hashlib.sha256()
     for name, expected in epoch:
         path = root / name
-        before = path.lstat()
-        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-        if identity != expected or not stat.S_ISREG(before.st_mode):
-            raise ValueError('CMW runtime changed during fingerprinting')
-        data = path.read_bytes()
-        after = path.lstat()
-        if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or len(data) != before.st_size:
-            raise ValueError('CMW runtime changed during fingerprinting')
+        before = file_epoch(path)
+        if before != expected:
+            raise RuntimeRefusal('in_flight_change', phase='before-open', path=name,
+                                 before=expected, after=before)
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        with os.fdopen(descriptor, 'rb') as handle:
+            opened = os.fstat(handle.fileno())
+            if (opened.st_dev, opened.st_ino, opened.st_size) != expected[:3]:
+                raise RuntimeRefusal('member_replaced', phase='open', path=name)
+            data = handle.read(16 * 1024**2 + 1)
+            closed = os.fstat(handle.fileno())
+        after = file_epoch(path)
+        if (after != expected or len(data) != expected[2]
+                or (closed.st_dev, closed.st_ino, closed.st_size, closed.st_mtime_ns, closed.st_ctime_ns) != expected[:5]):
+            raise RuntimeRefusal('in_flight_change', phase='read', path=name,
+                                 before=expected, after=after)
         encoded = name.encode('utf-8')
         digest.update(len(encoded).to_bytes(4, 'big') + encoded + len(data).to_bytes(8, 'big') + data)
     return digest.hexdigest()
 
 
-def runtime_identity():
-    """Fingerprint actual package bytes, interpreter and installed dependencies."""
+def runtime_observed():
+    """Observe complete current disk bytes; no claim about previously imported code."""
     import cmw
     root = Path(cmw.__file__).resolve().parent
-    total = 0
-    epoch = []
-    paths = sorted(path for path in root.rglob('*') if path.is_file()
-                   and '__pycache__' not in path.parts and path.suffix not in {'.pyc', '.pyo'}
-                   and path.name != '.DS_Store')
-    if not paths or len(paths) > 4096:
-        raise ValueError('CMW package file inventory is unavailable or oversized')
-    for path in paths:
-        observed = path.lstat()
-        total += observed.st_size
-        if not stat.S_ISREG(observed.st_mode) or observed.st_size > 16 * 1024**2 or total > 128 * 1024**2:
-            raise ValueError('CMW package contains unsupported or oversized files')
-        identity = (observed.st_dev, observed.st_ino, observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns)
-        epoch.append((str(path.relative_to(root)), identity))
-    package_digest = _package_digest(root, tuple(epoch))
+    root_epoch, epoch, directories = inventory(root)
+    package_digest = _package_digest(root, epoch)
+    if inventory(root) != (root_epoch, epoch, directories):
+        raise RuntimeRefusal('in_flight_change', phase='inventory-after-read',
+                             before=dict(epoch), after=dict(inventory(root)[1]))
     dependencies = {}
     for name in ('ase', 'gemmi', 'numpy', 'PyYAML', 'psutil', 'textual', 'rich'):
         try:
@@ -140,7 +140,12 @@ def runtime_identity():
     # another node's filesystem/process authority.
     record['fingerprint'] = stable_hash({key: value for key, value in record.items()
                                       if key not in {'package_origin', 'executable'}})
-    return record
+    return record, observation(root, root_epoch, epoch, directories, package_digest)
+
+
+def runtime_identity():
+    """Fingerprint actual package bytes, interpreter and installed dependencies."""
+    return runtime_observed()[0]
 
 
 @lru_cache(maxsize=128)
@@ -313,7 +318,11 @@ def _validate_runtime(value):
 
 
 def _validate_config(value):
-    _object(value, _CONFIG_FIELDS, _CONFIG_FIELDS, 'node configuration')
+    _object(value, _CONFIG_FIELDS | {'runtime_observation'}, _CONFIG_FIELDS, 'node configuration')
+    if 'runtime_observation' in value:
+        validate_observation(value['runtime_observation'])
+        if value['runtime_observation']['package_sha256'] != value['runtime']['package_sha256']:
+            raise ValueError('Original runtime observation contradicts enrolled digest')
     if type(value['schema']) is not int or value['schema'] != 1:
         raise ValueError('Unsupported node configuration schema')
     _uuid(value['node_id'], 'Node identity')
@@ -394,7 +403,7 @@ def enroll(config_root, spec, *, host_provider=None, runtime_provider=None,
     _object(spec, {'node_id', 'queues', 'storages', 'profiles'}, {'queues', 'storages', 'profiles'}, 'node enrollment')
     node_id = _uuid(spec.get('node_id', uuid4().hex), 'Node identity')
     host = _host((host_evidence if host_provider is None else host_provider)())
-    runtime = (runtime_identity if runtime_provider is None else runtime_provider)()
+    runtime, original = runtime_observed() if runtime_provider is None else (runtime_provider(), None)
     _validate_runtime(runtime)
     host_id = host['platform'] + ':' + host['hardware_id']
     queues = _aliases(spec['queues'], 'Queues')
@@ -423,7 +432,7 @@ def enroll(config_root, spec, *, host_provider=None, runtime_provider=None,
         queue_records[alias] = {**record, 'state': str(state)}
     value = _validate_config({'schema': 1, 'node_id': node_id, 'host_id': host_id, 'host': host,
                               'runtime': runtime, 'queues': queue_records, 'storages': storages,
-                              'profiles': profiles})
+                              'profiles': profiles, **({'runtime_observation': original} if original is not None else {})})
     content = canonical_json_bytes(value)
     if len(content) > MAX_CONFIG_BYTES:
         raise ValueError('Node configuration exceeds 1 MiB')
@@ -441,15 +450,22 @@ def enroll(config_root, spec, *, host_provider=None, runtime_provider=None,
 
 
 def check_node(config, *, host_provider=None, runtime_provider=None,
-               storage_provider=None, store_factory=None, operation=None, queue_alias=None):
+               storage_provider=None, store_factory=None, operation=None, queue_alias=None,
+               profile_aliases=None, storage_aliases=None, runtime_verifier=None):
     """Observe readiness; missing storage does not erase independent queue evidence."""
     from cmw.jobs.store import Store
     _validate_config(config)
-    diagnostic = operation == 'doctor.inspect'
-    if operation is not None and not diagnostic:
-        raise ValueError('Unsupported operation-scoped readiness check')
-    if diagnostic and queue_alias not in config['queues']:
-        raise ValueError('Doctor requires one explicitly enrolled queue')
+    scoped = operation is not None
+    if scoped:
+        from .protocol import OPERATIONS
+        if operation not in OPERATIONS | {'execution'} or queue_alias not in config['queues']:
+            raise ValueError('Scoped readiness requires a supported operation and enrolled queue')
+    elif profile_aliases is not None or storage_aliases is not None:
+        raise ValueError('Dependency scope requires an explicit owning operation')
+    profiles = config['profiles'] if not scoped else {
+        alias: config['profiles'][alias] for alias in (profile_aliases or ())}
+    storages = config['storages'] if not scoped else {
+        alias: config['storages'][alias] for alias in (storage_aliases or ())}
     result = {'ready': False, 'identity_ready': True, 'runtime_ready': True,
               'storage_ready': True, 'profiles_ready': True, 'identity_errors': [],
               'runtime_errors': [], 'errors': [], 'host': None, 'runtime': None,
@@ -461,13 +477,16 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         result['identity_errors'].append(str(exc))
     try:
-        result['runtime'] = (runtime_identity if runtime_provider is None else runtime_provider)()
+        verifier = runtime_verifier or RuntimeVerifier(config['runtime'], config.get('runtime_observation'))
+        result['runtime'] = verifier.verify(runtime_observed) if runtime_provider is None else runtime_provider()
         if result['runtime']['fingerprint'] != config['runtime']['fingerprint']:
             raise ValueError('Actual CMW runtime differs from the enrolled fingerprint')
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
         result['runtime_errors'].append(str(exc))
+        if isinstance(exc, RuntimeRefusal):
+            result['runtime_diagnostic'] = exc.evidence
     store_type = Store if store_factory is None else store_factory
-    queues = {queue_alias: config['queues'][queue_alias]} if diagnostic else config['queues']
+    queues = {queue_alias: config['queues'][queue_alias]} if scoped else config['queues']
     for alias, expected in queues.items():
         try:
             observed = store_type(expected['state']).queue_identity()
@@ -476,19 +495,22 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
             result['queues'][alias] = observed
         except (OSError, ValueError, RuntimeError) as exc:
             result['identity_errors'].append(f'{alias}: {exc}')
-    if diagnostic:
+    if scoped:
+        # Operation dependencies are derived on the owner, never a wire skip list.
         # Observation is not execution preflight: never hash runner payloads or
         # touch unrelated queue/storage roots to explain one selected endpoint.
-        result['storage_ready'] = result['profiles_ready'] = None
+        result['storage_ready'] = True if storages else None
+        result['profiles_ready'] = True if profiles else None
         result['coverage'] = {'operation': operation, 'queue': queue_alias,
-                              'storage': 'NOT_CHECKED', 'profiles': 'NOT_CHECKED'}
-    for alias, expected in (() if diagnostic else config['storages'].items()):
+                              'storage': sorted(storages) if storages else 'NOT_CHECKED',
+                              'profiles': sorted(profiles) if profiles else 'NOT_CHECKED'}
+    for alias, expected in storages.items():
         observed = (check_storage(expected) if storage_provider is None else storage_provider(expected))
         result['storages'][alias] = observed
         if observed.get('ready') is not True:
             result['storage_ready'] = False
             result['errors'].append(f'{alias}: {observed.get("error", "Storage unavailable")}')
-    for alias, profile in (() if diagnostic else config['profiles'].items()):
+    for alias, profile in profiles.items():
         try:
             for expected in [profile['runner_identity'], *profile['dependencies']]:
                 if _file_identity(expected['path']) != expected:
@@ -503,7 +525,6 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
     result['identity_ready'] = not result['identity_errors']
     result['runtime_ready'] = not result['runtime_errors']
     result['errors'] += result['identity_errors'] + result['runtime_errors']
-    required = ('identity_ready', 'runtime_ready') if diagnostic else (
-        'identity_ready', 'runtime_ready', 'storage_ready', 'profiles_ready')
+    required = ('identity_ready', 'runtime_ready') + (('storage_ready',) if storages else ()) + (('profiles_ready',) if profiles else ())
     result['ready'] = all(result[key] for key in required)
     return result

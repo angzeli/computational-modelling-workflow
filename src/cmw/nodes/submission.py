@@ -170,7 +170,10 @@ def preview(config, queue, spec):
     spec = normalize_spec(spec)
     _require(spec['node_id'] == config['node_id'] and spec['queue_id'] == queue['queue_id'], 'Submission targets a different enrolled node or queue')
     _require(spec['storage'] in config['storages'] and spec['profile'] in config['profiles'], 'Required destination storage/runtime profile is not enrolled')
-    readiness = check_node(config)
+    aliases = [alias for alias, record in config['queues'].items() if record['queue_id'] == queue['queue_id']]
+    _require(len(aliases) == 1, 'Destination queue identity is ambiguous')
+    readiness = check_node(config, operation='execution', queue_alias=aliases[0],
+                           profile_aliases=[spec['profile']], storage_aliases=[spec['storage']])
     _require(readiness['ready'], 'Destination preflight failed: ' + '; '.join(readiness['errors']), 'NOT_READY')
     profile = config['profiles'][spec['profile']]
     _require(profile['engine'] == spec['engine'], 'Submission engine differs from target runtime profile')
@@ -285,7 +288,10 @@ def launch_blocker(job, *, final=False):
         from .transfer import lookup_transfer
         binding = job['node_submission']
         config = load_node(binding['config_root'])
-        readiness = check_node(config)
+        aliases = [alias for alias, record in config['queues'].items() if record['queue_id'] == binding['queue_id']]
+        _require(len(aliases) == 1, 'Original destination queue identity is ambiguous')
+        readiness = check_node(config, operation='execution', queue_alias=aliases[0],
+            profile_aliases=[binding['profile']], storage_aliases=[binding['storage_alias']])
         _require(readiness['ready'], 'Node readiness failed: ' + '; '.join(readiness['errors']))
         _require(config['node_id'] == binding['node_id'] and config['runtime']['fingerprint'] == binding['runtime_id'], 'Node/runtime identity changed')
         queues = [item for item in config['queues'].values() if item['queue_id'] == binding['queue_id']]

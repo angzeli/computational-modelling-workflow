@@ -315,3 +315,5 @@ capability must update its map entry, route, scope and canonical links in the sa
 coherent change. Internal refactors with unchanged contracts need no map churn.
 Keep one root map; feature guides remain authoritative. Do not add changing test
 counts or use package version alone as a maturity guarantee.
+
+Runtime observation and operation scope: see the [bounded trust contract](docs/cmw-dual-node.md#runtime-metadata-and-operation-authority). Incomplete security evidence cannot authorize metadata recovery.

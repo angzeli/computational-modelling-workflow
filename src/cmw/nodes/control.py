@@ -160,6 +160,11 @@ def dispatch(backend, operation, params, *, target=None, request_id=None):
     action = params['action']
     preview_params = {key: params[key] for key in ('action', 'position') if key in params}
     preview = _preview(backend, preview_params, target)
+    if action in {'release', 'continue'} and target is not None:
+        selected = backend._job(target) if hasattr(backend, '_job') else _selected(backend, store.snapshot()['jobs'], target)
+        blocker = (runtime.launch_blocker(selected, final=True)
+                   if selected.get('node_submission') or selected.get('molecular_submission') else None)
+        _require(blocker is None, 'CONTROL_UNAVAILABLE', blocker or '')
     start_lock = exclusive(store.root / 'start.lock') if action == 'controller.start' else nullcontext()
     with start_lock:
         with store.transaction(create=False) as con:

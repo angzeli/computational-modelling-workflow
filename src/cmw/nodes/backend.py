@@ -121,6 +121,7 @@ class LocalBackend:
         self._closed = False
         self._lock = threading.Lock()
         self._pinned = None
+        self._runtime_verifier = None
         self._sessions = OrderedDict()
         self._validations = OrderedDict()
         self._generation = 0
@@ -135,12 +136,17 @@ class LocalBackend:
 
     def _check(self, operation=None):
         config = self._load_identity(self.config_root)
-        if operation == 'doctor.inspect' and not self._custom_identity_checker:
-            readiness = self._check_identity(config, operation=operation, queue_alias=self.queue_alias)
+        if not self._custom_identity_checker:
+            from .runtime_observation import RuntimeVerifier
+            if self._runtime_verifier is None:
+                self._runtime_verifier = RuntimeVerifier(config['runtime'], config.get('runtime_observation'))
+            readiness = self._check_identity(config, operation=operation or 'capabilities',
+                queue_alias=self.queue_alias, runtime_verifier=self._runtime_verifier)
         else:
             readiness = self._check_identity(config)
         if not readiness.get('identity_ready', False):
             raise BackendError('IDENTITY_CHANGED', '; '.join(readiness.get('identity_errors') or readiness.get('errors') or ['Node/queue identity is unavailable']))
+        self.runtime_diagnostic = readiness.get('runtime_diagnostic')
         if not readiness.get('runtime_ready', False):
             raise BackendError('RUNTIME_MISMATCH', '; '.join(readiness.get('runtime_errors') or ['Pinned endpoint runtime differs']))
         record = config.get('queues', {}).get(self.queue_alias)
@@ -150,7 +156,8 @@ class LocalBackend:
         if not isinstance(state, str):
             raise BackendError('INVALID_QUEUE', 'Enrolled queue lacks its local state path')
         store = Store(state)
-        actual = store.queue_identity()
+        actual = (store.queue_identity() if self._custom_identity_checker
+                  else readiness.get('queues', {}).get(self.queue_alias))
         if actual is None or any(actual.get(key) != record.get(key) for key in actual):
             raise BackendError('QUEUE_CHANGED', 'Enrolled queue identity differs from its authoritative database')
         if actual['node_id'] != config['node_id'] or actual['host_id'] != config['host_id']:
@@ -227,6 +234,7 @@ class LocalBackend:
     def _locations(self, job):
         found = discover(self.store, job['id'], expected_attempt_id=job['attempt_id'])
         result = []
+        storage_observations = {}
         for location in found.locations:
             candidates = []
             if location.path:
@@ -237,7 +245,13 @@ class LocalBackend:
                         continue
                     candidates.append((len(storage['root']), alias, storage, relative))
             _, alias, storage, relative = max(candidates, key=lambda value: value[0]) if candidates else (0, None, {}, None)
-            storage_ready = self.readiness.get('storages', {}).get(alias, {}).get('ready') if alias else None
+            if alias and alias not in storage_observations:
+                if self._custom_identity_checker:
+                    storage_observations[alias] = self.readiness.get('storages', {}).get(alias, {})
+                else:
+                    from .storage import check_storage
+                    storage_observations[alias] = check_storage(storage)
+            storage_ready = storage_observations.get(alias, {}).get('ready') if alias else None
             result.append({'node_id': self.config['node_id'], 'queue_id': self.queue['queue_id'],
                 'job_id': job['id'], 'attempt_id': job['attempt_id'], 'location_id': location.key,
                 'storage_alias': alias, 'storage_id': storage.get('storage_id'), 'registered_root': storage.get('root'),
