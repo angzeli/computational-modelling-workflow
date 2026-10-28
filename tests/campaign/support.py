@@ -180,7 +180,8 @@ class ProcessLedger:
             if process.create_time() != row['birth']:
                 result.update(classification='identity_mismatch', required_live=True)
                 return result
-            if process.status() == psutil.STATUS_ZOMBIE:
+            result['pre_read_status'] = process.status()
+            if result['pre_read_status'] == psutil.STATUS_ZOMBIE:
                 result['classification'] = 'zombie_reaping_pending'
                 return result
             result['required_live'] = True
@@ -193,6 +194,9 @@ class ProcessLedger:
             try:
                 current = psutil.Process(row['pid'])
                 same = current.create_time() == row['birth']
+                result['post_error_status'] = current.status() if same else None
+                if same and result['post_error_status'] == psutil.STATUS_ZOMBIE:
+                    same = psutil.Process(row['pid']).create_time() == row['birth']
             except psutil.NoSuchProcess:
                 result.update(classification='verified_exited', required_live=False,
                               exit_evidence='recorded identity absent on follow-up observation')
@@ -200,8 +204,12 @@ class ProcessLedger:
             except (psutil.Error, OSError) as exc:
                 result.update(classification='genuinely_unobservable', required_live=True, error=str(exc))
             else:
-                result.update(classification='transient_read_error' if same else 'identity_mismatch',
-                              required_live=True, error='Process changed during resource read')
+                if same and result['post_error_status'] == psutil.STATUS_ZOMBIE:
+                    result.update(classification='zombie_reaping_pending', required_live=False,
+                                  exit_evidence='same recorded birth observed zombie after resource read')
+                else:
+                    result.update(classification='transient_read_error' if same else 'identity_mismatch',
+                                  required_live=True, error='Process changed during resource read')
         except psutil.AccessDenied as exc:
             result.update(classification='access_denied', required_live=True, error=str(exc))
         except (psutil.Error, OSError) as exc:

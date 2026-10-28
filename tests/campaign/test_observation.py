@@ -63,6 +63,25 @@ class ObservationTests(unittest.TestCase):
             ledger.observations.append(observed)
         self.assertFalse(ledger.report()['coverage_passed'])
 
+    def test_resource_exit_race_distinguishes_observed_zombie_from_live_uncertainty(self):
+        for status, classification, required, reused in ((psutil.STATUS_ZOMBIE, 'zombie_reaping_pending', False, False),
+                (psutil.STATUS_RUNNING, 'transient_read_error', True, False),
+                (psutil.STATUS_ZOMBIE, 'identity_mismatch', True, True)):
+            with self.subTest(status=status, reused=reused):
+                ledger = ProcessLedger(self.id())
+                process = Mock(pid=ledger.frontend['pid'])
+                process.create_time.return_value = ledger.frontend['birth']
+                if reused:
+                    process.create_time.side_effect = [ledger.frontend['birth'], ledger.frontend['birth'], ledger.frontend['birth']+1]
+                process.status.side_effect = [psutil.STATUS_RUNNING, status]
+                with patch('tests.campaign.support.psutil.Process', return_value=process), \
+                     patch('tests.campaign.support.resource_sample', side_effect=psutil.NoSuchProcess(process.pid)):
+                    observed = ledger.observe(ledger.frontend)
+                self.assertEqual(observed['classification'], classification)
+                self.assertEqual(observed['required_live'], required)
+                self.assertNotIn('sample', observed)
+                self.assertNotIn(ledger.frontend['ledger_id'], ledger.terminal)
+
     def test_missing_birth_requires_original_popen_reap_not_later_adoption(self):
         ledger = ProcessLedger(self.id())
         row = {**ledger.frontend, 'ledger_id': 1, 'birth': None}
