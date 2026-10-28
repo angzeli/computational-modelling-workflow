@@ -64,9 +64,26 @@ class MolecularNodeTests(unittest.TestCase):
             'files':[{'source':str(self.input),'path':'inputs/source Ω.inp','role':'input'}],
             'scientific':{'profile':'sp','input':{'bundle':'inputs/source Ω.inp'}},'intent':'held','dependencies_complete':True}
 
-    def readiness(self,config):
+    def readiness(self,config,*,operation=None,queue_alias=None,
+                  profile_aliases=None,storage_aliases=None):
         return check_node(config,host_provider=lambda:HOST,runtime_provider=lambda:RUNTIME,
-                          storage_provider=lambda record:check_storage(record,probe=volume))
+                          storage_provider=lambda record:check_storage(record,probe=volume),
+                          operation=operation,queue_alias=queue_alias,
+                          profile_aliases=profile_aliases,storage_aliases=storage_aliases)
+
+    def test_readiness_preserves_execution_dependency_scope(self):
+        scope={'operation':'execution','queue_alias':'research',
+               'profile_aliases':['orca'],'storage_aliases':['scratch']}
+        result=self.readiness(self.config,**scope)
+        self.assertTrue(result['ready'],result)
+        self.assertEqual(result['coverage'],{'operation':'execution','queue':'research',
+                         'profiles':['orca'],'storage':['scratch']})
+        with self.assertRaisesRegex(ValueError,'Scoped readiness'):
+            self.readiness(self.config,**{**scope,'queue_alias':'wrong-queue'})
+        self.native.write_text('#!/bin/sh\nexit 0\n')
+        changed=self.readiness(self.config,**scope)
+        self.assertFalse(changed['ready'])
+        self.assertFalse(changed['profiles_ready'])
 
     def test_pure_check_and_preview_are_honest_and_do_not_publish(self):
         result=client_check(self.backend,self.spec)['result']
