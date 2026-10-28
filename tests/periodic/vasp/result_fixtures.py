@@ -46,7 +46,7 @@ def native_texts(*, relaxation=False, evaluations=1, cell=CELL, positions=POSITI
     incar = "\n".join(f"{key} = {value}" for key, value in effective.items()) + "\n"
     out = [f" vasp.{version} invented synthetic fixture", " INCAR:", *incar.splitlines(),
            " POTCAR: invented identity, no potential data", " VRHFIN =H: synthetic",
-           " VRHFIN =He: synthetic", " ions per type = 1 1", " NIONS = 2",
+           " VRHFIN =He: synthetic", " ions per type = 1 1", " NIONS = 2", " Startparameter for this run:",
            *incar.splitlines(), " direct lattice vectors                    reciprocal lattice vectors"]
     # Only orthogonal/lower-triangular invented cells are used. Reciprocal rows
     # are printed for grammar completeness, and the parser uses direct columns.
