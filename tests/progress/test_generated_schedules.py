@@ -17,6 +17,7 @@ from cmw.progress.service import ObservationService
 
 # This ordinary static dialect needs no research inputs or potential payloads.
 HEADER = ''' vasp.6.6.1 invented schedule fixture
+ Startparameter for this run:
  EDIFF = 0.000001
  EDIFFG = -0.02
  NELM = 8
