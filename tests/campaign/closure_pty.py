@@ -235,6 +235,7 @@ def child(settings_path, directory):
     from cmw.nodes.portal import NodesApp, row_key, target_key
     from tests.campaign.support import MeterTransport
     from textual import events
+    from textual.containers import Vertical
     from textual.widgets import Button, DataTable, Input, Static, TextArea
     from tests.jobs.isolated_runtime import fixture_collect
 
@@ -345,7 +346,8 @@ def child(settings_path, directory):
             text = body.text if isinstance(body, TextArea) else str(body.render())
             painted = screen._compositor.render_strips()
             widgets = {}
-            for widget in [screen.children[0], body.parent, body, *screen.query(Button)]:
+            shell = next(widget for widget in screen.children if isinstance(widget, Vertical))
+            for widget in [shell, body.parent, body, *screen.query(Button)]:
                 region = widget.region
                 widgets[widget.id or type(widget).__name__] = {
                     'region': list(region), 'content_region': list(widget.content_region),
