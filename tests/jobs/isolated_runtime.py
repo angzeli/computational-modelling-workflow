@@ -3,15 +3,107 @@
 Production never reads fixture-processes.json or selects this launcher. Tests
 propagate the replacement launcher to their own controller and worker children.
 """
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import stat
+from uuid import uuid4
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+_RUNTIME_REFUSAL_PID = os.getpid()
+_RUNTIME_REFUSAL_CAPTURES = 0
+_RUNTIME_REFUSAL_LIMIT = 8
+_RUNTIME_REFUSAL_BYTES = 8 * 1024**2
+
+
+@contextmanager
+def record_runtime_refusals():
+    """Retain owner-side refusal evidence without repeating a readiness check.
+
+    Only fixture launchers enter this context. Direct cmw CLI endpoints do not.
+    An explicit private evidence directory enables at most eight bounded files
+    per process; diagnostics never replace the original result or exception.
+    """
+    from cmw.nodes.backend import LocalBackend
+    import cmw
+
+    original = LocalBackend._check
+
+    def checked(backend, *args, **kwargs):
+        global _RUNTIME_REFUSAL_PID, _RUNTIME_REFUSAL_CAPTURES
+        try:
+            return original(backend, *args, **kwargs)
+        except Exception as error:
+            evidence = os.environ.get('CMW_TEST_EVIDENCE_DIR')
+            if (not evidence or getattr(error, 'code', None) != 'RUNTIME_MISMATCH'
+                    or getattr(backend, '_test_runtime_refusal_recorded', False)):
+                raise
+            backend._test_runtime_refusal_recorded = True
+            try:
+                pid = os.getpid()
+                if pid != _RUNTIME_REFUSAL_PID:
+                    _RUNTIME_REFUSAL_PID, _RUNTIME_REFUSAL_CAPTURES = pid, 0
+                if _RUNTIME_REFUSAL_CAPTURES >= _RUNTIME_REFUSAL_LIMIT:
+                    raise ValueError('incomplete capture: eight-file process limit reached')
+                _RUNTIME_REFUSAL_CAPTURES += 1
+                directory = Path(evidence)
+                if not directory.is_absolute() or directory.resolve() != directory:
+                    raise ValueError('incomplete capture: evidence directory must be canonical and absolute')
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                info = directory.lstat()
+                if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) & 0o077):
+                    raise ValueError('incomplete capture: evidence directory must be private and owned')
+                config = None
+                cursor = error.__traceback__
+                while cursor is not None:
+                    if cursor.tb_frame.f_code is original.__code__:
+                        config = cursor.tb_frame.f_locals.get('config')
+                        break
+                    cursor = cursor.tb_next
+                del cursor
+                verifier = getattr(backend, '_runtime_verifier', None)
+                diagnostic = getattr(backend, 'runtime_diagnostic', None)
+                record = {
+                    'schema': 1, 'pid': pid, 'python': sys.executable,
+                    'package_origin': cmw.__file__, 'config_root': str(backend.config_root),
+                    'queue_alias': backend.queue_alias,
+                    'operation': kwargs.get('operation', args[0] if args else None),
+                    'exception': {'type': type(error).__name__, 'code': error.code, 'message': str(error)},
+                    'config_source': 'original_check_traceback_local', 'expected_config': config,
+                    'runtime_diagnostic': diagnostic,
+                    'verifier_expected': getattr(verifier, 'expected', None),
+                    'verifier_original': getattr(verifier, 'original', None),
+                    'capture_complete': config is not None and isinstance(diagnostic, dict),
+                }
+                if not record['capture_complete']:
+                    record['capture_error'] = 'Original failed-check config or runtime diagnostic unavailable'
+                payload = json.dumps(record, separators=(',', ':'), ensure_ascii=True).encode() + b'\n'
+                if len(payload) > _RUNTIME_REFUSAL_BYTES:
+                    payload = json.dumps({'schema': 1, 'pid': pid, 'capture_complete': False,
+                        'capture_error': 'Original evidence exceeds the 8 MiB capture limit',
+                        'original_encoded_bytes': len(payload), 'exception_code': error.code,
+                        'category': str((diagnostic or {}).get('category'))[:256]}).encode() + b'\n'
+                name = f'runtime-refusal-{pid}-{uuid4().hex}.json'
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                # Exclusive private creation refuses a pre-existing path, including a symlink.
+                descriptor = os.open(directory / name, flags, 0o600)
+                with os.fdopen(descriptor, 'wb') as handle:
+                    handle.write(payload)
+            except Exception as capture_error:
+                try:
+                    print('Runtime refusal diagnostic incomplete: ' + str(capture_error)[:512],
+                          file=sys.stderr, flush=True)
+                except Exception:
+                    pass
+            raise
+
+    with patch.object(LocalBackend, '_check', checked):
+        yield
 
 
 def environment():
@@ -82,6 +174,7 @@ def detached(arguments, log):
 def install():
     from cmw.jobs import activity, runtime, sharing
     patches = ExitStack()
+    patches.enter_context(record_runtime_refusals())
     patches.enter_context(patch.object(activity, 'DEFAULT_OBSERVER', activity.Observer(collector=fixture_collect)))
     patches.enter_context(patch.object(runtime, 'detached', detached))
     patches.enter_context(patch.object(sharing, 'AdmissionSampler', FixtureAdmissionSampler))
