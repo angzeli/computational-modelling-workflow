@@ -16,6 +16,7 @@ from cmw.nodes.identity import enroll
 from tests.jobs.isolated_runtime import install
 from tests.jobs.test_jobs import wait_for
 from tests.molecular.orca.jobs_fixture import make_spec
+from tests.periodic.vasp.handoff_case import wait_for_fixture_sources
 
 
 def make_orca_fixture(root, *, accepted=False):
@@ -96,6 +97,8 @@ def make_orca_fixture(root, *, accepted=False):
         'approved_changes':['scientific_stage'],'checkpoint':'none'}
     spec_path = root/'successor.json'
     spec_path.write_text(json.dumps(successor,indent=2)+'\n')
+    # Settle newly created fixture metadata before approval; production epochs stay strict.
+    wait_for_fixture_sources([template, profile, spec_path], quiet_seconds=.25, timeout=3)
     return {'root':root,'store':store,'config':config,'job':job,'target':target,
             'spec':successor,'spec_path':spec_path,'run':run,'scientific_record':record,
             'receipt':store.root/'attempts'/job['attempt_id']/'payload-exit.json','cleanup':cleanup}
