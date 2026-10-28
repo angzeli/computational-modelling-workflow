@@ -190,6 +190,75 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
             await self.status_update(app, backends, pilot)
             self.assertEqual(table_view(app), after)
 
+    async def test_resize_sequence_settles_geometry_with_delayed_modal_updates(self):
+        from tests.campaign.geometry import GeometryProbe, RESIZE_SEQUENCE, geometry_problems
+        from tests.progress.test_scientific_card import example
+
+        for where in ('top', 'offscreen'):
+            with self.subTest(position=where):
+                app, backends = self.app()
+                backend = backends['MINI']
+                backend.snapshot = example()
+                probe = GeometryProbe()
+                async with app.run_test(size=RESIZE_SEQUENCE[0]) as pilot:
+                    await self.until(pilot, lambda: len(app.rows) == 72 and not app.navigation_pending(),
+                                     'initial node layout')
+                    target = deepcopy(backend.jobs[24]['target'])
+                    app.select(row_key(target))
+                    await self.until(pilot, lambda: app.selected_key == row_key(target)
+                                     and app.selected_snapshot(*app.selected()) is not None
+                                     and not app.navigation_pending(), 'selected fixture observation')
+                    await pilot.pause()
+                    table = app.query_one('#table', DataTable)
+                    offset = 0 if where == 'top' else table.scrollable_content_region.height + 15
+                    table.scroll_to(y=table.cursor_row - offset, animate=False, immediate=True)
+                    await pilot.pause()
+                    states = []
+                    for index, size in enumerate(RESIZE_SEQUENCE):
+                        before = table_view(app)
+                        await self.open_details(app, pilot)
+                        backend.snapshot = ProgressSnapshot(backend.context, 'height-fixture',
+                            status='UNAVAILABLE', phase='No parsed progress', read_health='UNAVAILABLE')
+                        app.lanes['MINI'].next_progress = 0
+                        await self.until(pilot, lambda: app.selected_snapshot(*app.selected()).adapter == 'height-fixture',
+                                         'delayed smaller scientific card')
+                        def mutate(node):
+                            if index == 1:
+                                new = deepcopy(node.jobs[-1])
+                                new.update(id=37, display_id='J37.1', attempt_id='resize-new-37')
+                                new['target'].update(job_id=37, attempt_id='resize-new-37')
+                                node.jobs.append(new)
+                            if index == 2:
+                                node.jobs = node.jobs[4:] + node.jobs[:4]
+                        await self.status_update(app, backends, pilot, mutate)
+                        await pilot.resize_terminal(*size)
+                        backend.snapshot = example()
+                        app.lanes['MINI'].next_progress = 0
+                        await self.until(pilot, lambda: app.selected_snapshot(*app.selected()).adapter == 'test',
+                                         'delayed full scientific card')
+                        await pilot.press('escape')
+                        state = await probe.settled(app, size, require_visible=where == 'top')
+                        states.append(state)
+                        self.assertEqual(state['selected'], row_key(target))
+                        if where == 'offscreen' or before['relative'] < len(state['visible']):
+                            self.assertEqual(table_view(app)['visible'][0], before['visible'][0])
+                        if where == 'offscreen':
+                            self.assertFalse(state['selected_visible'])
+                        painted = '\n'.join(state['painted_card'])
+                        for literal in ('rms', '1.89', '|d eps|', '2.9332', 'EDIFF', '1E-5', 'matched', 'data'):
+                            self.assertIn(literal, painted)
+                        # The capture oracle rejects the original 100→77 stale-card shape.
+                        stale = {**state, 'frame_widths': [93] * 8, 'card_widths': [93] * 8}
+                        self.assertIn('card frame retains a different width', geometry_problems(stale, (77, 24)))
+                        pending = {**state, 'pending_restores': 1}
+                        self.assertIn('layout or navigation restoration is pending', geometry_problems(pending, size))
+                    self.assertGreater(states[-1]['card_layout_generation'], states[0]['card_layout_generation'])
+                    await self.status_update(app, backends, pilot)
+                    later = await probe.settled(app, RESIZE_SEQUENCE[-1], require_visible=where == 'top')
+                    self.assertEqual(later['selected'], states[-1]['selected'])
+                    self.assertEqual(later['scroll'], states[-1]['scroll'])
+                    self.assertFalse(any(call[0].startswith('control.') for call in backend.calls))
+
     async def test_removed_or_replaced_attempt_never_transfers_selection(self):
         for number, replaced in ((15, False), (15, True), (25, False), (25, True)):
             with self.subTest(number=number, replaced=replaced):

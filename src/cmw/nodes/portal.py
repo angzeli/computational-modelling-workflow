@@ -132,7 +132,13 @@ class NodesApp(NodeCatalogue, NavigationApp):
         yield ScientificProgress(id='progress', markup=False)
         yield Static('/ Search · T Catalogue · Q / Ctrl-C detaches; execution continues.', id='message', markup=False)
         with Vertical(id='command-bar'):
-            yield Static('Enter Details · F Files · G Progress · S Sources · Y Copy · L Logs\nP Dispatch · H Hold · O Order · X Cancel · U Suspend · B Queue · R Review · Q Detach', id='shortcuts', markup=False)
+            yield Static(self.shortcut_text('Suspend'), id='shortcuts', markup=False)
+
+    def shortcut_text(self, action):
+        controls = f'P Dispatch · H Hold · O Order · X Cancel · U {action} · B Queue · R Review · Q Detach'
+        if len(controls) > self.size.width - 2:
+            controls = controls.replace(' · ', '·')
+        return 'Enter Details · F Files · G Progress · S Sources · Y Copy · L Logs\n' + controls
 
     def on_mount(self):
         self.query_one(DataTable).focus()
@@ -149,7 +155,8 @@ class NodesApp(NodeCatalogue, NavigationApp):
 
     def on_resize(self):
         if self.is_mounted:
-            self.render_state()
+            # Resize reaches the app before its refreshed size is installed.
+            self.call_after_refresh(self.render_state)
 
     def action_detach(self):
         self.exit()
@@ -417,8 +424,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
             suffix = execution.get('summary') or execution.get('observed_execution') if execution else 'worker evidence unavailable'
             self.query_one('#execution', Static).update(literal(f'Execution: reported by {owner} · ' + suffix + (' (cached)' if not lane.fresh(now) or cache.get('observe.error') else '')))
             action = 'Continue' if effective_status(job) == 'Suspended' else 'Suspend'
-            self.query_one('#shortcuts', Static).update('Enter Details · F Files · G Progress · S Sources · Y Copy · L Logs\n' +
-                f'P Dispatch · H Hold · O Order · X Cancel · U {action} · B Queue · R Review · Q Detach')
+            self.query_one('#shortcuts', Static).update(self.shortcut_text(action))
             self.render_progress(owner, job, cache)
         else:
             self.query_one('#selected', Static).update('Selected attempt is no longer in the current node snapshot.' if self.selected_key else 'No managed jobs reported. Select an enrolled node through the CLI to submit.')

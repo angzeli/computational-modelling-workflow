@@ -17,6 +17,7 @@ import threading
 import time
 
 from tests.campaign.support import BUDGETS, MeterTransport, assert_native, assert_review, summary
+from tests.campaign.geometry import GeometryProbe, RESIZE_SEQUENCE
 
 
 class Session:
@@ -92,6 +93,8 @@ class Session:
         return value['result']
 
     def close(self):
+        # EOF releases the child control reader even when the app exits on a key.
+        os.close(self.writer)
         if self.process.poll() is None:
             self.send(b'q')
             try:
@@ -100,7 +103,7 @@ class Session:
                 self.process.terminate()  # Only this Popen-owned terminal child.
                 self.process.wait(timeout=10)
         self.thread.join(timeout=2)
-        for fd in (self.master, self.reader, self.writer):
+        for fd in (self.master, self.reader):
             os.close(fd)
         assert not self.thread.is_alive()
         return self.process.returncode
@@ -117,10 +120,10 @@ def run(settings, directory):
         report['native_screenshots'] = []
         if view == 'nodes':
             session.request('select_native', owner='10000')
-        for size in ((77, 24), (80, 24), (100, 30), (140, 40)):
+        for index, size in enumerate(RESIZE_SEQUENCE):
             session.resize(size)
             report['native_screenshots'].append(session.request('capture', size=list(size),
-                name=f'native-{view}-{size[0]}x{size[1]}'))
+                name=f'native-{view}-{index}-{size[0]}x{size[1]}', require_visible=True))
         if view == 'nodes':
             session.request('select_native', owner='1000')
         session.resize((100, 30))
@@ -190,6 +193,7 @@ def child(settings_path, directory):
         def __init__(self):
             self.intervals, self.renders = [], []
             self.last_tick = None
+            self.geometry = GeometryProbe()
             if view == 'local':
                 super().__init__(Store(settings['fixtures'][0]['state']),
                     observer=Observer(collector=fixture_collect))
@@ -198,7 +202,8 @@ def child(settings_path, directory):
 
         def on_ready(self):
             self.set_interval(.05, self.record_tick)
-            threading.Thread(target=self.control, daemon=True).start()
+            self.control_thread = threading.Thread(target=self.control, daemon=True)
+            self.control_thread.start()
 
         def record_tick(self):
             now = time.perf_counter()
@@ -277,11 +282,22 @@ def child(settings_path, directory):
                 await self.until(lambda: self.selected_key == row_key(row['target']) and self.snapshot()['metrics'] > 0)
                 return self.snapshot()
             if operation == 'capture':
-                await self.until(lambda: list(self.size) == command['size'] and self.snapshot()['metrics'] > 0)
-                await self.screen.wait_for_refresh()
+                transition = self.geometry.snapshot(self)
+                transition_image = command['name']+'-transition.svg'
+                (directory/transition_image).write_text(self.export_screenshot())
+                try:
+                    settled = await self.geometry.settled(self, command['size'],
+                        require_visible=command.get('require_visible', False))
+                except AssertionError as exc:
+                    failure = {'transition_image': transition_image, 'transition_geometry': transition,
+                               'failure': exc.args[0]}
+                    (directory/(command['name']+'-settlement-failure.json')).write_text(json.dumps(failure, indent=2)+'\n')
+                    raise
                 expected = self.native_oracle()
                 (directory/(command['name']+'.svg')).write_text(self.export_screenshot())
-                return {**self.snapshot(), 'size': list(self.size), 'image': command['name']+'.svg', 'literal_metrics': expected}
+                return {**self.snapshot(), 'size': list(self.size), 'image': command['name']+'.svg',
+                    'transition_image': transition_image, 'transition_geometry': transition,
+                    'geometry': settled, 'literal_metrics': expected}
             if operation == 'review_ready':
                 await self.until(lambda: isinstance(self.screen, ReviewScreen) and self.screen.record is not None and not self.screen.busy)
                 self.screen.query_one('#review-bytes', Input).value = str(BUDGETS['review_per_source_bytes'])
@@ -304,8 +320,14 @@ def child(settings_path, directory):
                 argv = list(backend.transport.argv)
                 argv[argv.index('-p')+1] = str(settings['unavailable_port'])
                 backend.transport.argv = argv
+                first_refusal = len(backend.transport.samples)
                 self.queue(owner, 'status')
                 await self.until(lambda: self.lanes[owner].error is not None)
+                refusals = [sample for sample in backend.transport.samples[first_refusal:]
+                            if sample['outcome'] != 'ok']
+                assert refusals, 'Unavailable-owner control did not attempt a failing request'
+                for sample in refusals:
+                    sample.update(expected_refusal=True, refusal_reason='deliberate unavailable-owner control')
                 healthy = str(settings['fixtures'][0]['rows'])
                 await self.until(lambda: not self.lanes[healthy].busy)
                 selected = next((job for name, job in self.rows.values() if name == healthy and job['id'] == 1), None)
@@ -340,25 +362,30 @@ def child(settings_path, directory):
             raise ValueError(operation)
 
         def control(self):
-            reader = os.fdopen(int(os.environ['CMW_CAMPAIGN_IN']), 'r')
-            writer = os.fdopen(int(os.environ['CMW_CAMPAIGN_OUT']), 'w', buffering=1)
-            for line in reader:
-                try:
-                    value = self.call_from_thread(self.command, json.loads(line))
-                    reply = {'ok': True, 'result': value}
-                except Exception as exc:
-                    reply = {'ok': False, 'error': repr(exc)}
-                writer.write(json.dumps(reply)+'\n')
+            with (os.fdopen(int(os.environ['CMW_CAMPAIGN_IN']), 'r') as reader,
+                  os.fdopen(int(os.environ['CMW_CAMPAIGN_OUT']), 'w', buffering=1) as writer):
+                for line in reader:
+                    try:
+                        value = self.call_from_thread(self.command, json.loads(line))
+                        reply = {'ok': True, 'result': value}
+                    except Exception as exc:
+                        reply = {'ok': False, 'error': repr(exc)}
+                    writer.write(json.dumps(reply)+'\n')
 
     app = App()
     try:
         app.run(mouse=True)
     finally:
+        control_thread = getattr(app, 'control_thread', None)
+        if control_thread is not None:
+            control_thread.join(timeout=2)
         report = {'ui_tick_intervals': summary(app.intervals), 'ui_render_seconds': summary(app.renders),
+            'control_thread_alive': control_thread is not None and control_thread.is_alive(),
             'requests': {owner: client.transport.samples for owner, client in clients.items()},
             'owned_transports': [record for client in clients.values() for record in client.transport.owners],
             'ssh_wire_sessions': [wire for client in clients.values() for wire in client.transport.wire_sessions]}
         (directory/'metrics.json').write_text(json.dumps(report, indent=2)+'\n')
+        assert not report['control_thread_alive'], report
 
 
 if __name__ == '__main__':
