@@ -92,10 +92,17 @@ class ProcessLedger:
                'role': role, 'owning_test': self.owning_test, 'phase': self.phase,
                'capture_origin': origin, 'recorded_at': time.monotonic()}
         try:
-            row.update(process_identity(process.pid))
-            row['parent'] = process.ppid()
-        except (psutil.Error, OSError) as exc:
+            expected_birth = process.create_time()
+            observed = process_identity(process.pid)
+            parent = process.ppid()
+            if observed['birth'] != expected_birth:
+                raise psutil.NoSuchProcess(process.pid, msg='Birth changed while assembling ownership')
+        except (psutil.Error, OSError, AttributeError) as exc:
+            # A partially read replacement identity never gains signal authority.
             row['identity_error'] = type(exc).__name__ + ': ' + str(exc)
+        else:
+            row.update(observed)
+            row['parent'] = parent
         with self.lock:
             for prior in reversed(self.records):
                 if prior['ledger_id'] in self.terminal or prior['pid'] != process.pid:

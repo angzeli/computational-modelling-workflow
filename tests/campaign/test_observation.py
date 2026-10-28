@@ -66,6 +66,7 @@ class ObservationTests(unittest.TestCase):
         ledger = ProcessLedger(self.id())
         process = Mock(pid=123456)
         process.ppid.return_value = os.getpid()
+        process.create_time.side_effect = [1.0, 2.0]
         first, second = Mock(), Mock()
         identity = {'pid': process.pid, 'host': ledger.host, 'boot': ledger.boot}
         with patch('tests.campaign.support.process_identity', side_effect=[
@@ -79,6 +80,18 @@ class ObservationTests(unittest.TestCase):
         first.wait.return_value = 0
         self.assertEqual(ledger.observe(old)['classification'], 'verified_exited')
         self.assertNotIn(new['ledger_id'], ledger.terminal)
+
+    def test_partial_identity_assembly_never_adopts_replacement_birth(self):
+        ledger = ProcessLedger(self.id())
+        process = Mock(pid=123456)
+        process.create_time.return_value = 1.0
+        process.ppid.side_effect = psutil.NoSuchProcess(process.pid)
+        with patch('tests.campaign.support.process_identity', return_value={
+                'pid': process.pid, 'host': ledger.host, 'boot': ledger.boot, 'birth': 2.0}):
+            row = ledger._register(process, 'descendant', 'first-observed-descendant')
+        self.assertIsNone(row['birth'])
+        self.assertIn('NoSuchProcess', row['identity_error'])
+        self.assertEqual(ledger.observe(row)['classification'], 'genuinely_unobservable')
 
     def test_failed_start_is_retained(self):
         with ProcessLedger(self.id()) as ledger:
