@@ -319,7 +319,15 @@ def child(settings, directory):
                 region = widget.content_region
                 assert widget.display and not getattr(widget, 'disabled', False)
                 if selector == '#first-row':
-                    return [region.x+3, region.y+widget.header_height+1]
+                    # Use the actual ID cell; Files has a different click action.
+                    coordinate = widget.get_cell_coordinate(widget.ordered_rows[0].key, 'id')
+                    cell = widget._get_cell_region(coordinate)
+                    x = region.x+cell.x-int(widget.scroll_x)+cell.width//2
+                    y = region.y+cell.y-int(widget.scroll_y)+cell.height//2
+                    assert region.x <= x < region.right and region.y <= y < region.bottom
+                    self.controls[-1]['observed_cell'] = {'column': 'id', 'cell_region': list(cell),
+                                                          'terminal_position': [x+1,y+1]}
+                    return [x+1,y+1]
                 return [region.x+region.width//2+1, region.y+region.height//2+1]
             if operation == 'page':
                 offset = command['offset']; expected = settings['expected'][offset:offset+PAGE_ROWS]
