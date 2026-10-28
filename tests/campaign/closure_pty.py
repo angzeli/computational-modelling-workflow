@@ -232,8 +232,7 @@ def child(settings_path, directory):
     from cmw.jobs.study_ui import StudyScreen
     from cmw.jobs.tui import Inspect, JobsApp
     from cmw.nodes.connections import ConnectedBackend
-    from cmw.nodes.portal import NodesApp, row_key
-    from cmw.nodes.protocol import target_key
+    from cmw.nodes.portal import NodesApp, row_key, target_key
     from tests.campaign.support import MeterTransport
     from textual import events
     from textual.widgets import Button, DataTable, Input, Static, TextArea
@@ -511,7 +510,14 @@ def child(settings_path, directory):
                     try:
                         reply = {'ok': True, 'result': self.call_from_thread(self.command, json.loads(line))}
                     except Exception as exc:
-                        reply = {'ok': False, 'error': repr(exc)}
+                        failure_name = f'control-{len(self.controls):03d}-failure'
+                        try:
+                            rendered = self.call_from_thread(self.export_screenshot)
+                            (directory/(failure_name+'.svg')).write_text(rendered)
+                        except Exception as capture_error:
+                            write(directory/(failure_name+'-capture-error.json'), {'error': repr(capture_error)})
+                        write(directory/(failure_name+'.json'), {'command': json.loads(line), 'error': repr(exc)})
+                        reply = {'ok': False, 'error': repr(exc), 'failure_image': failure_name+'.svg'}
                     writer.write(json.dumps(reply, default=str)+'\n')
 
     with monitored(directory, 'closure-pty-'+view_mode+'-'+kind):
