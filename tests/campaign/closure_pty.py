@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 
+from tests.campaign.analysis_oracle_v2 import analysis_evidence, analysis_painted, analysis_details
 from tests.campaign.geometry import GeometryProbe, RESIZE_SEQUENCE
 from tests.campaign.pty import Session
 from tests.campaign.paint_barrier import active_screen_refresh
@@ -166,6 +167,10 @@ def run_cases(settings_path, directory):
                 case_report['ready'] = request('ready')
                 assert case_report['ready']['tty'] == [True, True]
                 if kind == 'analysis':
+                    send(b'\r', expected='details')
+                    case_report['analysis_details'] = request('analysis_details')
+                    send(b'\x1b', expected='base')
+                    request('ready_view', view='base')
                     cycle('analysis')
                 else:
                     send(b't')
@@ -334,11 +339,12 @@ def child(settings_path, directory):
             return (self.progress_snapshot if view_mode == 'local' else
                     self.selected_snapshot(*selected) if selected else None)
 
-        async def until(self, predicate):
+        async def until(self, predicate, label='native UI condition'):
+            self.active_condition = label
             deadline = time.monotonic()+CONDITION_SECONDS
             while not predicate():
                 if time.monotonic() >= deadline:
-                    raise AssertionError('Native UI condition deadline exceeded')
+                    raise AssertionError(label+' deadline exceeded; '+str(getattr(self, 'condition_error', '')))
                 await asyncio.sleep(.025)
 
         def identity(self):
@@ -407,14 +413,7 @@ def child(settings_path, directory):
             self.identity_check()
             if view == 'analysis':
                 assert MACHINE_HEADER in '\n'.join(strip.text for strip in self.screen._compositor.render_strips())
-                snapshot = self.science()
-                assert snapshot is not None and snapshot.context.engine == 'Multiwfn'
-                assert not snapshot.metrics, 'Analysis fixture must not invent SCF/geometry metrics'
-                assert snapshot.calculation == case['profile']
-                expected = ['ANALYSIS', 'STAGE', 'OUTPUT', *case['literal_text']]
-                text = '\n'.join(geometry['painted_card'])
-                assert all(contains(text, token) for token in expected), {'expected': expected, 'painted': text}
-                return expected
+                return analysis_painted(self.science(), case, geometry['painted_card'])
             text = geometry['body_text']
             if view == 'catalogue':
                 record = self.screen.record
@@ -485,7 +484,7 @@ def child(settings_path, directory):
                     (directory/image).write_text(self.export_screenshot())
                 result = {'size': size, 'view': view, 'image': image, 'required_id': command.get('required_id'),
                           'literal_metrics': expected,
-                          'literal_validation': 'painted-card' if view == 'analysis' else 'model-body-and-painted-title',
+                          'literal_validation': 'full-typed-evidence-and-painted-card-with-explicit-stage-ellipsis' if view == 'analysis' else 'model-body-and-painted-title',
                           'selected': self.identity(), 'transition_image': transition_image,
                           'transition_geometry': transition, 'geometry': settled}
                 write(directory/(name+'.json'), result)
@@ -525,10 +524,33 @@ def child(settings_path, directory):
                     self.collect_progress()
                 await self.until(lambda: self.science() is not None)
                 if kind == 'analysis':
-                    await self.until(lambda: all(contains(str(self.screen.query_one('#progress', Static).render()), token)
-                                                for token in case['literal_text']))
+                    def full_analysis_ready():
+                        try:
+                            analysis_evidence(self.science(), case)
+                            return True
+                        except AssertionError as exc:
+                            self.condition_error = str(exc)
+                            return False
+                    await self.until(full_analysis_ready, 'full typed analysis fixture evidence')
                 self.identity_check()
                 return {'selected': self.identity(), 'tty': [sys.stdin.isatty(), sys.stdout.isatty()]}
+            if operation == 'analysis_details':
+                await self.until(lambda: self.view_ready('details'), 'actual analysis Details screen')
+                await active_screen_refresh(self, timeout=FRAME_SECONDS, records=self.refresh_barriers)
+                self.identity_check()
+                screen = self.screen
+                if isinstance(screen, Inspect):
+                    assert screen.expected_attempt == case['attempt_id']
+                    body = str(screen.query_one('#body', Static).render())
+                else:
+                    assert screen.selection == target_key(case['target'])
+                    body = screen.query_one('#copy-text', TextArea).text
+                result = analysis_details(analysis_evidence(self.science(), case), body)
+                result['painted'] = [strip.text for strip in screen._compositor.render_strips()]
+                result['image'] = 'analysis-details.svg'
+                (directory/result['image']).write_text(self.export_screenshot())
+                write(directory/'analysis-details.json', result)
+                return result
             if operation == 'ready_view':
                 await self.until(lambda: self.view_ready(command['view']))
                 await active_screen_refresh(self, timeout=FRAME_SECONDS, records=self.refresh_barriers)
@@ -572,7 +594,8 @@ def child(settings_path, directory):
                             write(directory/(failure_name+'-capture-error.json'), {'error': repr(capture_error)})
                         write(directory/(failure_name+'.json'), {'command': json.loads(line), 'error': repr(exc),
                             'refresh_barriers': self.refresh_barriers[-3:], 'native_inputs': self.native_inputs[-3:],
-                            'paints': self.paints[-3:]})
+                            'paints': self.paints[-3:], 'active_condition': getattr(self, 'active_condition', None),
+                            'condition_error': getattr(self, 'condition_error', None)})
                         reply = {'ok': False, 'error': repr(exc), 'failure_image': failure_name+'.svg'}
                     writer.write(json.dumps(reply, default=str)+'\n')
 
