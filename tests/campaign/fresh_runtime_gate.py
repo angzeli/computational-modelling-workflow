@@ -134,14 +134,14 @@ def gate(args, origin):
               'quiet_window_used': False, 'retries': 0}
     backend = None
     try:
-        work = args.output / 'private-work'
-        work.mkdir(mode=0o700)
-        store = Store(args.output / 'private-queue')
-        job = store.add(argv=['/usr/bin/true'], cwd=work, name='Runtime trust fixture', hold=True)
-        config_root = args.output / 'private-node'
-        config = enroll(config_root, {'queues': {'research': str(store.root)},
-            'storages': {'scratch': str(work)},
-            'profiles': {'benign': {'engine': 'Command', 'runner': '/usr/bin/true', 'max_cpus': 1}}})
+        seed = args.seed.resolve(strict=True)
+        assert seed.is_relative_to(args.campaign_root.resolve() / 'artifacts')
+        config_root = seed / 'private-node'
+        config = load_node(config_root)
+        store = Store(seed / 'private-queue')
+        rows = store.snapshot()['jobs']
+        assert len(rows) == 1 and rows[0]['status'] == 'Hold'
+        job = rows[0]
         enrollment_bytes = (config_root / 'node.json').read_bytes()
         (args.output / 'enrollment-original.json').write_bytes(enrollment_bytes)
         backend = LocalBackend(config_root, 'research', defer_check=True)
@@ -163,6 +163,8 @@ def gate(args, origin):
         assert record['receipt_record'] == store.request_lookup(record['request_id'])
         write(args.output / 'request-original.json', record)
         original_trust = deepcopy(backend._runtime_verifier.original)
+        prior_current = deepcopy(backend._runtime_verifier.current)
+        result['unchanged_operation_verification'] = deepcopy(backend._runtime_verifier.last_evidence)
         member = Path(cmw.__file__)
         assert not member.is_symlink() and member.resolve().is_relative_to(Path(origin['install']))
         before = file_epoch(member)
@@ -191,10 +193,10 @@ def gate(args, origin):
         result['long_lived_lookup'] = lookup(backend, record)
         refused = result['long_lived_lookup']
         assert refused['outcome'] == 'REFUSED' and refused['code'] == 'RUNTIME_MISMATCH', refused
-        assert refused['verification']['category'] in {'security_baseline_incomplete', 'fresh_isolated_observer_required'}, refused
+        assert refused['verification']['category'] in {'security_baseline_incomplete', 'fresh_isolated_observer_required', 'metadata_recovery_exhausted'}, refused
         assert refused['verification']['before'] and refused['verification']['after']
         assert backend._runtime_verifier.original == original_trust
-        assert backend._runtime_verifier.current == original_trust
+        assert backend._runtime_verifier.current == prior_current
         current_runtime, observation = runtime_observed()
         result['after_mutation_runtime'] = current_runtime
         result['after_mutation_observation'] = observation
@@ -233,16 +235,43 @@ def gate(args, origin):
     return result
 
 
+def prepare(args, origin):
+    """Enrollment and observer have distinct real process lifetimes, as in usage."""
+    from cmw.jobs.store import Store
+    from cmw.nodes.identity import enroll
+    args.output.mkdir(mode=0o700)
+    work = args.output / 'private-work'
+    work.mkdir(mode=0o700)
+    store = Store(args.output / 'private-queue')
+    store.add(argv=['/usr/bin/true'], cwd=work, name='Runtime trust fixture', hold=True)
+    enroll(args.output / 'private-node', {'queues': {'research': str(store.root)},
+        'storages': {'scratch': str(work)},
+        'profiles': {'benign': {'engine': 'Command', 'runner': '/usr/bin/true', 'max_cpus': 1}}})
+    command = [sys.executable, '-I', '-B', str(Path(__file__).resolve()),
+               '--phase', 'gate', '--campaign-root', str(args.campaign_root),
+               '--install-root', origin['install'], '--seed', str(args.output),
+               '--output', str(args.output / 'exercise')]
+    child = subprocess.run(command, capture_output=True, text=True, timeout=45)
+    (args.output / 'exercise.log').write_text(child.stdout + child.stderr)
+    result = json.loads((args.output / 'exercise/result.json').read_text())
+    result['observer_process_returncode'] = child.returncode
+    result['enrollment_and_observer_separate'] = True
+    write(args.output / 'result.json', result)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--campaign-root', type=Path, required=True)
     parser.add_argument('--install-root', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--phase', choices=('gate', 'fresh'), default='gate')
+    parser.add_argument('--phase', choices=('prepare', 'gate', 'fresh'), default='prepare')
+    parser.add_argument('--seed', type=Path)
     args = parser.parse_args()
     args.output = args.output.resolve()
     origin = verify_install(args)
-    result = fresh(args, origin) if args.phase == 'fresh' else gate(args, origin)
+    result = (fresh(args, origin) if args.phase == 'fresh' else
+              prepare(args, origin) if args.phase == 'prepare' else gate(args, origin))
     print(json.dumps({key: result.get(key) for key in
         ('safety_contract_passed', 'positive_recovery_demonstrated', 'qualification', 'error')}))
     return 0 if result['safety_contract_passed'] and result['positive_recovery_demonstrated'] else 1
