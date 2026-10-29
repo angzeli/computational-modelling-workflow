@@ -88,16 +88,23 @@ def coverage(records, observations, opportunities, *, ended_at, sampling_errors=
         terminal_times = [item['at'] for item in selected if item['classification'] == 'verified_exited']
         end = min(ended_at, record.get('exit', {}).get('at', ended_at), *terminal_times)
         lifetime = max(0., end - start)
-        long_lived = lifetime >= policy['long_lived_seconds']
+        zombie_times = [item['at'] for item in selected
+            if item['classification'] == 'zombie_reaping_pending'
+            and record.get('birth') is not None and item.get('birth') == record['birth']]
+        # A same-identity zombie is no longer a live resource-observation target.
+        # It remains owned and pending reap; cleanup and lifecycle end stay separate.
+        resource_end = min(end, *zombie_times) if zombie_times else end
+        resource_lifetime = max(0., resource_end-start)
+        long_lived = resource_lifetime >= policy['long_lived_seconds']
         for field in FIELDS:
-            relevant = [item for item in selected if item.get('required_live')]
+            relevant = [item for item in selected if item.get('required_live') and item.get('at', start) <= resource_end]
             valid = sorted(item['fields'][field]['ended_at'] for item in relevant
                            if item.get('fields', {}).get(field, {}).get('classification') == 'sampled_live')
-            valid = [at for at in valid if start <= at <= end]
-            points = [start, *valid, end]
+            valid = [at for at in valid if start <= at <= resource_end]
+            points = [start, *valid, resource_end]
             intervals = [{'start': before, 'end': after, 'seconds': after-before}
                          for before, after in zip(points, points[1:])]
-            longest = max((item['seconds'] for item in intervals), default=lifetime)
+            longest = max((item['seconds'] for item in intervals), default=resource_lifetime)
             counts = Counter(item.get('fields', {}).get(field, {}).get('classification',
                              item['classification']) for item in relevant)
             required = field in policy['required_fields'] and (long_lived or record['role'] in {'frontend', 'controller', 'endpoint'})
@@ -112,6 +119,9 @@ def coverage(records, observations, opportunities, *, ended_at, sampling_errors=
             rows.append({'ledger_id': record['ledger_id'], 'role': record['role'], 'field': field,
                 'capture_origin': record['capture_origin'], 'lifetime_seconds': lifetime,
                 'first_observed_limit': record['capture_origin'] == 'first-observed-descendant',
+                'resource_window_seconds': resource_lifetime, 'resource_end_upper_bound': resource_end,
+                'resource_end_basis': 'same-birth zombie observed; reap still required' if zombie_times else 'lifecycle observation end',
+                'zombie_pending_reap_seconds': max(0., end-resource_end) if zombie_times else None,
                 'lifecycle_end_upper_bound': end, 'end_basis': 'observed verified exit' if terminal_times or record.get('exit') else 'observation window end',
                 'required': required, 'valid_reads': len(valid), 'classifications': dict(counts),
                 'first_valid_after_seconds': valid[0]-start if valid else None,

@@ -100,6 +100,93 @@ class DriverContractTests(unittest.TestCase):
             self.assertLess(row['longest_blind_seconds'], .2)
         self.assertNotIn('exit', record)
 
+    def test_zombie_tail_is_separate_from_live_blindness_and_actual_gaps_remain(self):
+        record = {'ledger_id': 64, 'birth': 123., 'recorded_at': 0., 'role': 'owned descendant',
+                  'capture_origin': 'first-observed-descendant'}
+        observations = [{'ledger_id': 64, 'birth': 123., 'at': value, 'required_live': True,
+            'classification': 'sampled_live',
+            'fields': {field: {'ended_at': value, 'classification': 'sampled_live'} for field in FIELDS}}
+            for value in (.01, .13, .25, .37, .49, .62, 1.40)]
+        observations.extend([{'ledger_id': 64, 'birth': 123., 'at': 1.52,
+            'required_live': False, 'classification': 'zombie_reaping_pending'},
+            {'ledger_id': 64, 'birth': 123., 'at': 65.3, 'required_live': False, 'classification': 'verified_exited'}])
+        result = coverage([record], observations, [], ended_at=70.)
+        self.assertEqual(result['resource_observability'], 'RESOURCE_QUALIFICATION_INCOMPLETE')
+        for row in result['field_coverage']:
+            self.assertEqual(row['lifetime_seconds'], 65.3)
+            self.assertEqual(row['resource_window_seconds'], 1.52)
+            self.assertAlmostEqual(row['zombie_pending_reap_seconds'], 63.78)
+            self.assertAlmostEqual(row['longest_blind_seconds'], .78)
+            self.assertNotIn('exit', record)
+            if row['required']:
+                self.assertIn('required_blind_interval', row['failures'])
+        observations[-2]['birth'] = 999.
+        result = coverage([record], observations, [], ended_at=70.)
+        self.assertGreater(result['field_coverage'][0]['longest_blind_seconds'], 60.)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'Native zombie lifecycle fixture is macOS qualification')
+    def test_native_zombie_retains_reap_responsibility_without_resource_blindness(self):
+        import select
+        code = """import os, sys
+read_gate, write_gate = os.pipe()
+child = os.fork()
+if child == 0:
+    os.close(write_gate)
+    os.read(read_gate, 1)
+    os._exit(0)
+os.close(read_gate)
+print(child, flush=True)
+sys.stdin.buffer.read(1)
+os.write(write_gate, b'X')
+os.close(write_gate)
+sys.stdin.buffer.read(1)
+_, status = os.waitpid(child, 0)
+assert os.waitstatus_to_exitcode(status) == 0
+"""
+        evidence = {'scope': 'native benign grandchild live-to-zombie-to-parent-reap', 'samples': []}
+        with ProcessLedger(self.id()) as ledger:
+            parent = subprocess.Popen([sys.executable, '-I', '-B', '-c', code], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+            try:
+                ready, _, _ = select.select([parent.stdout], [], [], 3.)
+                self.assertTrue(ready)
+                child_pid = int(parent.stdout.readline())
+                evidence['samples'].append(ledger.sample())
+                child_row, = [row for row in ledger.records if row['pid'] == child_pid]
+                parent.stdin.write(b'X'); parent.stdin.flush()
+                deadline = time.monotonic()+3.
+                while psutil.Process(child_pid).status() != psutil.STATUS_ZOMBIE:
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(.01)
+                evidence['samples'].append(ledger.sample())
+                zombie, = [row for row in evidence['samples'][-1]['observations'] if row['pid'] == child_pid]
+                self.assertEqual(zombie['classification'], 'zombie_reaping_pending')
+                self.assertFalse(zombie['required_live'])
+                self.assertNotIn(child_row['ledger_id'], ledger.terminal)
+                self.assertNotIn('exit', child_row)
+                parent.stdin.write(b'Y'); parent.stdin.flush()
+                self.assertEqual(parent.wait(timeout=3.), 0)
+                evidence['samples'].append(ledger.sample())
+                self.assertIn(child_row['ledger_id'], ledger.terminal)
+                report = ledger.report()
+                fields = [row for row in report['field_coverage'] if row['ledger_id'] == child_row['ledger_id']]
+                self.assertTrue(all(row['resource_end_basis'].startswith('same-birth zombie') for row in fields))
+                self.assertTrue(all(row['resource_end_upper_bound'] <= row['lifecycle_end_upper_bound'] for row in fields))
+                evidence['child_field_coverage'] = fields
+                evidence['actual_parent_returncode'] = parent.returncode
+            finally:
+                try:
+                    if parent.poll() is None:
+                        parent.stdin.write(b'XY'); parent.stdin.flush()
+                        parent.wait(timeout=3.)
+                finally:
+                    parent.stdin.close(); parent.stdout.close(); parent.stderr.close()
+                    evidence['remaining'] = ledger.cleanup(time.monotonic()+3.)
+                    evidence['records'] = ledger.records
+                    if destination := os.environ.get('CMW_TEST_EVIDENCE_DIR'):
+                        closure_workflows.save(Path(destination)/'zombie-lifecycle.json', evidence)
+            self.assertFalse(evidence['remaining'])
+
     def test_isolated_field_gap_is_disclosed_within_predeclared_window(self):
         record = {'ledger_id': 0, 'recorded_at': 0., 'role': 'controller', 'capture_origin': 'direct-launch'}
         observations = [{'ledger_id': 0, 'classification': 'sampled_live', 'required_live': True,
