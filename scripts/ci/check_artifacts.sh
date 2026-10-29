@@ -29,7 +29,12 @@ cp "$source_root/tests/jobs/"{isolated_runtime,lifecycle_evidence,progress_accep
 cp "$source_root/tests/periodic/vasp/"{result_fixtures,result_case,runner_case,handoff_case,fake_handoff_runner}.py "$check_root/driver/tests/periodic/vasp/"
 : > "$check_root/driver/tests/progress/__init__.py"
 cp "$source_root/tests/progress/orca_fixtures.py" "$check_root/driver/tests/progress/"
-for kind in core jobs sdist editable; do
+case "${CMW_ARTIFACT_MODES:-all}" in
+  all) artifact_modes=(core jobs sdist editable);;
+  readiness) artifact_modes=(core jobs);;
+  *) printf 'CMW_ARTIFACT_MODES must be all or readiness\n' >&2; exit 64;;
+esac
+for kind in "${artifact_modes[@]}"; do
   env_root="$check_root/env-$kind"
   "$python_exe" -m venv "$env_root"
   wheel=("$check_root"/dist/*.whl)
