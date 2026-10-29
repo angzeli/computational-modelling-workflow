@@ -24,17 +24,18 @@ class AnalysisOracleTests(unittest.TestCase):
             'session_log', 'Validator PASSED (recorded)']}
 
     def test_original_full_literal_predicate_fails_only_width_limited_stage(self):
-        for width in (138, 98, 75, 78):
+        # The shared portal card is seven cells narrower than its terminal.
+        for width in (133, 93, 70, 73):
             with self.subTest(width=width):
                 text = card_text(self.snapshot, width=width, now=0, max_lines=8, framed=True)
                 evidence = analysis_painted(self.snapshot, self.case, text.splitlines())
                 truncated = any(row['display'] == 'explicit-ellipsis' for row in evidence['stage_rendering'])
-                self.assertEqual(truncated, width != 138)
-                self.assertEqual(all(token in text for token in self.case['literal_text']), width == 138)
+                self.assertEqual(truncated, width != 133)
+                self.assertEqual(all(token in text for token in self.case['literal_text']), width == 133)
                 self.assertEqual(evidence['full_literals'], self.case['literal_text'])
 
     def test_missing_or_wrong_scope_output_or_stage_never_passes(self):
-        text = card_text(self.snapshot, width=98, now=0, max_lines=8, framed=True)
+        text = card_text(self.snapshot, width=93, now=0, max_lines=8, framed=True)
         for old, new in [('singlet', 'triplet'), ('session_log', 'missing_log'),
                          ('PASSED', 'FAILED'), ('Runner:', 'Absent:'),
                          ('Output validation', 'Output invalidation'), ('…', '')]:
