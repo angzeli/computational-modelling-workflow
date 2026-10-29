@@ -212,13 +212,11 @@ def run(directory):
                 # and never rescues a failed/timed-out workload.
                 signal.alarm(0); cleanup_started = time.monotonic(); signal.alarm(30)
                 cleanup_errors = []
-                if session is not None:
-                    try:
-                        report['pty_returncode'] = session.close()
-                    except BaseException as exc:
-                        cleanup_errors.append(repr(exc))
                 if store is not None and writer is not None:
+                    # Drain the worker before a modal terminal close can consume
+                    # its deadline; stopping its controller first kills the fixture guardian.
                     finish.touch()
+                    report['writer_drain_started'] = time.monotonic()
                     try:
                         current = next(job for job in store.snapshot()['jobs'] if job['id'] == writer['id'])
                         if current['status'] in {'Hold', 'Queue'} and current['started_at'] is None:
@@ -230,6 +228,7 @@ def run(directory):
                             completed = next(job for job in snapshot['jobs'] if job['id'] == writer['id'])
                             receipt = store.root/'attempts'/writer['attempt_id']/'payload-exit.json'
                             report['writer'] = {'job': completed, 'receipt': json.loads(receipt.read_text())}
+                            report['writer_terminal_observed'] = time.monotonic()
                             assert completed['status'] == 'Done' and report['writer']['receipt']['exit_code'] == 0
                     except BaseException as exc:
                         cleanup_errors.append(repr(exc))
@@ -239,6 +238,12 @@ def run(directory):
                         for child in tuple(runtime._CHILDREN):
                             assert child.wait(timeout=max(.01, cleanup_started+23-time.monotonic())) == 0
                         runtime.reap_detached()
+                    except BaseException as exc:
+                        cleanup_errors.append(repr(exc))
+                report['frontend_close_started'] = time.monotonic()
+                if session is not None:
+                    try:
+                        report['pty_returncode'] = session.close()
                     except BaseException as exc:
                         cleanup_errors.append(repr(exc))
                 report['cleanup_errors'] = cleanup_errors
