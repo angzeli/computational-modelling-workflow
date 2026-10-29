@@ -106,3 +106,61 @@ class SessionCleanupTests(unittest.TestCase):
         process.wait.assert_called_once()
         self.assertEqual(json.loads((directory/'session-cleanup.json').read_text())['open_descriptors'], 0)
         self.assertIn('thread start failed', (directory/'session-startup-failure.json').read_text())
+
+
+class ActiveScreenRefreshTests(unittest.IsolatedAsyncioTestCase):
+    async def test_removed_predecessor_is_retargeted_without_waiting_for_its_refresh(self):
+        import asyncio
+        from types import SimpleNamespace
+        from tests.campaign.paint_barrier import active_screen_refresh
+        def screen():
+            return SimpleNamespace(is_mounted=True, is_attached=True, size=(80, 24),
+                                   _layout_required=False, _task=asyncio.Future())
+        old, current = screen(), screen()
+        entered = asyncio.Event()
+        async def old_refresh():
+            entered.set()
+            await asyncio.Future()  # The real removed-screen refresh never fires.
+        async def current_refresh():
+            return True
+        old.wait_for_refresh, current.wait_for_refresh = old_refresh, current_refresh
+        app = SimpleNamespace(screen=old)
+        trace = []
+        waiter = asyncio.create_task(active_screen_refresh(app, expected=lambda: app.screen is current,
+                                                          records=trace, timeout=.2))
+        await entered.wait()
+        old.is_mounted = old.is_attached = False
+        app.screen = current
+        old._task.set_result(None)
+        result = await waiter
+        self.assertEqual(result['current']['object'], id(current))
+        self.assertEqual(result['waited'][0]['outcome'], 'retargeted')
+        self.assertFalse(current._task.cancelled())
+        self.assertEqual(result['outcome'], 'refreshed')
+
+    async def test_live_screen_without_refresh_still_times_out_with_exact_object(self):
+        import asyncio
+        from types import SimpleNamespace
+        from tests.campaign.paint_barrier import active_screen_refresh
+        async def blocked():
+            await asyncio.Future()
+        current = SimpleNamespace(is_mounted=True, is_attached=True, size=(80, 24),
+                                  _layout_required=False, _task=asyncio.Future(), wait_for_refresh=blocked)
+        trace = []
+        with self.assertRaises(TimeoutError):
+            await active_screen_refresh(SimpleNamespace(screen=current), records=trace, timeout=.02)
+        self.assertEqual(trace[0]['outcome'], 'deadline')
+        self.assertEqual(trace[0]['current']['object'], id(current))
+        self.assertFalse(current._task.cancelled())
+
+
+class CompactVisualContractTests(unittest.TestCase):
+    def test_required_inventory_has_exact_distinct_coverage_and_synthetic_header(self):
+        from tests.campaign.visual_contract_v2 import plan, synthetic_machine
+        from cmw.jobs.cli import machine_text
+        value = plan()
+        self.assertEqual(len(value['core']), 24)
+        self.assertEqual(len(value['modals']), 8)
+        self.assertEqual(len({row['id'] for row in value['core']+value['modals']}), 32)
+        self.assertEqual(machine_text(synthetic_machine()), value['synthetic_machine_header'])
+        self.assertEqual({tuple(row['size']) for row in value['modals']}, {(80, 24)})

@@ -18,6 +18,9 @@ import time
 
 from tests.campaign.support import BUDGETS, MeterTransport, assert_native, assert_review, summary
 from tests.campaign.geometry import GeometryProbe, RESIZE_SEQUENCE
+from tests.campaign.paint_barrier import active_screen_refresh
+from tests.campaign.navigation_trace import screen_state
+from tests.campaign.visual_contract_v2 import frame_id, synthetic_machine, SyntheticMachineSampler, MACHINE_HEADER
 
 
 class Session:
@@ -159,7 +162,8 @@ class Session:
 
 
 def run(settings, directory):
-    view = json.loads(settings.read_text())['view']
+    configuration = json.loads(settings.read_text())
+    view = configuration['view']
     session = Session(settings, directory)
     report = {}
     try:
@@ -172,7 +176,8 @@ def run(settings, directory):
         for index, size in enumerate(RESIZE_SEQUENCE):
             session.resize(size)
             report['native_screenshots'].append(session.request('capture', size=list(size),
-                name=f'native-{view}-{index}-{size[0]}x{size[1]}', require_visible=True))
+                name=f'native-{view}-{index}-{size[0]}x{size[1]}', require_visible=True,
+                required_id=frame_id(view, 'static', size) if view == 'local' and index < 4 else None))
         if view == 'nodes':
             session.request('select_native', owner='1000')
         session.resize((100, 30))
@@ -213,8 +218,65 @@ def run(settings, directory):
     assert metrics['ui_tick_intervals']['p95'] <= BUDGETS['ui_tick_p95_seconds'], metrics
     assert metrics['ui_render_seconds']['p95'] <= BUDGETS['ui_render_p95_seconds'], metrics
     report['metrics'] = metrics
+    report['compact_core'] = compact_core(configuration, directory)
     (directory/'result.json').write_text(json.dumps(report, indent=2)+'\n')
     return report
+
+
+def compact_core(configuration, directory):
+    """Fill distinct core contracts using the original immutable native fixtures.
+
+    Local Jobs has one queue per app. Federated core views use one selected owner
+    so the exact machine-header example remains visible; the original two-owner
+    run above retains unavailable-peer isolation and reconnection assertions.
+    """
+    view = configuration['view']
+    results = []
+    for fixture in configuration['fixtures']:
+        family = 'relaxation' if fixture['rows'] == 10000 else 'static'
+        if view == 'local' and family == 'static':
+            continue
+        settings = directory/(family+'-core-settings.json')
+        settings.write_text(json.dumps({'view': view, 'fixtures': [fixture]}))
+        output = directory/(family+'-core')
+        session = Session(settings, output)
+        result = {'family': family, 'synthetic_machine': True, 'frames': [], 'directory': str(output)}
+        try:
+            session.request('ready')
+            for index, size in enumerate(RESIZE_SEQUENCE):
+                session.resize(size)
+                name = f'{family}-{index}-{size[0]}x{size[1]}'
+                before = session.request('capture', size=list(size), name=name, require_visible=True,
+                    required_id=frame_id(view, family, size) if index < 4 else None)
+                result['frames'].append(before)
+                def send(keys, modal):
+                    old = session.request('input_count')
+                    session.send(keys)
+                    return session.request('input_received', after=old, modal=modal, delivered_hex=keys.hex())
+                send(b'\r', True)
+                session.request('screen_transition', name=name+'-details')
+                send(b'\x1b', False)
+                returned = session.request('capture', size=list(size), name=name+'-returned', require_visible=True)
+                for key in ('selected', 'cursor', 'scroll', 'scroll_target', 'visible', 'screen_scroll'):
+                    assert returned['geometry'][key] == before['geometry'][key], (key, before, returned)
+                send(b'\x1b[B', False)
+                session.request('selected', job_id=2)
+                send(b'\x1b[A', False)
+                session.request('selected', job_id=1)
+                session.request('native_ready')
+                refreshed = session.request('capture', size=list(size), name=name+'-fresh-input', require_visible=True)
+                assert refreshed['geometry']['selected'] == before['geometry']['selected']
+                session.request('later_refresh')
+                later = session.request('capture', size=list(size), name=name+'-later-refresh', require_visible=True)
+                for key in ('selected', 'cursor', 'scroll', 'scroll_target', 'visible', 'screen_scroll'):
+                    assert later['geometry'][key] == refreshed['geometry'][key], (key, refreshed, later)
+        finally:
+            result['returncode'] = session.close()
+            result['terminal_bytes'] = session.output_bytes
+            (output/'result.json').write_text(json.dumps(result, indent=2)+'\n')
+        assert result['returncode'] == 0, result
+        results.append(result)
+    return results
 
 
 def child(settings_path, directory):
@@ -241,13 +303,30 @@ def child(settings_path, directory):
     class App(base):
         def __init__(self):
             self.intervals, self.renders = [], []
+            self.native_inputs, self.refresh_barriers, self.paints = [], [], []
             self.last_tick = None
             self.geometry = GeometryProbe()
             if view == 'local':
                 super().__init__(Store(settings['fixtures'][0]['state']),
-                    observer=Observer(collector=fixture_collect))
+                    observer=Observer(collector=fixture_collect), sampler=SyntheticMachineSampler())
             else:
                 super().__init__(clients, request_root=directory/'requests')
+
+        def machine_usage(self, owner):
+            return synthetic_machine()
+
+        def _display(self, screen, renderable):
+            super()._display(screen, renderable)
+            if renderable is not None and self._running and not self._closed and not self._batch_count:
+                self.paints.append({'generation': len(self.paints)+1, 'screen': screen_state(screen),
+                                    'at': time.monotonic()})
+
+        async def on_event(self, event):
+            from textual import events
+            if isinstance(event, (events.Key, events.MouseUp, events.MouseScrollUp, events.MouseScrollDown)) and not event.is_forwarded:
+                self.native_inputs.append({'event': type(event).__name__, 'key': getattr(event, 'key', None),
+                    'at': time.monotonic(), 'screen': screen_state(self.screen), 'paint_generation': len(self.paints)})
+            await super().on_event(event)
 
         def on_ready(self):
             self.set_interval(.05, self.record_tick)
@@ -291,16 +370,46 @@ def child(settings_path, directory):
 
         def native_oracle(self):
             if view == 'local':
-                return assert_native(self.progress_snapshot, 1)
+                return assert_native(self.progress_snapshot, 2 if settings['fixtures'][0]['rows'] == 10000 else 1)
             owner, job = self.selected()
             return assert_native(self.selected_snapshot(owner, job), 2 if owner == '10000' else 1)
 
         async def command(self, command):
             operation = command['operation']
+            if operation == 'input_count':
+                return {'count': len(self.native_inputs), 'screen': screen_state(self.screen),
+                        'paint_generation': len(self.paints)}
+            if operation == 'input_received':
+                await self.until(lambda: len(self.native_inputs) > command['after']['count'])
+                result = await active_screen_refresh(self, records=self.refresh_barriers,
+                    expected=lambda: (self.screen is not self.screen_stack[0]) == command['modal'])
+                result.update(before=command['after'], acknowledgment=self.native_inputs[-1],
+                              delivered_hex=command['delivered_hex'], paint_generation=len(self.paints))
+                return result
+            if operation == 'screen_transition':
+                await active_screen_refresh(self, records=self.refresh_barriers)
+                name = command['name']+'-transition.svg'
+                (directory/name).write_text(self.export_screenshot())
+                return {'screen': screen_state(self.screen), 'image': name}
+            if operation == 'selected':
+                def selected_id():
+                    selected = self.selected()
+                    job = selected if view == 'local' else selected[1] if selected else None
+                    return job['id'] if job else None
+                await self.until(lambda: selected_id() == command['job_id'])
+                return selected_id()
+            if operation == 'later_refresh':
+                before = len(self.renders)
+                await self.until(lambda: len(self.renders) > before)
+                await active_screen_refresh(self, records=self.refresh_barriers)
+                return self.snapshot()
+            if operation == 'native_ready':
+                await self.until(lambda: self.snapshot()['metrics'] > 0 and 'SCF' in self.snapshot()['card'])
+                self.native_oracle()
+                return self.snapshot()
             if operation == 'ready':
                 await self.until(lambda: self.snapshot()['metrics'] > 0 and 'SCF' in self.snapshot()['card'])
                 self.native_oracle()
-                (directory/'native-screen.svg').write_text(self.export_screenshot())
                 return self.snapshot()
             if operation == 'modal':
                 await self.until(lambda: (self.screen is not self.screen_stack[0]) == command['opened'])
@@ -308,7 +417,7 @@ def child(settings_path, directory):
             if operation == 'doctor_complete':
                 await self.until(lambda: isinstance(self.screen, DoctorReport) and not self.screen.pending)
                 assert self.screen.report is not None
-                (directory/'doctor.svg').write_text(self.export_screenshot())
+                (directory/'doctor-transition.svg').write_text(self.export_screenshot())
                 return {'target': self.screen.report.get('target'), 'pending': self.screen.pending}
             if operation == 'details':
                 await self.until(lambda: self.screen is not self.screen_stack[0] and not isinstance(self.screen, DoctorReport))
@@ -343,8 +452,13 @@ def child(settings_path, directory):
                     (directory/(command['name']+'-settlement-failure.json')).write_text(json.dumps(failure, indent=2)+'\n')
                     raise
                 expected = self.native_oracle()
-                (directory/(command['name']+'.svg')).write_text(self.export_screenshot())
-                return {**self.snapshot(), 'size': list(self.size), 'image': command['name']+'.svg',
+                image = command['name']+'.svg' if command.get('required_id') else None
+                if image:
+                    painted = '\n'.join(strip.text for strip in self.screen._compositor.render_strips())
+                    assert MACHINE_HEADER in painted, painted
+                    (directory/image).write_text(self.export_screenshot())
+                return {**self.snapshot(), 'size': list(self.size), 'image': image,
+                    'required_id': command.get('required_id'),
                     'transition_image': transition_image, 'transition_geometry': transition,
                     'geometry': settled, 'literal_metrics': expected}
             if operation == 'review_ready':
@@ -357,7 +471,7 @@ def child(settings_path, directory):
                 await self.until(lambda: self.screen.record is not None and self.screen.record.status not in {'PREVIEW', 'CACHED', 'PENDING'} and not self.screen.busy)
                 record = self.screen.record
                 assert_review(record)
-                (directory/'selected-review.svg').write_text(self.export_screenshot())
+                (directory/'selected-review-transition.svg').write_text(self.export_screenshot())
                 return record.to_dict()
             if operation == 'unavailable':
                 # The socket is bound by the parent but never listens. This is
@@ -431,6 +545,7 @@ def child(settings_path, directory):
             control_thread.join(timeout=2)
         report = {'ui_tick_intervals': summary(app.intervals), 'ui_render_seconds': summary(app.renders),
             'control_thread_alive': control_thread is not None and control_thread.is_alive(),
+            'native_inputs': app.native_inputs, 'refresh_barriers': app.refresh_barriers, 'paints': app.paints,
             'requests': {owner: client.transport.samples for owner, client in clients.items()},
             'owned_transports': [record for client in clients.values() for record in client.transport.owners],
             'ssh_wire_sessions': [wire for client in clients.values() for wire in client.transport.wire_sessions]}

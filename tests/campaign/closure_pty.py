@@ -21,6 +21,9 @@ import time
 
 from tests.campaign.geometry import GeometryProbe, RESIZE_SEQUENCE
 from tests.campaign.pty import Session
+from tests.campaign.paint_barrier import active_screen_refresh
+from tests.campaign.navigation_trace import screen_state
+from tests.campaign.visual_contract_v2 import frame_id, plan, synthetic_machine, SyntheticMachineSampler, MACHINE_HEADER
 from tests.campaign.support import BUDGETS, OBSERVATION_RULES, ProcessLedger, summary
 from tests.campaign.qualification_v2 import outcomes
 
@@ -111,7 +114,8 @@ def run_cases(settings_path, directory):
     deadline = started+BUDGET_SECONDS
     report = {'schema': 1, 'budget_seconds': BUDGET_SECONDS, 'native_screenshots': [],
               'settings': str(Path(settings_path).resolve()), 'cases': {},
-              'visual_inspection_required': True, 'scientific_acceptance_claimed': False}
+              'visual_inspection_required': True, 'visual_contract': plan(),
+              'synthetic_machine': True, 'scientific_acceptance_claimed': False}
     try:
         for kind, view_mode in ((kind, view) for kind in ('study', 'analysis') for view in ('local', 'nodes')):
             assert time.monotonic() < deadline, 'Extra PTY budget exhausted'
@@ -125,19 +129,23 @@ def run_cases(settings_path, directory):
             case_report = report['cases'][label] = {'fixture': case, 'frames': []}
             def request(operation, **values):
                 return session.request(operation, **values)
-            def send(keys):
+            def send(keys, *, expected=None, selector=None):
                 before = request('input_count')
                 session.send(keys)
-                request('input_received', after=before)
-            def capture(name, view, size):
-                frame = request('capture', name=name, view=view, size=list(size))
+                request('input_received', after=before, expected=expected,
+                        delivered_hex=keys.hex(), selector=selector)
+            def capture(name, view, size, *, required=False):
+                family = 'multiwfn' if view == 'analysis' else view
+                frame = request('capture', name=name, view=view, size=list(size),
+                                required_id=frame_id(view_mode, family, size) if required else None)
                 case_report['frames'].append(frame)
                 report['native_screenshots'].append({**frame, 'directory': str(child_dir)})
                 return frame
             def cycle(view):
                 for index, size in enumerate(RESIZE_SEQUENCE):
                     session.resize(size)
-                    capture(f'{view}-{index}-{size[0]}x{size[1]}', view, size)
+                    capture(f'{view}-{index}-{size[0]}x{size[1]}', view, size,
+                            required=(view == 'analysis' and index < 4) or (view != 'analysis' and size == (80, 24)))
                     if view != 'analysis':
                         # Exercise ordinary keyboard scroll after a settled refresh.
                         send(b'\x1b[6~')
@@ -149,9 +157,9 @@ def run_cases(settings_path, directory):
                     x, y = request('position', selector=selector)
                     send(f'\x1b[<64;{x};{y}M'.encode())
                     capture(f'{view}-{index}-mouse-scroll', view, size)
-            def click(selector):
+            def click(selector, expected=None):
                 x, y = request('position', selector=selector)
-                send(f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode())
+                send(f'\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m'.encode(), expected=expected, selector=selector)
             try:
                 case_report['ready'] = request('ready')
                 assert case_report['ready']['tty'] == [True, True]
@@ -161,16 +169,16 @@ def run_cases(settings_path, directory):
                     send(b't')
                     request('ready_view', view='catalogue')
                     cycle('catalogue')
-                    click('#catalogue-study')
+                    click('#catalogue-study', 'study')
                     request('ready_view', view='study')
                     cycle('study')
-                    click('#study-back')
+                    click('#study-back', 'catalogue')
                     request('ready_view', view='catalogue')
-                    click('#catalogue-detail-back')
+                    click('#catalogue-detail-back', 'base')
                     request('ready_view', view='base')
                     send(b'r')
                     request('review_limits')
-                    click('#review-inspect')
+                    click('#review-inspect', 'review')
                     case_report['review'] = request('review_complete')
                     cycle('review')
                     send(b'y')
@@ -193,7 +201,7 @@ def run_cases(settings_path, directory):
                 send(b'y')
                 request('ready_view', view='copy')
                 capture('copy-before-refresh', 'copy', (140, 40))
-                click('#copy-refresh')
+                click('#copy-refresh', 'copy')
                 capture('copy-after-mouse-refresh', 'copy', (140, 40))
                 send(b'\x1b')
                 case_report['returned'] = request('ready_view', view='base')
@@ -270,21 +278,33 @@ def child(settings_path, directory):
         def __init__(self):
             self.geometry = GeometryProbe()
             self.intervals, self.renders, self.controls, self.native_inputs = [], [], [], []
+            self.refresh_barriers, self.paints = [], []
             self.last_tick = None
             if view_mode == 'local':
-                super().__init__(store, observer=Observer(collector=fixture_collect))
+                super().__init__(store, observer=Observer(collector=fixture_collect), sampler=SyntheticMachineSampler())
             else:
                 super().__init__({'WORKFLOW': client}, request_root=directory/'requests')
+
+        def machine_usage(self, owner):
+            return synthetic_machine()
 
         def on_ready(self):
             self.set_interval(.05, self.record_tick)
             self.control_thread = threading.Thread(target=self.control, daemon=True)
             self.control_thread.start()
 
+        def _display(self, screen, renderable):
+            super()._display(screen, renderable)
+            if renderable is not None and self._running and not self._closed and not self._batch_count:
+                self.paints.append({'generation': len(self.paints)+1, 'screen': screen_state(screen),
+                                    'at': time.monotonic()})
+
         async def on_event(self, event):
             if isinstance(event, (events.Key, events.MouseUp, events.MouseScrollUp, events.MouseScrollDown)) and not event.is_forwarded:
                 self.native_inputs.append({'event': type(event).__name__, 'key': getattr(event, 'key', None),
-                                           'at': time.monotonic(), 'screen': type(self.screen).__name__})
+                                           'at': time.monotonic(), 'screen': screen_state(self.screen),
+                                           'paint_generation': len(self.paints),
+                                           'widget': getattr(getattr(event, 'widget', None), 'id', None)})
             await super().on_event(event)
 
         def record_tick(self):
@@ -327,6 +347,14 @@ def child(settings_path, directory):
 
         def identity_check(self):
             assert self.identity() == [case['job_id'], case['attempt_id']], self.identity()
+
+        def view_matches(self, view):
+            if view in {'base', 'analysis'}:
+                return self.screen is self.screen_stack[0]
+            types = {'catalogue': CatalogueDetails, 'study': StudyScreen, 'review': ReviewScreen,
+                     'doctor': DoctorReport, 'details': (Inspect, DoctorDetails),
+                     'copy': CopyPreview, 'review-copy': FrozenText}
+            return isinstance(self.screen, types[view])
 
         def view_ready(self, view):
             screen = self.screen
@@ -376,6 +404,7 @@ def child(settings_path, directory):
         def literal_check(self, view, geometry):
             self.identity_check()
             if view == 'analysis':
+                assert MACHINE_HEADER in '\n'.join(strip.text for strip in self.screen._compositor.render_strips())
                 snapshot = self.science()
                 assert snapshot is not None and snapshot.context.engine == 'Multiwfn'
                 assert not snapshot.metrics, 'Analysis fixture must not invent SCF/geometry metrics'
@@ -449,9 +478,11 @@ def child(settings_path, directory):
                         assert remaining > 0, {'problems': problems, 'last_geometry': state}
                         await asyncio.wait_for(self.screen.wait_for_refresh(), remaining)
                 expected = self.literal_check(view, settled)
-                image = name+'.svg'
-                (directory/image).write_text(self.export_screenshot())
-                result = {'size': size, 'view': view, 'image': image, 'literal_metrics': expected,
+                image = name+'.svg' if command.get('required_id') else None
+                if image:
+                    (directory/image).write_text(self.export_screenshot())
+                result = {'size': size, 'view': view, 'image': image, 'required_id': command.get('required_id'),
+                          'literal_metrics': expected,
                           'literal_validation': 'painted-card' if view == 'analysis' else 'model-body-and-painted-title',
                           'selected': self.identity(), 'transition_image': transition_image,
                           'transition_geometry': transition, 'geometry': settled}
@@ -466,11 +497,18 @@ def child(settings_path, directory):
             operation = command['operation']
             self.controls.append({'operation': operation, 'at': time.monotonic()})
             if operation == 'input_count':
-                return len(self.native_inputs)
+                return {'count': len(self.native_inputs), 'paint_generation': len(self.paints),
+                        'screen': screen_state(self.screen)}
             if operation == 'input_received':
-                await self.until(lambda: len(self.native_inputs) > command['after'])
-                await asyncio.wait_for(self.screen.wait_for_refresh(), FRAME_SECONDS)
-                return self.native_inputs[-1]
+                await self.until(lambda: len(self.native_inputs) > command['after']['count'])
+                expected = command.get('expected')
+                result = await active_screen_refresh(self,
+                    expected=(lambda: self.view_matches(expected)) if expected else (lambda: True),
+                    timeout=FRAME_SECONDS, records=self.refresh_barriers)
+                result.update(delivered_hex=command.get('delivered_hex'), selector=command.get('selector'),
+                              acknowledgment=self.native_inputs[-1], before=command['after'],
+                              paint_generation=len(self.paints))
+                return result
             if operation == 'ready':
                 if view_mode == 'local':
                     await self.until(lambda: job['display_id'] in self.row_ids)
@@ -491,13 +529,13 @@ def child(settings_path, directory):
                 return {'selected': self.identity(), 'tty': [sys.stdin.isatty(), sys.stdout.isatty()]}
             if operation == 'ready_view':
                 await self.until(lambda: self.view_ready(command['view']))
-                await asyncio.wait_for(self.screen.wait_for_refresh(), FRAME_SECONDS)
+                await active_screen_refresh(self, timeout=FRAME_SECONDS, records=self.refresh_barriers)
                 self.identity_check()
                 if command['view'] == 'doctor':
                     return {'selected': self.identity(), 'report': self.screen.report}
                 return {'selected': self.identity(), 'screen': type(self.screen).__name__}
             if operation == 'position':
-                await asyncio.wait_for(self.screen.wait_for_refresh(), FRAME_SECONDS)
+                await active_screen_refresh(self, timeout=FRAME_SECONDS, records=self.refresh_barriers)
                 button = self.screen.query_one(command['selector'])
                 assert not getattr(button, 'disabled', False) and button.display
                 region = button.region
@@ -530,7 +568,9 @@ def child(settings_path, directory):
                             (directory/(failure_name+'.svg')).write_text(rendered)
                         except Exception as capture_error:
                             write(directory/(failure_name+'-capture-error.json'), {'error': repr(capture_error)})
-                        write(directory/(failure_name+'.json'), {'command': json.loads(line), 'error': repr(exc)})
+                        write(directory/(failure_name+'.json'), {'command': json.loads(line), 'error': repr(exc),
+                            'refresh_barriers': self.refresh_barriers[-3:], 'native_inputs': self.native_inputs[-3:],
+                            'paints': self.paints[-3:]})
                         reply = {'ok': False, 'error': repr(exc), 'failure_image': failure_name+'.svg'}
                     writer.write(json.dumps(reply, default=str)+'\n')
 
@@ -545,6 +585,7 @@ def child(settings_path, directory):
             write(directory/'metrics.json', {'python': sys.executable, 'package_origin': cmw.__file__,
                 'ui_tick_intervals': summary(app.intervals), 'ui_render_seconds': summary(app.renders),
                 'controls': app.controls, 'native_inputs': app.native_inputs,
+                'refresh_barriers': app.refresh_barriers, 'paints': app.paints,
                 'requests': client.transport.samples if client is not None else [],
                 'owned_transports': client.transport.owners if client is not None else [],
                 'control_thread_alive': thread is not None and thread.is_alive()})

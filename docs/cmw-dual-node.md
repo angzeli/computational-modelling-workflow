@@ -467,3 +467,20 @@ set, object/content epochs and access evidence must match. A second drift or any
 other uncertainty refuses. Optional collection diagnostics retain the first
 refusal and both inventories. This is coherent current-disk collection, not
 replacement trust; the original fingerprint and fresh-observer checks still apply.
+
+### Navigation qualification diagnostics
+
+Navigation return preserves the exact saved selection and viewport when content
+and table/card geometry are unchanged. A new input cancels older restoration;
+late scientific data, row changes or resize preserve the immutable target and
+anchor with only necessary bounds/visibility clamping. A different visible-row
+count after a real table-height change is not an exact-geometry comparison.
+
+The focused portal regression gates scientific response and return callbacks in
+both orders. `CMW_NAVIGATION_TRACE_DIR` retains full structured event/geometry
+traces; failures always retain a counterexample path. Native PTY preflight uses
+`tests.campaign.pty_barrier_smoke`, real keys/mouse reports, and resulting-screen
+refresh barriers that abandon detached predecessors. The prospective visual
+inventory is `tests.campaign.visual_contract_v2.plan()`: 24 core and eight modal
+settled views plus transition/failure evidence. Its machine header is explicitly
+synthetic; historical missing frames and failed gates remain unchanged.

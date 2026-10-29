@@ -48,6 +48,8 @@ def table_view(app):
 
 @unittest.skipIf(NodesApp is None, 'Jobs UI extra unavailable')
 class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
+    maxDiff = None
+
     def app(self):
         backends = {'MBP': many_jobs('MBP'), 'MINI': many_jobs('MINI', remote=True)}
         return NodesApp(backends), backends
@@ -372,22 +374,69 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(any(call[0].startswith('fetch') for call in backend.calls))
 
     async def test_genuine_input_before_deferred_restore_wins(self):
-        app, backends = self.app()
-        async with app.run_test(size=(100, 30)) as pilot:
-            await self.position(app, backends, pilot)
-            await self.open_details(app, pilot)
-            queued = []
-            original = app._restore_cursor
-            # Gate only the task-owned return callback; application timers remain active.
-            with patch.object(app, '_restore_cursor', side_effect=queued.append):
-                await pilot.press('escape')
-                await self.until(pilot, lambda: bool(queued), 'return callback queued')
-            await pilot.press('down')
-            new_view = table_view(app)
-            self.assertEqual(app.selected()[1]['display_id'], 'J26.1')
-            for pending in queued:
-                original(pending)
-            await self.returned(app, pilot)
-            self.assert_same_view(new_view, app)
-            await self.status_update(app, backends, pilot)
-            self.assert_same_view(new_view, app)
+        from tests.campaign.navigation_trace import NavigationTrace
+        for order in ('restore-first', 'progress-first'):
+            with self.subTest(schedule=order):
+                app, backends = self.app()
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await self.position(app, backends, pilot)
+                    with NavigationTrace(app, 'genuine-input-'+order) as trace:
+                        await self.open_details(app, pilot)
+                        queued = []
+                        original = app._restore_cursor
+                        gate = threading.Event()
+                        backend = backends['MINI']
+                        backend.blocks['progress'] = gate
+                        try:
+                            # Gate only return restoration and the scientific response.
+                            # Normal polling, layout watchers and genuine input stay active.
+                            with patch.object(app, '_restore_cursor', side_effect=queued.append):
+                                await pilot.press('escape')
+                                await self.until(pilot, lambda: bool(queued), 'return callback queued')
+                            trace.mark('return:callback-gated')
+                            await pilot.press('down')
+                            await self.until(pilot, lambda: any(call[0] == 'progress' and call[2]['job_id'] == 26
+                                             for call in backend.calls), 'new target progress request gated')
+                            new_view = table_view(app)
+                            pending_geometry = trace.snapshot()
+                            trace.mark('new-input:pending-science')
+                            target = deepcopy(backend.jobs[25]['target'])
+                            self.assertEqual(app.selected()[1]['target'], target)
+                            if order == 'restore-first':
+                                for pending in queued:
+                                    original(pending)
+                                await self.returned(app, pilot)
+                                trace.mark('stale-callbacks:released')
+                                self.assertEqual(trace.snapshot()['card_region'], pending_geometry['card_region'])
+                                self.assertEqual(trace.snapshot()['tables'][0]['region'], pending_geometry['tables'][0]['region'])
+                                self.assert_same_view(new_view, app)
+                            gate.set()
+                            await self.until(pilot, lambda: app.selected_snapshot('MINI', backend.jobs[25]) is not None
+                                             and not app.navigation_pending()
+                                             and not app.screen_stack[0]._layout_required,
+                                             'late scientific response and changed card layout settled')
+                            await pilot.pause()
+                            trace.mark('late-science:settled')
+                            settled = table_view(app)
+                            geometry = trace.snapshot()
+                            self.assertGreater(geometry['card_region'][3], pending_geometry['card_region'][3])
+                            self.assertLess(geometry['tables'][0]['region'][3], pending_geometry['tables'][0]['region'][3])
+                            # In this fixture the cursor still fits after the card grows.
+                            # Preserve every intent field; only the visible row count changes.
+                            for key in ('selection', 'cursor', 'column', 'x', 'y', 'targets', 'relative', 'screen'):
+                                self.assertEqual(settled[key], new_view[key], key)
+                            self.assertGreater(len(settled['visible']), settled['relative'])
+                            self.assertEqual(settled['visible'], new_view['visible'][:len(settled['visible'])])
+                            self.assertEqual(app.selected()[1]['target'], target)
+                            if order == 'progress-first':
+                                for pending in queued:
+                                    original(pending)
+                                await self.returned(app, pilot)
+                                trace.mark('stale-callbacks:released')
+                                self.assert_same_view(settled, app)
+                            await self.status_update(app, backends, pilot)
+                            trace.mark('later-normal-refresh:settled')
+                            self.assert_same_view(settled, app)
+                        finally:
+                            gate.set()
+                            backend.blocks.pop('progress', None)
