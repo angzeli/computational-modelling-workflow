@@ -5,11 +5,13 @@ propagate the replacement launcher to their own controller and worker children.
 """
 from contextlib import ExitStack, contextmanager
 import json
+import importlib
 import os
 from pathlib import Path
 import subprocess
 import sys
 import stat
+import threading
 from uuid import uuid4
 from unittest.mock import patch
 
@@ -32,9 +34,31 @@ def record_runtime_refusals():
     import cmw
 
     original = LocalBackend._check
+    try:
+        runtime_module = importlib.import_module('cmw.nodes.runtime_observation')
+    except ModuleNotFoundError as exc:
+        if exc.name != 'cmw.nodes.runtime_observation':
+            raise
+        runtime_module = None
+    original_coherence = getattr(runtime_module, '_source_imports_coherent', None)
+    coherence = threading.local()
+
+    def observed_coherence(observed):
+        current = getattr(coherence, 'current', None)
+        try:
+            result = original_coherence(observed)
+        except BaseException as exc:
+            if current is not None:
+                current.update(evaluated=True, exception=type(exc).__name__)
+            raise
+        if current is not None:
+            current.update(evaluated=True, result=result)
+        return result
 
     def checked(backend, *args, **kwargs):
         global _RUNTIME_REFUSAL_PID, _RUNTIME_REFUSAL_CAPTURES
+        previous = getattr(coherence, 'current', None)
+        coherence.current = {'available': callable(original_coherence), 'evaluated': False}
         try:
             return original(backend, *args, **kwargs)
         except Exception as error:
@@ -78,6 +102,11 @@ def record_runtime_refusals():
                     'exception': {'type': type(error).__name__, 'code': error.code, 'message': str(error)},
                     'config_source': 'original_check_traceback_local', 'expected_config': config,
                     'runtime_diagnostic': diagnostic,
+                    'verifier_observer_state': {
+                        'process_started_ns': getattr(verifier, 'process_started_ns', None),
+                        'isolated': getattr(verifier, 'isolated', None),
+                        'recovered': getattr(verifier, 'recovered', None),
+                        'source_imports_coherent': dict(coherence.current)},
                     'verifier_expected': getattr(verifier, 'expected', None),
                     'verifier_original': getattr(verifier, 'original', None),
                     'capture_complete': config is not None and isinstance(diagnostic, dict),
@@ -103,8 +132,13 @@ def record_runtime_refusals():
                 except Exception:
                     pass
             raise
+        finally:
+            coherence.current = previous
 
-    with patch.object(LocalBackend, '_check', checked):
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(LocalBackend, '_check', checked))
+        if callable(original_coherence):
+            stack.enter_context(patch.object(runtime_module, '_source_imports_coherent', observed_coherence))
         yield
 
 

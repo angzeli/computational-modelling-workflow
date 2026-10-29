@@ -37,7 +37,8 @@ class RuntimeRefusalEvidenceTests(unittest.TestCase):
         backend.config = {'stale': 'must not be used'}
         backend._load_identity = Mock(side_effect=AssertionError('No extra identity read'))
         backend._runtime_verifier = SimpleNamespace(expected=self.config['runtime'],
-                                                    original=self.config['runtime_observation'])
+                                                    original=self.config['runtime_observation'],
+                                                    process_started_ns=123456, isolated=True, recovered=False)
         return backend
 
     def check(self, backend, operation=None):
@@ -71,6 +72,45 @@ class RuntimeRefusalEvidenceTests(unittest.TestCase):
         self.invoke(backend)
         self.assertEqual(len(list(self.destination.glob('*.json'))), 1)
         self.assertEqual(len(self.calls), 2)
+
+    def test_observer_state_and_actual_coherence_result_are_retained_without_recheck(self):
+        from cmw.nodes import runtime_observation
+        backend = self.backend()
+        def check(backend, operation=None):
+            config = self.config
+            backend.runtime_diagnostic = self.diagnostic
+            runtime_observation._source_imports_coherent(self.diagnostic['after'])
+            raise self.error
+        with patch.object(runtime_observation, '_source_imports_coherent', return_value=False) as coherent, \
+             patch.object(LocalBackend, '_check', check), isolated_runtime.record_runtime_refusals():
+            with self.assertRaises(NodeError) as caught:
+                backend._check('progress')
+        self.assertIs(caught.exception, self.error)
+        coherent.assert_called_once_with(self.diagnostic['after'])
+        record = json.loads(next(self.destination.glob('runtime-refusal-*.json')).read_text())
+        self.assertEqual(record['verifier_observer_state'], {'process_started_ns': 123456,
+            'isolated': True, 'recovered': False,
+            'source_imports_coherent': {'available': True, 'evaluated': True, 'result': False}})
+        self.assertEqual(record['expected_config'], self.config)
+        backend._load_identity.assert_not_called()
+
+    def test_short_circuited_coherence_is_not_evaluated_by_diagnostics(self):
+        from cmw.nodes import runtime_observation
+        with patch.object(runtime_observation, '_source_imports_coherent') as coherent:
+            self.invoke(self.backend(), 'progress')
+        coherent.assert_not_called()
+        record = json.loads(next(self.destination.glob('runtime-refusal-*.json')).read_text())
+        self.assertEqual(record['verifier_observer_state']['source_imports_coherent'],
+                         {'available': True, 'evaluated': False})
+
+    def test_old_runtime_without_observer_module_keeps_original_refusal(self):
+        missing = ModuleNotFoundError('old runtime has no observer module', name='cmw.nodes.runtime_observation')
+        with patch.object(isolated_runtime.importlib, 'import_module', side_effect=missing):
+            self.invoke(self.backend(), 'progress')
+        record = json.loads(next(self.destination.glob('runtime-refusal-*.json')).read_text())
+        self.assertEqual(record['exception']['message'], 'original refusal')
+        self.assertEqual(record['verifier_observer_state']['source_imports_coherent'],
+                         {'available': False, 'evaluated': False})
 
     def test_success_and_disabled_recorder_do_not_create_evidence(self):
         backend = self.backend()

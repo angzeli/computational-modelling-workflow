@@ -19,6 +19,10 @@ import time
 import traceback
 from uuid import uuid4
 
+import psutil
+
+from cmw.nodes.transport import ProcessTransport
+
 from tests.campaign.closure_workflows import SUPPORT, installed_origin, monitored, save, validate_child_reports
 
 
@@ -134,14 +138,72 @@ def helper_main():
     print(json.dumps(result))
 
 
-def connect(record, python):
+def endpoint_main():
+    """The unchanged installed CLI, with test-only failed-check capture enabled."""
+    from cmw.cli import main as cli_main
+    from tests.jobs.isolated_runtime import record_runtime_refusals
+    with record_runtime_refusals():
+        code = cli_main(sys.argv[1:])
+    raise SystemExit(code)
+
+
+class PeerTransport(ProcessTransport):
+    """Retain channel identity before the production transport closes on error."""
+    def __init__(self, argv, *, trace):
+        super().__init__(argv, timeout=20)
+        self.trace = trace
+        self.trace.update(argv=list(argv), events=[])
+
+    def _event(self, event, **values):
+        if len(self.trace['events']) < 128:
+            self.trace['events'].append({'event': event, 'at_ns': time.time_ns(),
+                'monotonic': time.monotonic(), **values})
+        else:
+            self.trace['events_truncated'] = True
+
+    def _start(self):
+        previous = self.process
+        super()._start()
+        if previous is None:
+            identity = {'pid': self.process.pid, 'birth': None}
+            try:
+                identity['birth'] = psutil.Process(self.process.pid).create_time()
+            except (psutil.Error, OSError) as exc:
+                identity['identity_error'] = repr(exc)
+            self._event('launch', **identity)
+
+    def exchange(self, operation, params=None, target=None, *, request_id=None):
+        self._event('request', operation=operation, target=target, request_id=request_id)
+        try:
+            result = super().exchange(operation, params, target, request_id=request_id)
+        except BaseException as exc:
+            self._event('refusal_or_error', operation=operation, exception=type(exc).__name__,
+                        code=getattr(exc, 'code', None), message=str(exc))
+            raise
+        self._event('response', operation=operation)
+        return result
+
+    def close(self):
+        process = self.process
+        try:
+            super().close()
+        finally:
+            if process is not None:
+                self._event('close', pid=process.pid, returncode=process.returncode)
+                self.trace['stderr_tail'] = bytes(self.stderr[-65536:]).decode('utf-8', errors='replace')
+
+
+def connect(record, python, *, label='native-peer', traces=None):
     from cmw.nodes.connections import ConnectedBackend
-    from cmw.nodes.transport import ProcessTransport
-    command = [str(python), '-I', '-B', '-m', 'cmw.cli', 'nodes', 'endpoint',
-               '--config', record['entry']['config_root'], '--queue', 'research']
-    # No status call is made: native progress/capabilities do not enumerate host
-    # activity. Each endpoint is pinned to its own disposable enrolled runtime.
-    return ConnectedBackend('native-peer', record['entry'], transport=ProcessTransport(command, timeout=20))
+    command = [str(python), '-I', '-B', '-c',
+        'import sys;sys.path.insert(0,sys.argv.pop(1));'
+        'from tests.campaign.closure_peer import endpoint_main;endpoint_main()',
+        str(SUPPORT), 'nodes', 'endpoint', '--config', record['entry']['config_root'], '--queue', 'research']
+    trace = {'channel': label, 'config_root': record['entry']['config_root']}
+    if traces is not None:
+        traces[label] = trace
+    # No extra check, retry or enrollment: call the same installed CLI once.
+    return ConnectedBackend('native-peer', record['entry'], transport=PeerTransport(command, trace=trace))
 
 
 def progress(client, target):
@@ -174,6 +236,7 @@ def run_peer(root, old_python, workflow_report, report):
     from cmw.nodes.codec import CodecError, decode_typed
     from cmw.nodes.protocol import NodeError
     clients, records = {}, {}
+    traces = report.setdefault('peer_channels', {})
     try:
         for label, python in (('old', old_python), ('new', sys.executable)):
             arguments = (workflow_report,) if label == 'new' else ()
@@ -182,8 +245,8 @@ def run_peer(root, old_python, workflow_report, report):
                 env={k: v for k, v in os.environ.items() if k != 'PYTHONPATH'})
             assert setup.returncode == 0, (label, setup.stdout, setup.stderr)
             record = json.loads(setup.stdout)
-            records[label] = record; clients[label] = connect(record, python)
-        clients['analysis'] = connect(records['new']['analysis_case'], sys.executable)
+            records[label] = record; clients[label] = connect(record, python, label=label, traces=traces)
+        clients['analysis'] = connect(records['new']['analysis_case'], sys.executable, label='analysis', traces=traces)
         report['runtimes'] = {label: record['origin'] for label, record in records.items()}
         report['vasp'], report['multiwfn'] = {}, {}
         encoded_new = None
