@@ -83,7 +83,10 @@ def coverage(records, observations, opportunities, *, ended_at, sampling_errors=
     for record in records:
         selected = [item for item in observations if item['ledger_id'] == record['ledger_id']]
         start = record['recorded_at']
-        end = min(ended_at, record.get('exit', {}).get('at', ended_at))
+        # An observed disappearance bounds the lifecycle from above; it does
+        # not establish the exact OS death instant or recover earlier fields.
+        terminal_times = [item['at'] for item in selected if item['classification'] == 'verified_exited']
+        end = min(ended_at, record.get('exit', {}).get('at', ended_at), *terminal_times)
         lifetime = max(0., end - start)
         long_lived = lifetime >= policy['long_lived_seconds']
         for field in FIELDS:
@@ -109,6 +112,7 @@ def coverage(records, observations, opportunities, *, ended_at, sampling_errors=
             rows.append({'ledger_id': record['ledger_id'], 'role': record['role'], 'field': field,
                 'capture_origin': record['capture_origin'], 'lifetime_seconds': lifetime,
                 'first_observed_limit': record['capture_origin'] == 'first-observed-descendant',
+                'lifecycle_end_upper_bound': end, 'end_basis': 'observed verified exit' if terminal_times or record.get('exit') else 'observation window end',
                 'required': required, 'valid_reads': len(valid), 'classifications': dict(counts),
                 'first_valid_after_seconds': valid[0]-start if valid else None,
                 'longest_blind_seconds': longest, 'blind_intervals': intervals,

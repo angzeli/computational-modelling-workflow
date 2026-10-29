@@ -153,6 +153,8 @@ class ProcessLedger:
 
     def observe(self, row):
         observed = self._observe(row)
+        if observed['classification'] == 'verified_exited':
+            row.setdefault('exit', {key: observed[key] for key in ('at', 'exit_evidence', 'returncode') if key in observed})
         classification = {'genuinely_unobservable': 'unavailable_identity',
             'verified_exited': 'verified_exit', 'zombie_reaping_pending': 'zombie_pending_reap',
             'transient_read_error': 'transient_read_uncertainty'}.get(observed['classification'], observed['classification'])

@@ -82,6 +82,24 @@ class DriverContractTests(unittest.TestCase):
         self.assertTrue(result['execution_passed'])
         self.assertFalse(result['qualified'])
 
+    def test_observed_descendant_exit_caps_lifetime_without_inventing_death_time(self):
+        record = {'ledger_id': 2, 'recorded_at': 0., 'role': 'owned descendant',
+                  'capture_origin': 'first-observed-descendant'}
+        observations = [{'ledger_id': 2, 'required_live': True, 'classification': 'sampled_live',
+            'fields': {field: {'ended_at': value, 'classification': 'sampled_live'} for field in FIELDS}}
+            for value in (.01, .13, .25, .37, .49, .62)]
+        observations.append({'ledger_id': 2, 'required_live': False, 'classification': 'verified_exited',
+                             'at': .74, 'exit_evidence': 'recorded identity absent on follow-up observation'})
+        result = coverage([record], observations, [], ended_at=61.84)
+        self.assertEqual(result['resource_observability'], 'PASS')
+        self.assertTrue(all(row['first_observed_limit'] for row in result['field_coverage']))
+        for row in result['field_coverage']:
+            self.assertEqual(row['lifetime_seconds'], .74)
+            self.assertEqual(row['lifecycle_end_upper_bound'], .74)
+            self.assertEqual(row['end_basis'], 'observed verified exit')
+            self.assertLess(row['longest_blind_seconds'], .2)
+        self.assertNotIn('exit', record)
+
     def test_isolated_field_gap_is_disclosed_within_predeclared_window(self):
         record = {'ledger_id': 0, 'recorded_at': 0., 'role': 'controller', 'capture_origin': 'direct-launch'}
         observations = [{'ledger_id': 0, 'classification': 'sampled_live', 'required_live': True,
