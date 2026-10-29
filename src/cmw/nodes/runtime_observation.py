@@ -12,9 +12,10 @@ from cmw.core.provenance import stable_hash
 
 class RuntimeRefusal(ValueError):
     def __init__(self, category, *, phase, before=None, after=None, path=None,
-                 expected_digest=None, actual_digest=None):
+                 expected_digest=None, actual_digest=None, api=None, errno=None, security_state=None, object_type=None):
         self.evidence = dict(category=category, role="runtime-package", phase=phase, path=path, before=before,
-                            after=after, expected_digest=expected_digest, actual_digest=actual_digest)
+                            after=after, expected_digest=expected_digest, actual_digest=actual_digest, api=api, errno=errno,
+                            security_state=security_state, object_type=object_type)
         super().__init__('CMW runtime verification refused: ' + category)
 
 
@@ -34,60 +35,62 @@ def _extended_security(path):
     if sys.platform != 'darwin':
         raise RuntimeRefusal('security_metadata_unavailable', phase='inventory', path=str(path))
     import ctypes
+    from .native_security import acl_evidence, object_epoch, SecurityReadError
     libc = ctypes.CDLL(None, use_errno=True)
-    listing, getting = libc.listxattr, libc.getxattr
-    listing.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    listing, getting = libc.flistxattr, libc.fgetxattr
+    listing.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
     listing.restype = ctypes.c_ssize_t
-    getting.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,
+    getting.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,
                         ctypes.c_uint32, ctypes.c_int]
     getting.restype = ctypes.c_ssize_t
-    raw = os.fsencode(path)
-    size = listing(raw, None, 0, 1)
-    if size < 0 or size > 65536:
-        raise RuntimeRefusal('security_metadata_unavailable', phase='xattr-list', path=str(path))
-    buffer = ctypes.create_string_buffer(size)
-    if listing(raw, buffer, size, 1) != size:
-        raise RuntimeRefusal('in_flight_change', phase='xattr-list', path=str(path))
-    names = buffer.raw.rstrip(b'\0').split(b'\0') if size else []
-    if len(names) > 64:
-        raise RuntimeRefusal('security_metadata_bound', phase='xattr-list', path=str(path))
-    attrs = {}
-    for name in names:
-        length = getting(raw, name, None, 0, 0, 1)
-        if length < 0 or length > 1024 * 1024:
-            raise RuntimeRefusal('security_metadata_unavailable', phase='xattr-read', path=str(path))
-        value = ctypes.create_string_buffer(length)
-        if getting(raw, name, value, length, 0, 1) != length:
-            raise RuntimeRefusal('in_flight_change', phase='xattr-read', path=str(path))
-        attrs[os.fsdecode(name)] = hashlib.sha256(value.raw).hexdigest()
-    get_acl, to_text, free = libc.acl_get_file, libc.acl_to_text, libc.acl_free
-    get_acl.argtypes, get_acl.restype = [ctypes.c_char_p, ctypes.c_int], ctypes.c_void_p
-    to_text.argtypes, to_text.restype = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ssize_t)], ctypes.c_void_p
-    free.argtypes, free.restype = [ctypes.c_void_p], ctypes.c_int
-    ctypes.set_errno(0)
-    acl = get_acl(raw, 0x100)
-    if not acl:
-        # NULL/ENOENT on an existing object is not documented proof of ACL absence.
-        # Preserve strict epoch observation, but prohibit metadata recovery.
-        attrs['__cmw_acl__'] = 'UNAVAILABLE:ACL'
-        return attrs
-    text = None
+    before = path.lstat()
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
-        length = ctypes.c_ssize_t()
-        text = to_text(acl, ctypes.byref(length))
-        if not text or not 0 <= length.value <= 1024 * 1024:
-            raise RuntimeRefusal('security_metadata_unavailable', phase='acl-read', path=str(path))
-        attrs['__cmw_acl__'] = hashlib.sha256(ctypes.string_at(text, length.value)).hexdigest()
+        if object_epoch(os.fstat(descriptor)) != object_epoch(before):
+            raise RuntimeRefusal('in_flight_change', phase='security-open', path=str(path))
+        size = listing(descriptor, None, 0, 0)
+        if size < 0 or size > 65536:
+            raise RuntimeRefusal('security_metadata_unavailable', phase='xattr-list', path=str(path),
+                                 api='flistxattr', errno=ctypes.get_errno())
+        buffer = ctypes.create_string_buffer(size)
+        if listing(descriptor, buffer, size, 0) != size:
+            raise RuntimeRefusal('in_flight_change', phase='xattr-list', path=str(path))
+        names = buffer.raw.rstrip(b'\0').split(b'\0') if size else []
+        if len(names) > 64:
+            raise RuntimeRefusal('security_metadata_bound', phase='xattr-list', path=str(path))
+        attrs = {}
+        for name in names:
+            length = getting(descriptor, name, None, 0, 0, 0)
+            if length < 0 or length > 1024 * 1024:
+                raise RuntimeRefusal('security_metadata_unavailable', phase='xattr-read', path=str(path),
+                                     api='fgetxattr', errno=ctypes.get_errno())
+            value = ctypes.create_string_buffer(length)
+            if getting(descriptor, name, value, length, 0, 0) != length:
+                raise RuntimeRefusal('in_flight_change', phase='xattr-read', path=str(path))
+            attrs[os.fsdecode(name)] = hashlib.sha256(value.raw).hexdigest()
+        try:
+            acl = acl_evidence(descriptor)
+        except SecurityReadError as exc:
+            raise RuntimeRefusal('in_flight_change' if exc.state == 'changed-object' else
+                                 'security_metadata_unavailable', phase='acl-read', path=str(path),
+                                 api=exc.api, errno=exc.errno, security_state=exc.state,
+                                 object_type='directory' if stat.S_ISDIR(before.st_mode) else 'file') from exc
+        attrs['__cmw_acl__'] = 'ABSENT:FILESEC_ACL' if acl['state'] == 'absent' else acl['sha256']
+        if (object_epoch(os.fstat(descriptor)) != object_epoch(before)
+                or object_epoch(path.lstat()) != object_epoch(before)):
+            raise RuntimeRefusal('in_flight_change', phase='security-after-read', path=str(path))
+        return attrs
     finally:
-        if text:
-            free(text)
-        free(acl)
-    return attrs
+        os.close(descriptor)
 
 
 def _security(path, info):
     extended = _extended_security(path)
     complete = not str(extended.get('__cmw_acl__', '')).startswith('UNAVAILABLE:')
+    # Preserve schema-1 hash bytes for exact-epoch compatibility; completeness and
+    # the versioned policy distinguish positively proven absence from old unknown.
+    if extended.get('__cmw_acl__') == 'ABSENT:FILESEC_ACL':
+        extended = {**extended, '__cmw_acl__': 'UNAVAILABLE:ACL'}
     return (info.st_mode, info.st_uid, info.st_gid, getattr(info, 'st_flags', 0),
             info.st_nlink, stable_hash(extended), complete)
 
@@ -139,7 +142,7 @@ def inventory(root):
 
 def observation(root, root_epoch, epoch, directories, digest):
     executable = Path(sys.executable).resolve(strict=True)
-    return dict(schema=1, root=str(root), root_epoch=list(root_epoch),
+    return dict(schema=2, root=str(root), root_epoch=list(root_epoch),
                 executable=str(executable), executable_epoch=list(file_epoch(executable)),
                 members={name: list(value) for name, value in epoch},
                 directories={name: list(value) for name, value in directories.items()}, package_sha256=digest)
@@ -157,7 +160,7 @@ def validate_observation(value):
     fields = {'schema', 'root', 'root_epoch', 'executable', 'executable_epoch',
               'members', 'directories', 'package_sha256'}
     if (type(value) is not dict or set(value) != fields or type(value['schema']) is not int
-            or value['schema'] != 1 or type(value['members']) is not dict
+            or value['schema'] not in {1, 2} or type(value['members']) is not dict
             or not 1 <= len(value['members']) <= 4096
             or type(value['directories']) is not dict or len(value['directories']) > 4096):
         raise ValueError('Malformed original runtime observation')
@@ -208,7 +211,13 @@ def _differences(before, after):
         new = after['members'][name]
         if old[:2] != new[:2]:
             return 'member_replaced'
-        if old[5:] != new[5:]:
+        # V2: only package-member UF_TRACKED XOR on supported macOS is eligible.
+        # Root, directories and interpreter retain strict identity/security epochs.
+        flags_xor = old[8] ^ new[8]
+        eligible_flags = (sys.platform == 'darwin' and before['schema'] == 2
+                          and after['schema'] == 2 and flags_xor & ~0x40 == 0)
+        if (old[5:8] != new[5:8] or old[9:] != new[9:]
+                or flags_xor and not eligible_flags):
             return 'security_metadata_changed'
         if old[2:4] != new[2:4]:
             return 'content_epoch_changed'
@@ -240,6 +249,20 @@ class RuntimeVerifier:
             self.last_evidence = exc.evidence
             raise
         baseline = self.current
+        if baseline is not None and baseline['schema'] == 1 and observed['schema'] == 2:
+            # An old incomplete baseline can match its exact epoch, never gain
+            # security evidence retroactively. No legacy flag reclassification.
+            from copy import deepcopy
+            observed = deepcopy(observed)
+            observed['schema'] = 1
+            pairs = [(baseline['root_epoch'], observed['root_epoch']),
+                     (baseline['executable_epoch'], observed['executable_epoch'])]
+            for key in ('members', 'directories'):
+                pairs.extend((epoch, observed[key][name]) for name, epoch in baseline[key].items()
+                             if name in observed[key])
+            for old, new in pairs:
+                if not old[-1]:
+                    new[-1] = False
         if record['fingerprint'] != self.expected['fingerprint']:
             category = _differences(baseline, observed) if baseline is not None else None
             raise RuntimeRefusal(category or 'runtime_fingerprint_changed', phase='compare',
@@ -275,5 +298,8 @@ class RuntimeVerifier:
                                  **self.last_evidence)
         self.current = observed
         self.recovered = True
-        self.last_evidence['category'] = 'ctime_only_current_disk_verified'
+        flag_change = any(new[8] != baseline['members'][name][8]
+                          for name, new in observed['members'].items())
+        self.last_evidence['category'] = ('uf_tracked_current_disk_verified' if flag_change
+                                          else 'ctime_only_current_disk_verified')
         return record

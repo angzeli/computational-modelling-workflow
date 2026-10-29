@@ -416,20 +416,34 @@ is no time-based or indefinitely trusted runtime/storage result. Inventory is
 rechecked around reads. Bounds are 4,096 files, 8,192 tree entries, 16 MiB per file
 and 128 MiB per package. Identical bytes never authorize a replacement inode.
 
-One eligible ctime-only change may be completely reverified against original
-enrollment. Changed content/membership/object/security state, incomplete baseline,
-in-flight change or a second recovery refuses. Supplemental epochs never rewrite
-enrollment. Current disk coherence does not prove imported-code coherence:
-recovery requires a fresh isolated observer started after the changed epoch,
-source imports from enrolled members, and no unverified cached bytecode. Existing
-controllers/workers are never restarted by verification.
+Observation schema 2 permits one eligible package-member ctime change, including
+an XOR containing only Darwin UF_TRACKED (0x40), to undergo full revalidation.
+This bit denotes document-ID tracking, not an actor or an assurance of safety.
+Root, directory and interpreter epochs remain strict. Mixed or unknown flag
+changes refuse. Content, membership, object and security expectations remain
+those of the original enrollment; semantic fingerprints and request digests do
+not change. A second recovery refuses. Current disk coherence does not prove
+imported-code coherence: recovery requires a fresh isolated observer started
+after the changed epoch, enrolled source imports and no unverified bytecode.
 
-A null macOS ACL read is not proof of ACL absence. Unavailable ACL evidence
-preserves ordinary exact-epoch checking but prohibits metadata recovery. Fixed
-sleep or quiet-window settings cannot resolve this uncertainty. check_node
-retains structured refusal evidence, including original/current metadata, phase,
-path where known, digests and category. LocalBackend retains it in the session's
-runtime_diagnostic; the bounded wire error schema remains unchanged.
+On supported Darwin arm64/x86_64, ACL evidence is descriptor-bound: successful
+fstatx_np into a fresh filesec plus successful filesec_query_property(FILESEC_ACL)
+with presence zero proves absence. A present property is serialized by the native
+ACL API without reordering ACEs. NULL, ENOENT, empty xattrs and display output do
+not prove absence. Denied, unsupported, errored or incoherent reads refuse with
+API/errno/object diagnostics. Before/after object epochs enclose descriptor reads.
+The absence security hash preserves the legacy hash domain; schema 2 and the
+completeness bit carry its newly established meaning. A schema-1 incomplete
+original baseline may match its exact epoch but is never filled retroactively,
+and never gains recovery authority or UF_TRACKED reclassification.
+
+Primary implementation basis: Apple's [acl_file.c](https://github.com/apple-oss-distributions/Libc/blob/main/posix1e/acl_file.c),
+[statx_np.c](https://github.com/apple-oss-distributions/Libc/blob/main/sys/statx_np.c),
+[filesec.c](https://github.com/apple-oss-distributions/Libc/blob/main/gen/filesec.c),
+and [XNU stat.h](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/stat.h),
+checked against the local SDK ABI. This bounded sequential integrity check is not
+a tamper-proof history or protection against an actor controlling the verifier/OS.
+There is no quiet-window sleep, automatic re-enrollment or controller restart.
 
 Owner-side code derives operation dependencies, never a client skip list.
 Selected reads check current host/runtime/queue before and after each call. Files

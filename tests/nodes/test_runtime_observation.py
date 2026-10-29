@@ -216,3 +216,47 @@ class RequestRecoveryTests(unittest.TestCase):
         self.assertEqual(found['result']['target'], target)
         self.assertEqual(found['result']['status'], 'COMPLETED')
         self.assertEqual(len(self.store.snapshot()['jobs']), 1)
+
+
+class TrackedPolicyTests(RuntimeObservationTests):
+    def test_v2_tracked_only_revalidates_all_original_evidence(self):
+        current = deepcopy(self.epoch)
+        current['members']['__init__.py'][8] ^= 0x40
+        current['members']['__init__.py'][4] += 1
+        verifier = self.verifier()
+        with patch('cmw.nodes.runtime_observation.sys.platform', 'darwin'):
+            verifier.verify(lambda: (self.original, current))
+        self.assertEqual(verifier.last_evidence['category'], 'uf_tracked_current_disk_verified')
+        self.assertEqual(verifier.original, self.epoch)
+
+    def test_mixed_flags_and_other_platform_and_legacy_refuse(self):
+        for flags, platform, schema in ((0x42, 'darwin', 2), (0x40, 'linux', 2),
+                                        (0x40, 'darwin', 1)):
+            with self.subTest(flags=flags, platform=platform, schema=schema):
+                before = deepcopy(self.epoch)
+                before['schema'] = schema
+                current = deepcopy(before)
+                current['members']['__init__.py'][8] ^= flags
+                verifier = RuntimeVerifier(self.original, before, process_started_ns=10**20, isolated=True)
+                with patch('cmw.nodes.runtime_observation.sys.platform', platform):
+                    with self.assertRaisesRegex(RuntimeRefusal, 'security_metadata_changed'):
+                        verifier.verify(lambda: (self.original, current))
+
+    def test_legacy_incomplete_baseline_exact_epoch_only_not_retroactive_evidence(self):
+        legacy = deepcopy(self.epoch)
+        legacy['schema'] = 1
+        for epoch in [legacy['root_epoch'], legacy['executable_epoch'], *legacy['members'].values()]:
+            epoch[-1] = False
+        verifier = RuntimeVerifier(self.original, legacy, process_started_ns=10**20, isolated=True)
+        verifier.verify(lambda: (self.original, deepcopy(self.epoch)))
+        current = deepcopy(self.epoch)
+        current['members']['__init__.py'][4] += 1
+        with self.assertRaisesRegex(RuntimeRefusal, 'security_baseline_incomplete'):
+            verifier.verify(lambda: (self.original, current))
+
+    def test_restored_mtime_content_change_refuses(self):
+        before = self.member.stat()
+        self.member.write_text('value=2\n')
+        os.utime(self.member, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with self.assertRaisesRegex(RuntimeRefusal, 'content_changed'):
+            self.verifier().verify(runtime_observed)
