@@ -44,7 +44,13 @@ def _extended_security(path):
                         ctypes.c_uint32, ctypes.c_int]
     getting.restype = ctypes.c_ssize_t
     before = path.lstat()
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise RuntimeRefusal('security_metadata_unavailable', phase='security-open', path=str(path),
+                             api='open', errno=exc.errno,
+                             security_state='denied' if isinstance(exc, PermissionError) else 'error',
+                             object_type='directory' if stat.S_ISDIR(before.st_mode) else 'file') from exc
     try:
         if object_epoch(os.fstat(descriptor)) != object_epoch(before):
             raise RuntimeRefusal('in_flight_change', phase='security-open', path=str(path))

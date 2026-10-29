@@ -91,3 +91,16 @@ class NativeSecurityTests(unittest.TestCase):
         with self.assertRaises(SecurityReadError) as caught:
             acl_evidence(self.fd, libc=Racing())
         self.assertEqual(caught.exception.state, 'changed-object')
+
+    def test_denied_descriptor_open_retains_native_error_context(self):
+        from cmw.nodes.runtime_observation import RuntimeRefusal
+        self.file.chmod(0)
+        try:
+            with self.assertRaises(RuntimeRefusal) as caught:
+                file_epoch(self.file)
+            self.assertEqual(caught.exception.evidence['api'], 'open')
+            self.assertEqual(caught.exception.evidence['errno'], errno.EACCES)
+            self.assertEqual(caught.exception.evidence['security_state'], 'denied')
+            self.assertEqual(caught.exception.evidence['object_type'], 'file')
+        finally:
+            self.file.chmod(0o600)
