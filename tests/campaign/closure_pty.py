@@ -33,7 +33,9 @@ CONDITION_SECONDS = 8.0
 
 
 def write(path, value):
-    path.write_text(json.dumps(value, indent=2, default=str)+'\n')
+    with path.open('w') as stream:
+        json.dump(value, stream, indent=2, default=str)
+        stream.write('\n')
 
 
 def contains(text, token):

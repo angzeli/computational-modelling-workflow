@@ -112,6 +112,31 @@ class DriverContractTests(unittest.TestCase):
         self.assertEqual(fds['classifications']['access_denied'], 1)
         self.assertAlmostEqual(fds['longest_blind_seconds'], .2)
 
+    def test_descendant_discovery_skips_only_roots_already_in_verified_tree(self):
+        for parent_sees_child in (True, False):
+            with self.subTest(parent_sees_child=parent_sees_child):
+                ledger = ProcessLedger(self.id())
+                child_row = {**ledger.frontend, 'pid': 123456, 'birth': 123., 'ledger_id': 1,
+                             'capture_origin': 'direct-launch', 'role': 'controller'}
+                ledger.records.append(child_row)
+                parent, child = Mock(pid=ledger.frontend['pid']), Mock(pid=child_row['pid'])
+                parent.create_time.return_value = ledger.frontend['birth']
+                child.create_time.return_value = child_row['birth']
+                parent.children.return_value = [child] if parent_sees_child else []
+                child.children.return_value = []
+                def observation(row):
+                    return {'ledger_id': row['ledger_id'], 'pid': row['pid'], 'birth': row['birth'],
+                            'classification': 'sampled_live', 'required_live': True}
+                with patch('tests.campaign.support.psutil.Process', side_effect=lambda pid: parent if pid == parent.pid else child), \
+                     patch.object(ledger, '_register', return_value=child_row), \
+                     patch.object(ledger, 'observe', side_effect=observation):
+                    ledger.sample()
+                parent.children.assert_called_once_with(recursive=True)
+                if parent_sees_child:
+                    child.children.assert_not_called()
+                else:
+                    child.children.assert_called_once_with(recursive=True)
+
     def test_sampler_lag_has_classified_scheduled_opportunities(self):
         ledger = ProcessLedger(self.id())
         ledger.next_due -= .35
@@ -148,6 +173,22 @@ class DriverContractTests(unittest.TestCase):
             self.assertEqual(after['queue'][0]['status'], 'Queue')
             self.assertFalse(after['controller']['dispatch'])
             self.assertTrue(after['queue'][0]['reason'])
+
+    def test_streamed_report_keeps_owned_shape_encoding_and_newline(self):
+        from tests.campaign.active_writer_pty import save as writer_save
+        from tests.campaign.closure_pty import write as pty_write
+        value = {'samples': [{'at': 1.25, 'observations': [{'ledger_id': 1, 'role': 'endpoint',
+            'fields': {'fds': {'classification': 'access_denied', 'value': None,
+                              'message': 'fixture denied', 'errno': 13}}}], 'processes': []}],
+            'outcomes': {'functional_result': 'PASS', 'resource_observability': 'RESOURCE_QUALIFICATION_INCOMPLETE'},
+            'remaining': [], 'label': '研究'}
+        expected = json.dumps(value, indent=2)+'\n'
+        with tempfile.TemporaryDirectory() as directory:
+            for index, writer in enumerate((closure_workflows.save, writer_save, pty_write)):
+                target = Path(directory)/f'owned-{index}.json'
+                writer(target, value)
+                self.assertEqual(target.read_text(), expected)
+                self.assertEqual(json.loads(target.read_text()), value)
 
     def test_fault_driver_selectors_resolve_without_loader_failures(self):
         loader = unittest.TestLoader()

@@ -27,7 +27,9 @@ SUPPORT = Path(__file__).resolve().parents[2]
 
 
 def save(path, value):
-    Path(path).write_text(json.dumps(value, indent=2) + '\n')
+    with Path(path).open('w') as stream:
+        json.dump(value, stream, indent=2)
+        stream.write('\n')
 
 
 def installed_origin():

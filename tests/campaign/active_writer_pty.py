@@ -21,7 +21,9 @@ ROWS, CYCLES, PAGE_ROWS, WALL_SECONDS = 120, 12, 50, 60
 
 
 def save(path, value):
-    Path(path).write_text(json.dumps(value, indent=2, default=str)+'\n')
+    with Path(path).open('w') as stream:
+        json.dump(value, stream, indent=2, default=str)
+        stream.write('\n')
 
 
 def bounded(predicate, deadline):

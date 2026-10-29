@@ -357,7 +357,9 @@ def run(root, mode, expected_runtime):
             observation=observation, resource_limits_passed=not any('RSS/FD' in value or 'descriptor' in value
                 or 'subprocess count' in value for value in violations),
             performance_passed=not report['deadline_exceeded'] and not any('latency' in value or 'Protocol' in value for value in violations))
-        (root/'result.json').write_text(json.dumps(report, indent=2)+'\n')
+        with (root/'result.json').open('w') as stream:
+            json.dump(report, stream, indent=2)
+            stream.write('\n')
     if failure is not None:
         raise failure
     assert report['passed'], report['budget_violations']

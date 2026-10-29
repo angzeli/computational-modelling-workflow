@@ -251,7 +251,13 @@ class ProcessLedger:
         with self.lock:
             roots = [row for row in self.records if row['ledger_id'] not in self.terminal
                      and row['capture_origin'] in {'explicit-root', 'direct-launch'}]
+        discovered_roots = set()
         for row in roots:
+            # One recursive traversal already covers direct children it found.
+            # Retain separate traversal for a known root absent from that tree
+            # (reparenting, disappearance or an incomplete parent observation).
+            if (row['pid'], row['birth']) in discovered_roots:
+                continue
             if row['birth'] is None:
                 continue
             try:
@@ -259,7 +265,9 @@ class ProcessLedger:
                 if process.create_time() != row['birth']:
                     continue  # The classified observation below records the mismatch.
                 for child in process.children(recursive=True):
-                    self._register(child, 'owned descendant', 'first-observed-descendant')
+                    registered = self._register(child, 'owned descendant', 'first-observed-descendant')
+                    if registered['birth'] is not None:
+                        discovered_roots.add((registered['pid'], registered['birth']))
             except psutil.NoSuchProcess:
                 pass
             except (psutil.Error, OSError) as exc:

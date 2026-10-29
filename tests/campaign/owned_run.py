@@ -124,7 +124,9 @@ def run(argv, output, timeout, *, max_owned=BUDGETS['owned_subprocesses']):
     report['passed'] = report['outcomes']['qualified']
     report['execution_passed'] = report['outcomes']['execution_passed']
     report['harness_returncode'] = int(not report['passed'])
-    (output/'result.json').write_text(json.dumps(report, indent=2)+'\n')
+    with (output/'result.json').open('w') as stream:
+        json.dump(report, stream, indent=2)
+        stream.write('\n')
     return report
 
 
