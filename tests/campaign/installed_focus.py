@@ -12,7 +12,7 @@ from cmw.nodes.identity import runtime_identity
 
 MODULES = [
     'tests.nodes.test_runtime_observation', 'tests.progress.test_vasp_setting_context',
-    'tests.campaign.test_observation', 'tests.campaign.test_catalogue_writer',
+    'tests.campaign.test_observation', 'tests.campaign.test_driver_contracts', 'tests.campaign.test_catalogue_writer',
     'tests.progress.test_generated_schedules', 'tests.progress.test_multiwfn',
     'tests.jobs.test_research_invariants',
     'tests.nodes.test_integrated_portal', 'tests.jobs.test_integrated_navigation',

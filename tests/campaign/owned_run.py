@@ -21,6 +21,7 @@ import time
 import cmw
 
 from tests.campaign.support import BUDGETS, OBSERVATION_RULES, ProcessLedger, summary
+from tests.campaign.qualification_v2 import outcomes
 
 
 def run(argv, output, timeout, *, max_owned=BUDGETS['owned_subprocesses']):
@@ -89,18 +90,18 @@ def run(argv, output, timeout, *, max_owned=BUDGETS['owned_subprocesses']):
                      if all(row[key] == ledger.frontend[key] for key in ('pid', 'birth'))), None)
     initial_frontend = frontend(report['samples'][0])
     final_frontend = frontend(final_sample)
-    growth = final_frontend['fds']-initial_frontend['fds'] if initial_frontend and final_frontend else None
-    report['resource_peaks'] = {'rss_bytes': max((row['rss_bytes'] for row in resources), default=None),
-                               'fds': max((row['fds'] for row in resources), default=None)}
+    growth = final_frontend['fds']-initial_frontend['fds'] if initial_frontend and final_frontend and 'fds' in initial_frontend and 'fds' in final_frontend else None
+    report['resource_peaks'] = {'rss_bytes': max((row['rss_bytes'] for row in resources if 'rss_bytes' in row), default=None),
+                               'fds': max((row['fds'] for row in resources if 'fds' in row), default=None)}
     report['frontend_descriptors'] = {'initial': initial_frontend, 'final': final_frontend, 'growth': growth}
     report['resource_limits'] = {key: BUDGETS[key] for key in
                                 ('process_rss_bytes', 'process_fds', 'frontend_fd_growth')}
     violations = []
     if not resources:
         violations.append('No successful resource observations')
-    if any(row['rss_bytes'] > BUDGETS['process_rss_bytes'] for row in resources):
+    if any(('rss_bytes' in row and row['rss_bytes'] > BUDGETS['process_rss_bytes']) for row in resources):
         violations.append('Per-process RSS budget exceeded')
-    if any(row['fds'] > BUDGETS['process_fds'] for row in resources):
+    if any(('fds' in row and row['fds'] > BUDGETS['process_fds']) for row in resources):
         violations.append('Per-process FD budget exceeded')
     if growth is None:
         violations.append('Frontend initial/final descriptor observation missing')
@@ -108,12 +109,21 @@ def run(argv, output, timeout, *, max_owned=BUDGETS['owned_subprocesses']):
         violations.append('Frontend descriptor growth budget exceeded')
     report['resource_budget_violations'] = violations
     report['resource_limits_passed'] = not violations
-    report['passed'] = (report.get('returncode') == 0 and 'error' not in report
-        and 'cleanup_error' not in report and not report.get('remaining', [])
-        and not report['sampling_errors'] and report['ownership']['coverage_passed']
-        and not report['ownership']['cleanup_errors'] and report['sampler_stopped']
-        and report['cleanup_seconds'] <= OBSERVATION_RULES['cleanup_seconds']
-        and report['peak_sampled_owned_subprocesses'] <= max_owned and report['resource_limits_passed'])
+    observation = report['ownership']
+    if report['sampling_errors']:
+        observation.update(observation_accounting='FAIL', resource_observability='RESOURCE_QUALIFICATION_INCOMPLETE')
+    report['process_exits'] = {'command_returncode': report.get('returncode'),
+                              'command_reaped_returncode': report.get('reaped_returncode')}
+    report['outcomes'] = outcomes(functional_passed=report.get('returncode') == 0 and 'error' not in report,
+        safety_passed=observation['control_identity_safety'] == 'PASS',
+        cleanup_passed='cleanup_error' not in report and not report.get('remaining', [])
+            and not observation['cleanup_errors'] and report['sampler_stopped']
+            and report['cleanup_seconds'] <= OBSERVATION_RULES['cleanup_seconds'],
+        observation=observation, resource_limits_passed=report['resource_limits_passed']
+            and report['peak_sampled_owned_subprocesses'] <= max_owned)
+    report['passed'] = report['outcomes']['qualified']
+    report['execution_passed'] = report['outcomes']['execution_passed']
+    report['harness_returncode'] = int(not report['passed'])
     (output/'result.json').write_text(json.dumps(report, indent=2)+'\n')
     return report
 

@@ -51,6 +51,7 @@ def installed_origin():
 def monitored(name, destination):
     """Use the campaign's shared classified ledger before any child launch."""
     from tests.campaign.support import BUDGETS, ProcessLedger
+    from tests.campaign.qualification_v2 import outcomes
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     stopped = threading.Event()
@@ -79,25 +80,31 @@ def monitored(name, destination):
             cleanup_deadline = time.monotonic() + 30
             stopped.set()
             sampler.join(timeout=2)
+            ledger.finish_sampling()
             remaining = ledger.cleanup(cleanup_deadline)
             evidence = ledger.report()
             live = [process for sample in samples for process in sample['processes']]
-            peaks = {'rss_bytes': max((process['rss_bytes'] for process in live), default=0),
-                     'fds': max((process['fds'] for process in live), default=0),
+            peaks = {'rss_bytes': max((process['rss_bytes'] for process in live if 'rss_bytes' in process), default=None),
+                     'fds': max((process['fds'] for process in live if 'fds' in process), default=None),
                      'owned_subprocesses': max((sum(process['pid'] != os.getpid() for process in sample['processes'])
                                                for sample in samples), default=0)}
-            resource_ok = (peaks['rss_bytes'] <= BUDGETS['process_rss_bytes']
-                           and peaks['fds'] <= BUDGETS['process_fds']
+            resource_ok = (all(('rss_bytes' not in process or process['rss_bytes'] <= BUDGETS['process_rss_bytes'])
+                           and ('fds' not in process or process['fds'] <= BUDGETS['process_fds']) for process in live)
                            and peaks['owned_subprocesses'] <= BUDGETS['owned_subprocesses'])
             evidence.update(peaks=peaks, resource_limits_passed=resource_ok, samples=samples, sampler_errors=sampling_errors,
                             sampler_stopped=not sampler.is_alive(), remaining=remaining)
+            if sampling_errors:
+                evidence.update(observation_accounting='FAIL', resource_observability='RESOURCE_QUALIFICATION_INCOMPLETE')
+            evidence['outcomes'] = outcomes(functional_passed=not body_failed,
+                safety_passed=evidence['control_identity_safety'] == 'PASS',
+                cleanup_passed=not remaining and not ledger.cleanup_errors and not sampler.is_alive(),
+                observation=evidence, resource_limits_passed=resource_ok)
             save(destination, evidence)
             if not body_failed:
                 summary = {'evidence': str(destination), 'coverage_passed': evidence['coverage_passed'],
                     'resource_limits_passed': resource_ok, 'remaining_records': len(remaining),
                     'sampling_errors': sampling_errors, 'sampler_stopped': not sampler.is_alive()}
-                assert not sampler.is_alive() and not sampling_errors, summary
-                assert evidence['coverage_passed'] and resource_ok and not remaining, summary
+                assert evidence['outcomes']['execution_passed'], summary
 
 
 def child_command(arguments, evidence):
@@ -350,13 +357,7 @@ def study_workflow(root, report):
                        'selection': selection, 'receipt_paths': [str(value[1]['receipt']) for value in bindings.values()]}
     report['reached_stage'] = 'selected-and-held-reviews'
     first_id = cases[0]['case_id']; parent, bound = bindings[first_id]
-    held = store.add(argv=['/usr/bin/true'], cwd=bound['run'], engine='VASP', hold=True,
-        progress_sources=tuple(SourceDescriptor(role.lower(), str(bound['run'] / role))
-                               for role in ('OUTCAR', 'OSZICAR', 'POSCAR')))
-    held_review = review(store, held, {})
-    held_domains = {item.name: item.status for item in held_review.domains}
-    assert held_domains['operational'] == 'UNKNOWN', held_review.to_dict()
-    assert held_domains['policy'] == held_domains['finalization'] == 'NOT ASSESSED'
+    held_review = held_unknown_review(store, bound['run'])
     report['held_review'] = held_review.to_dict()
     report['reached_stage'] = 'successor'
     successor_spec = {'schema': 1, 'parent': selection['cases'][first_id]['target'], 'mode': 'geometry',
@@ -406,6 +407,45 @@ def study_workflow(root, report):
     assert changed['rows'][0]['status'] != 'QUALIFIED' and changed['rows'][0]['delta'] is None
     report['negative_controls'] = {'wrong_case': case_report, 'wrong_owner': owner_report, 'wrong_attempt': wrong_report, 'missing': absent, 'source_change': changed}
     assert not store.snapshot()['controller']['online']
+
+
+def held_unknown_review(store, run):
+    """Execute the exact post-export held branch without a completion receipt."""
+    from cmw.progress.models import SourceDescriptor
+    held = store.add(argv=['/usr/bin/true'], cwd=run, name='held UNKNOWN review control', engine='VASP', hold=True,
+        progress_sources=tuple(SourceDescriptor(role.lower(), str(run / role))
+                               for role in ('OUTCAR', 'OSZICAR', 'POSCAR')))
+    held_review = review(store, held, {})
+    domains = {item.name: item.status for item in held_review.domains}
+    assert domains['operational'] == 'UNKNOWN', held_review.to_dict()
+    assert domains['policy'] == domains['finalization'] == 'NOT ASSESSED'
+    return held_review
+
+
+def observation_rollup(root, functional_passed):
+    """A nested monitor failure changes qualification, never recorded child exits."""
+    paths = sorted({*Path(root).rglob('ownership.json'), *Path(root).rglob('*.ownership.json')})
+    reports, monitor_errors = [], []
+    for path in paths:
+        try:
+            value = json.loads(path.read_text())
+            reports.append({'path': str(path), 'outcomes': value['outcomes']})
+        except (OSError, ValueError, KeyError) as exc:
+            monitor_errors.append({'path': str(path), 'error': repr(exc)})
+    keys = ('functional_result', 'control_identity_safety', 'cleanup_result',
+            'observation_accounting', 'resource_observability', 'performance_result', 'visual_result')
+    result = {}
+    for key in keys:
+        statuses = [report['outcomes'][key] for report in reports]
+        result[key] = ('FAIL' if 'FAIL' in statuses else 'RESOURCE_QUALIFICATION_INCOMPLETE'
+            if 'RESOURCE_QUALIFICATION_INCOMPLETE' in statuses else 'PASS' if 'PASS' in statuses else 'NOT_ASSESSED')
+    if not functional_passed:
+        result['functional_result'] = 'FAIL'
+    if not reports or monitor_errors:
+        result['observation_accounting'] = 'FAIL'
+        result['resource_observability'] = 'RESOURCE_QUALIFICATION_INCOMPLETE'
+    return {'outcomes': result, 'qualified': all(value in {'PASS', 'NOT_ASSESSED'} for value in result.values()),
+            'monitor_reports': reports, 'monitor_errors': monitor_errors}
 
 
 def run_component(name, action, report):
@@ -522,8 +562,8 @@ def validate_child_reports(root, allowed_pythons=None):
             'live_coverage': owned['live_coverage'], 'remaining_records': len(owned['remaining']),
             'resource_limits_passed': owned['resource_limits_passed']}
         children.append(summary)
-        assert owned['coverage_passed'] and owned['resource_limits_passed'] and not owned['remaining'], summary
-        assert owned['sampler_stopped'] and not owned['sampler_errors'], str(path)
+        summary['outcomes'] = owned['outcomes']
+        assert owned['outcomes']['execution_passed'], summary
     return children
 
 
@@ -575,6 +615,7 @@ def main():
     finally:
         signal.alarm(0); signal.signal(signal.SIGALRM, previous)
         report.update(seconds=time.monotonic() - started, budget_seconds=deadline)
+        report.update(observation_rollup(root, report['status'] == 'PASS'))
         save(output, report)
     raise SystemExit(report['status'] != 'PASS')
 

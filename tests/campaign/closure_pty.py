@@ -22,6 +22,7 @@ import time
 from tests.campaign.geometry import GeometryProbe, RESIZE_SEQUENCE
 from tests.campaign.pty import Session
 from tests.campaign.support import BUDGETS, OBSERVATION_RULES, ProcessLedger, summary
+from tests.campaign.qualification_v2 import outcomes
 
 BUDGET_SECONDS = 120
 FRAME_SECONDS = 2.0
@@ -52,15 +53,20 @@ def monitored(directory, label):
                 report['sampling_errors'].append(repr(exc))
                 return
     sampler = threading.Thread(target=sample, name='closure-pty-resource-sampler', daemon=True)
+    body_failed = False
     with ledger:
         try:
             report['samples'].append(ledger.sample())
             sampler.start()
             yield report
+        except BaseException:
+            body_failed = True
+            raise
         finally:
             stopped.set()
             if sampler.ident is not None:
                 sampler.join(timeout=2)
+            ledger.finish_sampling()
             try:
                 report['remaining'] = ledger.cleanup(time.monotonic()+5)
             except BaseException as exc:
@@ -71,15 +77,21 @@ def monitored(directory, label):
                 report['sample_cadence_seconds'] = summary([b['at']-a['at']
                     for a, b in zip(report['samples'], report['samples'][1:])])
                 resources = [row for sample in report['samples'] for row in sample['processes']]
-                report['resource_bounds_passed'] = all(row['rss_bytes'] <= BUDGETS['process_rss_bytes']
-                    and row['fds'] <= BUDGETS['process_fds'] for row in resources)
+                report['resource_bounds_passed'] = all(('rss_bytes' not in row or row['rss_bytes'] <= BUDGETS['process_rss_bytes'])
+                    and ('fds' not in row or row['fds'] <= BUDGETS['process_fds']) for row in resources)
                 report['peak_owned_subprocesses'] = max((sum(row['pid'] != os.getpid()
                     for row in sample['processes']) for sample in report['samples']), default=0)
-                report['passed'] = (not report.get('remaining') and 'cleanup_error' not in report
-                    and not report['sampling_errors'] and report['ownership']['coverage_passed']
-                    and not report['ownership']['cleanup_errors'] and report['sampler_stopped']
-                    and report['resource_bounds_passed']
-                    and report['peak_owned_subprocesses'] <= BUDGETS['owned_subprocesses'])
+                observation = report['ownership']
+                if report['sampling_errors']:
+                    observation.update(observation_accounting='FAIL', resource_observability='RESOURCE_QUALIFICATION_INCOMPLETE')
+                report['outcomes'] = outcomes(functional_passed=not body_failed,
+                    safety_passed=observation['control_identity_safety'] == 'PASS',
+                    cleanup_passed=not report.get('remaining') and 'cleanup_error' not in report
+                        and not observation['cleanup_errors'] and report['sampler_stopped'],
+                    observation=observation, resource_limits_passed=report['resource_bounds_passed']
+                        and report['peak_owned_subprocesses'] <= BUDGETS['owned_subprocesses'])
+                report['passed'] = report['outcomes']['execution_passed']
+                report['qualified'] = report['outcomes']['qualified']
                 write(directory/'ownership.json', report)
     assert report['passed'], report
 

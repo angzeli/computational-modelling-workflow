@@ -289,6 +289,8 @@ def main():
     finally:
         signal.alarm(0); signal.signal(signal.SIGALRM, previous)
         report.update(seconds=time.monotonic() - started, budget_seconds=120)
+        from tests.campaign.closure_workflows import observation_rollup
+        report.update(observation_rollup(root, report['status'] == 'PASS'))
         save(output, report)
     raise SystemExit(report['status'] != 'PASS')
 

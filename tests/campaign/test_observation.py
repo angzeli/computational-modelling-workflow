@@ -56,7 +56,7 @@ class ObservationTests(unittest.TestCase):
         ledger = ProcessLedger(self.id())
         for error, expected in ((psutil.AccessDenied(os.getpid()), 'access_denied'),
                                 (psutil.NoSuchProcess(os.getpid()), 'transient_read_error')):
-            with self.subTest(error=expected), patch('tests.campaign.support.resource_sample', side_effect=error):
+            with self.subTest(error=expected), patch('tests.campaign.support.field_sample', side_effect=error):
                 observed = ledger.observe(ledger.frontend)
             self.assertEqual(observed['classification'], expected)
             self.assertTrue(observed['required_live'])
@@ -75,7 +75,7 @@ class ObservationTests(unittest.TestCase):
                     process.create_time.side_effect = [ledger.frontend['birth'], ledger.frontend['birth'], ledger.frontend['birth']+1]
                 process.status.side_effect = [psutil.STATUS_RUNNING, status]
                 with patch('tests.campaign.support.psutil.Process', return_value=process), \
-                     patch('tests.campaign.support.resource_sample', side_effect=psutil.NoSuchProcess(process.pid)):
+                     patch('tests.campaign.support.field_sample', side_effect=psutil.NoSuchProcess(process.pid)):
                     observed = ledger.observe(ledger.frontend)
                 self.assertEqual(observed['classification'], classification)
                 self.assertEqual(observed['required_live'], required)
@@ -246,7 +246,7 @@ class ObservationTests(unittest.TestCase):
                     ledger = Mock(frontend=baseline)
                     ledger.sample.side_effect = [initial, last]
                     ledger.cleanup.return_value = []
-                    ledger.report.return_value = {'coverage_passed': True, 'cleanup_errors': []}
+                    ledger.report.return_value = {'coverage_passed': True, 'cleanup_errors': [], 'control_identity_safety': 'PASS', 'observation_accounting': 'PASS', 'resource_observability': 'PASS'}
                     context = Mock()
                     context.__enter__ = Mock(return_value=ledger)
                     context.__exit__ = Mock(return_value=False)

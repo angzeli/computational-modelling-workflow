@@ -22,6 +22,7 @@ import psutil
 from cmw.jobs.ownership import identity as process_identity
 from cmw.nodes.protocol import encode, request
 from cmw.nodes.transport import ProcessTransport
+from tests.campaign.qualification_v2 import PLAN, FIELDS, coverage, field_sample, role_for
 
 
 # Fixed before execution. These bounds describe this fixture, not production SLA.
@@ -42,8 +43,8 @@ BUDGETS = {
 
 
 # New observation/cleanup rules, separate from the retained workload bounds.
-OBSERVATION_RULES = {'sample_cadence_seconds': .1, 'required_live_coverage': 1.0,
-                     'cleanup_seconds': 30}
+OBSERVATION_RULES = {key: PLAN[key] for key in ('sample_cadence_seconds', 'cleanup_seconds')}
+OBSERVATION_RULES['contract_version'] = 2
 
 
 def summary(values):
@@ -55,11 +56,9 @@ def summary(values):
 
 
 def resource_sample(process):
-    """A live sample is never a fabricated zero for an exited/inaccessible PID."""
-    cpu = process.cpu_times()
-    return {'pid': process.pid, 'birth': process.create_time(),
-            'rss_bytes': process.memory_info().rss, 'fds': process.num_fds(),
-            'threads': process.num_threads(), 'cpu_seconds': cpu.user + cpu.system}
+    """Legacy endpoint samples preserve partial values and their field evidence."""
+    values, fields = field_sample(process, process.create_time())
+    return {**values, 'field_observations': fields}
 
 
 class ProcessLedger:
@@ -75,8 +74,12 @@ class ProcessLedger:
         self.records, self.launch_failures, self.observations = [], [], []
         self.discovery_errors, self.cleanup_errors = [], []
         self.direct, self.terminal = {}, set()
+        self.opportunities, self.sampling_errors = [], []
+        self.next_due = time.monotonic()
+        self.last_sample_end = self.next_due
         self.lock = threading.RLock()
-        self.frontend = self._register(psutil.Process(), 'frontend', 'explicit-root')
+        root_role = role_for(owning_test.split(':'))
+        self.frontend = self._register(psutil.Process(), 'frontend' if root_role == 'helper' else root_role, 'explicit-root')
         self._patch = None
 
     def _register(self, process, role, origin, direct=None):
@@ -139,7 +142,7 @@ class ProcessLedger:
                     process = psutil.Process(self.pid)
                 except psutil.NoSuchProcess:
                     process = type('ExitedChild', (), {'pid': self.pid})()
-                ledger._register(process, Path(str(argv[0])).name if isinstance(argv, (list, tuple)) else 'subprocess',
+                ledger._register(process, role_for(argv),
                                  'direct-launch', direct=self)
         self._patch = patch('subprocess.Popen', RecordedPopen)
         self._patch.start()
@@ -149,8 +152,20 @@ class ProcessLedger:
         self._patch.stop()
 
     def observe(self, row):
+        observed = self._observe(row)
+        classification = {'genuinely_unobservable': 'unavailable_identity',
+            'verified_exited': 'verified_exit', 'zombie_reaping_pending': 'zombie_pending_reap',
+            'transient_read_error': 'transient_read_uncertainty'}.get(observed['classification'], observed['classification'])
+        observed.setdefault('fields', {field: {'field': field, 'method': 'psutil.Process.' + method,
+            'classification': classification, 'started_at': observed['at'], 'ended_at': time.monotonic(),
+            'value': None, 'reason': observed.get('error', observed.get('exit_evidence'))}
+            for field, method in FIELDS.items()})
+        return observed
+
+    def _observe(self, row):
         result = {'ledger_id': row['ledger_id'], 'pid': row['pid'], 'birth': row['birth'],
-                  'phase': self.phase, 'at': time.monotonic(), 'required_live': False}
+                  'phase': self.phase, 'role': row['role'], 'owning_test': self.owning_test,
+                  'at': time.monotonic(), 'required_live': False}
         direct = self.direct.get(row['ledger_id'])
         if direct is not None and direct.poll() is not None:
             result.update(classification='verified_exited', returncode=direct.wait(timeout=0),
@@ -185,11 +200,16 @@ class ProcessLedger:
                 result['classification'] = 'zombie_reaping_pending'
                 return result
             result['required_live'] = True
-            sample = resource_sample(process)
+            sample, fields = field_sample(process, row['birth'])
+            result['fields'] = fields
             if psutil.Process(row['pid']).create_time() != row['birth']:
                 result['classification'] = 'identity_mismatch'
                 return result
-            result.update(classification='sampled_live', sample=sample)
+            result.update(classification='sampled_live' if all(item['classification'] == 'sampled_live'
+                for item in fields.values()) else 'partially_sampled_live', sample=sample)
+            if any(item['classification'] == 'identity_mismatch' for item in fields.values()):
+                result.update(classification='identity_mismatch')
+                result.pop('sample')
         except psutil.NoSuchProcess:
             try:
                 current = psutil.Process(row['pid'])
@@ -218,6 +238,14 @@ class ProcessLedger:
         return result
 
     def sample(self):
+        started = time.monotonic()
+        cadence = OBSERVATION_RULES['sample_cadence_seconds']
+        while self.next_due + cadence <= started:
+            self._missed_opportunity(self.next_due, 'skipped_lag')
+            self.next_due += cadence
+        scheduled = self.next_due if self.next_due <= started else None
+        if scheduled is not None:
+            self.next_due += cadence
         with self.lock:
             roots = [row for row in self.records if row['ledger_id'] not in self.terminal
                      and row['capture_origin'] in {'explicit-root', 'direct-launch'}]
@@ -238,10 +266,39 @@ class ProcessLedger:
                     'error': type(exc).__name__ + ': ' + str(exc)})
         with self.lock:
             rows = [row for row in self.records if row['ledger_id'] not in self.terminal]
-        observations = [self.observe(row) for row in rows]
+        try:
+            observations = [self.observe(row) for row in rows]
+        except BaseException as exc:
+            self.sampling_errors.append({'at': time.monotonic(), 'exception': type(exc).__name__, 'message': str(exc)})
+            if scheduled is not None:
+                self._missed_opportunity(scheduled, 'sampler_crash')
+            raise
         self.observations.extend(observations)
-        return {'at': time.monotonic(), 'phase': self.phase, 'observations': observations,
-                'processes': [item['sample'] for item in observations if item['classification'] == 'sampled_live']}
+        self.last_sample_end = time.monotonic()
+        if scheduled is not None:
+            self.opportunities.append({'scheduled_at': scheduled, 'started_at': started,
+                'ended_at': self.last_sample_end, 'classification': 'sampled', 'phase': self.phase})
+        return {'at': self.last_sample_end, 'observer_seconds': self.last_sample_end-started, 'phase': self.phase, 'observations': observations,
+                'processes': [item['sample'] for item in observations if 'sample' in item]}
+
+    def _missed_opportunity(self, scheduled, classification):
+        self.opportunities.append({'scheduled_at': scheduled, 'classification': classification, 'phase': self.phase})
+        for row in self.records:
+            if row['ledger_id'] in self.terminal or row['recorded_at'] > scheduled:
+                continue
+            self.observations.append({'ledger_id': row['ledger_id'], 'pid': row['pid'], 'birth': row['birth'],
+                'role': row['role'], 'owning_test': self.owning_test, 'phase': self.phase, 'at': scheduled,
+                'classification': classification, 'required_live': True,
+                'fields': {field: {'field': field, 'method': method, 'classification': classification,
+                    'started_at': None, 'ended_at': None, 'value': None} for field, method in FIELDS.items()}})
+
+    def finish_sampling(self, ended_at=None):
+        """Close the declared observation window, accounting for lag after a crash."""
+        ended_at = time.monotonic() if ended_at is None else ended_at
+        while self.next_due <= ended_at:
+            self._missed_opportunity(self.next_due, 'skipped_lag')
+            self.next_due += OBSERVATION_RULES['sample_cadence_seconds']
+        self.last_sample_end = ended_at
 
     def cleanup(self, deadline):
         """Reap direct children and stop only still-matching recorded owners."""
@@ -257,7 +314,7 @@ class ProcessLedger:
                 if observed['classification'] == 'verified_exited':
                     continue
                 remaining.append({**row, 'observation': observed})
-                if observed['classification'] != 'sampled_live' or row['ledger_id'] in signalled:
+                if observed['classification'] not in {'sampled_live', 'partially_sampled_live'} or row['ledger_id'] in signalled:
                     continue
                 try:
                     process = psutil.Process(row['pid'])
@@ -276,11 +333,15 @@ class ProcessLedger:
     def report(self):
         required = [row for row in self.observations if row['required_live']]
         covered = sum(row['classification'] == 'sampled_live' for row in required)
-        return {'records': self.records, 'launch_failures': self.launch_failures,
+        classified = coverage(self.records, self.observations, self.opportunities,
+                              ended_at=self.last_sample_end, sampling_errors=self.sampling_errors)
+        if self.discovery_errors:
+            classified['resource_observability'] = 'RESOURCE_QUALIFICATION_INCOMPLETE'
+        return {**classified, 'records': self.records, 'launch_failures': self.launch_failures,
                 'discovery_errors': self.discovery_errors, 'cleanup_errors': self.cleanup_errors,
                 'required_live_observations': len(required), 'sampled_live_observations': covered,
                 'live_coverage': covered / len(required) if required else None,
-                'coverage_passed': bool(required) and covered == len(required) and not self.discovery_errors,
+                'coverage_passed': classified['resource_observability'] == 'PASS',
                 'scope': 'Launch records plus sampled owned descendants; not continuous short-lived descendant coverage'}
 
 

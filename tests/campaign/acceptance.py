@@ -296,7 +296,8 @@ def run(root, mode, expected_runtime):
             final_frontend = resource_sample(own)
         except (psutil.Error, OSError) as exc:
             final_frontend = None
-            cleanup_errors.append({'component': 'frontend-sample', 'error': repr(exc)})
+            report['sampling_errors'].append({'component': 'frontend-sample', 'error': repr(exc)})
+        ledger.finish_sampling()
         report['ownership'] = ledger.report()
         cleanup_ended = time.monotonic()
         report['cleanup'] = {'remaining_owned_processes': remaining, 'listener_closed': listener_closed,
@@ -321,9 +322,9 @@ def run(root, mode, expected_runtime):
         if report['peak_owned_subprocesses'] > BUDGETS['owned_subprocesses']:
             violations.append('Owned subprocess count budget exceeded')
         all_resources = [p for sample in report['resources'] for p in sample['processes']]
-        if any(p['rss_bytes'] > BUDGETS['process_rss_bytes'] or p['fds'] > BUDGETS['process_fds'] for p in all_resources):
+        if any(('rss_bytes' in p and p['rss_bytes'] > BUDGETS['process_rss_bytes']) or ('fds' in p and p['fds'] > BUDGETS['process_fds']) for p in all_resources):
             violations.append('Per-process RSS/FD budget exceeded')
-        if initial is None or final_frontend is None or final_frontend['fds']-initial['fds'] > BUDGETS['frontend_fd_growth']:
+        if initial is None or final_frontend is None or 'fds' not in initial or 'fds' not in final_frontend or final_frontend['fds']-initial['fds'] > BUDGETS['frontend_fd_growth']:
             violations.append('Frontend descriptor observation/growth failed')
         if any(max([s['request_bytes'], *s.get('response_frame_bytes', [s['response_bytes']])]) > BUDGETS['protocol_frame_bytes'] for s in samples):
             violations.append('Protocol frame budget exceeded')
@@ -345,6 +346,17 @@ def run(root, mode, expected_runtime):
             violations.append('Required final fixture-protection checks incomplete')
         report['budget_violations'] = violations
         report['passed'] = 'error' not in report and not violations and not report['deadline_exceeded']
+        from tests.campaign.qualification_v2 import outcomes
+        observation = report['ownership']
+        if report['sampling_errors']:
+            observation.update(observation_accounting='FAIL', resource_observability='RESOURCE_QUALIFICATION_INCOMPLETE')
+        report['outcomes'] = outcomes(functional_passed='error' not in report,
+            safety_passed=observation['control_identity_safety'] == 'PASS',
+            cleanup_passed=not remaining and listener_closed is not False and not cleanup_errors
+                and not ledger.cleanup_errors and not sampler.is_alive() and cleanup_ended <= cleanup_deadline,
+            observation=observation, resource_limits_passed=not any('RSS/FD' in value or 'descriptor' in value
+                or 'subprocess count' in value for value in violations),
+            performance_passed=not report['deadline_exceeded'] and not any('latency' in value or 'Protocol' in value for value in violations))
         (root/'result.json').write_text(json.dumps(report, indent=2)+'\n')
     if failure is not None:
         raise failure

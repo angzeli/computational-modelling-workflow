@@ -33,6 +33,15 @@ def bounded(predicate, deadline):
     raise AssertionError('Active-writer condition deadline exceeded')
 
 
+def admission_diagnostic(store, writer_id):
+    snapshot = store.snapshot()
+    keys = ('id', 'attempt_id', 'order', 'status', 'reason', 'worker', 'claim', 'started_at')
+    jobs = sorted(snapshot['jobs'], key=lambda job: (job.get('order') is None, job.get('order') or 0))
+    return {'writer_id': writer_id, 'controller': snapshot['controller'],
+            'queue': [{key: job.get(key) for key in keys} for job in jobs],
+            'events': snapshot.get('events', []), 'observed_at': time.monotonic()}
+
+
 def run(directory):
     from cmw.jobs import runtime
     from cmw.jobs.store import Store
@@ -64,10 +73,18 @@ def run(directory):
                 code = 'from pathlib import Path; import time\np=Path('+repr(str(finish))+')\nwhile not p.exists(): time.sleep(.05)'
                 writer = store.add(argv=[sys.executable, '-I', '-B', '-c', code], cwd=root,
                                    name='benign heartbeat writer', hold=True)
+                # Supported fixture ordering: held queue heads block later jobs.
+                store.change(writer['id'], 'move', position=1)
                 store.change(writer['id'], 'release')
+                report['admission_before_start'] = admission_diagnostic(store, writer['id'])
                 runtime.start(store)
-                bounded(lambda: any(job['id'] == writer['id'] and job['status'] == 'Run'
-                                    for job in store.snapshot()['jobs']), min(deadline, time.monotonic()+10))
+                try:
+                    bounded(lambda: any(job['id'] == writer['id'] and job['status'] == 'Run'
+                                        for job in store.snapshot()['jobs']), min(deadline, time.monotonic()+10))
+                finally:
+                    report['admission_after_wait'] = admission_diagnostic(store, writer['id'])
+                    save(root/'result.json', report)
+                report['run_gate_reached'] = True
                 settings = root/'settings.json'
                 save(settings, {'state': str(store.root), 'expected': expected})
                 session = Session(settings, root/'pty', module='tests.campaign.active_writer_pty', deadline=deadline)
@@ -132,6 +149,11 @@ def run(directory):
                 assert report['workload_seconds'] <= WALL_SECONDS
             except BaseException as exc:
                 report['primary_error'] = type(exc).__name__+': '+str(exc)
+                if store is not None and writer is not None:
+                    try:
+                        report['admission_at_failure'] = admission_diagnostic(store, writer['id'])
+                    except BaseException as diagnostic_error:
+                        report['admission_diagnostic_error'] = repr(diagnostic_error)
                 raise
             finally:
                 # The cleanup deadline is separate, includes all nested helpers,
@@ -146,13 +168,17 @@ def run(directory):
                 if store is not None and writer is not None:
                     finish.touch()
                     try:
+                        current = next(job for job in store.snapshot()['jobs'] if job['id'] == writer['id'])
+                        if current['status'] in {'Hold', 'Queue'} and current['started_at'] is None:
+                            report['writer_not_started'] = current
                         snapshot = bounded(lambda: (value if any(job['id'] == writer['id'] and job['status'] in {'Done','Fail','Unknown'}
                             for job in value['jobs']) else None) if (value := store.snapshot()) else None,
-                            cleanup_started+10)
-                        completed = next(job for job in snapshot['jobs'] if job['id'] == writer['id'])
-                        receipt = store.root/'attempts'/writer['attempt_id']/'payload-exit.json'
-                        report['writer'] = {'job': completed, 'receipt': json.loads(receipt.read_text())}
-                        assert completed['status'] == 'Done' and report['writer']['receipt']['exit_code'] == 0
+                            cleanup_started+10) if not report.get('writer_not_started') else None
+                        if snapshot is not None:
+                            completed = next(job for job in snapshot['jobs'] if job['id'] == writer['id'])
+                            receipt = store.root/'attempts'/writer['attempt_id']/'payload-exit.json'
+                            report['writer'] = {'job': completed, 'receipt': json.loads(receipt.read_text())}
+                            assert completed['status'] == 'Done' and report['writer']['receipt']['exit_code'] == 0
                     except BaseException as exc:
                         cleanup_errors.append(repr(exc))
                     try:
@@ -183,8 +209,7 @@ def run(directory):
             origin = json.loads(origin_path.read_text())
             assert origin['python'] == report['origin']['python'] and origin['package'] == report['origin']['package']
         for path, owned in helpers:
-            assert owned['coverage_passed'] and owned['resource_limits_passed'] and not owned['remaining'], str(path)
-            assert owned['sampler_stopped'] and not owned['sampler_errors'], str(path)
+            assert owned['outcomes']['execution_passed'], str(path)
         from tests.campaign.support import BUDGETS
         ui = json.loads((root/'pty'/'input.json').read_text())
         assert not ui['control_thread_alive'] and ui['native_inputs']
@@ -204,6 +229,8 @@ def run(directory):
         signal.alarm(0); signal.signal(signal.SIGALRM, previous)
         report['elapsed_seconds'] = time.monotonic()-started
         report['cleanup_seconds'] = time.monotonic()-cleanup_started if cleanup_started is not None else None
+        from tests.campaign.closure_workflows import observation_rollup
+        report.update(observation_rollup(root, report['passed']))
         save(root/'result.json', report)
     return report
 

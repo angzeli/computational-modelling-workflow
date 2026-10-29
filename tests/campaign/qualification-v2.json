@@ -1,0 +1,18 @@
+{
+  "schema": 2,
+  "status": "PROVISIONAL_REQUIRES_PREFLIGHT_FREEZE",
+  "sample_cadence_seconds": 0.1,
+  "cleanup_seconds": 30,
+  "coverage": {
+    "roles": ["frontend", "controller", "endpoint", "worker", "helper", "owned descendant"],
+    "required_fields": ["rss_bytes", "fds"],
+    "optional_fields": ["cpu_seconds"],
+    "long_lived_seconds": 1.0,
+    "startup_seconds": 0.3,
+    "max_blind_seconds": 0.5,
+    "minimum_valid_reads": 2,
+    "reason": "At unchanged 100 ms cadence a long-lived owner must expose required RSS/FD during startup and across its lifetime. Five missed opportunities are the provisional longest blind window; preflight must justify and freeze it. Every optional CPU gap remains disclosed. Frontend/controller/endpoint also require at least one valid RSS/FD read for short lifetimes. Short helpers retain original launch/wait/reap and only actually observed values."
+  },
+  "claims": ["sampled maxima only", "no retroactive old-gate acceptance", "no production admission changes"],
+  "required_driver_branches": ["completed-study", "held-UNKNOWN", "successor-after-export", "ORCA", "FMO", "ESP", "IGMH", "IFCT", "new-old-peer", "fault-selector", "mutation-import", "local-federated-PTY", "active-writer-Run"]
+}
