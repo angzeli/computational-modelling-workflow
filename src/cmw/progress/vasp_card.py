@@ -39,7 +39,7 @@ def vasp_card_groups(snapshot):
             target = 'Target N/A · EDIFFG=0'
         else:
             # A known setting alone does not establish a force/mask comparison.
-            target = f'EDIFFG {force_value:g} eV/Å (unapplied)'
+            target = f'EDIFFG {force_value:g} eV/Å unapplied'
         if target != 'Target unavailable' and force_setting.qualification == 'provisional':
             target += '*'
     energy_ids = ('vasp.electronic.dE', 'vasp.electronic.d_eps')

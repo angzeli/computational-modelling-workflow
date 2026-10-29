@@ -82,10 +82,27 @@ class IndependentTargetTests(unittest.TestCase):
             with self.subTest(qualification=qualification):
                 snapshot, text = card(SettingObservation('EDIFFG', -.02, 'Declared target', qualification),
                     calculation='fixed-cell-relaxation')
-                expected = 'EDIFFG -0.02 eV/Å (unapplied)' + ('*' if qualification == 'provisional' else '')
+                expected = 'EDIFFG -0.02 eV/Å unapplied' + ('*' if qualification == 'provisional' else '')
                 self.assertIn(expected, text)
                 self.assertIn('— (not observed)', text)
                 self.assertFalse(snapshot.metrics)
+                self.assertNotIn('BELOW', text)
+
+    def test_77_column_terminal_preserves_full_unapplied_qualifier(self):
+        # Actual 77x24 local/node captures have a 70-cell bordered card and
+        # 28-cell target column; the 29-cell parenthesized label was clipped.
+        for qualification in ('effective', 'provisional'):
+            with self.subTest(qualification=qualification):
+                snapshot, _ = card(SettingObservation('EDIFFG', -.02, 'Declared target', qualification),
+                                   calculation='fixed-cell-relaxation')
+                text = card_text(snapshot, width=70, max_lines=8, framed=True, now=100)
+                expected = 'EDIFFG -0.02 eV/Å unapplied' + ('*' if qualification == 'provisional' else '')
+                force_line = next(line for line in text.splitlines() if 'FORCE' in line)
+                self.assertIn(expected, force_line)
+                self.assertNotIn('…', force_line)
+                self.assertTrue(all(len(line) == 70 for line in text.splitlines()))
+                self.assertFalse(snapshot.metrics)
+                self.assertEqual(snapshot.scientific_validation, 'not-assessed')
                 self.assertNotIn('BELOW', text)
 
     def test_static_positive_zero_and_invalid_force_target_semantics(self):
@@ -107,7 +124,7 @@ class IndependentTargetTests(unittest.TestCase):
             with self.subTest(calculation=calculation, status=status):
                 _, text = card(SettingObservation('EDIFFG', -.02, 'OUTCAR current segment'),
                     calculation=calculation, status=status)
-                self.assertIn('EDIFFG -0.02 eV/Å (unapplied)', text)
+                self.assertIn('EDIFFG -0.02 eV/Å unapplied', text)
 
     def test_conflicting_native_settings_cannot_restore_a_target(self):
         native = native_texts(ediff='1e-6')
@@ -172,7 +189,7 @@ class IndependentTargetTests(unittest.TestCase):
                 self.assertEqual(ediff.value, 1e-6)
                 text = progress_text(snapshot, width=77)
                 self.assertIn('EDIFF 1E-6 eV', text)
-                self.assertIn('EDIFFG -0.02 eV/Å (unapplied)', text)
+                self.assertIn('EDIFFG -0.02 eV/Å unapplied', text)
                 self.assertIn('|dE| —', text)
                 self.assertIn('|d eps| —', text)
                 self.assertIn('rms —', text)

@@ -120,7 +120,7 @@ class ConstrainedRelaxationTests(unittest.TestCase):
                 text = progress_text(snapshot, width=110, now=100)
                 self.assertNotIn('Fmax movable', text)
                 self.assertNotIn('Target 0.020', text)
-                self.assertIn('EDIFFG -0.02 eV/Å (unapplied)', text)
+                self.assertIn('EDIFFG -0.02 eV/Å unapplied', text)
                 if poscar != 'partial':
                     self.assertEqual(set(forces), {'all'})
 
@@ -161,7 +161,7 @@ class ConstrainedRelaxationTests(unittest.TestCase):
                 self.assertTrue(all(item.latest.criterion is None for item in snapshot.metrics))
                 text = progress_text(snapshot, width=110, now=100)
                 self.assertIn('EDIFF 1E-6 eV', text)
-                self.assertIn('EDIFFG -0.02 eV/Å (unapplied)', text)
+                self.assertIn('EDIFFG -0.02 eV/Å unapplied', text)
                 self.assertNotIn('Target 0.020', text)
 
     def test_native_stopping_and_nsw_exhaustion_are_distinct(self):
