@@ -337,6 +337,19 @@ assert os.waitstatus_to_exitcode(status) == 0
             self.assertEqual(record['category'], 'in_flight_change')
             self.assertTrue(observed['call_stack'])
 
+    def test_readiness_capture_failure_does_not_replace_actual_refusal(self):
+        from cmw.nodes import identity
+        config = {'node_id': 'original', 'runtime': {}, 'runtime_observation': {}}
+        refusal = {'ready': False, 'errors': ['original refusal']}
+        report = {}
+        with patch.object(identity, 'check_node', return_value=refusal) as original:
+            with patch.object(closure_workflows, 'save', side_effect=OSError('capture denied')):
+                with closure_workflows.readiness_diagnostics('/not-written', report):
+                    self.assertIs(identity.check_node(config), refusal)
+            original.assert_called_once_with(config)
+        self.assertEqual(report['readiness_capture_errors'],
+                         [{'type': 'OSError', 'message': 'capture denied'}])
+
     def test_fault_driver_selectors_resolve_without_loader_failures(self):
         loader = unittest.TestLoader()
         with redirect_stderr(io.StringIO()):

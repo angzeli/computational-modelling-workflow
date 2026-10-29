@@ -589,15 +589,19 @@ def readiness_diagnostics(root, report):
     def observed(config, **kwargs):
         value = original(config, **kwargs)
         if not value['ready']:
-            path = Path(root) / f'readiness-refusal-{len(records) + 1}.json'
-            save(path, {'readiness': value, 'node_id': config['node_id'],
-                'original_runtime': config['runtime'],
-                'original_observation': config.get('runtime_observation'),
-                'process_started_ns': started_ns, 'observed_ns': time.time_ns(),
-                'isolated': bool(sys.flags.isolated), 'no_bytecode': sys.dont_write_bytecode,
-                'call_stack': traceback.format_stack(limit=12)})
-            records.append({'path': str(path), 'category': value.get('runtime_diagnostic', {}).get('category'),
-                            'errors': value['errors']})
+            try:
+                path = Path(root) / f'readiness-refusal-{len(records) + 1}.json'
+                save(path, {'readiness': value, 'node_id': config['node_id'],
+                    'original_runtime': config['runtime'],
+                    'original_observation': config.get('runtime_observation'),
+                    'process_started_ns': started_ns, 'observed_ns': time.time_ns(),
+                    'isolated': bool(sys.flags.isolated), 'no_bytecode': sys.dont_write_bytecode,
+                    'call_stack': traceback.format_stack(limit=12)})
+                records.append({'path': str(path), 'category': value.get('runtime_diagnostic', {}).get('category'),
+                                'errors': value['errors']})
+            except Exception as error:
+                report.setdefault('readiness_capture_errors', []).append(
+                    {'type': type(error).__name__, 'message': str(error)[:512]})
         return value
 
     with patch.object(identity, 'check_node', observed):
