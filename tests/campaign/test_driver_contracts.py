@@ -318,6 +318,25 @@ assert os.waitstatus_to_exitcode(status) == 0
                 self.assertEqual(target.read_text(), expected)
                 self.assertEqual(json.loads(target.read_text()), value)
 
+    def test_readiness_diagnostic_retains_original_refusal_without_retry(self):
+        from cmw.nodes import identity
+        config = {'node_id': 'original', 'runtime': {'fingerprint': 'original'},
+                  'runtime_observation': {'original': True}}
+        refusal = {'ready': False, 'errors': ['exact refusal'],
+                   'runtime_diagnostic': {'category': 'in_flight_change', 'after': {'epoch': 42}}}
+        report = {}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(identity, 'check_node', return_value=refusal) as original:
+                with closure_workflows.readiness_diagnostics(directory, report):
+                    self.assertIs(identity.check_node(config, operation='execution'), refusal)
+                original.assert_called_once_with(config, operation='execution')
+            record, = report['readiness_refusals']
+            observed = json.loads(Path(record['path']).read_text())
+            self.assertEqual(observed['readiness'], refusal)
+            self.assertEqual(observed['original_observation'], config['runtime_observation'])
+            self.assertEqual(record['category'], 'in_flight_change')
+            self.assertTrue(observed['call_stack'])
+
     def test_fault_driver_selectors_resolve_without_loader_failures(self):
         loader = unittest.TestLoader()
         with redirect_stderr(io.StringIO()):

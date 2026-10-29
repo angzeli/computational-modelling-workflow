@@ -575,6 +575,35 @@ def validate_child_reports(root, allowed_pythons=None):
     return children
 
 
+
+@contextmanager
+def readiness_diagnostics(root, report):
+    """Retain actual readiness refusals without retrying or changing the result."""
+    from unittest.mock import patch
+    import psutil
+    from cmw.nodes import identity
+    original = identity.check_node
+    records = report.setdefault('readiness_refusals', [])
+    started_ns = int(psutil.Process().create_time() * 1e9)
+
+    def observed(config, **kwargs):
+        value = original(config, **kwargs)
+        if not value['ready']:
+            path = Path(root) / f'readiness-refusal-{len(records) + 1}.json'
+            save(path, {'readiness': value, 'node_id': config['node_id'],
+                'original_runtime': config['runtime'],
+                'original_observation': config.get('runtime_observation'),
+                'process_started_ns': started_ns, 'observed_ns': time.time_ns(),
+                'isolated': bool(sys.flags.isolated), 'no_bytecode': sys.dont_write_bytecode,
+                'call_stack': traceback.format_stack(limit=12)})
+            records.append({'path': str(path), 'category': value.get('runtime_diagnostic', {}).get('category'),
+                            'errors': value['errors']})
+        return value
+
+    with patch.object(identity, 'check_node', observed):
+        yield
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', choices=('workflows', 'molecular', 'faults'))
@@ -605,7 +634,8 @@ def main():
                 ledger.phase = 'installed-contract-faults'
                 report['scope'] = 'Installed API fault injection and handwritten arithmetic fixtures; no fabricated execution receipts'
                 suite = unittest.defaultTestLoader.loadTestsFromNames(FAULT_TESTS)
-                result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
+                with readiness_diagnostics(root, report):
+                    result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
                 report['tests'] = {'names': FAULT_TESTS, 'count': result.testsRun,
                     'failures': [(str(test), detail) for test, detail in result.failures],
                     'errors': [(str(test), detail) for test, detail in result.errors],
