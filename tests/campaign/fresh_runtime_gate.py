@@ -74,6 +74,8 @@ def fresh(args, origin):
               'positive_recovery_demonstrated': False}
     try:
         result['lookup'] = lookup(backend, record)
+        result['observer_started_ns'] = backend._runtime_verifier.process_started_ns
+        result['observer_isolated'] = backend._runtime_verifier.isolated
         current_runtime, current_observation = runtime_observed()
         result['current_runtime'] = current_runtime
         result['current_observation'] = current_observation
@@ -188,7 +190,7 @@ def gate(args, origin):
             import ctypes
             libc = ctypes.CDLL(None, use_errno=True)
             libc.fchflags.argtypes, libc.fchflags.restype = [ctypes.c_int, ctypes.c_uint32], ctypes.c_int
-            if libc.fchflags(descriptor, opened.st_flags ^ 0x40) != 0:
+            if libc.fchflags(descriptor, opened.st_flags | 0x40) != 0:
                 raise OSError(ctypes.get_errno(), 'fchflags on sacrificial member failed')
         finally:
             os.close(descriptor)
@@ -200,7 +202,8 @@ def gate(args, origin):
             'uf_tracked_xor': before[8] ^ after[8],
             'all_other_epoch_fields_equal': before[:4] == after[:4] and before[5:8] == after[5:8] and before[9:] == after[9:]}
         write(args.output / 'mutation.json', result['mutation'])
-        assert result['mutation']['uf_tracked_xor'] == 0x40
+        assert result['mutation']['uf_tracked_xor'] in {0, 0x40}
+        result['mutation']['kind'] = 'UF_TRACKED-set' if result['mutation']['uf_tracked_xor'] else 'already-tracked-ctime-only'
         assert all(result['mutation'][key] for key in ('bytes_equal', 'ctime_changed', 'all_other_epoch_fields_equal'))
         result['long_lived_lookup'] = lookup(backend, record)
         refused = result['long_lived_lookup']
