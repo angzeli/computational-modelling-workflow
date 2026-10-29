@@ -35,8 +35,24 @@ class InputCompletionProbe:
             return {'screen': None, 'focus': None}
         focused = self.screen.focused
         return {'screen': screen_state(self.screen), 'focus': getattr(focused, 'id', None),
+                'focus_class': type(focused).__name__ if focused is not None else None,
+                'focus_object': id(focused) if focused is not None else None,
+                'selects': self.select_state(),
                 'value': focused.value if isinstance(focused, Input) else None,
                 'cursor_position': focused.cursor_position if isinstance(focused, Input) else None}
+
+    def select_state(self):
+        from textual.widgets import OptionList, Select
+        if not self.screen_stack:
+            return {}
+        values = {}
+        for select in self.screen.query(Select):
+            overlay = select.query_one(OptionList)
+            values[select.id] = {'value': '<blank>' if select.value is Select.BLANK else select.value,
+                'expanded': select.expanded, 'overlay_focused': overlay.has_focus,
+                'highlighted': overlay.highlighted,
+                'options': [str(overlay.get_option_at_index(index).prompt) for index in range(overlay.option_count)]}
+        return values
 
     async def _check_bindings(self, key, priority=False):
         before = self.input_state()
@@ -184,7 +200,10 @@ def run(directory):
                         if offset < 100:
                             send(b'/'); session.request('search')
                             click('#catalogue-owner')
-                            send(b'\x1b[B\r')
+                            session.request('owner_menu')
+                            send(b'\x1b[F', binding='end')
+                            session.request('owner_highlighted')
+                            send(b'\r', binding='enter')
                             session.request('owner_selected')
                             click('#catalogue-next')
                     snapshot = store.snapshot()
@@ -388,6 +407,18 @@ def child(settings, directory):
             if operation == 'search_text':
                 await self.until(lambda: self.screen.query_one('#catalogue-text', Input).value == command['text'])
                 return True
+            if operation == 'owner_menu':
+                await self.until(lambda: (owner := self.select_state().get('catalogue-owner'))
+                    and owner['expanded'] and owner['overlay_focused'])
+                owner = self.select_state()['catalogue-owner']
+                assert owner['options'] == ['Owner with another page', 'LOCAL'], owner
+                return owner
+            if operation == 'owner_highlighted':
+                await self.until(lambda: (owner := self.select_state().get('catalogue-owner'))
+                    and owner['expanded'] and owner['overlay_focused'] and owner['highlighted'] == 1)
+                owner = self.select_state()['catalogue-owner']
+                assert owner['options'][owner['highlighted']] == 'LOCAL', owner
+                return owner
             if operation == 'owner_selected':
                 await self.until(lambda: self.screen.query_one('#catalogue-owner', Select).value == 'LOCAL')
                 return True

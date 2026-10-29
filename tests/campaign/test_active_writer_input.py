@@ -6,7 +6,7 @@ from tests.campaign.active_writer_pty import InputCompletionProbe
 
 try:
     from textual.app import App
-    from textual.widgets import Input, Static
+    from textual.widgets import Input, Static, Select
     from textual._xterm_parser import XTermParser
     from cmw.jobs.catalogue_ui import CatalogueSearch
 except ImportError:
@@ -65,3 +65,46 @@ class ActiveWriterInputTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(field.has_focus)
                     await pilot.pause()
                     self.assertEqual(field.value,'Synthetic')
+
+    async def test_owner_menu_one_down_selects_blank_prompt_not_local(self):
+        from types import SimpleNamespace
+        app = Probe()
+        async with app.run_test(size=(140,40)) as pilot:
+            app.push_screen(CatalogueSearch(None, {'LOCAL':SimpleNamespace(next_cursor='synthetic')}, 'Synthetic page'))
+            await pilot.pause()
+            await pilot.click('#catalogue-owner')
+            await app.until(lambda: app.select_state()['catalogue-owner']['expanded']
+                            and app.select_state()['catalogue-owner']['overlay_focused'])
+            await pilot.pause()
+            opened = app.select_state()['catalogue-owner']
+            self.assertIsNone(opened['highlighted'])
+            self.assertEqual(opened['options'],['Owner with another page','LOCAL'])
+            app.native_burst('\x1b[B\r')
+            await pilot.pause()
+            after = app.select_state()['catalogue-owner']
+            self.assertEqual(after['highlighted'],0)
+            self.assertEqual(after['value'],'<blank>')
+            self.assertFalse(after['expanded'])
+
+    async def test_owner_end_binding_then_enter_selects_literal_local(self):
+        from types import SimpleNamespace
+        app = Probe()
+        async with app.run_test(size=(140,40)) as pilot:
+            app.push_screen(CatalogueSearch(None, {'LOCAL':SimpleNamespace(next_cursor='synthetic')}, 'Synthetic page'))
+            await pilot.pause()
+            await pilot.click('#catalogue-owner')
+            await app.until(lambda: app.select_state()['catalogue-owner']['expanded']
+                            and app.select_state()['catalogue-owner']['overlay_focused'])
+            await app.until(lambda: app.select_state()['catalogue-owner']['overlay_focused'])
+            before = app.input_count()
+            app.native_burst('\x1b[F')
+            await app.input_received(before,binding='end')
+            owner = app.select_state()['catalogue-owner']
+            self.assertEqual(owner['options'][owner['highlighted']],'LOCAL')
+            before = app.input_count()
+            app.native_burst('\r')
+            await app.input_received(before,binding='enter')
+            await app.until(lambda: app.screen.query_one('#catalogue-owner',Select).value=='LOCAL')
+            await pilot.pause()
+            self.assertFalse(app.select_state()['catalogue-owner']['expanded'])
+            self.assertEqual(app.select_state()['catalogue-owner']['value'],'LOCAL')
