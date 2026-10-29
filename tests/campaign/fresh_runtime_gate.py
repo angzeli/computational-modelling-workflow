@@ -106,7 +106,8 @@ def fresh(args, origin):
             for name, module in tuple(sys.modules.items()) if name == 'cmw' or name.startswith('cmw.')]
     except BaseException as exc:
         result['error'] = {'type': type(exc).__name__, 'message': str(exc),
-                           'verification': getattr(exc, 'evidence', None)}
+                           'verification': getattr(exc, 'evidence', None),
+                           'traceback': __import__('traceback').format_exc()}
     finally:
         backend.close()
         result['backend_closed'] = backend._closed
@@ -136,9 +137,10 @@ def gate(args, origin):
     try:
         seed = args.seed.resolve(strict=True)
         assert seed.is_relative_to(args.campaign_root.resolve() / 'artifacts')
-        config_root = seed / 'private-node'
+        prior = json.loads((seed / 'request-original.json').read_text()) if (seed / 'request-original.json').exists() else None
+        config_root = Path(prior['config']) if prior else seed / 'private-node'
         config = load_node(config_root)
-        store = Store(seed / 'private-queue')
+        store = Store(prior['state'] if prior else seed / 'private-queue')
         rows = store.snapshot()['jobs']
         assert len(rows) == 1 and rows[0]['status'] == 'Hold'
         job = rows[0]
@@ -156,10 +158,16 @@ def gate(args, origin):
         endpoint = {'node_id': config['node_id'], 'queue_id': target['queue_id'],
                     'host_id': config['host_id'], 'runtime_id': config['runtime']['fingerprint'],
                     'clock_id': preview['expected_clock_id']}
-        receipt = backend.call('control', {**params, '_endpoint': endpoint}, target,
-                               request_id=record['request_id'])['result']
-        assert receipt['digest'] == record['request_digest']
-        record['receipt_record'] = backend.call('request', {'request_id': record['request_id']})['result']['request']
+        if prior:
+            assert prior['target'] == target
+            record = prior
+            assert semantic_digest(record) == record['request_digest']
+            assert backend.call('request', {'request_id': record['request_id']})['result']['request'] == record['receipt_record']
+        else:
+            receipt = backend.call('control', {**params, '_endpoint': endpoint}, target,
+                                   request_id=record['request_id'])['result']
+            assert receipt['digest'] == record['request_digest']
+            record['receipt_record'] = backend.call('request', {'request_id': record['request_id']})['result']['request']
         assert record['receipt_record'] == store.request_lookup(record['request_id'])
         write(args.output / 'request-original.json', record)
         original_trust = deepcopy(backend._runtime_verifier.original)
@@ -176,8 +184,12 @@ def gate(args, origin):
             opened = os.fstat(descriptor)
             assert (opened.st_dev, opened.st_ino) == before[:2]
             assert opened.st_nlink == 1, 'Disposable package member is hardlinked; require uv --link-mode copy'
-            assert sys.platform == 'darwin' and hasattr(os, 'fchflags')
-            os.fchflags(descriptor, opened.st_flags ^ 0x40)
+            assert sys.platform == 'darwin', 'Native UF_TRACKED fixture requires Darwin'
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+            libc.fchflags.argtypes, libc.fchflags.restype = [ctypes.c_int, ctypes.c_uint32], ctypes.c_int
+            if libc.fchflags(descriptor, opened.st_flags ^ 0x40) != 0:
+                raise OSError(ctypes.get_errno(), 'fchflags on sacrificial member failed')
         finally:
             os.close(descriptor)
         after = file_epoch(member)
@@ -224,7 +236,8 @@ def gate(args, origin):
             durable_original_receipt_unchanged=True)
     except BaseException as exc:
         result['error'] = {'type': type(exc).__name__, 'message': str(exc),
-                           'verification': getattr(exc, 'evidence', None)}
+                           'verification': getattr(exc, 'evidence', None),
+                           'traceback': __import__('traceback').format_exc()}
     finally:
         if backend is not None:
             backend.close()
