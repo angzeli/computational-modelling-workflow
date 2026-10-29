@@ -62,11 +62,16 @@ def inventory(roots):
                 if sidecar.is_file():
                     visit(json.loads(sidecar.read_text()), source.parent, group, root)
     rows = []
+    bound_sources = {}
     for identity, requirement in required.items():
         found = candidates[identity]
         assert len(found) <= 1, 'Duplicate distinct exports for required ID: '+identity
         group, source = next(iter(found)) if found else (
             'history' if requirement['family'] in {'static', 'relaxation'} else 'views', None)
+        if source is not None:
+            assert source not in bound_sources, ('One SVG cannot satisfy distinct visual IDs',
+                                                  bound_sources.get(source), identity, source)
+            bound_sources[source] = identity
         rows.append({**requirement, 'id': identity, 'group': group, 'source': source,
                      'required': True, 'phase': 'settled',
                      'checks': ['Exact immutable target, literal native values, card/controls fit; inspect actual image.']})

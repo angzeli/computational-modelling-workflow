@@ -61,3 +61,12 @@ class VisualInventoryTests(unittest.TestCase):
         self.assertEqual(result['counts']['missing'],32)
         self.assertFalse(result['render_complete'])
         self.assertEqual(result['visual_acceptance'],'PENDING_INDEPENDENT_PER_IMAGE_INSPECTION')
+
+    def test_one_svg_cannot_satisfy_two_distinct_required_views(self):
+        root = self.roots['history']
+        (root/'same.svg').write_text('<svg/>')
+        frames = [{'required_id':identity,'size':[80,24],'image':'same.svg'}
+                  for identity in ('local-static-80x24','local-relaxation-80x24')]
+        (root/'result.json').write_text(json.dumps({'frames':frames}))
+        with self.assertRaisesRegex(AssertionError,'One SVG cannot satisfy distinct'):
+            inventory(self.roots)
