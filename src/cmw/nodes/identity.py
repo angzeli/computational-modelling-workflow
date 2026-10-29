@@ -114,15 +114,68 @@ def _package_digest(root, epoch):
     return digest.hexdigest()
 
 
-def runtime_observed():
-    """Observe complete current disk bytes; no claim about previously imported code."""
+def _metadata_only_collection_change(before, after):
+    """Only a complete Darwin member ctime/UF_TRACKED delta can be recollected."""
+    if sys.platform != 'darwin' or before[0] != after[0] or before[2] != after[2]:
+        return False
+    old, new = dict(before[1]), dict(after[1])
+    if old.keys() != new.keys() or not before[0][-1] or not all(v[-1] for v in before[2].values()):
+        return False
+    changed = False
+    for name, value in old.items():
+        other = new[name]
+        if (not value[-1] or not other[-1] or value[:4] != other[:4]
+                or value[5:8] != other[5:8] or value[9:] != other[9:]
+                or (value[8] ^ other[8]) & ~0x40):
+            return False
+        changed |= value != other
+    return changed
+
+
+def runtime_observed(*, diagnostics=None):
+    """Observe coherent disk bytes, with one classified full metadata recollection.
+
+    The retry neither supplies missing original trust nor changes the verifier's
+    loaded-code policy. It cannot recover bytes/identity/security uncertainty.
+    """
     import cmw
     root = Path(cmw.__file__).resolve().parent
-    root_epoch, epoch, directories = inventory(root)
-    package_digest = _package_digest(root, epoch)
-    if inventory(root) != (root_epoch, epoch, directories):
-        raise RuntimeRefusal('in_flight_change', phase='inventory-after-read',
-                             before=dict(epoch), after=dict(inventory(root)[1]))
+    first = inventory(root)
+    executable = Path(sys.executable).resolve(strict=True)
+    executable_before = file_epoch(executable)
+    root_epoch, epoch, directories = first
+    try:
+        package_digest = _package_digest(root, epoch)
+        after = inventory(root)
+        if after != first:
+            raise RuntimeRefusal('in_flight_change', phase='inventory-after-read',
+                                 before=dict(epoch), after=dict(after[1]))
+    except RuntimeRefusal as exc:
+        if (exc.evidence['category'] != 'in_flight_change'
+                or exc.evidence['phase'] not in {'before-open', 'read', 'inventory-after-read'}):
+            raise
+        current = inventory(root)
+        if (file_epoch(executable) != executable_before
+                or not _metadata_only_collection_change(first, current)):
+            raise
+        evidence = {'attempts': 2, 'first_refusal': exc.evidence, 'before': first,
+                    'supplemental': current, 'outcome': 'PENDING'}
+        if diagnostics is not None:
+            diagnostics.append(evidence)
+        root_epoch, epoch, directories = current
+        try:
+            # Uncached complete reread; an eligible stat delta is not a PASS.
+            package_digest = _package_digest.__wrapped__(root, epoch)
+            after = inventory(root)
+            if after != current or file_epoch(executable) != executable_before:
+                raise RuntimeRefusal('in_flight_change', phase='recollection-after-read',
+                                     before=dict(epoch), after=dict(after[1]))
+        except BaseException:
+            evidence['outcome'] = 'REFUSED'
+            raise
+        evidence['outcome'] = 'COHERENT_CURRENT_DISK_ONLY'
+    if file_epoch(executable) != executable_before:
+        raise RuntimeRefusal('interpreter_changed', phase='collection-after-read')
     dependencies = {}
     for name in ('ase', 'gemmi', 'numpy', 'PyYAML', 'psutil', 'textual', 'rich'):
         try:

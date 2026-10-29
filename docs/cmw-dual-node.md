@@ -459,3 +459,11 @@ pause do not depend on unrelated archive health. Legacy unbound controls retain
 their behavior. Study/successor services still conservatively check aggregate
 configuration readiness as well as exact source/input/owner checks; dependency
 narrowing for those routes is not claimed.
+
+During schema-2 observation collection, one complete-inventory transition limited
+to supported member ctime/UF_TRACKED may trigger one uncached full reread. The
+first inventory must already be complete; root/directories/interpreter, member
+set, object/content epochs and access evidence must match. A second drift or any
+other uncertainty refuses. Optional collection diagnostics retain the first
+refusal and both inventories. This is coherent current-disk collection, not
+replacement trust; the original fingerprint and fresh-observer checks still apply.

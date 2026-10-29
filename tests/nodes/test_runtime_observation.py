@@ -260,3 +260,50 @@ class TrackedPolicyTests(RuntimeObservationTests):
         os.utime(self.member, ns=(before.st_atime_ns, before.st_mtime_ns))
         with self.assertRaisesRegex(RuntimeRefusal, 'content_changed'):
             self.verifier().verify(runtime_observed)
+
+
+class MetadataCollectionTests(RuntimeObservationTests):
+    def test_only_one_full_eligible_recollection_not_a_quiet_sleep(self):
+        from cmw.nodes import identity
+        real = identity._package_digest
+        def change_before_open(root, epoch):
+            os.chflags(self.member, self.member.stat().st_flags ^ 0x40)
+            return real(root, epoch)
+        if not hasattr(os, 'chflags'):
+            self.skipTest('Darwin flags')
+        diagnostic = []
+        with patch.object(identity, '_package_digest', side_effect=change_before_open) as digest:
+            digest.__wrapped__ = real.__wrapped__
+            result, _ = runtime_observed(diagnostics=diagnostic)
+        self.assertEqual(result['fingerprint'], self.original['fingerprint'])
+        self.assertEqual(len(diagnostic), 1)
+        self.assertEqual(diagnostic[0]['attempts'], 2)
+        self.assertEqual(diagnostic[0]['outcome'], 'COHERENT_CURRENT_DISK_ONLY')
+        self.assertEqual(digest.call_count, 1)
+
+    def test_content_epoch_and_unknown_flags_never_recollect(self):
+        from cmw.nodes.identity import _metadata_only_collection_change
+        from cmw.nodes.runtime_observation import inventory
+        before = inventory(self.package)
+        for index in (0, 1, 2, 3, 5, 6, 7, 9):
+            after = deepcopy(before)
+            name, epoch = after[1][0]
+            changed = list(epoch)
+            changed[index] += 1
+            after = (after[0], ((name, tuple(changed)),), after[2])
+            self.assertFalse(_metadata_only_collection_change(before, after))
+
+    def test_second_inflight_change_remains_a_refusal(self):
+        from cmw.nodes import identity
+        if not hasattr(os, 'chflags'):
+            self.skipTest('Darwin flags')
+        real = identity._package_digest
+        def drift(root, epoch):
+            os.chflags(self.member, self.member.stat().st_flags ^ 0x40)
+            return real.__wrapped__(root, epoch)
+        diagnostics = []
+        with patch.object(identity, '_package_digest', side_effect=drift) as digest:
+            digest.__wrapped__ = drift
+            with self.assertRaisesRegex(RuntimeRefusal, 'in_flight_change'):
+                runtime_observed(diagnostics=diagnostics)
+        self.assertEqual(diagnostics[0]['outcome'], 'REFUSED')

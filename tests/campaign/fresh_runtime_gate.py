@@ -122,6 +122,13 @@ def gate(args, origin):
     from cmw.nodes.runtime_observation import file_epoch
 
     args.output.mkdir(mode=0o700)
+    from unittest.mock import patch
+    from cmw.nodes import identity
+    collection = []
+    original_observer = identity.runtime_observed
+    capture = patch.object(identity, 'runtime_observed',
+                           lambda: original_observer(diagnostics=collection))
+    capture.start()
     result = {'origin': origin, 'safety_contract_passed': False,
               'positive_recovery_demonstrated': False, 'payloads_started': 0,
               'quiet_window_used': False, 'retries': 0}
@@ -220,6 +227,8 @@ def gate(args, origin):
         if backend is not None:
             backend.close()
         result['backend_closed'] = backend is None or backend._closed
+        capture.stop()
+        result['runtime_collection'] = collection
         write(args.output / 'result.json', result)
     return result
 
