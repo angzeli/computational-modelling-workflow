@@ -17,7 +17,53 @@ import sys
 import threading
 import time
 
+from tests.campaign.paint_barrier import active_screen_refresh
+from tests.campaign.navigation_trace import screen_state
+
 ROWS, CYCLES, PAGE_ROWS, WALL_SECONDS = 120, 12, 50, 60
+
+
+class InputCompletionProbe:
+    """Observe native receipt separately from completion of a bubbled binding."""
+    def __init__(self, *args, **kwargs):
+        self.inputs, self.bindings, self.refresh_barriers = [], [], []
+        super().__init__(*args, **kwargs)
+
+    def input_state(self):
+        from textual.widgets import Input
+        if not self.screen_stack:
+            return {'screen': None, 'focus': None}
+        focused = self.screen.focused
+        return {'screen': screen_state(self.screen), 'focus': getattr(focused, 'id', None),
+                'value': focused.value if isinstance(focused, Input) else None,
+                'cursor_position': focused.cursor_position if isinstance(focused, Input) else None}
+
+    async def _check_bindings(self, key, priority=False):
+        before = self.input_state()
+        handled = await super()._check_bindings(key, priority=priority)
+        if handled:
+            self.bindings.append({'key': key, 'priority': priority, 'at': time.monotonic(),
+                                  'before': before, 'after': self.input_state()})
+        return handled
+
+    async def on_event(self, event):
+        from textual import events
+        if isinstance(event, (events.Key, events.MouseUp, events.MouseScrollUp, events.MouseScrollDown)) and not event.is_forwarded:
+            self.inputs.append({'type': type(event).__name__, 'key': getattr(event, 'key', None),
+                                'at': time.monotonic(), 'state': self.input_state()})
+        await super().on_event(event)
+
+    def input_count(self):
+        return {'inputs': len(self.inputs), 'bindings': len(self.bindings)}
+
+    async def input_received(self, after, *, binding=None):
+        await self.until(lambda: len(self.inputs) > after['inputs'])
+        if binding is not None:
+            await self.until(lambda: any(item['key'] == binding and not item['priority']
+                                        for item in self.bindings[after['bindings']:]))
+        refresh = await active_screen_refresh(self, timeout=2, records=self.refresh_barriers)
+        return {'receipt': self.inputs[-1], 'completed_bindings': self.bindings[after['bindings']:],
+                'refresh': refresh, 'state': self.input_state()}
 
 
 def save(path, value):
@@ -93,10 +139,10 @@ def run(directory):
                 session.resize((140, 40))
                 assert session.request('ready')['tty'] == [True, True]
 
-                def send(data):
+                def send(data, *, binding=None):
                     count = session.request('input_count')
                     session.send(data)
-                    session.request('input_received', after=count)
+                    session.request('input_received', after=count, binding=binding, delivered_hex=data.hex())
 
                 def click(selector):
                     x, y = session.request('position', selector=selector)
@@ -105,7 +151,11 @@ def run(directory):
                 for cycle in range(CYCLES):
                     before = store.snapshot()['controller']['heartbeat']
                     send(b'/'); session.request('search')
-                    send(b'\x01\x0bSynthetic')
+                    # Binding keys bubble after printable keys in a single native burst.
+                    # Finish clearing the field before delivering replacement text.
+                    send(b'\x01\x0b', binding='ctrl+k')
+                    session.request('search_text', text='')
+                    send(b'Synthetic')
                     session.request('search_text', text='Synthetic')
                     click('#catalogue-apply')
                     pages = []; generation = None
@@ -252,9 +302,9 @@ def child(settings, directory):
     settings = json.loads(Path(settings).read_text()); directory = Path(directory)
     save(directory/'origin.json', installed_origin())
 
-    class App(JobsApp):
+    class App(InputCompletionProbe, JobsApp):
         def __init__(self):
-            self.inputs = []; self.controls = []
+            self.controls = []
             self.ticks = []; self.renders = []; self.last_tick = None
             super().__init__(Store(Path(settings['state'])), observer=Observer(collector=fixture_collect))
 
@@ -272,11 +322,6 @@ def child(settings, directory):
             started = time.perf_counter()
             try: return super().refresh_state()
             finally: self.renders.append(time.perf_counter()-started)
-
-        async def on_event(self, event):
-            if isinstance(event, (events.Key, events.MouseUp, events.MouseScrollUp, events.MouseScrollDown)) and not event.is_forwarded:
-                self.inputs.append({'type': type(event).__name__, 'key': getattr(event, 'key', None), 'at': time.monotonic()})
-            await super().on_event(event)
 
         async def until(self, predicate):
             deadline = time.monotonic()+4
@@ -318,16 +363,16 @@ def child(settings, directory):
                 'table': self.table_geometry(), 'terminal': list(os.get_terminal_size(1)), 'app': list(self.size),
                 'screen': list(screen.size), 'class': type(screen).__name__,
                 'selected': self.selected_identity(), 'pending_layout': bool(screen._layout_required),
-                'pending_restores': len(self._navigation_restores),
+                'pending_restores': len(self._navigation_restores), 'input_state': self.input_state(),
+                'input_fields': {field.id: {'value': field.value, 'has_focus': field.has_focus,
+                    'cursor_position': field.cursor_position, 'region': list(field.region)} for field in screen.query(Input)},
                 'painted': [strip.text for strip in screen._compositor.render_strips()]}
 
         async def command(self, command):
             operation = command['operation']; self.controls.append(command)
-            if operation == 'input_count': return len(self.inputs)
+            if operation == 'input_count': return self.input_count()
             if operation == 'input_received':
-                await self.until(lambda: len(self.inputs) > command['after'])
-                await asyncio.wait_for(self.screen.wait_for_refresh(), 2)
-                return self.inputs[-1]
+                return await self.input_received(command['after'], binding=command.get('binding'))
             if operation == 'ready':
                 await self.until(lambda: len(self.row_ids) == ROWS+1)
                 return {'tty': [sys.stdin.isatty(), sys.stdout.isatty()]}
@@ -344,7 +389,7 @@ def child(settings, directory):
             if operation == 'position':
                 selector = command['selector']
                 widget = self.screen.query_one('#table' if selector == '#first-row' else selector)
-                await asyncio.wait_for(self.screen.wait_for_refresh(), 2)
+                await active_screen_refresh(self, timeout=2, records=self.refresh_barriers)
                 region = widget.content_region
                 assert widget.display and not getattr(widget, 'disabled', False)
                 if selector == '#first-row':
@@ -416,7 +461,9 @@ def child(settings, directory):
                         try:
                             (directory/(name+'.svg')).write_text(self.call_from_thread(self.export_screenshot))
                             save(directory/(name+'.json'), {'command': json.loads(line), 'error': repr(exc),
-                                'geometry': self.call_from_thread(self.ui_state), 'image': name+'.svg'})
+                                'geometry': self.call_from_thread(self.ui_state), 'image': name+'.svg',
+                                'native_inputs': self.inputs, 'completed_bindings': self.bindings,
+                                'refresh_barriers': self.refresh_barriers, 'controls': self.controls})
                         except Exception as capture_error:
                             save(directory/(name+'.json'), {'command': line, 'error': repr(exc), 'capture_error': repr(capture_error)})
                     writer.write(json.dumps(reply)+'\n')
@@ -428,6 +475,7 @@ def child(settings, directory):
             thread = getattr(app,'control_thread',None)
             if thread is not None: thread.join(timeout=2)
             save(directory/'input.json', {'native_inputs':app.inputs,'controls':app.controls,
+                'completed_bindings':app.bindings,'refresh_barriers':app.refresh_barriers,
                 'control_thread_alive':thread is not None and thread.is_alive(),
                 'tick_intervals':summary(app.ticks),'render_seconds':summary(app.renders)})
             assert thread is None or not thread.is_alive()
