@@ -14,6 +14,7 @@ import time
 import socket
 import subprocess
 import threading
+import traceback
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -400,42 +401,80 @@ def protocol_report(samples):
 
 
 class MeterTransport(ProcessTransport):
-    """Count encoded protocol frames, separately from encrypted SSH wire traffic."""
+    """Count encoded frames and retain request/close timing without changing outcomes."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.samples = []
         self.owners = []
         self.wire_sessions = []
         self.phase = 'unspecified'
+        self._meter_active = {}
+        self._meter_owner = None
         _install_frame_meter()
 
+    def _meter_event(self, owner, event, **values):
+        if owner is None:
+            return
+        events = owner.setdefault('transport_events', [])
+        if len(events) >= 32:
+            owner['transport_events_truncated'] = owner.get('transport_events_truncated', 0)+1
+            return
+        events.append({'event': event, 'at': time.monotonic(), 'wall_ns': time.time_ns(),
+            'thread_ident': threading.get_ident(),
+            'active_requests': [dict(item) for item in tuple(self._meter_active.values())], **values})
+
     def _start(self):
+        previous_process = self.process
         super()._start()
         try:
             value = process_identity(self.process.pid)
         except psutil.Error as exc:
             value = {'pid': self.process.pid, 'birth': None, 'identity_error': type(exc).__name__}
-        if not any(row['pid'] == value['pid'] and row['birth'] == value['birth'] for row in self.owners):
-            self.owners.append(value)
+        owner = next((row for row in self.owners
+                      if row['pid'] == value['pid'] and row['birth'] == value['birth']), None)
+        if owner is None:
+            owner = value
+            self.owners.append(owner)
+        self._meter_owner = owner
+        if previous_process is None:
+            self._meter_event(owner, 'launch', pid=self.process.pid)
+
+    @staticmethod
+    def _meter_exception(exc):
+        def detail(value):
+            message = str(value)
+            return {'type': type(value).__name__, 'code': getattr(value, 'code', None),
+                'message': message[:2048], 'message_truncated': len(message) > 2048,
+                'errno': getattr(value, 'errno', None)}
+        return {**detail(exc), 'cause': detail(exc.__cause__) if exc.__cause__ is not None else None}
 
     def exchange(self, operation, params=None, target=None, *, request_id=None):
         request_id = request_id or uuid4().hex
         sent = len(encode(request(operation, params, target, request_id)))
-        started = time.perf_counter()
-        frames, outcome = [], 'ok'
+        started = time.monotonic()
+        started_wall_ns = time.time_ns()
+        frames, outcome, error = [], 'ok', None
         cold = self.process is None
         previous = getattr(_frame_scope, 'current', None)
         _frame_scope.current = frames
+        token = object()
+        self._meter_active[id(token)] = {'operation': operation, 'request_id': request_id,
+            'started_at': started, 'thread_ident': threading.get_ident()}
         try:
             return super().exchange(operation, params, target, request_id=request_id)
         except BaseException as exc:
             outcome = getattr(exc, 'code', type(exc).__name__)
+            error = self._meter_exception(exc)
             raise
         finally:
+            ended = time.monotonic()
+            self._meter_active.pop(id(token), None)
             _frame_scope.current = previous
             self.samples.append({'operation': operation, 'target': target, 'request_id': request_id,
                 'phase': self.phase, 'temperature': 'cold' if cold else 'warm',
-                'seconds': time.perf_counter()-started, 'request_bytes': sent,
+                'started_at': started, 'ended_at': ended, 'started_wall_ns': started_wall_ns,
+                'ended_wall_ns': time.time_ns(), 'thread_ident': threading.get_ident(),
+                'seconds': ended-started, 'request_bytes': sent, 'error': error,
                 'response_bytes': sum(frames), 'response_frame_bytes': frames,
                 'response_scope': 'actual complete frames passed to the unchanged strict decoder',
                 'outcome': outcome,
@@ -443,30 +482,47 @@ class MeterTransport(ProcessTransport):
                 'refusal_reason': getattr(self, 'expected_refusal_reason', None) if outcome != 'ok' else None})
 
     def close(self):
-        # OpenSSH emits its own encrypted channel byte counts at orderly EOF.
-        # Drain only this owned channel; normal protocol/host-key checks stay in
-        # ProcessTransport and no system-wide network counter is sampled.
-        process = self.process
-        if process is not None and process.poll() is None:
-            process.stdin.close()
-            deadline = time.monotonic()+1
-            streams = [stream for stream in (process.stdout, process.stderr) if not stream.closed]
-            while streams and time.monotonic() < deadline:
-                ready, _, _ = select.select(streams, [], [], min(.1, max(0., deadline-time.monotonic())))
-                for stream in ready:
-                    try:
-                        data = os.read(stream.fileno(), 65536)
-                    except (BlockingIOError, OSError):
-                        data = b''
-                    if not data:
-                        streams.remove(stream)
-                    elif stream is process.stderr:
-                        self._diagnostic(data)
+        # Preserve the existing channel drain. Its timing and consumed bytes are
+        # evidence when shutdown overlaps an unchanged in-flight exchange.
+        process, owner = self.process, self._meter_owner
+        drained = {'stdout': 0, 'stderr': 0}
+        error = None
         if process is not None:
-            match = re.search(rb'Transferred: sent (\d+), received (\d+) bytes', bytes(self.stderr))
-            if match:
-                self.wire_sessions.append({'sent': int(match[1]), 'received': int(match[2])})
-        super().close()
+            self._meter_event(owner, 'close_start', pid=process.pid,
+                cached_returncode=process.returncode,
+                caller=[{'file': frame.filename, 'line': frame.lineno, 'function': frame.name}
+                        for frame in traceback.StackSummary.extract(
+                            traceback.walk_stack(None), limit=6, lookup_lines=False)])
+        try:
+            if process is not None and process.poll() is None:
+                process.stdin.close()
+                deadline = time.monotonic()+1
+                streams = [stream for stream in (process.stdout, process.stderr) if not stream.closed]
+                while streams and time.monotonic() < deadline:
+                    ready, _, _ = select.select(streams, [], [], min(.1, max(0., deadline-time.monotonic())))
+                    for stream in ready:
+                        try:
+                            data = os.read(stream.fileno(), 65536)
+                        except (BlockingIOError, OSError):
+                            data = b''
+                        drained['stderr' if stream is process.stderr else 'stdout'] += len(data)
+                        if not data:
+                            streams.remove(stream)
+                        elif stream is process.stderr:
+                            self._diagnostic(data)
+            if process is not None:
+                match = re.search(rb'Transferred: sent (\d+), received (\d+) bytes', bytes(self.stderr))
+                if match:
+                    self.wire_sessions.append({'sent': int(match[1]), 'received': int(match[2])})
+            super().close()
+        except BaseException as exc:
+            error = self._meter_exception(exc)
+            raise
+        finally:
+            if process is not None:
+                self._meter_event(owner, 'close_end', pid=process.pid,
+                    returncode=process.returncode, drained_bytes=drained, error=error,
+                    stderr_tail=bytes(self.stderr[-4096:]).decode('utf-8', errors='replace'))
 
 
 def fixture(root, count, *, history_rows=None):
