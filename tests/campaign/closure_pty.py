@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 
-from tests.campaign.analysis_oracle_v2 import analysis_evidence, analysis_painted, analysis_details
+from tests.campaign.analysis_oracle_v2 import analysis_evidence, analysis_painted, analysis_details, bounded_analysis_snapshot
 from tests.campaign.geometry import GeometryProbe, RESIZE_SEQUENCE
 from tests.campaign.pty import Session
 from tests.campaign.paint_barrier import active_screen_refresh
@@ -525,11 +525,14 @@ def child(settings_path, directory):
                 await self.until(lambda: self.science() is not None)
                 if kind == 'analysis':
                     def full_analysis_ready():
+                        snapshot = self.science()
                         try:
-                            analysis_evidence(self.science(), case)
+                            analysis_evidence(snapshot, case)
                             return True
                         except AssertionError as exc:
                             self.condition_error = str(exc)
+                            self.analysis_failure = {'predicate_error': str(exc),
+                                'observation': bounded_analysis_snapshot(snapshot)}
                             return False
                     await self.until(full_analysis_ready, 'full typed analysis fixture evidence')
                 self.identity_check()
@@ -595,7 +598,8 @@ def child(settings_path, directory):
                         write(directory/(failure_name+'.json'), {'command': json.loads(line), 'error': repr(exc),
                             'refresh_barriers': self.refresh_barriers[-3:], 'native_inputs': self.native_inputs[-3:],
                             'paints': self.paints[-3:], 'active_condition': getattr(self, 'active_condition', None),
-                            'condition_error': getattr(self, 'condition_error', None)})
+                            'condition_error': getattr(self, 'condition_error', None),
+                            'analysis_failure': getattr(self, 'analysis_failure', None)})
                         reply = {'ok': False, 'error': repr(exc), 'failure_image': failure_name+'.svg'}
                     writer.write(json.dumps(reply, default=str)+'\n')
 

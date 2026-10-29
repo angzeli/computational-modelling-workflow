@@ -4,7 +4,7 @@ import unittest
 
 from cmw.progress.card import card_text
 from cmw.progress.formatting import progress_text
-from tests.campaign.analysis_oracle_v2 import analysis_evidence, analysis_painted, analysis_details
+from tests.campaign.analysis_oracle_v2 import analysis_evidence, analysis_painted, analysis_details, bounded_analysis_snapshot
 
 
 class AnalysisOracleTests(unittest.TestCase):
@@ -12,6 +12,8 @@ class AnalysisOracleTests(unittest.TestCase):
         from tests.progress.test_multiwfn import MultiwfnProgressTests
         self.fixture = MultiwfnProgressTests()
         self.fixture.setUp()
+        # Runtime-resolved native snapshots use the canonical engine identifier.
+        self.fixture.context = replace(self.fixture.context, engine='MULTIWFN')
         self.addCleanup(self.fixture.doCleanups)
         from pathlib import Path
         Path(self.fixture.sources[0].path).write_text(
@@ -60,3 +62,15 @@ class AnalysisOracleTests(unittest.TestCase):
             with self.subTest(required=required):
                 with self.assertRaises(AssertionError):
                     analysis_details(evidence, body.replace(required, 'missing'))
+
+    def test_wrong_typed_field_names_the_predicate_and_retains_actual_snapshot(self):
+        wrong = replace(self.snapshot, context=replace(self.snapshot.context, engine='Multiwfn'))
+        with self.assertRaisesRegex(AssertionError, 'context.engine'):
+            analysis_evidence(wrong, self.case)
+        retained = bounded_analysis_snapshot(wrong)
+        self.assertTrue(retained['complete'])
+        self.assertEqual(retained['snapshot']['context']['engine'], 'Multiwfn')
+        limited = bounded_analysis_snapshot(wrong, limit_bytes=24)
+        self.assertFalse(limited['complete'])
+        self.assertEqual(len(limited['retained_json_prefix']), 24)
+        self.assertNotIn('snapshot', limited)

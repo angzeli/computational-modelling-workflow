@@ -1,6 +1,7 @@
 """Separate full IFCT fixture evidence from width-limited painted stage cells."""
 from __future__ import annotations
 
+import json
 import re
 
 
@@ -10,21 +11,29 @@ def contains(text, token):
 
 def analysis_evidence(snapshot, case):
     """Verify complete fixture literals and immutable identity before display checks."""
-    assert snapshot is not None and snapshot.context.engine == 'Multiwfn'
-    assert snapshot.context.attempt_id == case['attempt_id']
+    assert snapshot is not None, 'scientific snapshot is missing'
+    assert snapshot.context.engine == 'MULTIWFN', {'predicate': 'context.engine',
+        'expected': 'MULTIWFN', 'actual': snapshot.context.engine}
+    assert snapshot.context.attempt_id == case['attempt_id'], {'predicate': 'context.attempt_id',
+        'expected': case['attempt_id'], 'actual': snapshot.context.attempt_id}
     assert not snapshot.metrics, 'Analysis fixture must not invent SCF/geometry metrics'
-    assert snapshot.calculation == case['profile']
-    assert [group.label for group in snapshot.card_groups] == ['ANALYSIS', 'STAGE', 'OUTPUT']
+    assert snapshot.calculation == case['profile'], {'predicate': 'calculation',
+        'expected': case['profile'], 'actual': snapshot.calculation}
+    assert [group.label for group in snapshot.card_groups] == ['ANALYSIS', 'STAGE', 'OUTPUT'], {
+        'predicate': 'card group labels', 'actual': [group.label for group in snapshot.card_groups]}
     cells = [cell.text for group in snapshot.card_groups for row in group.rows for cell in row]
     assert all(contains('\n'.join(cells), token) for token in case['literal_text']), {
+        'predicate': 'full descriptor fixture literals',
         'expected': case['literal_text'], 'full_descriptor_cells': cells}
     settings = {item.name: item.value for item in snapshot.settings}
     stages = {'Native': str(settings.get('native_stage', '')).removeprefix('Native '),
               'Runner': str(settings.get('runner_stage', ''))}
-    assert all(stages.values()), stages
-    assert all(any(token in value for token in case['literal_text']) for value in stages.values()), stages
+    assert all(stages.values()), {'predicate': 'both full stage settings', 'actual': stages}
+    assert all(any(token in value for token in case['literal_text']) for value in stages.values()), {
+        'predicate': 'stage settings match fixture literals', 'actual': stages}
     if 'Validator PASSED (recorded)' in case['literal_text']:
-        assert snapshot.scientific_validation == 'validator-recorded-passed'
+        assert snapshot.scientific_validation == 'validator-recorded-passed', {
+            'predicate': 'scientific_validation', 'actual': snapshot.scientific_validation}
     return {'attempt_id': snapshot.context.attempt_id, 'profile': snapshot.calculation,
             'full_literals': case['literal_text'], 'stages': stages,
             'scientific_validation': snapshot.scientific_validation}
@@ -67,3 +76,16 @@ def analysis_details(evidence, body):
     assert all(contains(body, token) for token in expected), {'expected': expected, 'body': body}
     return {'full_literals': expected, 'validation': 'actual-details-model-body',
             'body': body, 'painted_full_stage_claimed': False}
+
+
+def bounded_analysis_snapshot(snapshot, limit_bytes=65536):
+    """Retain the actual typed observation, disclosing any diagnostic truncation."""
+    value = snapshot.to_dict() if snapshot is not None else None
+    encoded = json.dumps(value, ensure_ascii=True, default=str).encode('ascii')
+    result = {'complete': len(encoded) <= limit_bytes, 'json_bytes': len(encoded),
+              'limit_bytes': limit_bytes}
+    if result['complete']:
+        result['snapshot'] = value
+    else:
+        result['retained_json_prefix'] = encoded[:limit_bytes].decode('ascii')
+    return result
