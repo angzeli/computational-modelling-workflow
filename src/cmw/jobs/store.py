@@ -305,11 +305,16 @@ class Store:
 
     @staticmethod
     def _request_record(con, request_id):
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_requests'").fetchone() is None:
-            return None
-        row = con.execute('SELECT operation,digest,result FROM node_requests WHERE request_id=?',
-                          (request_id,)).fetchone()
+        row = None
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_requests'").fetchone():
+            row = con.execute('SELECT operation,digest,result FROM node_requests WHERE request_id=?',
+                              (request_id,)).fetchone()
         if row is None:
+            # An immutable job binding proves a receipt is missing, not its outcome.
+            bound = con.execute("SELECT id FROM jobs WHERE json_extract(data, '$.node_submission.request_id')=? LIMIT 1",
+                                (request_id,)).fetchone()
+            if bound is not None:
+                raise JobsError('Recorded node request journal is missing for an existing attempt; recovery refused')
             return None
         try:
             result = json.loads(row[2])
@@ -320,6 +325,12 @@ class Store:
             if (binding.get('request_id') != request_id or binding.get('digest') != row[1]
                     or row[0] == 'control' and result.get('status') not in {'ACCEPTED', 'COMPLETED'}):
                 raise ValueError('Request identity differs from its recorded outcome')
+            if row[0] == 'submit':
+                job_row = con.execute('SELECT data FROM jobs WHERE id=?', (result.get('id'),)).fetchone()
+                job = json.loads(job_row[0]) if job_row is not None else None
+                if (not isinstance(job, dict) or result.get('attempt_id') != job.get('attempt_id')
+                        or binding != job.get('node_submission')):
+                    raise ValueError('Request outcome differs from its immutable attempt binding')
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise JobsError(f'Recorded node request is malformed: {exc}') from exc
         return {'request_id': request_id, 'operation': row[0], 'digest': row[1], 'result': result}

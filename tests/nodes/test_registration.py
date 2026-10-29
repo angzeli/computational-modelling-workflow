@@ -112,8 +112,13 @@ class RegistrationTests(RegistrationFixture, unittest.TestCase):
         with patch.object(self.store, 'transaction', after_commit):
             with self.assertRaisesRegex(RuntimeError, 'lost reply'):
                 self.add()
+        self.store = Store(self.store.root)  # New caller after the failed/lost reply.
         outcome = self.store.request_lookup(self.request['request_id'])
         self.assertIsNotNone(outcome)
+        with self.store.read_transaction() as con:
+            durable = con.execute('SELECT result FROM node_requests WHERE request_id=?',
+                                  (self.request['request_id'],)).fetchone()
+            self.assertEqual(json.loads(durable[0]), outcome['result'])
         self.assertEqual(self.add(), outcome['result'])
         self.assertEqual(len(self.store.snapshot()['jobs']), 1)
 
@@ -128,10 +133,44 @@ class RegistrationTests(RegistrationFixture, unittest.TestCase):
         result = subprocess.run([sys.executable, '-I', '-B', '-c', script, str(checkout / 'src'),
                                  str(self.store.root), json.dumps(options)], capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 73, result.stderr.decode())
+        self.store = Store(self.store.root)  # New caller after the failed/lost reply.
         outcome = self.store.request_lookup(self.request['request_id'])
         self.assertIsNotNone(outcome)
+        with self.store.read_transaction() as con:
+            durable = con.execute('SELECT result FROM node_requests WHERE request_id=?',
+                                  (self.request['request_id'],)).fetchone()
+            self.assertEqual(json.loads(durable[0]), outcome['result'])
         self.assertEqual(self.add(), outcome['result'])
         self.assertEqual(len(self.store.snapshot()['jobs']), 1)
+
+    def test_missing_or_corrupt_journal_refuses_without_reconstructing_or_duplicating(self):
+        job = self.add()
+        request_id = self.request['request_id']
+        for damage in ('missing-row', 'missing-table', 'invalid-json', 'wrong-attempt'):
+            with self.subTest(damage=damage):
+                with self.store.transaction() as con:
+                    if damage == 'missing-row':
+                        con.execute('DELETE FROM node_requests WHERE request_id=?', (request_id,))
+                    elif damage == 'missing-table':
+                        con.execute('DROP TABLE node_requests')
+                    else:
+                        result = '{' if damage == 'invalid-json' else json.dumps({**job, 'attempt_id': uuid4().hex})
+                        con.execute('UPDATE node_requests SET result=? WHERE request_id=?', (result, request_id))
+                fresh = Store(self.store.root)
+                with self.assertRaisesRegex(JobsError, 'journal is missing|malformed'):
+                    fresh.request_lookup(request_id)
+                with self.assertRaisesRegex(JobsError, 'journal is missing|malformed'):
+                    fresh.add(argv=job['argv'], cwd=self.inputs, name=job['name'],
+                              remote_request=self.request, node_submission=self.metadata)
+                with fresh.read_transaction() as con:
+                    self.assertEqual(len(Store.rows(con)), 1)
+                    self.assertEqual(Store.rows(con)[0]['attempt_id'], job['attempt_id'])
+                with self.store.transaction() as con:
+                    con.execute('CREATE TABLE IF NOT EXISTS node_requests ('
+                                'request_id TEXT PRIMARY KEY, operation TEXT NOT NULL, '
+                                'digest TEXT NOT NULL, result TEXT NOT NULL)')
+                    con.execute('DELETE FROM node_requests WHERE request_id=?', (request_id,))
+                    Store.record_request(con, request_id, 'submit', self.request['digest'], job)
 
     def test_metadata_cannot_be_added_replaced_or_rebound_after_registration(self):
         job = self.add()

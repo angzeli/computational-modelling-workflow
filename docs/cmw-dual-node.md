@@ -75,6 +75,10 @@ cached evidence, selected-job Details access and export limitations.
 
 ## Reviewed held submission
 
+Lost-reply recovery requires the original durable request receipt and its exact
+immutable attempt binding. A missing receipt for an already bound request, or a
+corrupt receipt, refuses explicitly; matching job names never reconstruct it.
+
 Submission uses the same selected backend as observation. `submit --preview`
 prepares a private frontend spool and durable request record, then asks the
 endpoint for a read-only plan. It does not stage files on the destination or add
