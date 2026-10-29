@@ -44,9 +44,9 @@ def run(argv, output, timeout, *, max_owned=BUDGETS['owned_subprocesses']):
                 except BaseException as exc:
                     report['sampling_errors'].append(repr(exc))
                     return
-        report['samples'].append(ledger.sample())
         sampler = threading.Thread(target=sample, name='owned-run-resource-sampler', daemon=True)
         try:
+            report['samples'].append(ledger.sample())
             sampler.start()
             ledger.phase = 'command'
             with (output/'command.log').open('wb') as log:
@@ -88,7 +88,7 @@ def run(argv, output, timeout, *, max_owned=BUDGETS['owned_subprocesses']):
     def frontend(sample):
         return next((row for row in (sample or {}).get('processes', ())
                      if all(row[key] == ledger.frontend[key] for key in ('pid', 'birth'))), None)
-    initial_frontend = frontend(report['samples'][0])
+    initial_frontend = frontend(report['samples'][0] if report['samples'] else None)
     final_frontend = frontend(final_sample)
     growth = final_frontend['fds']-initial_frontend['fds'] if initial_frontend and final_frontend and 'fds' in initial_frontend and 'fds' in final_frontend else None
     report['resource_peaks'] = {'rss_bytes': max((row['rss_bytes'] for row in resources if 'rss_bytes' in row), default=None),

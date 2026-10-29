@@ -164,6 +164,41 @@ class DriverContractTests(unittest.TestCase):
             self.assertFalse(report['outcomes']['qualified'])
             self.assertFalse(report['remaining'])
 
+    def test_identity_read_uncertainty_is_not_unsafe_signal_authority(self):
+        record = {'ledger_id': 0, 'recorded_at': 0., 'role': 'controller', 'capture_origin': 'direct-launch',
+                  'birth': None, 'exit': {'at': 2., 'returncode': 0, 'exit_evidence': 'original Popen wait/reap'}}
+        observations = [{'ledger_id': 0, 'required_live': True, 'classification': 'genuinely_unobservable'}]
+        report = coverage([record], observations, [], ended_at=2.)
+        result = outcomes(functional_passed=True, safety_passed=report['control_identity_safety'] == 'PASS',
+                          cleanup_passed=True, observation=report)
+        self.assertEqual(result['functional_result'], 'PASS')
+        self.assertEqual(result['control_identity_safety'], 'PASS')
+        self.assertEqual(result['resource_observability'], 'RESOURCE_QUALIFICATION_INCOMPLETE')
+        self.assertTrue(result['execution_passed'])
+        self.assertFalse(result['qualified'])
+
+    def test_cleanup_exception_is_saved_before_it_blocks_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)/'owned.json'
+            with patch.object(ProcessLedger, 'cleanup', side_effect=RuntimeError('injected cleanup failure')):
+                with self.assertRaises(AssertionError):
+                    with closure_workflows.monitored(self.id(), destination):
+                        pass
+            report = json.loads(destination.read_text())
+            self.assertIn('injected cleanup failure', report['cleanup_error'])
+            self.assertEqual(report['outcomes']['functional_result'], 'PASS')
+            self.assertEqual(report['outcomes']['cleanup_result'], 'FAIL')
+
+    def test_initial_sampler_crash_writes_top_level_failure(self):
+        from tests.campaign.owned_run import run
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(ProcessLedger, 'sample', side_effect=RuntimeError('initial sampler crash')):
+                report = run(['/unexecuted'], Path(directory)/'owned', 1)
+            self.assertFalse(report['passed'])
+            self.assertIn('initial sampler crash', report['error'])
+            self.assertIsNone(report['process_exits']['command_returncode'])
+            self.assertTrue((Path(directory)/'owned'/'result.json').is_file())
+
     def test_cleanup_failure_remains_a_blocker(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(ProcessLedger, 'cleanup', return_value=[{'unresolved': True}]):

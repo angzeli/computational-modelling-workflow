@@ -81,8 +81,14 @@ def monitored(name, destination):
             stopped.set()
             sampler.join(timeout=2)
             ledger.finish_sampling()
-            remaining = ledger.cleanup(cleanup_deadline)
+            cleanup_error = None
+            try:
+                remaining = ledger.cleanup(cleanup_deadline)
+            except BaseException as exc:
+                remaining = []
+                cleanup_error = type(exc).__name__ + ': ' + str(exc)
             evidence = ledger.report()
+            evidence['cleanup_error'] = cleanup_error
             live = [process for sample in samples for process in sample['processes']]
             peaks = {'rss_bytes': max((process['rss_bytes'] for process in live if 'rss_bytes' in process), default=None),
                      'fds': max((process['fds'] for process in live if 'fds' in process), default=None),
@@ -97,7 +103,7 @@ def monitored(name, destination):
                 evidence.update(observation_accounting='FAIL', resource_observability='RESOURCE_QUALIFICATION_INCOMPLETE')
             evidence['outcomes'] = outcomes(functional_passed=not body_failed,
                 safety_passed=evidence['control_identity_safety'] == 'PASS',
-                cleanup_passed=not remaining and not ledger.cleanup_errors and not sampler.is_alive(),
+                cleanup_passed=cleanup_error is None and not remaining and not ledger.cleanup_errors and not sampler.is_alive(),
                 observation=evidence, resource_limits_passed=resource_ok)
             save(destination, evidence)
             if not body_failed:

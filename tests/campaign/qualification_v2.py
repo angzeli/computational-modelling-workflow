@@ -115,8 +115,9 @@ def coverage(records, observations, opportunities, *, ended_at, sampling_errors=
                 'failures': failures, 'resource_claim': 'sampled maxima only'})
     accounting_ok = not sampling_errors and all(item['classification'] in
         {'sampled', 'skipped_lag', 'sampler_crash'} for item in opportunities)
-    unsafe = [item for item in observations if item['classification'] in
-              {'identity_mismatch', 'genuinely_unobservable', 'unavailable_identity'}]
+    # Unavailable resource identity is uncertainty, not an unsafe action.
+    # Cleanup separately requires fresh signal authority or the original wait.
+    unsafe = [item for item in observations if item['classification'] == 'identity_mismatch']
     failures = [row for row in rows if row['failures']]
     return {'contract_version': 2, 'plan_status': PLAN['status'],
         'observation_accounting': 'PASS' if accounting_ok else 'FAIL',
