@@ -273,8 +273,17 @@ def compact_core(configuration, directory):
         finally:
             result['returncode'] = session.close()
             result['terminal_bytes'] = session.output_bytes
+            metrics = output/'metrics.json'
+            if metrics.exists():
+                result['metrics'] = json.loads(metrics.read_text())
             (output/'result.json').write_text(json.dumps(result, indent=2)+'\n')
         assert result['returncode'] == 0, result
+        assert result['terminal_bytes'] > 0
+        metrics = result['metrics']
+        assert not metrics['control_thread_alive'], metrics
+        assert metrics['ui_tick_intervals']['p95'] <= BUDGETS['ui_tick_p95_seconds'], metrics
+        assert metrics['ui_render_seconds']['p95'] <= BUDGETS['ui_render_p95_seconds'], metrics
+        assert all(sample['outcome'] == 'ok' for samples in metrics['requests'].values() for sample in samples), metrics
         results.append(result)
     return results
 
