@@ -469,7 +469,16 @@ class MeterTransport(ProcessTransport):
         super().close()
 
 
-def fixture(root, count):
+def fixture(root, count, *, history_rows=None):
+    """Build the existing native case with an explicit small readiness history.
+
+    ``count`` retains the established 1000/10000 native-case/owner key. A reduced
+    history is disclosed independently and never qualifies large-history work.
+    """
+    actual_rows = count if history_rows is None else history_rows
+    if history_rows is not None and (isinstance(actual_rows, bool)
+            or not isinstance(actual_rows, int) or not 2 <= actual_rows <= count):
+        raise ValueError('history_rows must be an integer between 2 and the case count')
     from cmw.jobs.store import Store
     from cmw.nodes.identity import enroll
     from cmw.progress.models import SourceDescriptor
@@ -494,7 +503,7 @@ def fixture(root, count):
         '--kpar', '1', '--mpi-mode', 'synthetic', '--restart', 'none', '--timeout', '10',
         '--stop-before', '0', '--managed-foreground'], cwd=science,
         name='Synthetic native selected row', engine='VASP', hold=True, progress_sources=sources)
-    populate_history(state, root, count, first=native)
+    populate_history(state, root, actual_rows, first=native)
     config = enroll(root/'node', {'queues': {'research': str(state.root)},
         'storages': {'scratch': str(science)},
         'profiles': {'benign': {'engine': 'Command', 'runner': '/usr/bin/true', 'max_cpus': 1}}})
@@ -504,7 +513,7 @@ def fixture(root, count):
         'default_queue': 'research', 'read_only': False}
     target = {'node_id': entry['node_id'], 'queue_id': entry['queues']['research'],
               'job_id': native['id'], 'attempt_id': native['attempt_id']}
-    return {'entry': entry, 'target': target, 'state': str(state.root), 'science': str(science), 'rows': count}
+    return {'entry': entry, 'target': target, 'state': str(state.root), 'science': str(science), 'rows': count, 'actual_history_rows': actual_rows}
 
 
 def endpoint_command(config):
