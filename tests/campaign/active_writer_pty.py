@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import faulthandler
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import sys
 import threading
 import time
 
+from tests.campaign.pty import Session
 from tests.campaign.paint_barrier import active_screen_refresh
 from tests.campaign.navigation_trace import screen_state
 
@@ -82,6 +84,45 @@ class InputCompletionProbe:
                 'refresh': refresh, 'state': self.input_state()}
 
 
+def command_trace(directory, name, phase, command, **values):
+    """One append survives blocked UI/teardown; never asks the UI thread to flush."""
+    record = {'at': time.monotonic(), 'thread': threading.get_ident(),
+              'phase': phase, 'command': command, **values}
+    descriptor = os.open(Path(directory)/(name+'.jsonl'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        data = (json.dumps(record, default=str)+'\n').encode()
+        assert os.write(descriptor, data) == len(data), 'Incomplete command trace append'
+    finally:
+        os.close(descriptor)
+
+
+class DiagnosticSession(Session):
+    """Ask only the original owned child for stacks when a barrier fails."""
+    def request(self, operation, **values):
+        command = {'operation': operation, **values}
+        command_trace(self.directory, 'parent-commands', 'start', command)
+        try:
+            result = super().request(operation, **values)
+        except BaseException as exc:
+            command_trace(self.directory, 'parent-commands', 'error', command, error=repr(exc))
+            marker = self.directory/'stack-handler.json'
+            handler = json.loads(marker.read_text()) if marker.exists() else {}
+            if self.process is not None and self.process.poll() is None and handler.get('pid') == self.process.pid:
+                try:
+                    self.process.send_signal(signal.SIGUSR1)
+                    command_trace(self.directory, 'parent-commands', 'stack-requested', command,
+                                  pid=self.process.pid, signal='SIGUSR1')
+                except OSError as signal_error:
+                    command_trace(self.directory, 'parent-commands', 'stack-request-error', command,
+                                  error=repr(signal_error))
+            else:
+                command_trace(self.directory, 'parent-commands', 'stack-unavailable', command,
+                              handler=handler, reason='Original child is reaped or handler is not registered')
+            raise
+        command_trace(self.directory, 'parent-commands', 'finish', command)
+        return result
+
+
 def save(path, value):
     with Path(path).open('w') as stream:
         json.dump(value, stream, indent=2, default=str)
@@ -111,7 +152,6 @@ def run(directory):
     from cmw.jobs.store import Store
     from tests.campaign.closure_pty import monitored
     from tests.campaign.closure_workflows import configure_children, installed_origin
-    from tests.campaign.pty import Session
     from tests.jobs.isolated_runtime import install
     from tests.jobs.test_catalogue_store import populate_history
 
@@ -151,7 +191,7 @@ def run(directory):
                 report['run_gate_reached'] = True
                 settings = root/'settings.json'
                 save(settings, {'state': str(store.root), 'expected': expected})
-                session = Session(settings, root/'pty', module='tests.campaign.active_writer_pty', deadline=deadline)
+                session = DiagnosticSession(settings, root/'pty', module='tests.campaign.active_writer_pty', deadline=deadline)
                 session.resize((140, 40))
                 assert session.request('ready')['tty'] == [True, True]
 
@@ -325,6 +365,10 @@ def child(settings, directory):
     from tests.campaign.support import summary
     settings = json.loads(Path(settings).read_text()); directory = Path(directory)
     save(directory/'origin.json', installed_origin())
+    stack_output = (directory/'thread-stacks.txt').open('w')
+    faulthandler.register(signal.SIGUSR1, file=stack_output, all_threads=True)
+    save(directory/'stack-handler.json', {'pid': os.getpid(), 'signal': 'SIGUSR1',
+                                        'path': str(directory/'thread-stacks.txt')})
 
     class App(InputCompletionProbe, JobsApp):
         def __init__(self):
@@ -393,6 +437,17 @@ def child(settings, directory):
                 'painted': [strip.text for strip in screen._compositor.render_strips()]}
 
         async def command(self, command):
+            command_trace(directory, 'child-commands', 'ui-start', command, state=self.input_state(),
+                          native_inputs=self.inputs[-3:], completed_bindings=self.bindings[-3:])
+            try:
+                result = await self.execute_command(command)
+            except BaseException as exc:
+                command_trace(directory, 'child-commands', 'ui-error', command, error=repr(exc))
+                raise
+            command_trace(directory, 'child-commands', 'ui-finish', command, state=self.input_state())
+            return result
+
+        async def execute_command(self, command):
             operation = command['operation']; self.controls.append(command)
             if operation == 'input_count': return self.input_count()
             if operation == 'input_received':
@@ -490,7 +545,9 @@ def child(settings, directory):
             with (os.fdopen(int(os.environ['CMW_CAMPAIGN_IN'])) as reader,
                   os.fdopen(int(os.environ['CMW_CAMPAIGN_OUT']), 'w', buffering=1) as writer):
                 for line in reader:
-                    try: reply = {'ok': True, 'result': self.call_from_thread(self.command,json.loads(line))}
+                    command = json.loads(line)
+                    command_trace(directory, 'child-commands', 'control-received', command)
+                    try: reply = {'ok': True, 'result': self.call_from_thread(self.command, command)}
                     except Exception as exc:
                         reply = {'ok': False, 'error': repr(exc)}
                         name = 'command-'+str(len(self.controls))+'-failure'
@@ -502,6 +559,7 @@ def child(settings, directory):
                                 'refresh_barriers': self.refresh_barriers, 'controls': self.controls})
                         except Exception as capture_error:
                             save(directory/(name+'.json'), {'command': line, 'error': repr(exc), 'capture_error': repr(capture_error)})
+                    command_trace(directory, 'child-commands', 'control-reply', command, ok=reply['ok'])
                     writer.write(json.dumps(reply)+'\n')
 
     with monitored(directory, 'active-writer-pty-child'):
@@ -514,6 +572,8 @@ def child(settings, directory):
                 'completed_bindings':app.bindings,'refresh_barriers':app.refresh_barriers,
                 'control_thread_alive':thread is not None and thread.is_alive(),
                 'tick_intervals':summary(app.ticks),'render_seconds':summary(app.renders)})
+            faulthandler.unregister(signal.SIGUSR1)
+            stack_output.close()
             assert thread is None or not thread.is_alive()
 
 
