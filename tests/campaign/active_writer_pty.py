@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 
-from tests.campaign.pty import Session
+from tests.campaign.pty import ANSI_CAPTURE_BYTES, Session
 from tests.campaign.paint_barrier import active_screen_refresh
 from tests.campaign.navigation_trace import screen_state
 
@@ -331,7 +331,10 @@ def run(directory):
         assert not ui['control_thread_alive'] and ui['native_inputs']
         assert ui['tick_intervals']['p95'] <= BUDGETS['ui_tick_p95_seconds']
         assert ui['render_seconds']['p95'] <= BUDGETS['ui_render_p95_seconds']
-        assert session is not None and 0 < session.output_bytes <= 8*1024*1024
+        assert session is not None and session.output_bytes > 0
+        report['terminal_capture'] = session.terminal_capture()
+        assert 0 < session.retained_bytes <= ANSI_CAPTURE_BYTES
+        assert (root/'pty'/'terminal.ansi').stat().st_size == session.retained_bytes
         final = store.snapshot()
         assert all(job['status'] == 'Hold' and job['started_at'] is None
                    and not (store.root/'attempts'/job['attempt_id']/'payload-exit.json').exists()

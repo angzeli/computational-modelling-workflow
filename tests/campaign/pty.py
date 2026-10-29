@@ -23,11 +23,14 @@ from tests.campaign.navigation_trace import screen_state
 from tests.campaign.visual_contract_v2 import frame_id, synthetic_machine, SyntheticMachineSampler, MACHINE_HEADER
 
 
+ANSI_CAPTURE_BYTES = 8 * 1024 * 1024
+
+
 class Session:
     def __init__(self, settings, directory, *, module='tests.campaign.pty', deadline=None):
         self.deadline, self.directory = deadline, directory
         self.process = self.thread = None
-        self.buffer, self.output_bytes = b'', 0
+        self.buffer, self.output_bytes, self.retained_bytes = b'', 0, 0
         self._fds, self.cleanup_notes = set(), []
         self._drain_stop = threading.Event()
         directory.mkdir(mode=0o700)
@@ -68,28 +71,41 @@ class Session:
             except OSError as exc:
                 self.cleanup_notes.append(repr(exc))
 
+    def terminal_capture(self):
+        return {'limit_bytes': ANSI_CAPTURE_BYTES, 'total_received_bytes': self.output_bytes,
+                'retained_bytes': self.retained_bytes,
+                'discarded_bytes': self.output_bytes-self.retained_bytes,
+                'truncated': self.output_bytes > self.retained_bytes,
+                'role': 'optional bounded ANSI diagnostic; required images/actions are separate'}
+
     def drain(self):
         tail = b''
-        with (self.directory/'terminal.ansi').open('wb') as output:
-            while not self._drain_stop.is_set():
-                try:
-                    ready, _, _ = select.select([self.master], [], [], .2)
-                    if not ready:
-                        if self.process.poll() is not None:
+        try:
+            with (self.directory/'terminal.ansi').open('wb') as output:
+                while not self._drain_stop.is_set():
+                    try:
+                        ready, _, _ = select.select([self.master], [], [], .2)
+                        if not ready:
+                            if self.process.poll() is not None:
+                                return
+                            continue
+                        data = os.read(self.master, 65536)
+                        if not data:
                             return
-                        continue
-                    data = os.read(self.master, 65536)
-                    if not data:
+                        self.output_bytes += len(data)
+                        # The storage cap must not close the reader and block the
+                        # owned child's terminal writer. Keep draining and DSR replies.
+                        retained = data[:max(0, ANSI_CAPTURE_BYTES-self.retained_bytes)]
+                        if retained:
+                            self.retained_bytes += output.write(retained)
+                        if b'\x1b[6n' in tail + data:
+                            os.write(self.master, b'\x1b[1;1R')
+                        tail = data[-3:]
+                    except (OSError, ValueError):
                         return
-                    self.output_bytes += len(data)
-                    if self.output_bytes > 8 * 1024 * 1024:
-                        return
-                    output.write(data)
-                    if b'\x1b[6n' in tail + data:
-                        os.write(self.master, b'\x1b[1;1R')
-                    tail = data[-3:]
-                except (OSError, ValueError):
-                    return
+        finally:
+            (self.directory/'terminal-capture.json').write_text(
+                json.dumps(self.terminal_capture(), indent=2)+'\n')
 
     def send(self, keys):
         os.write(self.master, keys)
@@ -211,6 +227,7 @@ def run(settings, directory):
     finally:
         report['returncode'] = session.close()
         report['terminal_bytes'] = session.output_bytes
+        report['terminal_capture'] = session.terminal_capture()
     assert report['returncode'] == 0, report
     terminal = (directory/'terminal.ansi').read_bytes()
     assert b'CMW' in terminal and b'SCF' in terminal and b'RESULT REVIEW' in terminal
@@ -273,6 +290,7 @@ def compact_core(configuration, directory):
         finally:
             result['returncode'] = session.close()
             result['terminal_bytes'] = session.output_bytes
+            result['terminal_capture'] = session.terminal_capture()
             metrics = output/'metrics.json'
             if metrics.exists():
                 result['metrics'] = json.loads(metrics.read_text())
