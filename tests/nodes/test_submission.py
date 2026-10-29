@@ -297,9 +297,17 @@ class SubmissionEndpointTests(unittest.TestCase):
             process.stderr.close()
         self.assertNotEqual(code, 0)
         self.assertIn('BrokenPipeError', diagnostic)
-        lookup = backend.call('request', {'request_id': spec['request_id']})['result']['request']
-        self.assertIsNotNone(lookup)
-        retry = self.register(backend, spec)
+        backend.close()
+        fresh = self.connect(node)
+        with self.store(node).read_transaction() as con:
+            rows = con.execute('SELECT result FROM node_requests WHERE request_id=?',
+                               (spec['request_id'],)).fetchall()
+            self.assertEqual(len(rows), 1)
+            durable = json.loads(rows[0][0])
+            self.assertEqual(con.execute('SELECT count(*) FROM jobs').fetchone()[0], 1)
+        lookup = fresh.call('request', {'request_id': spec['request_id']})['result']['request']
+        self.assertEqual(lookup['result'], durable)
+        retry = self.register(fresh, spec)
         self.assertTrue(retry['replayed'])
         self.assertEqual(retry['job'], lookup['result'])
         self.assertEqual(len(self.store(node).snapshot()['jobs']), 1)
