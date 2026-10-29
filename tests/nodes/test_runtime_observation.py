@@ -293,6 +293,19 @@ class MetadataCollectionTests(RuntimeObservationTests):
             after = (after[0], ((name, tuple(changed)),), after[2])
             self.assertFalse(_metadata_only_collection_change(before, after))
 
+    def test_unknown_and_mixed_flag_bits_never_recollect(self):
+        from cmw.nodes.identity import _metadata_only_collection_change
+        from cmw.nodes.runtime_observation import inventory
+        before = inventory(self.package)
+        for flags in (0x02, 0x42):
+            name, epoch = before[1][0]
+            changed = list(epoch)
+            changed[8] ^= flags
+            changed[4] += 1
+            after = (before[0], ((name, tuple(changed)),), before[2])
+            with patch('cmw.nodes.identity.sys.platform', 'darwin'):
+                self.assertFalse(_metadata_only_collection_change(before, after))
+
     def test_second_inflight_change_remains_a_refusal(self):
         from cmw.nodes import identity
         if not hasattr(os, 'chflags'):
