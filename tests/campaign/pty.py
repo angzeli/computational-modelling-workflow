@@ -533,7 +533,16 @@ def child(settings_path, directory):
                         value = self.call_from_thread(self.command, json.loads(line))
                         reply = {'ok': True, 'result': value}
                     except Exception as exc:
-                        reply = {'ok': False, 'error': repr(exc)}
+                        failure = {'error': repr(exc), 'command': json.loads(line),
+                                   'barriers': self.refresh_barriers[-3:],
+                                   'native_inputs': self.native_inputs[-3:], 'paints': self.paints[-3:]}
+                        name = 'control-'+str(len(self.native_inputs))+'-failure'
+                        try:
+                            (directory/(name+'.svg')).write_text(self.call_from_thread(self.export_screenshot))
+                        except Exception as capture_error:
+                            failure['capture_error'] = repr(capture_error)
+                        (directory/(name+'.json')).write_text(json.dumps(failure, indent=2)+'\n')
+                        reply = {'ok': False, **failure}
                     writer.write(json.dumps(reply)+'\n')
 
     app = App()
