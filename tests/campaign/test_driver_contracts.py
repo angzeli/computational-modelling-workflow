@@ -35,7 +35,8 @@ class DriverContractTests(unittest.TestCase):
     def test_denied_fd_preserves_rss_cpu_and_exact_method(self):
         process = self.process()
         process.num_fds.side_effect = psutil.AccessDenied(process.pid)
-        values, fields = field_sample(process, 123.)
+        with patch('tests.campaign.qualification_v2.psutil.Process', return_value=process):
+            values, fields = field_sample(process, 123.)
         self.assertEqual(values['rss_bytes'], 1234)
         self.assertEqual(values['cpu_seconds'], 1.5)
         self.assertNotIn('fds', values)
@@ -48,7 +49,8 @@ class DriverContractTests(unittest.TestCase):
     def test_no_such_process_one_method_same_live_birth_is_field_uncertainty(self):
         process = self.process()
         process.memory_info.side_effect = psutil.NoSuchProcess(process.pid)
-        values, fields = field_sample(process, 123.)
+        with patch('tests.campaign.qualification_v2.psutil.Process', return_value=process):
+            values, fields = field_sample(process, 123.)
         self.assertEqual(fields['rss_bytes']['classification'], 'transient_read_uncertainty')
         self.assertEqual(fields['rss_bytes']['post_identity']['birth'], 123.)
         self.assertEqual(fields['rss_bytes']['post_identity']['status'], psutil.STATUS_RUNNING)
@@ -57,10 +59,49 @@ class DriverContractTests(unittest.TestCase):
 
     def test_wrong_birth_never_publishes_a_resource_value(self):
         process = self.process()
-        values, fields = field_sample(process, 124.)
+        with patch('tests.campaign.qualification_v2.psutil.Process', return_value=process):
+            values, fields = field_sample(process, 124.)
         self.assertEqual(set(values), {'pid', 'birth'})
         self.assertTrue(all(value['classification'] == 'identity_mismatch' for value in fields.values()))
         process.memory_info.assert_not_called()
+
+    def test_each_field_identity_bracket_uses_fresh_handles_not_cached_birth(self):
+        process = self.process()
+        identities = [self.process() for _ in range(2*len(FIELDS))]
+        # The original resource handle would keep returning its cached birth.
+        # Replacement occurs during its first resource call and must invalidate it.
+        for identity in identities[1:]:
+            identity.create_time.return_value = 124.
+        with patch('tests.campaign.qualification_v2.psutil.Process', side_effect=identities) as factory:
+            values, fields = field_sample(process, 123.)
+        self.assertEqual(factory.call_count, 2*len(FIELDS))
+        self.assertTrue(all(call.args == (process.pid,) for call in factory.call_args_list))
+        self.assertEqual(len({id(identity) for identity in identities}), 2*len(FIELDS))
+        process.create_time.assert_not_called()
+        for identity in identities:
+            identity.create_time.assert_called_once_with()
+        self.assertEqual(fields['rss_bytes']['pre_identity']['birth'], 123.)
+        self.assertEqual(fields['rss_bytes']['post_identity']['birth'], 124.)
+        self.assertEqual(fields['rss_bytes']['classification'], 'identity_mismatch')
+        self.assertEqual(set(values), {'pid', 'birth'})
+        process.memory_info.assert_called_once_with()
+        process.num_fds.assert_not_called()
+        process.cpu_times.assert_not_called()
+
+    def test_fresh_identity_brackets_preserve_rss_and_fd_when_cpu_is_denied(self):
+        process = self.process()
+        process.cpu_times.side_effect = psutil.AccessDenied(process.pid)
+        identities = [self.process() for _ in range(2*len(FIELDS))]
+        with patch('tests.campaign.qualification_v2.psutil.Process', side_effect=identities):
+            values, fields = field_sample(process, 123.)
+        self.assertEqual(values['rss_bytes'], 1234)
+        self.assertEqual(values['fds'], 9)
+        self.assertNotIn('cpu_seconds', values)
+        self.assertEqual(fields['cpu_seconds']['classification'], 'access_denied')
+        self.assertEqual(fields['cpu_seconds']['method'], 'psutil.Process.cpu_times')
+        self.assertEqual(fields['cpu_seconds']['pre_identity']['birth'], 123.)
+        self.assertEqual(fields['cpu_seconds']['post_identity']['birth'], 123.)
+        process.create_time.assert_not_called()
 
     def test_required_owner_blindness_is_not_hidden_by_other_owners(self):
         records = [{'ledger_id': i, 'recorded_at': 0., 'role': role, 'capture_origin': 'direct-launch'}

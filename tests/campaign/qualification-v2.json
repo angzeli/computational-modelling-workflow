@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "status": "FROZEN_AFTER_PREFLIGHT_02",
+  "status": "FROZEN_AFTER_PREFLIGHT_03",
   "sample_cadence_seconds": 0.1,
   "cleanup_seconds": 30,
   "coverage": {
@@ -46,13 +46,16 @@
     "active-writer-Run"
   ],
   "calibration": {
-    "evidence": "artifacts/observation-preflight-02/result.json",
+    "evidence": "artifacts/observation-preflight-03/result.json",
     "evidence_path_scope": "relative to campaign workspace, not repository",
-    "prior_evidence_retained": "artifacts/observation-preflight-01/result.json",
+    "prior_evidence_retained": [
+      "artifacts/observation-preflight-01/result.json",
+      "artifacts/observation-preflight-02/result.json"
+    ],
     "sample_cadence_changed": false,
     "thresholds_changed": false,
-    "required_field_startup_max_seconds": 0.057319374987855554,
-    "required_field_blind_max_seconds": 0.13243545801378787,
+    "required_field_startup_max_seconds": 0.058707040967419744,
+    "required_field_blind_max_seconds": 0.1364355420228094,
     "valid_reads_each_role_field": 16,
     "roles": [
       "frontend",
@@ -60,14 +63,15 @@
       "endpoint",
       "worker"
     ],
-    "observer_call_p95_seconds": 0.023476500064134598,
-    "actual_interval_p95_seconds": 0.13243962498381734,
-    "observer_active_wall_fraction": 0.1483674022571736,
-    "rule_rationale": "Each role and field is evaluated independently. Required fields must be observed during the 0.3 s startup window, then no blind interval may exceed 0.5 s. Calibration first reads were within 0.058 s and every required gap below 0.133 s. The finite blind window permits isolated classified misses but refuses persistent owner blindness; later absence never repairs a past gap. No overall percentage is used.",
+    "observer_call_p95_seconds": 0.026390374870970845,
+    "actual_interval_p95_seconds": 0.13646712503395975,
+    "observer_active_wall_fraction": 0.16278019936983895,
+    "rule_rationale": "Each role and field is evaluated independently. Required fields must be observed during the unchanged 0.3 s startup window, then no blind interval may exceed the unchanged 0.5 s limit. Fresh-identity calibration first reads were within 0.059 s and every required gap below 0.137 s. The finite blind window permits isolated classified misses but refuses persistent owner blindness; later absence never repairs a past gap. No overall percentage is used.",
     "limits": [
       "Two-second synthetic role windows do not certify loaded-host or long-run behavior.",
       "Nominal cadence is 0.1 s; actual intervals, lag and overhead remain reported.",
       "Original request/UI deadlines and sampled resource ceilings are unchanged."
-    ]
+    ],
+    "identity_brackets": "Each field pre/post identity uses a newly created psutil.Process(pid); cached resource-handle birth is not reused."
   }
 }

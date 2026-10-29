@@ -19,8 +19,11 @@ FIELDS = {'rss_bytes': 'memory_info', 'fds': 'num_fds', 'cpu_seconds': 'cpu_time
 def identity_status(process):
     evidence = {'pid': process.pid, 'birth': None, 'status': None}
     try:
-        evidence['birth'] = process.create_time()
-        evidence['status'] = process.status()
+        # psutil caches create_time on each Process object. A new handle is
+        # required for each bracket to observe PID replacement during a read.
+        current = psutil.Process(process.pid)
+        evidence['birth'] = current.create_time()
+        evidence['status'] = current.status()
     except (psutil.Error, OSError) as exc:
         evidence.update(exception=type(exc).__name__, errno=getattr(exc, 'errno', None), message=str(exc))
     return evidence
