@@ -21,7 +21,7 @@ from cmw.nodes.client import apply_control, fetch, submit
 from cmw.nodes.connections import ConnectedBackend
 from cmw.nodes.identity import enroll
 from cmw.nodes.transport import ProcessTransport
-from tests.jobs.isolated_runtime import environment, install
+from tests.jobs.isolated_runtime import command, environment, install
 
 
 def wait_for(predicate, *, timeout=35):
@@ -74,8 +74,7 @@ printf 'completed\\n'
     def connect():
         if backend_builder is not None:
             return backend_builder(entry)
-        argv = [sys.executable, '-B', '-m', 'tests.jobs.isolated_runtime', 'cli',
-                'nodes', 'endpoint', '--config', str(config_root), '--queue', 'research']
+        argv = command(['cli', 'nodes', 'endpoint', '--config', str(config_root), '--queue', 'research'])
         return ConnectedBackend('fixture-mini', entry,
             transport=ProcessTransport(argv, timeout=30, env=environment()))
     def close_backend():

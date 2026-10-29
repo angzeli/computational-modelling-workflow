@@ -126,3 +126,19 @@ class RuntimeRefusalEvidenceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NativeInterpreterIsolationTests(unittest.TestCase):
+    def test_fixture_command_ignores_pythonpath_and_reports_installed_origin(self):
+        import subprocess
+        import cmw
+        argv = isolated_runtime.command([])
+        argv[4] = 'import sys,json,cmw;print(json.dumps({"isolated":sys.flags.isolated,"no_bytecode":sys.dont_write_bytecode,"origin":cmw.__file__,"paths":sys.path}))'
+        # This probe tests the actual interpreter boundary, without launching Jobs.
+        result = subprocess.run(argv[:5], capture_output=True, text=True, check=True,
+            env={**os.environ, 'PYTHONPATH':'/definitely-untrusted-cmw-source'}, timeout=10)
+        value = json.loads(result.stdout)
+        self.assertEqual(value['isolated'], 1)
+        self.assertTrue(value['no_bytecode'])
+        self.assertNotIn('/definitely-untrusted-cmw-source', value['paths'])
+        self.assertEqual(Path(value['origin']).resolve(), Path(cmw.__file__).resolve())

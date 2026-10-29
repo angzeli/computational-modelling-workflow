@@ -70,6 +70,8 @@ def record_runtime_refusals():
                 diagnostic = getattr(backend, 'runtime_diagnostic', None)
                 record = {
                     'schema': 1, 'pid': pid, 'python': sys.executable,
+                    'interpreter_isolated': bool(sys.flags.isolated),
+                    'dont_write_bytecode': sys.dont_write_bytecode,
                     'package_origin': cmw.__file__, 'config_root': str(backend.config_root),
                     'queue_alias': backend.queue_alias,
                     'operation': kwargs.get('operation', args[0] if args else None),
@@ -157,6 +159,13 @@ for final-admission races. Production never reads it or selects this class.
         return guard, {'samples': samples, 'source': source}
 
 
+def command(arguments):
+    """Isolate interpreter imports; explicitly bootstrap only the test support root."""
+    return [sys.executable, '-I', '-B', '-c',
+            'import sys;sys.path.insert(0,sys.argv.pop(1));from tests.jobs.isolated_runtime import main;main()',
+            str(ROOT), *arguments]
+
+
 def detached(arguments, log):
     from cmw.jobs import runtime
     from cmw.jobs.store import private_opener
@@ -164,7 +173,7 @@ def detached(arguments, log):
     runtime.reap_detached()
     with open(log, 'ab', buffering=0, opener=private_opener) as output:
         process = subprocess.Popen(
-            [sys.executable, '-m', 'tests.jobs.isolated_runtime', *arguments],
+            command(arguments),
             stdin=subprocess.DEVNULL, stdout=output, stderr=output,
             start_new_session=True, close_fds=True, env=environment(), cwd='/')
     runtime._CHILDREN.append(process)
