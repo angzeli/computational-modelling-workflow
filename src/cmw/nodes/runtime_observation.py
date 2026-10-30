@@ -82,23 +82,31 @@ def _extended_security(path):
                                  api=exc.api, errno=exc.errno, security_state=exc.state,
                                  object_type='directory' if stat.S_ISDIR(before.st_mode) else 'file') from exc
         attrs['__cmw_acl__'] = 'ABSENT:FILESEC_ACL' if acl['state'] == 'absent' else acl['sha256']
-        if (object_epoch(os.fstat(descriptor)) != object_epoch(before)
-                or object_epoch(path.lstat()) != object_epoch(before)):
-            raise RuntimeRefusal('in_flight_change', phase='security-after-read', path=str(path))
+        descriptor_after, path_after = os.fstat(descriptor), path.lstat()
+        if (object_epoch(descriptor_after) != object_epoch(before)
+                or object_epoch(path_after) != object_epoch(before)):
+            raise RuntimeRefusal('in_flight_change', phase='security-after-read', path=str(path),
+                before=object_epoch(before), after={'descriptor': object_epoch(descriptor_after),
+                    'path': object_epoch(path_after), 'acl': acl},
+                actual_digest=_security_digest(attrs), api='fstat/lstat', security_state='complete',
+                object_type='directory' if stat.S_ISDIR(before.st_mode) else 'file')
         return attrs
     finally:
         os.close(descriptor)
 
 
+def _security_digest(extended):
+    # Preserve schema-1 hash bytes; completeness/schema carry proven ACL absence.
+    if extended.get('__cmw_acl__') == 'ABSENT:FILESEC_ACL':
+        extended = {**extended, '__cmw_acl__': 'UNAVAILABLE:ACL'}
+    return stable_hash(extended)
+
+
 def _security(path, info):
     extended = _extended_security(path)
     complete = not str(extended.get('__cmw_acl__', '')).startswith('UNAVAILABLE:')
-    # Preserve schema-1 hash bytes for exact-epoch compatibility; completeness and
-    # the versioned policy distinguish positively proven absence from old unknown.
-    if extended.get('__cmw_acl__') == 'ABSENT:FILESEC_ACL':
-        extended = {**extended, '__cmw_acl__': 'UNAVAILABLE:ACL'}
     return (info.st_mode, info.st_uid, info.st_gid, getattr(info, 'st_flags', 0),
-            info.st_nlink, stable_hash(extended), complete)
+            info.st_nlink, _security_digest(extended), complete)
 
 
 def file_epoch(path):

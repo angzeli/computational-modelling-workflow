@@ -132,6 +132,31 @@ def _metadata_only_collection_change(before, after):
     return changed
 
 
+def _metadata_only_security_refusal(evidence, first, root):
+    """Classify the observed failed boundary before allowing a full reread.
+
+    A later eligible inventory cannot erase an earlier observed inode/security
+    change. Initial/partial ACL reads, roots and interpreter remain strict.
+    """
+    if (sys.platform != 'darwin' or evidence.get('phase') != 'security-after-read'
+            or evidence.get('security_state') != 'complete'):
+        return False
+    try:
+        name = str(Path(evidence['path']).relative_to(root))
+        expected = dict(first[1])[name]
+        before = tuple(evidence['before'])
+        after = evidence['after']
+        descriptor, path = tuple(after['descriptor']), tuple(after['path'])
+        acl_state = after['acl']['state']
+    except (KeyError, TypeError, ValueError):
+        return False
+    expected_object = tuple(expected[i] for i in (0, 1, 5, 6, 7, 9, 2, 3, 4, 8))
+    return bool(expected[-1] and evidence.get('actual_digest') == expected[-2]
+        and acl_state in {'absent', 'present'} and before == expected_object
+        and len(descriptor) == 10 and descriptor == path and descriptor != before
+        and descriptor[:8] == before[:8] and (descriptor[9] ^ before[9]) & ~0x40 == 0)
+
+
 def runtime_observed(*, diagnostics=None):
     """Observe coherent disk bytes, with one classified full metadata recollection.
 
@@ -152,7 +177,8 @@ def runtime_observed(*, diagnostics=None):
                                  before=dict(epoch), after=dict(after[1]))
     except RuntimeRefusal as exc:
         if (exc.evidence['category'] != 'in_flight_change'
-                or exc.evidence['phase'] not in {'before-open', 'read', 'inventory-after-read'}):
+                or (exc.evidence['phase'] not in {'before-open', 'read', 'inventory-after-read'}
+                    and not _metadata_only_security_refusal(exc.evidence, first, root))):
             raise
         current = inventory(root)
         if (file_epoch(executable) != executable_before

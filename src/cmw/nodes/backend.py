@@ -134,7 +134,7 @@ class LocalBackend:
         if not defer_check:
             self._check()
 
-    def _check(self, operation=None):
+    def _check(self, operation=None, *, phase="initial"):
         config = self._load_identity(self.config_root)
         if not self._custom_identity_checker:
             from .runtime_observation import RuntimeVerifier
@@ -148,7 +148,15 @@ class LocalBackend:
             raise BackendError('IDENTITY_CHANGED', '; '.join(readiness.get('identity_errors') or readiness.get('errors') or ['Node/queue identity is unavailable']))
         self.runtime_diagnostic = readiness.get('runtime_diagnostic')
         if not readiness.get('runtime_ready', False):
-            raise BackendError('RUNTIME_MISMATCH', '; '.join(readiness.get('runtime_errors') or ['Pinned endpoint runtime differs']))
+            message = '; '.join(readiness.get('runtime_errors') or ['Pinned endpoint runtime differs'])
+            context = {'operation': operation, 'operation_phase': phase}
+            if self.runtime_diagnostic:
+                self.runtime_diagnostic = {**self.runtime_diagnostic, **context}
+                context.update({key: self.runtime_diagnostic.get(key) for key in ('phase', 'path')})
+            # Keep the negotiated {code,message} error shape; retain the boundary
+            # even when a successful mutation is followed by a refused post-check.
+            raise BackendError('RUNTIME_MISMATCH', message[:2048] + ' | ' +
+                               json.dumps(context, ensure_ascii=True)[:1800])
         record = config.get('queues', {}).get(self.queue_alias)
         if not isinstance(record, dict):
             raise BackendError('UNKNOWN_QUEUE', f'Queue is not enrolled: {self.queue_alias}')
@@ -387,7 +395,7 @@ class LocalBackend:
             params = {} if params is None else params
             if type(params) is not dict:
                 raise BackendError('INVALID_PARAMS', 'Operation parameters must be an object')
-            self._check(operation)
+            self._check(operation, phase="before")
             if is_mutation(operation, params):
                 identifier(request_id, 'request ID')
                 expected = {'node_id': self.config['node_id'], 'queue_id': self.queue['queue_id'],
@@ -473,7 +481,7 @@ class LocalBackend:
                 job = self._job(target)
                 result = self._selected(operation, params, job)
                 self._job(target)
-            self._check(operation)
+            self._check(operation, phase="after")
             self.sequence += 1
             envelope = {'schema': 1, 'node_id': self.config['node_id'], 'queue_id': self.queue['queue_id'],
                     'queue_alias': self.queue_alias, 'session_id': self.session_id, 'sequence': self.sequence,

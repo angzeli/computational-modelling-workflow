@@ -468,6 +468,18 @@ other uncertainty refuses. Optional collection diagnostics retain the first
 refusal and both inventories. This is coherent current-disk collection, not
 replacement trust; the original fingerprint and fresh-observer checks still apply.
 
+A completed descriptor ACL/xattr read that observes a package-member change at
+its final stat boundary may enter that same single recollection only when its
+own before/after evidence is classified: original member identity, mode, owner,
+link count, size, mtime and security digest match, descriptor/path agree, and
+only ctime/UF_TRACKED differs. A later benign inventory cannot erase an observed
+unsafe transition. Initial inventory, partial/denied ACL reads, xattr races,
+roots/directories/interpreter and a second incoherent read remain refusals.
+Endpoint runtime errors retain before/after-operation context in the existing
+bounded code/message response. A post-operation refusal is not a rollback;
+query the same durable request/transfer identity from a fresh isolated observer.
+No automatic operation replay, trust rewrite or enrollment change is introduced.
+
 ### Navigation qualification diagnostics
 
 Navigation return preserves the exact saved selection and viewport when content
