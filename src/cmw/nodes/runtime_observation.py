@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import time
 
 from cmw.core.provenance import stable_hash
 
@@ -19,7 +20,7 @@ class RuntimeRefusal(ValueError):
         super().__init__('CMW runtime verification refused: ' + category)
 
 
-def _extended_security(path):
+def _extended_security(path, *, observe=None):
     """Read macOS ACL/xattrs natively; unavailable evidence is a refusal."""
     if sys.platform != 'darwin' and hasattr(os, 'listxattr'):
         names = os.listxattr(path, follow_symlinks=False)
@@ -44,6 +45,8 @@ def _extended_security(path):
                         ctypes.c_uint32, ctypes.c_int]
     getting.restype = ctypes.c_ssize_t
     before = path.lstat()
+    if observe is not None:
+        observe(object_epoch(before), 'security-before')
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
@@ -52,7 +55,10 @@ def _extended_security(path):
                              security_state='denied' if isinstance(exc, PermissionError) else 'error',
                              object_type='directory' if stat.S_ISDIR(before.st_mode) else 'file') from exc
     try:
-        if object_epoch(os.fstat(descriptor)) != object_epoch(before):
+        opened = object_epoch(os.fstat(descriptor))
+        if observe is not None:
+            observe(opened, 'security-open')
+        elif opened != object_epoch(before):
             raise RuntimeRefusal('in_flight_change', phase='security-open', path=str(path))
         size = listing(descriptor, None, 0, 0)
         if size < 0 or size > 65536:
@@ -75,7 +81,7 @@ def _extended_security(path):
                 raise RuntimeRefusal('in_flight_change', phase='xattr-read', path=str(path))
             attrs[os.fsdecode(name)] = hashlib.sha256(value.raw).hexdigest()
         try:
-            acl = acl_evidence(descriptor)
+            acl = acl_evidence(descriptor, observe=observe) if observe is not None else acl_evidence(descriptor)
         except SecurityReadError as exc:
             raise RuntimeRefusal('in_flight_change' if exc.state == 'changed-object' else
                                  'security_metadata_unavailable', phase='acl-read', path=str(path),
@@ -83,7 +89,10 @@ def _extended_security(path):
                                  object_type='directory' if stat.S_ISDIR(before.st_mode) else 'file') from exc
         attrs['__cmw_acl__'] = 'ABSENT:FILESEC_ACL' if acl['state'] == 'absent' else acl['sha256']
         descriptor_after, path_after = os.fstat(descriptor), path.lstat()
-        if (object_epoch(descriptor_after) != object_epoch(before)
+        if observe is not None:
+            observe(object_epoch(descriptor_after), 'security-descriptor-after')
+            observe(object_epoch(path_after), 'security-path-after')
+        elif (object_epoch(descriptor_after) != object_epoch(before)
                 or object_epoch(path_after) != object_epoch(before)):
             raise RuntimeRefusal('in_flight_change', phase='security-after-read', path=str(path),
                 before=object_epoch(before), after={'descriptor': object_epoch(descriptor_after),
@@ -109,15 +118,151 @@ def _security(path, info):
             info.st_nlink, _security_digest(extended), complete)
 
 
-def file_epoch(path):
+def file_epoch(path, *, collection=None):
+    from .native_security import object_epoch
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode):
         raise RuntimeRefusal('nonregular_member', phase='inventory', path=str(path))
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
-            *_security(path, info))
+    if collection is None:
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+                *_security(path, info))
+    observe = lambda value, phase: collection.object(path, value, phase)
+    observe(object_epoch(info), 'stat-before')
+    extended = _extended_security(path, observe=observe)
+    after = path.lstat()
+    observe(object_epoch(after), 'stat-after')
+    epoch = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+             after.st_mode, after.st_uid, after.st_gid, getattr(after, 'st_flags', 0),
+             after.st_nlink, _security_digest(extended),
+             not str(extended.get('__cmw_acl__', '')).startswith('UNAVAILABLE:'))
+    collection.security(path, epoch)
+    return epoch
 
 
-def inventory(root):
+# Darwin SDK sys/stat.h: document-ID tracking. Never apply to other object kinds.
+UF_TRACKED = 0x40
+MAX_OBSERVATION_SECONDS = 10.0
+MAX_READ_BYTES = 256 * 1024**2
+
+
+def _member_difference(old, new):
+    if old[:2] != new[:2]:
+        return 'member_replaced'
+    if old[5:8] != new[5:8] or old[9:] != new[9:]:
+        return 'security_metadata_changed'
+    if old[2:4] != new[2:4]:
+        return 'content_epoch_changed'
+    if old == new:
+        return None
+    if (sys.platform == 'darwin' and stat.S_ISREG(old[5]) and stat.S_ISREG(new[5])
+            and old[-1] and new[-1] and old[8] ^ new[8] == UF_TRACKED):
+        return None
+    return 'unqualified_observation_change'
+
+
+class RuntimeCollection:
+    """One sequential verification: no package restarts, at most two reads/member."""
+    def __init__(self, root, diagnostics=None):
+        self.root = root
+        self.deadline = time.monotonic() + MAX_OBSERVATION_SECONDS
+        self.objects, self.epochs, self.hashes, self.read_epochs = {}, {}, {}, {}
+        self.transitions, self.reads = {}, {}
+        self.bytes_read = 0
+        self.generation = 'initial-inventory'
+        self.evidence = {'policy': 3, 'status': 'PENDING', 'transitions': [],
+                         'content_reads': self.reads, 'bytes_read': 0}
+        if diagnostics is not None:
+            diagnostics.append(self.evidence)
+
+    def check(self):
+        if time.monotonic() > self.deadline:
+            self.refuse('observation_deadline', str(self.root))
+
+    def refuse(self, category, path, before=None, after=None, *, phase=None):
+        error = RuntimeRefusal(category, phase=phase or self.generation, path=str(path),
+                               before=before, after=after)
+        error.evidence.update(policy=3, generation=self.generation,
+                              bytes_read=self.bytes_read, content_reads=dict(self.reads))
+        if isinstance(before, (tuple, list)) and isinstance(after, (tuple, list)) and len(before) == len(after):
+            error.evidence['changed_indices'] = [i for i, pair in enumerate(zip(before, after))
+                                                if pair[0] != pair[1]]
+        self.evidence.update(status='REFUSED', refusal=error.evidence)
+        raise error
+
+    def object(self, path, value, phase):
+        self.check()
+        name = str(path.relative_to(self.root))
+        previous = self.objects.get(name)
+        if previous is not None and previous != value:
+            eligible = (sys.platform == 'darwin' and stat.S_ISREG(previous[2])
+                and stat.S_ISREG(value[2]) and previous[:8] == value[:8]
+                and previous[9] ^ value[9] == UF_TRACKED)
+            if not eligible:
+                self.refuse('in_flight_change', name, previous, value, phase=phase)
+            if name in self.transitions:
+                self.refuse('member_observation_budget', name, previous, value, phase=phase)
+            event = {'path': name, 'phase': phase, 'generation': self.generation,
+                     'before': list(previous), 'after': list(value),
+                     'raw_differences': {key: {'before': previous[index], 'after': value[index]}
+                         for key, index in [('ctime_ns', 8), ('flags', 9)] if previous[index] != value[index]},
+                     'material_differences': {}}
+            self.transitions[name] = event
+            self.evidence['transitions'].append(event)
+        self.objects[name] = value
+
+    def security(self, path, epoch):
+        name = str(path.relative_to(self.root))
+        if not epoch[-1]:
+            self.refuse('security_metadata_incomplete', name, after=epoch)
+        before = self.epochs.get(name)
+        if before is not None:
+            category = _member_difference(before, epoch)
+            if category:
+                self.refuse(category, name, before, epoch)
+        self.epochs[name] = epoch
+
+    def read(self, path):
+        from .native_security import object_epoch
+        name = str(path.relative_to(self.root))
+        before = file_epoch(path, collection=self)
+        count = self.reads.get(name, 0)
+        if count >= 2:
+            self.refuse('member_read_budget', name)
+        if before[2] > 16 * 1024**2 or self.bytes_read + before[2] > MAX_READ_BYTES:
+            self.refuse('member_size_bound', name)
+        self.reads[name] = count + 1
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, 'rb') as handle:
+            self.object(path, object_epoch(os.fstat(handle.fileno())), 'content-open')
+            data = handle.read(16 * 1024**2 + 1)
+            self.object(path, object_epoch(os.fstat(handle.fileno())), 'content-after')
+        self.bytes_read += len(data)
+        self.evidence['bytes_read'] = self.bytes_read
+        if len(data) != before[2] or self.bytes_read > MAX_READ_BYTES:
+            self.refuse('incomplete_content_read', name)
+        after = file_epoch(path, collection=self)
+        digest = hashlib.sha256(data).hexdigest()
+        if name in self.hashes and self.hashes[name] != digest:
+            self.refuse('content_changed', name, self.hashes[name], digest)
+        self.hashes[name] = digest
+        self.read_epochs[name] = after
+        if before != after:
+            # A transition enclosing the read needs content evidence afterwards.
+            return self.read(path)
+        self.check()
+        return data, after
+
+    def final_member(self, path, epoch):
+        name = str(path.relative_to(self.root))
+        if name not in self.read_epochs:
+            self.refuse('membership_changed', name)
+        if epoch != self.read_epochs[name]:
+            # Rehash this member after a qualified late delta, never restart peers.
+            _, epoch = self.read(path)
+        return epoch
+
+
+def inventory(root, *, collection=None, final=False):
     root = Path(root)
     info = root.lstat()
     if root != root.resolve(strict=True) or not stat.S_ISDIR(info.st_mode):
@@ -125,10 +270,15 @@ def inventory(root):
     # Directory modification times change for excluded bytecode; object and security do not.
     security = _security(root, info)
     root_epoch = (info.st_dev, info.st_ino, *security[:4], *security[-2:])
-    entries = sorted(path for path in root.rglob('*')
-                     if '__pycache__' not in path.parts)
-    if len(entries) > 8192:
-        raise RuntimeRefusal('membership_bound', phase='inventory', path=str(root))
+    entries = []
+    for path in root.rglob('*'):
+        if collection is not None:
+            collection.check()
+        if '__pycache__' not in path.parts:
+            entries.append(path)
+            if len(entries) > 8192:
+                raise RuntimeRefusal('membership_bound', phase='inventory', path=str(root))
+    entries.sort()
     directories = {}
     for path in entries:
         if path.is_dir():
@@ -146,7 +296,9 @@ def inventory(root):
     for path in paths:
         if any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
             raise RuntimeRefusal('path_replacement', phase='inventory', path=str(path))
-        observed = file_epoch(path)
+        observed = file_epoch(path, collection=collection)
+        if final and collection is not None:
+            observed = collection.final_member(path, observed)
         total += observed[2]
         if observed[2] > 16 * 1024**2 or total > 128 * 1024**2:
             raise RuntimeRefusal('member_size_bound', phase='inventory', path=str(path))
@@ -154,9 +306,9 @@ def inventory(root):
     return root_epoch, tuple(epoch), directories
 
 
-def observation(root, root_epoch, epoch, directories, digest):
+def observation(root, root_epoch, epoch, directories, digest, member_hashes):
     executable = Path(sys.executable).resolve(strict=True)
-    return dict(schema=2, root=str(root), root_epoch=list(root_epoch),
+    return dict(schema=3, member_sha256=member_hashes, root=str(root), root_epoch=list(root_epoch),
                 executable=str(executable), executable_epoch=list(file_epoch(executable)),
                 members={name: list(value) for name, value in epoch},
                 directories={name: list(value) for name, value in directories.items()}, package_sha256=digest)
@@ -173,11 +325,19 @@ def _valid_epoch(value, length):
 def validate_observation(value):
     fields = {'schema', 'root', 'root_epoch', 'executable', 'executable_epoch',
               'members', 'directories', 'package_sha256'}
+    if type(value) is dict and value.get('schema') == 3:
+        fields = fields | {'member_sha256'}
     if (type(value) is not dict or set(value) != fields or type(value['schema']) is not int
-            or value['schema'] not in {1, 2} or type(value['members']) is not dict
+            or value['schema'] not in {1, 2, 3} or type(value['members']) is not dict
             or not 1 <= len(value['members']) <= 4096
             or type(value['directories']) is not dict or len(value['directories']) > 4096):
         raise ValueError('Malformed original runtime observation')
+    if value['schema'] == 3:
+        hashes = value['member_sha256']
+        if (type(hashes) is not dict or set(hashes) != set(value['members'])
+                or any(type(v) is not str or len(v) != 64 or any(c not in '0123456789abcdef' for c in v)
+                       for v in hashes.values())):
+            raise ValueError('Malformed runtime member content evidence')
     for name, epoch in list(value['members'].items()) + list(value['directories'].items()):
         if type(name) is not str:
             raise ValueError('Malformed original runtime member path')
@@ -218,6 +378,7 @@ def _source_imports_coherent(observed, *, diagnostics=None):
 
 
 def _differences(before, after):
+    """Original content/authority comparison; raw transition policy is separate."""
     if before['root'] != after['root'] or before['root_epoch'] != after['root_epoch']:
         return 'root_replacement'
     if before['directories'] != after['directories']:
@@ -231,28 +392,25 @@ def _differences(before, after):
         new = after['members'][name]
         if old[:2] != new[:2]:
             return 'member_replaced'
-        # V2: only package-member UF_TRACKED XOR on supported macOS is eligible.
-        # Root, directories and interpreter retain strict identity/security epochs.
-        flags_xor = old[8] ^ new[8]
-        eligible_flags = (sys.platform == 'darwin' and before['schema'] == 2
-                          and after['schema'] == 2 and flags_xor & ~0x40 == 0)
         if (old[5:8] != new[5:8] or old[9:] != new[9:]
-                or flags_xor and not eligible_flags):
+                or (old[8] ^ new[8]) & ~UF_TRACKED):
             return 'security_metadata_changed'
         if old[2:4] != new[2:4]:
             return 'content_epoch_changed'
-    if before['package_sha256'] != after['package_sha256']:
+    if (before['package_sha256'] != after['package_sha256']
+            or before.get('member_sha256') != after.get('member_sha256')):
         return 'content_changed'
     return None
 
 
 class RuntimeVerifier:
-    """One original baseline, one metadata recovery; imported code is separate evidence."""
+    """Immutable enrollment, versioned observation policy, sticky material refusal."""
     def __init__(self, expected, original=None, *, process_started_ns=None, isolated=None):
         self.expected = expected
         self.original = validate_observation(original) if original is not None else None
         self.current = self.original
         self.recovered = False
+        self.tainted = False
         self.last_evidence = None
         if process_started_ns is None:
             import psutil
@@ -261,82 +419,84 @@ class RuntimeVerifier:
         self.isolated = bool(sys.flags.isolated and sys.dont_write_bytecode) if isolated is None else isolated
 
     def verify(self, provider):
+        if self.tainted:
+            raise RuntimeRefusal('fresh_isolated_observer_required', phase='loaded-code',
+                                 before=self.last_evidence)
         try:
-            record, observed = provider()
+            return self._verify(provider)
         except RuntimeRefusal as exc:
-            exc.evidence["trusted_baseline"] = self.original
-            exc.evidence["expected_runtime"] = self.expected
+            exc.evidence['trusted_baseline'] = self.original
+            exc.evidence['expected_runtime'] = self.expected
             self.last_evidence = exc.evidence
+            self.tainted = True
             raise
+
+    def _verify(self, provider):
+        record, observed = provider()
+        try:
+            validate_observation(observed)
+        except ValueError as exc:
+            raise RuntimeRefusal('incomplete_observation', phase='compare', after=observed) from exc
         baseline = self.current
-        if baseline is not None and baseline['schema'] == 1 and observed['schema'] == 2:
-            # An old incomplete baseline can match its exact epoch, never gain
-            # security evidence retroactively. No legacy flag reclassification.
+        if baseline is not None and baseline['schema'] < 3:
+            # Explicit legacy projection preserves exact matches, not new policy.
             from copy import deepcopy
             observed = deepcopy(observed)
-            observed['schema'] = 1
-            pairs = [(baseline['root_epoch'], observed['root_epoch']),
-                     (baseline['executable_epoch'], observed['executable_epoch'])]
-            for key in ('members', 'directories'):
-                pairs.extend((epoch, observed[key][name]) for name, epoch in baseline[key].items()
-                             if name in observed[key])
-            for old, new in pairs:
-                if not old[-1]:
-                    new[-1] = False
+            observed.pop('member_sha256', None)
+            observed['schema'] = baseline['schema']
+            if baseline['schema'] == 1:
+                pairs = [(baseline['root_epoch'], observed['root_epoch']),
+                         (baseline['executable_epoch'], observed['executable_epoch'])]
+                for key in ('members', 'directories'):
+                    pairs.extend((epoch, observed[key][name]) for name, epoch in baseline[key].items()
+                                 if name in observed[key])
+                for old, new in pairs:
+                    if not old[-1]:
+                        new[-1] = False
+        evidence = dict(before=baseline, after=observed,
+            expected_digest=self.expected['package_sha256'], actual_digest=record['package_sha256'])
         if record['fingerprint'] != self.expected['fingerprint']:
             category = _differences(baseline, observed) if baseline is not None else None
-            raise RuntimeRefusal(category or 'runtime_fingerprint_changed', phase='compare',
-                before=baseline, after=observed, expected_digest=self.expected['fingerprint'],
-                actual_digest=record['fingerprint'])
+            raise RuntimeRefusal(category or 'runtime_fingerprint_changed', phase='compare', **evidence)
         if baseline is None:
-            # Legacy enrollment permits ordinary checks, not metadata recovery.
             self.current = observed
             return record
         if baseline == observed:
             return record
-        category = _differences(baseline, observed)
+        if self.original is None:
+            raise RuntimeRefusal('original_baseline_unavailable', phase='compare', **evidence)
+        category = _differences(self.original, observed)
+        if category is None and baseline['schema'] < 3:
+            category = 'legacy_observation_policy_requires_enrollment'
         if category is None and (not baseline['root_epoch'][-1] or
                 not baseline['executable_epoch'][-1] or
                 not all(epoch[-1] for epoch in baseline['members'].values()) or
                 not all(epoch[-1] for epoch in baseline['directories'].values())):
             category = 'security_baseline_incomplete'
-        if category is None and self.original is None:
-            category = 'original_baseline_unavailable'
-        if category is None and self.recovered:
-            category = 'metadata_recovery_exhausted'
-        self.last_evidence = dict(before=baseline, after=observed,
-            expected_digest=self.expected['package_sha256'], actual_digest=record['package_sha256'])
+        if category is None:
+            for name, old in baseline['members'].items():
+                category = _member_difference(old, observed['members'][name])
+                if category:
+                    break
         if category:
-            raise RuntimeRefusal(category, phase='compare', **self.last_evidence)
-        # Provider has read the complete changed epoch and rechecked all membership.
-        # A long-lived interpreter cannot be made coherent by hashing its disk files.
-        changed = [new[4] for name, new in observed['members'].items()
+            raise RuntimeRefusal(category, phase='compare', **evidence)
+        changed = [name for name, new in observed['members'].items()
                    if new != baseline['members'][name]]
         imports = []
+        imports_coherent = _source_imports_coherent(observed, diagnostics=imports) if self.isolated else None
         predicate = ('not_isolated' if not self.isolated else
-                     'no_changed_members' if not changed else
-                     'metadata_not_before_process_start' if max(changed) >= self.process_started_ns else None)
-        imports_coherent = None
-        if predicate is None:
-            imports_coherent = _source_imports_coherent(observed, diagnostics=imports)
-            if not imports_coherent:
-                predicate = 'source_imports_incoherent'
-        if predicate is not None:
-            refused = RuntimeRefusal('fresh_isolated_observer_required', phase='loaded-code',
-                                     **self.last_evidence)
+                     'source_imports_incoherent' if not imports_coherent else None)
+        if predicate:
+            refused = RuntimeRefusal('fresh_isolated_observer_required', phase='loaded-code', **evidence)
             refused.evidence['loaded_code'] = {
                 'failed_predicate': predicate, 'isolated': self.isolated,
                 'process_started_ns': self.process_started_ns,
-                'latest_changed_ctime_ns': max(changed) if changed else None,
+                'latest_changed_ctime_ns': max((observed['members'][name][4] for name in changed), default=None),
                 'source_imports_coherent': imports_coherent, 'import_failures': imports,
-                'changed_members': [name for name, new in observed['members'].items()
-                                    if new != baseline['members'][name]]}
-            self.last_evidence = refused.evidence
+                'changed_members': changed, 'policy': 3}
             raise refused
         self.current = observed
         self.recovered = True
-        flag_change = any(new[8] != baseline['members'][name][8]
-                          for name, new in observed['members'].items())
-        self.last_evidence['category'] = ('uf_tracked_current_disk_verified' if flag_change
-                                          else 'ctime_only_current_disk_verified')
+        self.last_evidence = {**evidence, 'category': 'uf_tracked_current_disk_verified',
+                              'policy': 3, 'changed_members': changed}
         return record

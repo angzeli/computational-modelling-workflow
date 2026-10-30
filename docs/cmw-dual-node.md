@@ -413,41 +413,23 @@ runtime fingerprints and durable request digests are unchanged. Older endpoints
 may refuse this new optional configuration field; retain their original enrollment
 for rollback or peer checks rather than silently stripping the trust record.
 
-Observations cover bounded package members and intermediate directories, root and
-executable identities, security metadata, sizes and timestamps. Full package
-hashing is cached only by the exact complete metadata epoch (two entries); there
-is no time-based or indefinitely trusted runtime/storage result. Inventory is
-rechecked around reads. Bounds are 4,096 files, 8,192 tree entries, 16 MiB per file
-and 128 MiB per package. Identical bytes never authorize a replacement inode.
+Observation schema 3 separates original implementation content, filesystem
+execution authority and raw observation evidence. Independent qualified Darwin
+UF_TRACKED transitions on regular package members are verified without restarting
+a package scan or spending a global recovery allowance. Unexplained ctime,
+unknown/mixed flags, content, member/object/security changes and incomplete evidence
+remain refusals. Root, directories and interpreter remain strict. Bounds are 4,096
+files, 8,192 entries, 16 MiB/member, 128 MiB/package, two reads/member, 256 MiB read
+bytes and a checked ten-second observation deadline.
 
-Observation schema 2 permits one eligible package-member ctime change, including
-an XOR containing only Darwin UF_TRACKED (0x40), to undergo full revalidation.
-This bit denotes document-ID tracking, not an actor or an assurance of safety.
-Root, directory and interpreter epochs remain strict. Mixed or unknown flag
-changes refuse. Content, membership, object and security expectations remain
-those of the original enrollment; semantic fingerprints and request digests do
-not change. A second recovery refuses. Current disk coherence does not prove
-imported-code coherence: recovery requires a fresh isolated observer started
-after the changed epoch, enrolled source imports and no unverified bytecode.
-
-On supported Darwin arm64/x86_64, ACL evidence is descriptor-bound: successful
-fstatx_np into a fresh filesec plus successful filesec_query_property(FILESEC_ACL)
-with presence zero proves absence. A present property is serialized by the native
-ACL API without reordering ACEs. NULL, ENOENT, empty xattrs and display output do
-not prove absence. Denied, unsupported, errored or incoherent reads refuse with
-API/errno/object diagnostics. Before/after object epochs enclose descriptor reads.
-The absence security hash preserves the legacy hash domain; schema 2 and the
-completeness bit carry its newly established meaning. A schema-1 incomplete
-original baseline may match its exact epoch but is never filled retroactively,
-and never gains recovery authority or UF_TRACKED reclassification.
-
-Primary implementation basis: Apple's [acl_file.c](https://github.com/apple-oss-distributions/Libc/blob/main/posix1e/acl_file.c),
-[statx_np.c](https://github.com/apple-oss-distributions/Libc/blob/main/sys/statx_np.c),
-[filesec.c](https://github.com/apple-oss-distributions/Libc/blob/main/gen/filesec.c),
-and [XNU stat.h](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/stat.h),
-checked against the local SDK ABI. This bounded sequential integrity check is not
-a tamper-proof history or protection against an actor controlling the verifier/OS.
-There is no quiet-window sleep, automatic re-enrollment or controller restart.
+The [policy decision and safety argument](runtime-observation-policy.md) defines
+native ACL evidence, loaded-source assumptions, finite member verification and
+legacy compatibility. Isolated coherent source imports remain required for metadata
+revalidation; positively verified observation-only changes do not imply a loaded-code
+mismatch solely through ctime. A material/uncertain refusal taints that verifier.
+Schema 1/2 enrollments retain exact-match behavior only and are never silently
+upgraded; metadata revalidation requires separately authorized enrollment. Semantic
+content fingerprints and original request digests retain their existing domains.
 
 Owner-side code derives operation dependencies, never a client skip list.
 Selected reads check current host/runtime/queue before and after each call. Files
@@ -460,39 +442,16 @@ their behavior. Study/successor services still conservatively check aggregate
 configuration readiness as well as exact source/input/owner checks; dependency
 narrowing for those routes is not claimed.
 
-During schema-2 observation collection, one complete-inventory transition limited
-to supported member ctime/UF_TRACKED may trigger one uncached full reread. The
-first inventory must already be complete; root/directories/interpreter, member
-set, object/content epochs and access evidence must match. A second drift or any
-other uncertainty refuses. Optional collection diagnostics retain the first
-refusal and both inventories. This is coherent current-disk collection, not
-replacement trust; the original fingerprint and fresh-observer checks still apply.
+Runtime errors preserve the actual object, observed comparison operands, generation,
+content-read progress and original enrollment. Eligible raw transitions have explicit
+ctime/flags differences and no material difference; completed content and security
+verification is still required. Later diagnostics are not failure-time evidence.
 
-A completed descriptor ACL/xattr read that observes a package-member change at
-its final stat boundary may enter that same single recollection only when its
-own before/after evidence is classified: original member identity, mode, owner,
-link count, size, mtime and security digest match, descriptor/path agree, and
-only ctime/UF_TRACKED differs. A later benign inventory cannot erase an observed
-unsafe transition. Initial inventory, partial/denied ACL reads, xattr races,
-roots/directories/interpreter and a second incoherent read remain refusals.
-Endpoint runtime errors retain before/after-operation context in the existing
-bounded code/message response. A post-operation refusal is not a rollback;
-query the same durable request/transfer identity from a fresh isolated observer.
-No automatic operation replay, trust rewrite or enrollment change is introduced.
-Submission/transfer runtime refusals also name the original durable request and pinned
-node/queue, state whether dispatch was entered, and direct the client to a fresh
-verified observer's same-request lookup. A rejected post-dispatch response is
-explicitly unconfirmed until that independent lookup; it is not a Jobs Unknown
-status or evidence that nothing was submitted. The protocol still sends only
-its existing error code and bounded message, so older peers need no new fields.
-Loaded-code diagnostics retain the exact failed predicate, process-start and
-member-ctime operands, and import provenance when that check was reached.
-
-A refused final recollection records both comparison operands: package root,
-member/directory inventories and resolved interpreter epochs, plus separate
-inventory/interpreter change flags, collector pass and the first refusal. These
-are failure-time observations; a subsequent successful enrollment or fresh
-observer does not reconstruct an earlier missing observation or erase its failure.
+Submission/transfer runtime refusals retain original request/node/queue identity,
+before/after-dispatch context and explicit same-request lookup guidance in the
+existing bounded error code/message. A rejected post-dispatch response is unconfirmed
+until an independent fresh verified lookup; it is not a Jobs Unknown status or proof
+that nothing was submitted. No automatic replay, trust rewrite or release is added.
 
 ### Navigation qualification diagnostics
 

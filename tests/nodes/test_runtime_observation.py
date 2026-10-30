@@ -1,153 +1,163 @@
-"""Original trust is immutable; metadata recovery is bounded current-disk evidence."""
+"""Policy-3 runtime checks preserve original bytes, authority and request identity."""
 from copy import deepcopy
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from cmw.nodes.identity import _package_digest, runtime_observed, runtime_identity
-from cmw.nodes.runtime_observation import RuntimeVerifier, RuntimeRefusal
+from cmw.nodes.identity import runtime_observed
+from cmw.nodes.runtime_observation import RuntimeVerifier, RuntimeRefusal, validate_observation
 from tests.nodes import test_identity as identity_fixtures
 
 
 class RuntimeObservationTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(prefix='cmw-policy3-')
         self.addCleanup(self.temp.cleanup)
         self.package = Path(self.temp.name).resolve()
         self.member = self.package / '__init__.py'
         self.member.write_text('value=1\n')
         self.origin = patch('cmw.__file__', str(self.member))
-        self.origin.start()
-        self.addCleanup(self.origin.stop)
-        # Model a platform with complete security evidence for recovery negatives.
-        # A separate real-platform test retains incomplete macOS ACL coverage.
-        self.security = patch('cmw.nodes.runtime_observation._extended_security', return_value={})
-        self.security.start()
-        self.addCleanup(self.security.stop)
+        self.origin.start(); self.addCleanup(self.origin.stop)
         self.imports = patch('cmw.nodes.runtime_observation._source_imports_coherent', return_value=True)
-        self.imports.start()
-        self.addCleanup(self.imports.stop)
+        self.imports.start(); self.addCleanup(self.imports.stop)
         self.original, self.epoch = runtime_observed()
 
     def verifier(self, original=True, **options):
         return RuntimeVerifier(self.original, self.epoch if original else None,
-            process_started_ns=10**20, isolated=True, **options)
+            process_started_ns=0, isolated=True, **options)
 
     def touch_metadata(self):
-        os.chmod(self.member, self.member.stat().st_mode)
+        if not hasattr(os, 'chflags'):
+            self.skipTest('Darwin UF_TRACKED')
+        os.chflags(self.member, self.member.stat().st_flags ^ 0x40)
 
-    def test_stable_and_one_full_ctime_recovery_preserve_original_semantics(self):
+    def test_unchanged_runtime_and_complete_member_hashes(self):
+        import hashlib
+        verifier = self.verifier()
+        self.assertEqual(verifier.verify(runtime_observed), self.original)
+        self.assertEqual(self.epoch['schema'], 3)
+        self.assertEqual(self.epoch['member_sha256'],
+            {'__init__.py': hashlib.sha256(b'value=1\n').hexdigest()})
+        self.assertFalse(verifier.recovered)
+
+    def test_late_tracked_change_preserves_fingerprint_and_original_trust(self):
         verifier = self.verifier()
         trusted = deepcopy(self.epoch)
-        self.assertEqual(verifier.verify(runtime_observed), self.original)
         self.touch_metadata()
         self.assertEqual(verifier.verify(runtime_observed), self.original)
         self.assertEqual(verifier.original, trusted)
-        self.assertTrue(verifier.recovered)
-        self.assertEqual(verifier.last_evidence['category'], 'ctime_only_current_disk_verified')
+        self.assertEqual(verifier.last_evidence['category'], 'uf_tracked_current_disk_verified')
+        self.assertGreater(verifier.current['members']['__init__.py'][4], verifier.process_started_ns)
         self.assertEqual(verifier.verify(runtime_observed), self.original)
 
-    def test_long_lived_importer_requires_fresh_isolated_observer(self):
-        verifier = RuntimeVerifier(self.original, self.epoch, process_started_ns=0, isolated=True)
-        self.touch_metadata()
-        with self.assertRaises(RuntimeRefusal) as caught:
-            verifier.verify(runtime_observed)
-        self.assertEqual(caught.exception.evidence['category'], 'fresh_isolated_observer_required')
-        self.assertEqual(caught.exception.evidence['phase'], 'loaded-code')
-        self.assertFalse(verifier.recovered)
-        self.assertEqual(verifier.current, self.epoch)
+    def test_unexplained_ctime_is_not_exempt(self):
+        os.chmod(self.member, self.member.stat().st_mode)
+        with self.assertRaisesRegex(RuntimeRefusal, 'unqualified_observation_change'):
+            self.verifier().verify(runtime_observed)
 
-    def test_nonisolated_fresh_process_does_not_restore_authority(self):
-        verifier = RuntimeVerifier(self.original, self.epoch, process_started_ns=10**20, isolated=False)
+    def test_independent_member_changes_across_calls_do_not_exhaust_global_budget(self):
+        other = self.package/'second.py'; other.write_text('value=2\n')
+        original, epoch = runtime_observed()
+        verifier = RuntimeVerifier(original, epoch, process_started_ns=0, isolated=True)
         self.touch_metadata()
-        with self.assertRaisesRegex(RuntimeRefusal, 'fresh_isolated'):
-            verifier.verify(runtime_observed)
+        self.assertEqual(verifier.verify(runtime_observed), original)
+        os.chflags(other, other.stat().st_flags ^ 0x40)
+        self.assertEqual(verifier.verify(runtime_observed), original)
+        self.assertEqual(verifier.original, epoch)
 
-    def test_unknown_baseline_and_repeated_drift_refuse(self):
-        verifier = self.verifier(False)
-        verifier.verify(runtime_observed)
+    def test_content_with_restored_mtime_and_tracked_still_refuses(self):
+        before = self.member.stat()
+        self.member.write_text('value=2\n')
+        os.utime(self.member, ns=(before.st_atime_ns, before.st_mtime_ns))
         self.touch_metadata()
-        with self.assertRaisesRegex(RuntimeRefusal, 'original_baseline_unavailable'):
-            verifier.verify(runtime_observed)
+        with self.assertRaisesRegex(RuntimeRefusal, 'content_changed'):
+            self.verifier().verify(runtime_observed)
+
+    def test_same_bytes_replacement_and_symlink_refuse(self):
+        for symlink in (False, True):
+            with self.subTest(symlink=symlink):
+                other = self.package.parent/(self.package.name+'-replacement')
+                other.write_bytes(b'value=1\n'); self.addCleanup(other.unlink, missing_ok=True)
+                before = self.member.stat(); os.utime(other, ns=(before.st_atime_ns,before.st_mtime_ns))
+                self.member.unlink()
+                if symlink: self.member.symlink_to(other)
+                else: other.replace(self.member)
+                with self.assertRaises(RuntimeRefusal): self.verifier().verify(runtime_observed)
+
+    def test_material_refusal_taints_interpreter_after_disk_restoration(self):
         verifier = self.verifier()
-        verifier.verify(runtime_observed)
-        self.touch_metadata()
-        with self.assertRaisesRegex(RuntimeRefusal, 'metadata_recovery_exhausted'):
-            verifier.verify(runtime_observed)
-
-    def test_uncertain_imported_code_does_not_gain_authority(self):
-        self.touch_metadata()
-        with patch('cmw.nodes.runtime_observation._source_imports_coherent', return_value=False):
-            with self.assertRaisesRegex(RuntimeRefusal, 'fresh_isolated'):
-                self.verifier().verify(runtime_observed)
-
-    def test_directory_object_or_security_change_refuses(self):
-        original = deepcopy(self.epoch)
-        original['directories']['nodes'] = list(original['root_epoch'])
-        current = deepcopy(original)
-        current['directories']['nodes'][1] += 1
-        verifier = RuntimeVerifier(self.original, original, process_started_ns=10**20, isolated=True)
-        with self.assertRaisesRegex(RuntimeRefusal, 'directory_identity_or_security_changed'):
-            verifier.verify(lambda: (self.original, current))
-
-    def test_unknown_security_baseline_never_recovers(self):
-        original = deepcopy(self.epoch)
-        original['root_epoch'][-1] = False
-        current = deepcopy(original)
-        current['members']['__init__.py'][4] += 1
-        verifier = RuntimeVerifier(self.original, original, process_started_ns=10**20, isolated=True)
-        with self.assertRaisesRegex(RuntimeRefusal, 'security_baseline_incomplete'):
-            verifier.verify(lambda: (self.original, current))
-
-    def test_identical_byte_replacement_is_never_adopted(self):
-        copy = self.package / 'replacement'
-        copy.write_bytes(self.member.read_bytes())
-        os.utime(copy, ns=(self.member.stat().st_atime_ns, self.member.stat().st_mtime_ns))
-        copy.replace(self.member)
-        with self.assertRaisesRegex(RuntimeRefusal, 'member_replaced'):
-            self.verifier().verify(runtime_observed)
-
-    def test_permissions_and_security_metadata_refuse(self):
-        self.member.chmod(0o600 if self.member.stat().st_mode & 0o077 else 0o644)
+        changed = deepcopy(self.epoch); changed['members']['__init__.py'][5] ^= 0o020
         with self.assertRaisesRegex(RuntimeRefusal, 'security_metadata_changed'):
-            self.verifier().verify(runtime_observed)
+            verifier.verify(lambda:(self.original,changed))
+        with self.assertRaisesRegex(RuntimeRefusal, 'fresh_isolated_observer_required'):
+            verifier.verify(lambda:(self.original,self.epoch))
+        self.assertEqual(verifier.current,self.epoch)
 
-    def test_changed_content_and_membership_refuse_with_original_evidence(self):
-        for change in ('content', 'addition', 'removal'):
-            with self.subTest(change=change):
-                current = deepcopy(self.epoch)
-                record = deepcopy(self.original)
-                if change == 'content':
-                    current['package_sha256'] = '0' * 64
-                    record['package_sha256'] = '0' * 64
-                    record['fingerprint'] = '0' * 64
-                elif change == 'addition':
-                    current['members']['added.py'] = list(next(iter(current['members'].values())))
-                else:
-                    current['members'] = {}
-                with self.assertRaises(RuntimeRefusal) as caught:
-                    self.verifier().verify(lambda: (record, current))
-                self.assertIn(caught.exception.evidence['category'],
-                              {'content_changed', 'membership_changed', 'runtime_fingerprint_changed'})
+    def test_original_authority_negatives_are_handwritten(self):
+        cases = [('inode',1,1),('owner',6,1),('mode',5,0o020),('links',9,1),
+                 ('unknown_flag',8,2),('mixed_flag',8,0x42),('acl',10,'0'*64),('incomplete',11,False)]
+        for name,index,delta in cases:
+            with self.subTest(name=name):
+                current=deepcopy(self.epoch)
+                current['members']['__init__.py'][index] = (current['members']['__init__.py'][index]^delta
+                    if type(delta) is int else delta)
+                with self.assertRaises(RuntimeRefusal): self.verifier().verify(lambda:(self.original,current))
+        for field in ('root_epoch','executable_epoch'):
+            current=deepcopy(self.epoch); current[field][0]+=1
+            with self.subTest(field=field),self.assertRaises(RuntimeRefusal):
+                self.verifier().verify(lambda:(self.original,current))
+        current=deepcopy(self.epoch); current['directories']['injected']=list(current['root_epoch'])
+        with self.assertRaises(RuntimeRefusal): self.verifier().verify(lambda:(self.original,current))
 
-    def test_in_flight_change_is_not_retried_or_cached_as_success(self):
-        from cmw.nodes import identity
-        from cmw.nodes.runtime_observation import file_epoch
-        _package_digest.cache_clear()
-        calls = 0
-        def racing(path):
-            nonlocal calls
-            calls += 1
-            value = file_epoch(path)
-            if calls == 2:
-                return (*value[:4], value[4] + 1, *value[5:])
-            return value
-        with patch.object(identity, 'file_epoch', side_effect=racing):
-            with self.assertRaisesRegex(RuntimeRefusal, 'in_flight_change'):
-                runtime_observed()
-        self.assertEqual(_package_digest.cache_info().currsize, 0)
+    def test_added_removed_and_partial_member_evidence_refuse(self):
+        for kind in ('added','removed','partial'):
+            current=deepcopy(self.epoch)
+            if kind=='added':
+                current['members']['other.py']=list(current['members']['__init__.py'])
+                current['member_sha256']['other.py']='0'*64
+            elif kind=='removed': current['members'].clear();current['member_sha256'].clear()
+            else: current['member_sha256'].clear()
+            with self.subTest(kind=kind),self.assertRaises(RuntimeRefusal):
+                self.verifier().verify(lambda:(self.original,current))
+
+    def test_legacy_exact_only_and_no_retroactive_security(self):
+        for schema in (1,2):
+            legacy=deepcopy(self.epoch);legacy.pop('member_sha256');legacy['schema']=schema
+            if schema==1:
+                for row in [legacy['root_epoch'],legacy['executable_epoch'],*legacy['members'].values()]:row[-1]=False
+            verifier=RuntimeVerifier(self.original,legacy,isolated=True)
+            self.assertEqual(verifier.verify(lambda:(self.original,self.epoch)),self.original)
+            current=deepcopy(self.epoch);current['members']['__init__.py'][8]^=0x40
+            current['members']['__init__.py'][4]+=1
+            with self.assertRaisesRegex(RuntimeRefusal,'legacy_observation_policy'):
+                verifier.verify(lambda:(self.original,current))
+            self.assertEqual(verifier.original,legacy)
+        invalid=deepcopy(self.epoch);invalid['schema']=True
+        with self.assertRaises(ValueError):validate_observation(invalid)
+
+    def test_missing_original_baseline_does_not_gain_revalidation(self):
+        verifier=self.verifier(False);verifier.verify(runtime_observed)
+        self.touch_metadata()
+        with self.assertRaisesRegex(RuntimeRefusal,'original_baseline_unavailable'):verifier.verify(runtime_observed)
+
+    def test_incomplete_original_baseline_refuses_revalidation(self):
+        original=deepcopy(self.epoch);original['root_epoch'][-1]=False
+        verifier=RuntimeVerifier(self.original,original,isolated=True)
+        current=deepcopy(original);current['members']['__init__.py'][8]^=0x40
+        with self.assertRaisesRegex(RuntimeRefusal,'security_baseline_incomplete'):
+            verifier.verify(lambda:(self.original,current))
+
+
+    def test_darwin_flag_exception_is_not_portable_to_other_platforms(self):
+        current=deepcopy(self.epoch)
+        current['members']['__init__.py'][8]^=0x40
+        current['members']['__init__.py'][4]+=1
+        with patch('cmw.nodes.runtime_observation.sys.platform','linux'):
+            with self.assertRaisesRegex(RuntimeRefusal,'unqualified_observation_change'):
+                self.verifier().verify(lambda:(self.original,current))
 
 
 class ScopedReadinessTests(unittest.TestCase):
@@ -216,107 +226,3 @@ class RequestRecoveryTests(unittest.TestCase):
         self.assertEqual(found['result']['target'], target)
         self.assertEqual(found['result']['status'], 'COMPLETED')
         self.assertEqual(len(self.store.snapshot()['jobs']), 1)
-
-
-class TrackedPolicyTests(RuntimeObservationTests):
-    def test_v2_tracked_only_revalidates_all_original_evidence(self):
-        current = deepcopy(self.epoch)
-        current['members']['__init__.py'][8] ^= 0x40
-        current['members']['__init__.py'][4] += 1
-        verifier = self.verifier()
-        with patch('cmw.nodes.runtime_observation.sys.platform', 'darwin'):
-            verifier.verify(lambda: (self.original, current))
-        self.assertEqual(verifier.last_evidence['category'], 'uf_tracked_current_disk_verified')
-        self.assertEqual(verifier.original, self.epoch)
-
-    def test_mixed_flags_and_other_platform_and_legacy_refuse(self):
-        for flags, platform, schema in ((0x42, 'darwin', 2), (0x40, 'linux', 2),
-                                        (0x40, 'darwin', 1)):
-            with self.subTest(flags=flags, platform=platform, schema=schema):
-                before = deepcopy(self.epoch)
-                before['schema'] = schema
-                current = deepcopy(before)
-                current['members']['__init__.py'][8] ^= flags
-                verifier = RuntimeVerifier(self.original, before, process_started_ns=10**20, isolated=True)
-                with patch('cmw.nodes.runtime_observation.sys.platform', platform):
-                    with self.assertRaisesRegex(RuntimeRefusal, 'security_metadata_changed'):
-                        verifier.verify(lambda: (self.original, current))
-
-    def test_legacy_incomplete_baseline_exact_epoch_only_not_retroactive_evidence(self):
-        legacy = deepcopy(self.epoch)
-        legacy['schema'] = 1
-        for epoch in [legacy['root_epoch'], legacy['executable_epoch'], *legacy['members'].values()]:
-            epoch[-1] = False
-        verifier = RuntimeVerifier(self.original, legacy, process_started_ns=10**20, isolated=True)
-        verifier.verify(lambda: (self.original, deepcopy(self.epoch)))
-        current = deepcopy(self.epoch)
-        current['members']['__init__.py'][4] += 1
-        with self.assertRaisesRegex(RuntimeRefusal, 'security_baseline_incomplete'):
-            verifier.verify(lambda: (self.original, current))
-
-    def test_restored_mtime_content_change_refuses(self):
-        before = self.member.stat()
-        self.member.write_text('value=2\n')
-        os.utime(self.member, ns=(before.st_atime_ns, before.st_mtime_ns))
-        with self.assertRaisesRegex(RuntimeRefusal, 'content_changed'):
-            self.verifier().verify(runtime_observed)
-
-
-class MetadataCollectionTests(RuntimeObservationTests):
-    def test_only_one_full_eligible_recollection_not_a_quiet_sleep(self):
-        from cmw.nodes import identity
-        real = identity._package_digest
-        def change_before_open(root, epoch):
-            os.chflags(self.member, self.member.stat().st_flags ^ 0x40)
-            return real(root, epoch)
-        if not hasattr(os, 'chflags'):
-            self.skipTest('Darwin flags')
-        diagnostic = []
-        with patch.object(identity, '_package_digest', side_effect=change_before_open) as digest:
-            digest.__wrapped__ = real.__wrapped__
-            result, _ = runtime_observed(diagnostics=diagnostic)
-        self.assertEqual(result['fingerprint'], self.original['fingerprint'])
-        self.assertEqual(len(diagnostic), 1)
-        self.assertEqual(diagnostic[0]['attempts'], 2)
-        self.assertEqual(diagnostic[0]['outcome'], 'COHERENT_CURRENT_DISK_ONLY')
-        self.assertEqual(digest.call_count, 1)
-
-    def test_content_epoch_and_unknown_flags_never_recollect(self):
-        from cmw.nodes.identity import _metadata_only_collection_change
-        from cmw.nodes.runtime_observation import inventory
-        before = inventory(self.package)
-        for index in (0, 1, 2, 3, 5, 6, 7, 9):
-            after = deepcopy(before)
-            name, epoch = after[1][0]
-            changed = list(epoch)
-            changed[index] += 1
-            after = (after[0], ((name, tuple(changed)),), after[2])
-            self.assertFalse(_metadata_only_collection_change(before, after))
-
-    def test_unknown_and_mixed_flag_bits_never_recollect(self):
-        from cmw.nodes.identity import _metadata_only_collection_change
-        from cmw.nodes.runtime_observation import inventory
-        before = inventory(self.package)
-        for flags in (0x02, 0x42):
-            name, epoch = before[1][0]
-            changed = list(epoch)
-            changed[8] ^= flags
-            changed[4] += 1
-            after = (before[0], ((name, tuple(changed)),), before[2])
-            with patch('cmw.nodes.identity.sys.platform', 'darwin'):
-                self.assertFalse(_metadata_only_collection_change(before, after))
-
-    def test_second_inflight_change_remains_a_refusal(self):
-        from cmw.nodes import identity
-        if not hasattr(os, 'chflags'):
-            self.skipTest('Darwin flags')
-        real = identity._package_digest
-        def drift(root, epoch):
-            os.chflags(self.member, self.member.stat().st_flags ^ 0x40)
-            return real.__wrapped__(root, epoch)
-        diagnostics = []
-        with patch.object(identity, '_package_digest', side_effect=drift) as digest:
-            digest.__wrapped__ = drift
-            with self.assertRaisesRegex(RuntimeRefusal, 'in_flight_change'):
-                runtime_observed(diagnostics=diagnostics)
-        self.assertEqual(diagnostics[0]['outcome'], 'REFUSED')

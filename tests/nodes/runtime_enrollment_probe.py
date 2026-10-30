@@ -8,7 +8,7 @@ from uuid import uuid4
 
 # This directory supplies only the already tested recorder, never CMW source.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runtime_publish_probe import failure_record
+from runtime_publish_probe import failure_record, verify_lost_reply
 
 
 def path_snapshot(path):
@@ -20,44 +20,82 @@ def path_snapshot(path):
 
 
 def endpoint(config, diagnostic_path, mode):
-    """Real endpoint/collectors; wrapper only records or applies the named fault."""
+    """Real endpoint/collectors; controlled native flags and independent lost reply."""
     import hashlib
     import cmw
+    from cmw.nodes import identity
+    from cmw.nodes.runtime_observation import RuntimeCollection
     from cmw.nodes.backend import LocalBackend
     from cmw.nodes.endpoint import serve
-    report = {'mode': mode, 'python': sys.executable, 'package': cmw.__file__}
+    report = {'mode': mode, 'python': sys.executable, 'package': cmw.__file__,
+              'metadata_transitions': [], 'runtime_checks': []}
+    root = Path(cmw.__file__).resolve().parent
+    native_observed, native_read = identity.runtime_observed, RuntimeCollection.read
+    injected = set()
+
+    def transition(path, when):
+        assert path.is_relative_to(Path(sys.prefix).resolve()) and path.stat().st_nlink == 1
+        before = path.stat(); digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        os.chflags(path, before.st_flags ^ 0x40)
+        after = path.stat()
+        report['metadata_transitions'].append({'member': str(path), 'schedule': when,
+            'mechanism': 'native os.chflags; synthetic deterministic boundary',
+            'ctime_before': before.st_ctime_ns, 'ctime_after': after.st_ctime_ns,
+            'flags_before': before.st_flags, 'flags_after': after.st_flags,
+            'sha256_before': digest, 'sha256_after': hashlib.sha256(path.read_bytes()).hexdigest()})
+        injected.add(str(path.relative_to(root)))
+
+    def read(collection, path):
+        name = str(path.relative_to(root))
+        inject = mode == 'lost-submit-reply' and collection.generation == 'content' and name not in injected
+        if inject and name == '__init__.py':
+            transition(path, 'before member content open')
+        result = native_read(collection, path)
+        if inject and name == 'nodes/protocol.py' and name not in injected:
+            transition(path, 'after content read; before final member verification')
+        return result
+
+    def observed(**kwargs):
+        evidence = []
+        try:
+            record, observation = native_observed(diagnostics=evidence)
+            report['runtime_checks'].append({'status': 'PASS', 'policy': observation['schema'],
+                'fingerprint': record['fingerprint'], 'members': len(observation['members']),
+                'complete_hash_set': set(observation['members']) == set(observation['member_sha256']),
+                'bytes_read': evidence[0]['bytes_read'], 'transitions': evidence[0]['transitions'],
+                'content_reads': evidence[0]['content_reads']})
+            return record, observation
+        finally:
+            report['last_collection'] = evidence
+            diagnostic_path.write_text(json.dumps(report, indent=2)+'\n')
+    identity.runtime_observed = observed
+    RuntimeCollection.read = read
+
     def factory(root, queue):
         backend = LocalBackend(root, queue, defer_check=True)
-        original = backend._check
-        injected = False
+        original_check, original_call = backend._check, backend.call
         def check(operation=None, *, phase='initial', request_id=None):
-            nonlocal injected
-            if mode == 'post-submit' and operation == 'submit' and phase == 'after' and not injected:
-                member = Path(cmw.__file__).resolve()
-                assert member.is_relative_to(Path(sys.prefix).resolve()) and member.stat().st_nlink == 1
-                before = member.stat()
-                digest = hashlib.sha256(member.read_bytes()).hexdigest()
-                os.chflags(member, before.st_flags ^ 0x40)
-                after = member.stat()
-                report['controlled_fault'] = {'member': str(member), 'ctime_before': before.st_ctime_ns,
-                    'ctime_after': after.st_ctime_ns, 'flags_before': before.st_flags,
-                    'flags_after': after.st_flags, 'sha256_before': digest,
-                    'sha256_after': hashlib.sha256(member.read_bytes()).hexdigest()}
-                injected = True
             try:
-                return original(operation, phase=phase, request_id=request_id)
+                return original_check(operation, phase=phase, request_id=request_id)
             except BaseException as exc:
                 report.update(operation=operation, operation_phase=phase, request_id=request_id,
                     error_code=getattr(exc, 'code', None), error=str(exc),
                     runtime_diagnostic=getattr(backend, 'runtime_diagnostic', None))
                 diagnostic_path.write_text(json.dumps(report, indent=2)+'\n')
                 raise
-        backend._check = check
+        def call(operation, *args, **kwargs):
+            result = original_call(operation, *args, **kwargs)
+            if mode == 'lost-submit-reply' and operation == 'submit':
+                report['committed_registration_before_lost_reply'] = result['result']
+                diagnostic_path.write_text(json.dumps(report, indent=2)+'\n')
+                os._exit(0)  # This owned endpoint passed its post-check; drop only the reply.
+            return result
+        backend._check, backend.call = check, call
         return backend
     return serve(config, 'research', backend_factory=factory)
 
 
-def main(output, *, controlled=False):
+def main(output, *, controlled=False, wheel):
     import cmw
     from cmw.jobs.store import Store
     from cmw.nodes.connections import ConnectedBackend
@@ -73,6 +111,17 @@ def main(output, *, controlled=False):
     report = {'python': sys.executable, 'package': str(package), 'operation': 'setup',
               'owned_helpers': [], 'payloads_started': 0,
               'interpreter_before_probe': path_snapshot(Path(sys.executable))}
+    import hashlib, zipfile
+    with zipfile.ZipFile(wheel) as archive:
+        selected = {name[4:]: archive.read(name) for name in archive.namelist()
+                    if name.startswith('cmw/') and not name.endswith('/')}
+    installed = {str(path.relative_to(package.parent)): path.read_bytes()
+                 for path in package.parent.rglob('*') if path.is_file()
+                 and '__pycache__' not in path.parts and path.suffix not in {'.pyc', '.pyo'}
+                 and path.name != '.DS_Store'}
+    assert installed == selected, 'Selected wheel differs from installed implementation'
+    report['wheel'] = {'path': str(wheel), 'sha256': hashlib.sha256(wheel.read_bytes()).hexdigest(),
+                       'members_equal': len(selected)}
     transports = []
     serial = 0
     try:
@@ -99,19 +148,28 @@ def main(output, *, controlled=False):
                     str(config_path), str(diagnostic), mode]
             transport = ProcessTransport(argv, timeout=30)
             transports.append(transport)
+            original_start = transport._start
+            launched = {}
+            def start():
+                original_start()
+                if not launched:
+                    import psutil
+                    launched.update(pid=transport.process.pid, argv=argv,
+                        birth_time=psutil.Process(transport.process.pid).create_time())
+            transport._start = start
             original_close = transport.close
             def close():
                 process = transport.process
                 original_close()
                 if process is not None:
                     report['owned_helpers'].append({'role': 'instrumented native endpoint', 'argv': argv,
-                        'pid': process.pid, 'returncode': process.returncode, 'reaped': process.poll() is not None,
+                        'pid': process.pid, 'birth_time': launched.get('birth_time'), 'returncode': process.returncode, 'reaped': process.poll() is not None,
                         'diagnostic': str(diagnostic)})
                     assert process.returncode is not None
             transport.close = close
             return ConnectedBackend('disposable', entry, 'research', transport=transport)
         report['operation'] = 'endpoint startup'
-        backend = connect('post-submit' if controlled else 'normal')
+        backend = connect('lost-submit-reply' if controlled else 'normal')
         request_id = uuid4().hex
         bundle = prepare_local_bundle(output / 'spool',
             [{'source': str(source), 'path': 'support/fixture.sh', 'role': 'support'}],
@@ -143,20 +201,25 @@ def main(output, *, controlled=False):
                 backend.call('submit', {'spec': spec}, request_id=request_id)
             except NodeError as exc:
                 report['original_refusal'] = {'code': exc.code, 'message': str(exc)}
-                assert exc.code == 'RUNTIME_MISMATCH'
-                context = json.loads(str(exc).split(' | ', 1)[1])
-                assert context['request_id'] == request_id and context['dispatch_entered']
-                assert context['outcome'] == 'not_independently_confirmed'
+                assert exc.code == 'OUTCOME_UNKNOWN'
             else:
-                raise AssertionError('Controlled post-submit fault returned an accepted response')
+                raise AssertionError('Deliberately lost reply returned an accepted response')
             diagnostic = json.loads((output/'endpoint-1.json').read_text())
-            assert diagnostic['controlled_fault']['sha256_before'] == diagnostic['controlled_fault']['sha256_after']
+            assert len(diagnostic['metadata_transitions']) == 2
+            for event in diagnostic['metadata_transitions']:
+                assert event['sha256_before'] == event['sha256_after']
+                assert event['flags_before'] ^ event['flags_after'] == 0x40
+            assert all(check['complete_hash_set'] for check in diagnostic['runtime_checks'])
+            changed = {item['path'] for check in diagnostic['runtime_checks'] for item in check['transitions']}
+            assert {'__init__.py', 'nodes/protocol.py'} <= changed
+            report['verified_native_metadata_transitions'] = diagnostic['metadata_transitions']
             report['durable_before_recovery'] = Store(output/'queue').request_lookup(request_id)
             assert report['durable_before_recovery']['digest'] == digest
             backend.close()
             backend = connect('normal')
             recovered = backend.call('request', {'request_id': request_id})['result']['request']
             assert recovered == report['durable_before_recovery']
+            verify_lost_reply(report['original_refusal'], diagnostic, recovered, request_id=request_id, digest=digest)
             registered = backend.call('submit', {'spec': spec}, request_id=request_id)['result']
             assert registered['replayed'] and registered['job'] == recovered['result']
             report['fresh_verified_recovery'] = True
@@ -206,6 +269,7 @@ if __name__ == '__main__':
     try:
         if sys.argv[1] == '--endpoint':
             raise SystemExit(endpoint(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]))
-        main(Path(sys.argv[1]).resolve(), controlled='--controlled' in sys.argv)
+        main(Path(sys.argv[1]).resolve(), controlled='--controlled' in sys.argv,
+             wheel=Path(sys.argv[sys.argv.index('--wheel')+1]).resolve())
     finally:
         signal.alarm(0)

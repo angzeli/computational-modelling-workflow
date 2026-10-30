@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 from cmw.core.provenance import canonical_json_bytes, stable_hash
 from .storage import identify_storage, check_storage, validate_storage
 from .runtime_observation import (RuntimeRefusal, RuntimeVerifier, file_epoch, inventory,
-                                  observation, validate_observation)
+                                  observation, validate_observation, RuntimeCollection)
 
 
 MAX_CONFIG_BYTES = 1024 * 1024
@@ -87,142 +87,61 @@ def host_evidence():
     raise ValueError('Node enrollment supports macOS and Linux only')
 
 
-@lru_cache(maxsize=2)
-def _package_digest(root, epoch):
-    """Cache only exact complete metadata epochs, with bounded full-read evidence."""
+def _package_digest(root, epoch, collection):
+    """Keep the semantic hash domain while verifying every selected member once."""
     digest = hashlib.sha256()
-    for name, expected in epoch:
-        path = root / name
-        before = file_epoch(path)
-        if before != expected:
-            raise RuntimeRefusal('in_flight_change', phase='before-open', path=name,
-                                 before=expected, after=before)
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
-        with os.fdopen(descriptor, 'rb') as handle:
-            opened = os.fstat(handle.fileno())
-            if (opened.st_dev, opened.st_ino, opened.st_size) != expected[:3]:
-                raise RuntimeRefusal('member_replaced', phase='open', path=name)
-            data = handle.read(16 * 1024**2 + 1)
-            closed = os.fstat(handle.fileno())
-        after = file_epoch(path)
-        if (after != expected or len(data) != expected[2]
-                or (closed.st_dev, closed.st_ino, closed.st_size, closed.st_mtime_ns, closed.st_ctime_ns) != expected[:5]):
-            raise RuntimeRefusal('in_flight_change', phase='read', path=name,
-                                 before=expected, after=after)
+    for name, _ in epoch:
+        data, _ = collection.read(root / name)
         encoded = name.encode('utf-8')
         digest.update(len(encoded).to_bytes(4, 'big') + encoded + len(data).to_bytes(8, 'big') + data)
     return digest.hexdigest()
 
 
-def _metadata_only_collection_change(before, after):
-    """Only a complete Darwin member ctime/UF_TRACKED delta can be recollected."""
-    if sys.platform != 'darwin' or before[0] != after[0] or before[2] != after[2]:
-        return False
-    old, new = dict(before[1]), dict(after[1])
-    if old.keys() != new.keys() or not before[0][-1] or not all(v[-1] for v in before[2].values()):
-        return False
-    changed = False
-    for name, value in old.items():
-        other = new[name]
-        if (not value[-1] or not other[-1] or value[:4] != other[:4]
-                or value[5:8] != other[5:8] or value[9:] != other[9:]
-                or (value[8] ^ other[8]) & ~0x40):
-            return False
-        changed |= value != other
-    return changed
-
-
-def _metadata_only_security_refusal(evidence, first, root):
-    """Classify the observed failed boundary before allowing a full reread.
-
-    A later eligible inventory cannot erase an earlier observed inode/security
-    change. Initial/partial ACL reads, roots and interpreter remain strict.
-    """
-    if (sys.platform != 'darwin' or evidence.get('phase') != 'security-after-read'
-            or evidence.get('security_state') != 'complete'):
-        return False
-    try:
-        name = str(Path(evidence['path']).relative_to(root))
-        expected = dict(first[1])[name]
-        before = tuple(evidence['before'])
-        after = evidence['after']
-        descriptor, path = tuple(after['descriptor']), tuple(after['path'])
-        acl_state = after['acl']['state']
-    except (KeyError, TypeError, ValueError):
-        return False
-    expected_object = tuple(expected[i] for i in (0, 1, 5, 6, 7, 9, 2, 3, 4, 8))
-    return bool(expected[-1] and evidence.get('actual_digest') == expected[-2]
-        and acl_state in {'absent', 'present'} and before == expected_object
-        and len(descriptor) == 10 and descriptor == path and descriptor != before
-        and descriptor[:8] == before[:8] and (descriptor[9] ^ before[9]) & ~0x40 == 0)
-
-
 def runtime_observed(*, diagnostics=None):
-    """Observe coherent disk bytes, with one classified full metadata recollection.
-
-    The retry neither supplies missing original trust nor changes the verifier's
-    loaded-code policy. It cannot recover bytes/identity/security uncertainty.
-    """
+    """Policy-3 bounded sequential member verification, never replacement trust."""
     import cmw
-    root = Path(cmw.__file__).resolve().parent
-    first = inventory(root)
+    source = Path(cmw.__file__).absolute()
+    if source.is_symlink() or source.parent != source.parent.resolve(strict=True):
+        raise RuntimeRefusal('path_replacement', phase='origin', path=str(source))
+    root = source.parent
+    collection = RuntimeCollection(root, diagnostics)
+    try:
+        return _collect_runtime(root, collection)
+    except RuntimeRefusal as exc:
+        exc.evidence.update(policy=3, generation=collection.generation,
+                            bytes_read=collection.bytes_read,
+                            content_reads=dict(collection.reads))
+        collection.evidence.update(status='REFUSED', refusal=exc.evidence)
+        raise
+    except OSError as exc:
+        refused = RuntimeRefusal('runtime_member_unavailable', phase=collection.generation,
+            path=exc.filename, errno=exc.errno, security_state='incomplete')
+        refused.evidence.update(policy=3, generation=collection.generation,
+                               bytes_read=collection.bytes_read, content_reads=dict(collection.reads))
+        collection.evidence.update(status='REFUSED', refusal=refused.evidence)
+        raise refused from exc
+
+
+def _collect_runtime(root, collection):
+    import cmw
     executable = Path(sys.executable).resolve(strict=True)
     executable_before = file_epoch(executable)
-    root_epoch, epoch, directories = first
-    try:
-        package_digest = _package_digest(root, epoch)
-        after = inventory(root)
-        if after != first:
-            raise RuntimeRefusal('in_flight_change', phase='inventory-after-read',
-                                 before=dict(epoch), after=dict(after[1]))
-    except RuntimeRefusal as exc:
-        if (exc.evidence['category'] != 'in_flight_change'
-                or (exc.evidence['phase'] not in {'before-open', 'read', 'inventory-after-read'}
-                    and not _metadata_only_security_refusal(exc.evidence, first, root))):
-            raise
-        current = inventory(root)
-        if (file_epoch(executable) != executable_before
-                or not _metadata_only_collection_change(first, current)):
-            raise
-        evidence = {'attempts': 2, 'first_refusal': exc.evidence, 'before': first,
-                    'supplemental': current, 'outcome': 'PENDING'}
-        if diagnostics is not None:
-            diagnostics.append(evidence)
-        root_epoch, epoch, directories = current
-        try:
-            # Uncached complete reread; an eligible stat delta is not a PASS.
-            package_digest = _package_digest.__wrapped__(root, epoch)
-            after = inventory(root)
-            # Evaluate both operands once, before exception handling loses them.
-            executable_after = file_epoch(executable)
-            if after != current or executable_after != executable_before:
-                def operands(value, interpreter):
-                    return {'root': value[0], 'members': dict(value[1]),
-                            'directories': value[2], 'executable': interpreter}
-                refused = RuntimeRefusal('in_flight_change', phase='recollection-after-read',
-                    before=operands(current, executable_before),
-                    after=operands(after, executable_after), actual_digest=package_digest)
-                refused.evidence['comparison'] = {
-                    'inventory_changed': after != current,
-                    'executable_changed': executable_after != executable_before,
-                    'package_root': str(root), 'executable_lexical': sys.executable,
-                    'executable_resolved': str(executable),
-                    'file_epoch_fields': ['dev', 'ino', 'size', 'mtime_ns', 'ctime_ns',
-                        'mode', 'uid', 'gid', 'flags', 'nlink', 'security_digest', 'security_complete'],
-                    'directory_epoch_fields': ['dev', 'ino', 'mode', 'uid', 'gid',
-                        'flags', 'security_digest', 'security_complete'],
-                    'digest_scope': 'completed package reread before final comparison',
-                    'descriptor_epochs': 'not retained by inventory; native security checks remain strict'}
-                raise refused
-        except BaseException as failure:
-            evidence['outcome'] = 'REFUSED'
-            if isinstance(failure, RuntimeRefusal):
-                failure.evidence.update(collector_pass=2, recovery_count=1,
-                                        first_refusal=exc.evidence)
-            raise
-        evidence['outcome'] = 'COHERENT_CURRENT_DISK_ONLY'
-    if file_epoch(executable) != executable_before:
-        raise RuntimeRefusal('interpreter_changed', phase='collection-after-read')
+    first = inventory(root, collection=collection)
+    collection.generation = 'content'
+    package_digest = _package_digest(root, first[1], collection)
+    collection.generation = 'final-inventory'
+    after = inventory(root, collection=collection, final=True)
+    if first[0] != after[0]:
+        collection.refuse('root_replacement', root, first[0], after[0])
+    if first[2] != after[2]:
+        collection.refuse('directory_identity_or_security_changed', root, first[2], after[2])
+    if dict(first[1]).keys() != dict(after[1]).keys():
+        collection.refuse('membership_changed', root)
+    executable_after = file_epoch(executable)
+    if executable_before != executable_after:
+        collection.refuse('interpreter_changed', executable, executable_before, executable_after)
+    collection.check()
+    root_epoch, epoch, directories = after
     dependencies = {}
     for name in ('ase', 'gemmi', 'numpy', 'PyYAML', 'psutil', 'textual', 'rich'):
         try:
@@ -240,7 +159,12 @@ def runtime_observed(*, diagnostics=None):
     # another node's filesystem/process authority.
     record['fingerprint'] = stable_hash({key: value for key, value in record.items()
                                       if key not in {'package_origin', 'executable'}})
-    return record, observation(root, root_epoch, epoch, directories, package_digest)
+    observed = observation(root, root_epoch, epoch, directories, package_digest, dict(collection.hashes))
+    if observed['executable_epoch'] != list(executable_before):
+        collection.refuse('interpreter_changed', executable, executable_before, observed['executable_epoch'])
+    collection.check()
+    collection.evidence['status'] = 'COMPLETE'
+    return record, observed
 
 
 def runtime_identity():

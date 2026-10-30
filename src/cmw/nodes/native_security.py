@@ -64,7 +64,7 @@ def _failed(api):
     raise SecurityReadError(api, code, state)
 
 
-def acl_evidence(fd, *, libc=None):
+def acl_evidence(fd, *, libc=None, observe=None):
     """Absence requires successful fstatx AND successful ACL-property query == 0.
 
     Libc statx1 clears FS_VALID_ACL for KAUTH_FILESEC_NOACL/no ACL payload;
@@ -73,6 +73,8 @@ def acl_evidence(fd, *, libc=None):
     """
     libc = _api() if libc is None else libc
     before = os.fstat(fd)
+    if observe is not None:
+        observe(object_epoch(before), 'acl-before')
     C.set_errno(0)
     sec = libc.filesec_init()
     if not sec:
@@ -87,7 +89,9 @@ def acl_evidence(fd, *, libc=None):
                         native.nlink, native.size,
                         native.mtime.seconds * 10**9 + native.mtime.nanoseconds,
                         native.ctime.seconds * 10**9 + native.ctime.nanoseconds, native.flags)
-        if native_epoch != object_epoch(before):
+        if observe is not None:
+            observe(native_epoch, 'acl-native')
+        elif native_epoch != object_epoch(before):
             raise SecurityReadError('fstatx_np', 0, 'changed-object')
         present = C.c_int(-1)
         C.set_errno(0)
@@ -111,7 +115,10 @@ def acl_evidence(fd, *, libc=None):
                       'errno': 0, 'sha256': hashlib.sha256(C.string_at(text, length.value)).hexdigest()}
         else:
             raise SecurityReadError('filesec_query_property', errno.EINVAL, 'unsupported-result')
-        if object_epoch(os.fstat(fd)) != object_epoch(before):
+        after = object_epoch(os.fstat(fd))
+        if observe is not None:
+            observe(after, 'acl-after')
+        elif after != object_epoch(before):
             raise SecurityReadError('acl-read', 0, 'changed-object')
         return result
     finally:
