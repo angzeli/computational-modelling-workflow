@@ -230,7 +230,26 @@ async def federated_render_cases(root, renders=None):
                 await pilot.press('enter')
                 assert isinstance(app.screen, FrozenText) and 'Multiwfn' in app.screen.text
                 await pilot.press('escape', 'g')
-                await _until(pilot, lambda: isinstance(app.screen, ProgressHistory) and app.screen.page is not None)
+                try:
+                    await _until(pilot, lambda: isinstance(app.screen, ProgressHistory) and app.screen.page is not None)
+                except AssertionError as exc:
+                    lane = app.lanes['MINI']
+                    view = app.screen if isinstance(app.screen, ProgressHistory) else app.history_view
+                    cache = lane.cache.get(target_key(target), {})
+                    active = lane.active_request
+                    diagnostic = {'profile': profile, 'target': target, 'selection': app.selected_key,
+                        'screen': type(app.screen).__name__,
+                        'history': None if view is None else {'closed': view.closed, 'expired': view.expired,
+                            'generation': view.request_generation, 'page': view.page is not None},
+                        'lane_error': str(lane.error)[:512] if lane.error is not None else None,
+                        'busy': lane.busy, 'active': None if active is None else
+                            {'operation': active[0], 'target': active[2], 'automatic': active[4]},
+                        'pending_count': len(lane.pending),
+                        'pending': [{'operation': item[0], 'target': item[2], 'automatic': item[4]}
+                            for item in list(lane.pending)[:8]],
+                        'cache_errors': {key: str(cache[key])[:512]
+                            for key in sorted(key for key in cache if key.endswith('.error'))[:8]}}
+                    raise AssertionError(f'{exc}; {json.dumps(diagnostic, sort_keys=True)}') from exc
                 assert app.screen.page.entries
                 await pilot.press('escape', 's')
                 await _until(pilot, lambda: isinstance(app.screen, Sources) and app.screen.inspection is not None)

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -138,6 +139,7 @@ class PortalTests(unittest.IsolatedAsyncioTestCase):
         lane.busy = True  # An already dispatched request remains owned by its worker.
         app.queue('MINI', 'progress', target=old['target'], automatic=True)
         app.queue('MINI', 'observe', target=old['target'], automatic=True)
+        app.queue('MINI', 'history', target=old['target'], automatic=True)
         app.queue('MINI', 'observe', target=selected['target'], automatic=True)
         app.queue('MINI', 'progress', target=old['target'])
         callback = lambda *_: None
@@ -158,6 +160,53 @@ class PortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(lane.busy)
         self.assertEqual(app.selected_key, row_key(selected['target']))
         self.assertFalse(any(backend.calls for backend in backends.values()))
+
+    async def test_automatic_reads_deduplicate_active_request_without_losing_manual_work(self):
+        app = NodesApp(self.backends())
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.until(pilot, lambda: len(app.rows) == 10)
+            target = app.lanes['MINI'].backend.jobs[0]['target']
+            lane = app.lanes['MINI']
+            active = ('history', {'cursor': None}, target, None, False)
+            lane.active_request, lane.busy = active, True
+            self.assertFalse(app.queue('MINI', 'history', {'cursor': None}, target, automatic=True))
+            callbacks = []
+            self.assertTrue(app.queue('MINI', 'history', {'cursor': None}, target,
+                                      callback=lambda envelope, error: callbacks.append((envelope, error))))
+            self.assertTrue(app.queue('MINI', 'history', {'cursor': 'older'}, target, automatic=True))
+            self.assertEqual([item[1] for item in lane.pending], [{'cursor': None}, {'cursor': 'older'}])
+            self.assertIs(lane.active_request, active)
+            self.assertTrue(lane.busy)
+
+            app.accept('MINI', active, None, NodeError('UNREACHABLE', 'Synthetic connection loss'))
+
+            self.assertIsNone(lane.active_request)
+            self.assertFalse(lane.busy)
+            self.assertFalse(lane.pending)
+            self.assertEqual(len(callbacks), 1)
+            self.assertIsNone(callbacks[0][0])
+            self.assertEqual(callbacks[0][1].code, 'UNREACHABLE')
+
+    def test_history_release_discards_only_pending_automatic_refreshes(self):
+        app = NodesApp(self.backends())
+        job = app.lanes['MINI'].backend.jobs[0]
+        target = job['target']
+        app.rows = {row_key(target): ('MINI', job)}
+        app.selected_key = row_key(target)
+        app.history_view = SimpleNamespace(closed=False, expired=False,
+            selection=target_key(target), request_generation=1, parameters=lambda: {'cursor': None})
+        app.collect_progress(automatic=True)
+        lane = app.lanes['MINI']
+        self.assertTrue(lane.pending[0][4])
+        app.collect_progress()
+        explicit = lane.pending[0]
+        self.assertFalse(explicit[4])
+
+        app.release_history(('MINI', target))
+
+        self.assertEqual([item[0] for item in lane.pending], ['history.release', 'history'])
+        self.assertIs(lane.pending[1], explicit)
+        self.assertIsNotNone(explicit[3])
 
     async def test_global_selection_and_framed_compact_rendering_at_required_sizes(self):
         backends = self.backends()

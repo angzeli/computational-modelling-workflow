@@ -52,6 +52,7 @@ class NodeLane:
     backend: object
     pending: deque = field(default_factory=deque)
     busy: bool = False
+    active_request: tuple | None = None
     state: dict | None = None
     status_envelope: dict | None = None
     received: float | None = None
@@ -187,7 +188,8 @@ class NodesApp(NodeCatalogue, NavigationApp):
             return False
         request = (operation, params or {}, deepcopy(target), callback, automatic)
         if automatic:
-            if any(item[0] == operation and item[2] == target for item in lane.pending):
+            if any(item is not None and item[:3] == request[:3]
+                   for item in (*lane.pending, lane.active_request)):
                 return False
             lane.pending.append(request)
         else:
@@ -206,11 +208,12 @@ class NodesApp(NodeCatalogue, NavigationApp):
             if (selected and selected[0] == owner and lane.fresh(now)
                     and now >= lane.next_progress and not lane.pending):
                 lane.next_progress = now + 4
-                self.collect_progress()
+                self.collect_progress(automatic=True)
                 self.queue(owner, 'observe', target=selected[1]['target'], automatic=True)
             if lane.pending and not lane.busy:
                 request = lane.pending.popleft()
                 lane.busy = True
+                lane.active_request = request
                 lane.request_started = now
                 def collect(owner=owner, lane=lane, request=request):
                     operation, params, target, callback = request[:4]
@@ -241,6 +244,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
     def accept(self, owner, request, envelope, error):
         lane = self.lanes[owner]
         lane.busy = False
+        lane.active_request = None
         operation, params, target, callback = request[:4]
         now = self.clock()
         if error is not None:
@@ -444,7 +448,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
         # explicit requests and any request already owned by a running worker.
         for lane in self.lanes.values():
             lane.pending = deque(request for request in lane.pending
-                if not (request[4] and request[0] in {'progress', 'observe'}
+                if not (request[4] and request[0] in {'progress', 'observe', 'history'}
                         and request[2] is not None and row_key(request[2]) != key))
         self.catalogue_hydrate(key)
         if self.is_mounted and key in self.row_keys:
@@ -512,7 +516,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
         widget.update(rendered)
         self.card_height, self.viewport = len(text.splitlines()), tuple(self.size)
 
-    def collect_progress(self):
+    def collect_progress(self, *, automatic=False):
         selected = self.selected()
         if selected is None:
             return
@@ -531,12 +535,15 @@ class NodesApp(NodeCatalogue, NavigationApp):
                         {**envelope, 'result': {'snapshot': result['snapshot']}}, self.clock())
                 view.bind_context((owner, deepcopy(target)))
                 view.accept_page((owner, deepcopy(target)), page, generation)
-            self.queue(owner, 'history', view.parameters(), target, history_result)
+            self.queue(owner, 'history', view.parameters(), target, history_result, automatic=automatic)
         else:
             self.queue(owner, 'progress', target=target, automatic=True)
 
     def release_history(self, context):
         owner, target = context
+        lane = self.lanes[owner]
+        lane.pending = deque(request for request in lane.pending
+            if not (request[4] and request[0] == 'history' and request[2] == target))
         self.queue(owner, 'history.release', target=target)
 
     def action_history(self):
