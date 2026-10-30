@@ -91,27 +91,54 @@ else
     'import json,sys; print(json.load(sys.stdin)["state_path"])')
 fi
 
-json_field() {
-  local document=$1 field=$2
-  printf '%s' "$document" | "$PYTHON_BIN" -c \
-    'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$field"
+json_fields() {
+  local document=$1
+  shift
+  printf '%s' "$document" | "$PYTHON_BIN" -c '
+import json,sys
+document = json.load(sys.stdin)
+if not isinstance(document, dict):
+    raise ValueError("Workflow action must be an object")
+values = [str(document.get(field, "")) for field in sys.argv[1:]]
+if any("\0" in value for value in values):
+    raise ValueError("Workflow action contains NUL")
+sys.stdout.write("\0".join(values) + "\0")' "$@"
 }
+
+# Decode once per response; a checked private file preserves both literal fields
+# and producer failures on Bash 3.2 without eval or process-substitution status loss.
+action_file=$(mktemp "${TMPDIR:-/tmp}/cmw-workflow-action.XXXXXX")
+trap 'rm -f -- "$action_file"' EXIT
+action_keys=(action result_path failure_point reason stage input target metadata
+  output stderr final_geometry layout geometry_contract orca_exe nprocs
+  maxcore_mb_per_process require_minimum imaginary_tolerance_cm1)
 
 while true; do
   set +e
   action_json=$("$PYTHON_BIN" -m cmw.molecular.workflows.cli next --state "$state_path")
   action_status=$?
   set -e
-  action=$(json_field "$action_json" action)
+  if ! json_fields "$action_json" "${action_keys[@]}" > "$action_file"; then
+    printf 'Unable to decode the next workflow action\n' >&2
+    exit 64
+  fi
+  action_fields=()
+  while IFS= read -r -d '' field; do
+    action_fields+=("$field")
+  done < "$action_file"
+  if ((${#action_fields[@]} != ${#action_keys[@]})); then
+    printf 'Incomplete workflow action fields\n' >&2
+    exit 64
+  fi
+  action=${action_fields[0]}
   if [[ "$action" == COMPLETE && $action_status -eq 10 ]]; then
-    result_path=$(json_field "$action_json" result_path)
+    result_path=${action_fields[1]}
     printf '[WORKFLOW COMPLETE] %s\n' "$result_path"
     exit 0
   fi
   if [[ "$action" == FAILED || $action_status -eq 20 ]]; then
     printf 'Workflow stopped at %s: %s\n' \
-      "$(json_field "$action_json" failure_point)" \
-      "$(json_field "$action_json" reason)" >&2
+      "${action_fields[2]}" "${action_fields[3]}" >&2
     exit 70
   fi
   if [[ "$action" != RUN || $action_status -ne 0 ]]; then
@@ -119,20 +146,20 @@ while true; do
     exit 64
   fi
 
-  stage=$(json_field "$action_json" stage)
-  input=$(json_field "$action_json" input)
-  target=$(json_field "$action_json" target)
-  metadata=$(json_field "$action_json" metadata)
-  stage_output=$(json_field "$action_json" output)
-  stage_stderr=$(json_field "$action_json" stderr)
-  final_geometry=$(json_field "$action_json" final_geometry)
-  layout=$(json_field "$action_json" layout)
-  geometry_contract=$(json_field "$action_json" geometry_contract)
-  stage_orca_exe=$(json_field "$action_json" orca_exe)
-  stage_nprocs=$(json_field "$action_json" nprocs)
-  stage_maxcore=$(json_field "$action_json" maxcore_mb_per_process)
-  require_minimum=$(json_field "$action_json" require_minimum)
-  imaginary_tolerance=$(json_field "$action_json" imaginary_tolerance_cm1)
+  stage=${action_fields[4]}
+  input=${action_fields[5]}
+  target=${action_fields[6]}
+  metadata=${action_fields[7]}
+  stage_output=${action_fields[8]}
+  stage_stderr=${action_fields[9]}
+  final_geometry=${action_fields[10]}
+  layout=${action_fields[11]}
+  geometry_contract=${action_fields[12]}
+  stage_orca_exe=${action_fields[13]}
+  stage_nprocs=${action_fields[14]}
+  stage_maxcore=${action_fields[15]}
+  require_minimum=${action_fields[16]}
+  imaginary_tolerance=${action_fields[17]}
 
   runner=(
     "$ORCA_RUNNER" --input "$input" --target "$target" --metadata "$metadata"
