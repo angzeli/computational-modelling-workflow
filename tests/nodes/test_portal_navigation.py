@@ -133,6 +133,35 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
     def assert_same_view(self, before, app):
         self.assertEqual(table_view(app), before)
 
+    async def test_cursor_survives_refresh_before_highlight_delivery(self):
+        app, backends = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.until(pilot, lambda: len(app.rows) == 72 and not app.navigation_pending(),
+                             'initial node rows and layout')
+            predecessor = backends['MINI'].jobs[23]
+            selected = backends['MINI'].jobs[24]
+            old_key, new_key = row_key(predecessor['target']), row_key(selected['target'])
+            app.select(old_key)
+            app.render_state()
+            await self.until(pilot, lambda: table_view(app)['cursor'] == old_key
+                             and app.selected_snapshot('MINI', predecessor) is not None
+                             and not app.navigation_pending()
+                             and not app.screen_stack[0]._layout_required,
+                             'predecessor selection and layout')
+            table = app.query_one('#table', DataTable)
+            generation = app.selection_generation
+            table.action_cursor_down()
+            self.assertEqual(table.ordered_rows[table.cursor_row].key.value, new_key)
+            self.assertEqual(app.selected_key, old_key)
+
+            app.render_state()
+
+            self.assertEqual(app.selected_key, new_key)
+            self.assertEqual(table.ordered_rows[table.cursor_row].key.value, new_key)
+            await pilot.pause()
+            self.assertEqual(app.selected_key, new_key)
+            self.assertEqual(app.selection_generation, generation + 1)
+
     async def test_mouse_keyboard_j25_j24_repeat_at_required_geometries(self):
         for size in ((77, 24), (80, 24), (100, 30), (140, 40)):
             with self.subTest(size=size):

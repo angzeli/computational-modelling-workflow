@@ -334,9 +334,17 @@ class NodesApp(NodeCatalogue, NavigationApp):
         if not self.is_mounted or not list(self.query('#node-summary')):
             return
         origin = self.screen_stack[0]
+        table = origin.query_one('#table', DataTable)
+        # Keyboard movement precedes its queued highlight. Preserve that current
+        # identity before a status/progress refresh can restore the older row.
+        if (table.has_focus and not self.navigation_pending(origin)
+                and not self.navigation_origin_covered(origin) and self.selected() is not None
+                and 0 <= table.cursor_row < len(self.row_keys)):
+            key = self.row_keys[table.cursor_row]
+            if key != self.selected_key and key in self.rows:
+                self.select(key)
         view = self.capture_view(origin)
         before = (self.columns, tuple(self.row_keys), self.card_height, self.viewport)
-        table = origin.query_one('#table', DataTable)
         with table.prevent(DataTable.RowHighlighted):
             self._render_state()
         after = (self.columns, tuple(self.row_keys), self.card_height, self.viewport)

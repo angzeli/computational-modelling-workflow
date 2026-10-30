@@ -221,10 +221,15 @@ class ObservationService:
         if observation.history is not None:
             revision = source_revision(observation.context, states)
             if observation.history.revision != revision:
-                reconstruct = bool(observation.history.revision)
+                previous = {state.role: state for state in
+                            observation.snapshot.sources if state.identity is not None} if observation.snapshot else {}
+                reconstruct = any(state.role in previous and
+                    (previous[state.role].generation, previous[state.role].identity,
+                     previous[state.role].health == 'BINDING_CHANGED') !=
+                    (state.generation, state.identity, state.health == 'BINDING_CHANGED') for state in states)
                 observation.history.reset(revision)
-                # Unchanged readers have already drained their history rows.
-                # Reconstruct them before treating the new revision as complete.
+                # Changed generations need rows already drained by unchanged readers.
+                # First source appearances keep the live adapter's in-place promotion.
                 observation.history.trimmed = reconstruct
                 if observation.replay is not None:
                     self._close_observation(observation.replay.observation)
