@@ -64,8 +64,17 @@ class RuntimePublicationTests(unittest.TestCase):
                 self.assertEqual(dispatch.call_count, 0 if phase == 'before' else 1)
             self.assertEqual(caught.exception.code, 'RUNTIME_MISMATCH')
             context = json.loads(str(caught.exception).split(' | ', 1)[1])
-            self.assertEqual(context, {'operation': 'transfer.publish', 'operation_phase': phase,
-                'phase': 'security-after-read', 'path': '/synthetic/runtime/member.py'})
+            self.assertEqual({key: context[key] for key in ('operation', 'operation_phase', 'phase', 'path')},
+                {'operation': 'transfer.publish', 'operation_phase': phase,
+                 'phase': 'security-after-read', 'path': '/synthetic/runtime/member.py'})
+            self.assertEqual(context['request_id'], request_id)
+            self.assertEqual(context['node_id'], self.node_id)
+            self.assertEqual(context['queue_id'], self.backend.queue['queue_id'])
+            self.assertEqual(context['dispatch_entered'], phase == 'after')
+            self.assertEqual(context['outcome'], 'not_independently_confirmed' if phase == 'after' else 'not_dispatched')
+            self.assertEqual(context['original_error_code'], 'RUNTIME_MISMATCH')
+            self.assertIn('transfer.lookup', context['recovery'])
+            self.assertLess(len(str(caught.exception)), 4096)
             self.assertEqual(self.backend.runtime_diagnostic['operation_phase'], phase)
             self.readiness['runtime_ready'] = True
             fresh = self.make_backend()
@@ -93,3 +102,11 @@ class RuntimePublicationTests(unittest.TestCase):
 
     def test_post_operation_refusal_keeps_publication_and_same_id_replays(self):
         self.boundary('after')
+
+    def test_other_mutations_do_not_invent_submission_request_lookup_authority(self):
+        self.readiness['runtime_ready'] = False
+        with self.assertRaises(NodeError) as caught:
+            self.backend.call('fetch.prepare', {}, request_id=uuid4().hex)
+        context = json.loads(str(caught.exception).split(' | ', 1)[1])
+        self.assertNotIn('recovery', context)
+        self.assertNotIn('request_id', context)

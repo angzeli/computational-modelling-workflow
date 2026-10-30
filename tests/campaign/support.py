@@ -143,8 +143,11 @@ class ProcessLedger:
                     process = psutil.Process(self.pid)
                 except psutil.NoSuchProcess:
                     process = type('ExitedChild', (), {'pid': self.pid})()
-                ledger._register(process, role_for(argv),
-                                 'direct-launch', direct=self)
+                record = ledger._register(process, role_for(argv),
+                                          'direct-launch', direct=self)
+                with ledger.lock:
+                    record['argv'] = ([os.fsdecode(part) for part in argv]
+                                      if isinstance(argv, (list, tuple)) else os.fsdecode(argv))
         self._patch = patch('subprocess.Popen', RecordedPopen)
         self._patch.start()
         return self

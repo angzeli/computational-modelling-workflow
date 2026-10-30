@@ -85,13 +85,13 @@ def endpoint(config, mode, report_path):
     def factory(root, queue):
         backend = LocalBackend(root, queue, defer_check=True)
         original_check, original_call = backend._check, backend.call
-        def check(operation=None, *, phase='initial'):
+        def check(operation=None, *, phase='initial', request_id=None):
             nonlocal armed, count
             armed = operation == 'transfer.publish' and phase == mode and not injected
             if armed:
                 count = 0
             try:
-                return original_check(operation, phase=phase)
+                return original_check(operation, phase=phase, request_id=request_id)
             except Exception as exc:
                 diagnostic = getattr(backend, 'runtime_diagnostic', None) or {}
                 report['events'].append({'operation': operation, 'operation_phase': phase,

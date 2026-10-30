@@ -194,7 +194,7 @@ def validate_observation(value):
     return value
 
 
-def _source_imports_coherent(observed):
+def _source_imports_coherent(observed, *, diagnostics=None):
     root = Path(observed['root'])
     for name, module in tuple(sys.modules.items()):
         if name != 'cmw' and not name.startswith('cmw.'):
@@ -204,9 +204,15 @@ def _source_imports_coherent(observed):
             continue
         path = Path(filename).resolve()
         if not path.is_relative_to(root) or str(path.relative_to(root)) not in observed['members']:
+            if diagnostics is not None:
+                diagnostics.append({'module': name, 'path': str(path), 'reason': 'outside_observed_members'})
             return False
         cached = getattr(module, '__cached__', None)
-        if path.suffix != '.py' or cached and Path(cached).exists():
+        cache_present = bool(cached and Path(cached).exists())
+        if path.suffix != '.py' or cache_present:
+            if diagnostics is not None:
+                diagnostics.append({'module': name, 'path': str(path), 'cached': cached,
+                    'cache_present': cache_present, 'reason': 'non_source_or_cached_import'})
             return False
     return True
 
@@ -306,10 +312,27 @@ class RuntimeVerifier:
         # A long-lived interpreter cannot be made coherent by hashing its disk files.
         changed = [new[4] for name, new in observed['members'].items()
                    if new != baseline['members'][name]]
-        if (not self.isolated or not changed or max(changed) >= self.process_started_ns
-                or not _source_imports_coherent(observed)):
-            raise RuntimeRefusal('fresh_isolated_observer_required', phase='loaded-code',
-                                 **self.last_evidence)
+        imports = []
+        predicate = ('not_isolated' if not self.isolated else
+                     'no_changed_members' if not changed else
+                     'metadata_not_before_process_start' if max(changed) >= self.process_started_ns else None)
+        imports_coherent = None
+        if predicate is None:
+            imports_coherent = _source_imports_coherent(observed, diagnostics=imports)
+            if not imports_coherent:
+                predicate = 'source_imports_incoherent'
+        if predicate is not None:
+            refused = RuntimeRefusal('fresh_isolated_observer_required', phase='loaded-code',
+                                     **self.last_evidence)
+            refused.evidence['loaded_code'] = {
+                'failed_predicate': predicate, 'isolated': self.isolated,
+                'process_started_ns': self.process_started_ns,
+                'latest_changed_ctime_ns': max(changed) if changed else None,
+                'source_imports_coherent': imports_coherent, 'import_failures': imports,
+                'changed_members': [name for name, new in observed['members'].items()
+                                    if new != baseline['members'][name]]}
+            self.last_evidence = refused.evidence
+            raise refused
         self.current = observed
         self.recovered = True
         flag_change = any(new[8] != baseline['members'][name][8]

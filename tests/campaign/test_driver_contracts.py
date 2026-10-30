@@ -370,6 +370,7 @@ assert os.waitstatus_to_exitcode(status) == 0
             self.assertTrue(report['outcomes']['execution_passed'])
             child_record, = [row for row in report['records'] if row['capture_origin'] == 'direct-launch']
             self.assertEqual(child_record['exit']['returncode'], 0)
+            self.assertEqual(child_record['argv'], child.args)
 
     def test_sampler_crash_is_qualification_failure_with_cleanup_retained(self):
         with tempfile.TemporaryDirectory() as directory:

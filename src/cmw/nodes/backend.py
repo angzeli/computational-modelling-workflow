@@ -134,7 +134,7 @@ class LocalBackend:
         if not defer_check:
             self._check()
 
-    def _check(self, operation=None, *, phase="initial"):
+    def _check(self, operation=None, *, phase="initial", request_id=None):
         config = self._load_identity(self.config_root)
         if not self._custom_identity_checker:
             from .runtime_observation import RuntimeVerifier
@@ -153,6 +153,19 @@ class LocalBackend:
             if self.runtime_diagnostic:
                 self.runtime_diagnostic = {**self.runtime_diagnostic, **context}
                 context.update({key: self.runtime_diagnostic.get(key) for key in ('phase', 'path')})
+            if (isinstance(request_id, str) and len(request_id) == 32
+                    and all(char in '0123456789abcdef' for char in request_id)):
+                context.update(request_id=request_id,
+                    node_id=self._pinned[0] if self._pinned else None,
+                    queue_id=self._pinned[1] if self._pinned else None,
+                    original_error_code='RUNTIME_MISMATCH', dispatch_entered=phase == 'after',
+                    outcome='not_independently_confirmed' if phase == 'after' else 'not_dispatched',
+                    recovery=('Use a fresh verified observer for transfer.lookup with the original storage and request_id'
+                              if str(operation).startswith('transfer.') else
+                              'Use a fresh verified observer for request with this original request_id'),
+                    retry='Do not create a replacement request, release a job or start dispatch')
+                if self.runtime_diagnostic:
+                    self.runtime_diagnostic.update(context)
             # Keep the negotiated {code,message} error shape; retain the boundary
             # even when a successful mutation is followed by a refused post-check.
             raise BackendError('RUNTIME_MISMATCH', message[:2048] + ' | ' +
@@ -395,8 +408,11 @@ class LocalBackend:
             params = {} if params is None else params
             if type(params) is not dict:
                 raise BackendError('INVALID_PARAMS', 'Operation parameters must be an object')
-            self._check(operation, phase="before")
-            if is_mutation(operation, params):
+            mutation = is_mutation(operation, params)
+            durable_id = (params.get('request_id') if operation in {'transfer.begin', 'transfer.publish'}
+                          else request_id if operation == 'submit' else None)
+            self._check(operation, phase="before", request_id=durable_id)
+            if mutation:
                 identifier(request_id, 'request ID')
                 expected = {'node_id': self.config['node_id'], 'queue_id': self.queue['queue_id'],
                             'host_id': self.config['host_id'], 'runtime_id': self.config['runtime']['fingerprint'],
@@ -481,7 +497,7 @@ class LocalBackend:
                 job = self._job(target)
                 result = self._selected(operation, params, job)
                 self._job(target)
-            self._check(operation, phase="after")
+            self._check(operation, phase="after", request_id=durable_id)
             self.sequence += 1
             envelope = {'schema': 1, 'node_id': self.config['node_id'], 'queue_id': self.queue['queue_id'],
                     'queue_alias': self.queue_alias, 'session_id': self.session_id, 'sequence': self.sequence,

@@ -479,6 +479,14 @@ Endpoint runtime errors retain before/after-operation context in the existing
 bounded code/message response. A post-operation refusal is not a rollback;
 query the same durable request/transfer identity from a fresh isolated observer.
 No automatic operation replay, trust rewrite or enrollment change is introduced.
+Submission/transfer runtime refusals also name the original durable request and pinned
+node/queue, state whether dispatch was entered, and direct the client to a fresh
+verified observer's same-request lookup. A rejected post-dispatch response is
+explicitly unconfirmed until that independent lookup; it is not a Jobs Unknown
+status or evidence that nothing was submitted. The protocol still sends only
+its existing error code and bounded message, so older peers need no new fields.
+Loaded-code diagnostics retain the exact failed predicate, process-start and
+member-ctime operands, and import provenance when that check was reached.
 
 A refused final recollection records both comparison operands: package root,
 member/directory inventories and resolved interpreter epochs, plus separate

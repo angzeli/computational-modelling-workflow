@@ -19,7 +19,45 @@ def path_snapshot(path):
         'lstat': {name: getattr(info, 'st_' + name) for name in fields}}
 
 
-def main(output):
+def endpoint(config, diagnostic_path, mode):
+    """Real endpoint/collectors; wrapper only records or applies the named fault."""
+    import hashlib
+    import cmw
+    from cmw.nodes.backend import LocalBackend
+    from cmw.nodes.endpoint import serve
+    report = {'mode': mode, 'python': sys.executable, 'package': cmw.__file__}
+    def factory(root, queue):
+        backend = LocalBackend(root, queue, defer_check=True)
+        original = backend._check
+        injected = False
+        def check(operation=None, *, phase='initial', request_id=None):
+            nonlocal injected
+            if mode == 'post-submit' and operation == 'submit' and phase == 'after' and not injected:
+                member = Path(cmw.__file__).resolve()
+                assert member.is_relative_to(Path(sys.prefix).resolve()) and member.stat().st_nlink == 1
+                before = member.stat()
+                digest = hashlib.sha256(member.read_bytes()).hexdigest()
+                os.chflags(member, before.st_flags ^ 0x40)
+                after = member.stat()
+                report['controlled_fault'] = {'member': str(member), 'ctime_before': before.st_ctime_ns,
+                    'ctime_after': after.st_ctime_ns, 'flags_before': before.st_flags,
+                    'flags_after': after.st_flags, 'sha256_before': digest,
+                    'sha256_after': hashlib.sha256(member.read_bytes()).hexdigest()}
+                injected = True
+            try:
+                return original(operation, phase=phase, request_id=request_id)
+            except BaseException as exc:
+                report.update(operation=operation, operation_phase=phase, request_id=request_id,
+                    error_code=getattr(exc, 'code', None), error=str(exc),
+                    runtime_diagnostic=getattr(backend, 'runtime_diagnostic', None))
+                diagnostic_path.write_text(json.dumps(report, indent=2)+'\n')
+                raise
+        backend._check = check
+        return backend
+    return serve(config, 'research', backend_factory=factory)
+
+
+def main(output, *, controlled=False):
     import cmw
     from cmw.jobs.store import Store
     from cmw.nodes.connections import ConnectedBackend
@@ -27,6 +65,7 @@ def main(output):
     from cmw.nodes.submission import submission_digest
     from cmw.nodes.transfer import prepare_local_bundle, upload_local_bundle
     from cmw.nodes.transport import ProcessTransport
+    from cmw.nodes.protocol import NodeError
     output.mkdir(mode=0o700)
     package = Path(cmw.__file__).resolve()
     assert sys.flags.isolated and sys.dont_write_bytecode
@@ -34,7 +73,8 @@ def main(output):
     report = {'python': sys.executable, 'package': str(package), 'operation': 'setup',
               'owned_helpers': [], 'payloads_started': 0,
               'interpreter_before_probe': path_snapshot(Path(sys.executable))}
-    transport = None
+    transports = []
+    serial = 0
     try:
         storage = output / 'storage'; storage.mkdir()
         source = output / 'fixture.sh'; source.write_text('#!/bin/sh\nexit 0\n')
@@ -51,20 +91,27 @@ def main(output):
             'runtime_id': config['runtime']['fingerprint'],
             'queues': {'research': config['queues']['research']['queue_id']},
             'default_queue': 'research', 'read_only': False}
-        argv = [sys.executable, '-I', '-B', '-m', 'cmw.cli', 'nodes', 'endpoint',
-                '--config', str(config_path), '--queue', 'research']
-        transport = ProcessTransport(argv, timeout=30)
-        original_close = transport.close
-        def close():
-            process = transport.process
-            original_close()
-            if process is not None:
-                report['owned_helpers'].append({'role': 'native node endpoint', 'argv': argv,
-                    'pid': process.pid, 'returncode': process.returncode, 'reaped': process.poll() is not None})
-                assert process.returncode is not None
-        transport.close = close
+        def connect(mode):
+            nonlocal serial
+            serial += 1
+            diagnostic = output / f'endpoint-{serial}.json'
+            argv = [sys.executable, '-I', '-B', str(Path(__file__).resolve()), '--endpoint',
+                    str(config_path), str(diagnostic), mode]
+            transport = ProcessTransport(argv, timeout=30)
+            transports.append(transport)
+            original_close = transport.close
+            def close():
+                process = transport.process
+                original_close()
+                if process is not None:
+                    report['owned_helpers'].append({'role': 'instrumented native endpoint', 'argv': argv,
+                        'pid': process.pid, 'returncode': process.returncode, 'reaped': process.poll() is not None,
+                        'diagnostic': str(diagnostic)})
+                    assert process.returncode is not None
+            transport.close = close
+            return ConnectedBackend('disposable', entry, 'research', transport=transport)
         report['operation'] = 'endpoint startup'
-        backend = ConnectedBackend('disposable', entry, 'research', transport=transport)
+        backend = connect('post-submit' if controlled else 'normal')
         request_id = uuid4().hex
         bundle = prepare_local_bundle(output / 'spool',
             [{'source': str(source), 'path': 'support/fixture.sh', 'role': 'support'}],
@@ -91,7 +138,32 @@ def main(output):
         assert published['status'] == 'PUBLISHED' and published['manifest_digest'] == bundle['manifest_digest']
         assert (Path(published['published_root'])/'support/fixture.sh').read_bytes() == source.read_bytes()
         report['operation'] = 'submit held'
-        registered = backend.call('submit', {'spec': spec}, request_id=request_id)['result']
+        if controlled:
+            try:
+                backend.call('submit', {'spec': spec}, request_id=request_id)
+            except NodeError as exc:
+                report['original_refusal'] = {'code': exc.code, 'message': str(exc)}
+                assert exc.code == 'RUNTIME_MISMATCH'
+                context = json.loads(str(exc).split(' | ', 1)[1])
+                assert context['request_id'] == request_id and context['dispatch_entered']
+                assert context['outcome'] == 'not_independently_confirmed'
+            else:
+                raise AssertionError('Controlled post-submit fault returned an accepted response')
+            diagnostic = json.loads((output/'endpoint-1.json').read_text())
+            assert diagnostic['controlled_fault']['sha256_before'] == diagnostic['controlled_fault']['sha256_after']
+            report['durable_before_recovery'] = Store(output/'queue').request_lookup(request_id)
+            assert report['durable_before_recovery']['digest'] == digest
+            backend.close()
+            backend = connect('normal')
+            recovered = backend.call('request', {'request_id': request_id})['result']['request']
+            assert recovered == report['durable_before_recovery']
+            registered = backend.call('submit', {'spec': spec}, request_id=request_id)['result']
+            assert registered['replayed'] and registered['job'] == recovered['result']
+            report['fresh_verified_recovery'] = True
+        else:
+            registered = backend.call('submit', {'spec': spec}, request_id=request_id)['result']
+            assert registered['status'] == 'REGISTERED' and not registered['replayed']
+            report['normal_direct_response'] = True
         report['operation'] = 'original request lookup'
         found = backend.call('request', {'request_id': request_id})['result']['request']
         durable = Store(output/'queue').request_lookup(request_id)
@@ -115,8 +187,9 @@ def main(output):
         report.update(status='FAIL', error=failure_record(exc))
         raise
     finally:
-        if transport is not None:
+        for transport in transports:
             transport.close()
+        report['scenario'] = 'controlled-post-submit' if controlled else 'normal'
         report['cleanup_complete'] = all(row['reaped'] for row in report['owned_helpers'])
         report['interpreter_after_probe_later_inspection'] = path_snapshot(Path(sys.executable))
         report['module_origins'] = {name: module.__file__ for name, module in sys.modules.items()
@@ -131,6 +204,8 @@ if __name__ == '__main__':
         raise TimeoutError('90-second native enrollment probe deadline exceeded')
     signal.signal(signal.SIGALRM, deadline); signal.alarm(90)
     try:
-        main(Path(sys.argv[1]).resolve())
+        if sys.argv[1] == '--endpoint':
+            raise SystemExit(endpoint(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]))
+        main(Path(sys.argv[1]).resolve(), controlled='--controlled' in sys.argv)
     finally:
         signal.alarm(0)
