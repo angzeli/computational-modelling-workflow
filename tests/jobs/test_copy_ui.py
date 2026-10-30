@@ -122,19 +122,28 @@ class CopyUiTests(unittest.IsolatedAsyncioTestCase):
         app = self.app()
         async with app.run_test(size=(80, 24)) as pilot:
             widget = app.query_one('#progress', SelectableStatic)
-            widget.update('Synthetic summary revision one')
-            app.screen.selections = {widget: Selection(Offset(0, 0), Offset(9, 0))}
-            await pilot.pause()
-            widget.update('Synthetic summary revision two')
-            self.assertIn('revision one', str(widget.render()))
-            await pilot.press('ctrl+c')
-            await self.copied(app, pilot)
-            self.backend.assert_called_once_with('Synthetic')
-            self.assertIs(app.screen, app.screen_stack[0])
-            app.screen.clear_selection()
-            await pilot.pause()
-            self.assertIn('revision two', str(widget.render()))
-            await pilot.press('ctrl+c')
+            app.progress_snapshot = fixture(app.selected())
+            # Timed paints must read the same fixture revision as explicit paints.
+            with patch('cmw.progress.formatting.progress_text',
+                       return_value='Synthetic summary revision one') as rendered:
+                app.render_progress()
+                app.screen.selections = {widget: Selection(Offset(0, 0), Offset(9, 0))}
+                await pilot.pause()
+                rendered.return_value = 'Synthetic summary revision two'
+                app.refresh_state()
+                self.assertIn('revision one', str(widget.render()))
+                await pilot.press('ctrl+c')
+                await self.copied(app, pilot)
+                self.backend.assert_called_once_with('Synthetic')
+                self.assertIs(app.screen, app.screen_stack[0])
+                # A fresh paint must not mask a broken deferred-update release.
+                with patch.object(app, 'render_progress'):
+                    app.screen.clear_selection()
+                    await pilot.pause()
+                    self.assertIn('revision two', str(widget.render()))
+                app.refresh_state()
+                self.assertIn('revision two', str(widget.render()))
+                await pilot.press('ctrl+c')
 
     async def test_actual_mouse_selection_copies_and_empty_click_does_not_freeze(self):
         app = self.app()

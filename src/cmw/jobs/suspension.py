@@ -393,7 +393,13 @@ def bind_domain(registration, anchor):
     _check_identity(runner, anchor); _check_identity(root, anchor, allow_exit=True)
     if not _descends(runner['pid'], anchor['pid']) or not _descends(root['pid'], runner['pid']):
         raise JobsError('Runtime handshake is not bound to the owned payload ancestry')
-    if os.getpgid(root['pid']) == anchor['pid']:
+    try:
+        root_group = os.getpgid(root['pid'])
+    except ProcessLookupError as exc:
+        if _observed_exit(root['pid'], root, anchor, allow_zombie_topology_loss=True):
+            raise DomainPending('Computational root exited during group observation') from exc
+        raise
+    if root_group == anchor['pid']:
         raise JobsError('Computation shares the protected ownership group')
     strategy = registration.get('strategy')
     if strategy not in {'direct-tree', 'openmpi', 'orca-tree'}:
