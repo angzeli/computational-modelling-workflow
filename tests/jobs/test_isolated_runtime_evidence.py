@@ -1,5 +1,5 @@
 """No-child controls for the fixture-only owner runtime refusal recorder."""
-from contextlib import redirect_stderr
+from contextlib import ExitStack, redirect_stderr
 import io
 import json
 import os
@@ -26,9 +26,11 @@ class RuntimeRefusalEvidenceTests(unittest.TestCase):
                            'before': {'security': 'original'}, 'after': {'security': 'changed'}}
         self.error = NodeError('RUNTIME_MISMATCH', 'original refusal')
         self.calls = []
-        self.enterContext(patch.dict(os.environ, {'CMW_TEST_EVIDENCE_DIR': str(self.destination)}))
-        self.enterContext(patch.object(isolated_runtime, '_RUNTIME_REFUSAL_PID', os.getpid()))
-        self.enterContext(patch.object(isolated_runtime, '_RUNTIME_REFUSAL_CAPTURES', 0))
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.dict(os.environ, {'CMW_TEST_EVIDENCE_DIR': str(self.destination)}))
+        stack.enter_context(patch.object(isolated_runtime, '_RUNTIME_REFUSAL_PID', os.getpid()))
+        stack.enter_context(patch.object(isolated_runtime, '_RUNTIME_REFUSAL_CAPTURES', 0))
 
     def backend(self):
         backend = object.__new__(LocalBackend)

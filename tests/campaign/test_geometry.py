@@ -23,9 +23,10 @@ class GeometryTests(unittest.IsolatedAsyncioTestCase):
             app = JobsApp(Store(record['state']), observer=SyntheticObserver(), sampler=SyntheticSampler())
             probe = GeometryProbe()
             async with app.run_test(size=RESIZE_SEQUENCE[0]) as pilot:
-                async with asyncio.timeout(5):
+                async def wait_for_progress():
                     while app.progress_snapshot is None or not app.progress_snapshot.metrics:
                         await pilot.pause(.025)
+                await asyncio.wait_for(wait_for_progress(), timeout=5)
                 target = app._selected_target
                 for size in RESIZE_SEQUENCE:
                     await pilot.press('enter')

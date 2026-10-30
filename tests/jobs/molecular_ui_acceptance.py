@@ -161,7 +161,7 @@ async def federated_render_cases(root, renders=None):
     from cmw.nodes.backend import LocalBackend
     from cmw.nodes.connections import ConnectedBackend
     from cmw.nodes.identity import enroll
-    from cmw.nodes.portal import NodesApp, row_key
+    from cmw.nodes.portal import NodesApp, row_key, target_key
     from cmw.nodes.portal_views import NodeFiles, NodeCopyPreview
     from textual.widgets import DataTable, Static
 
@@ -197,7 +197,19 @@ async def federated_render_cases(root, renders=None):
                               job_id=job['id'], attempt_id=job['attempt_id'])
                 app.select(row_key(target))
                 app.collect_progress()
-                await _until(pilot, lambda: app.selected_snapshot('MINI', {**job, 'target': target}) is not None)
+                try:
+                    await _until(pilot, lambda: app.selected_snapshot('MINI', {**job, 'target': target}) is not None)
+                except AssertionError as exc:
+                    lane = app.lanes['MINI']
+                    cache = lane.cache.get(target_key(target), {})
+                    diagnostic = {'profile': profile, 'target': target, 'selection': app.selected_key,
+                        'lane_error': str(lane.error)[:512] if lane.error is not None else None,
+                        'busy': lane.busy, 'pending_count': len(lane.pending),
+                        'pending': [{'operation': item[0], 'target': item[2]} for item in list(lane.pending)[:8]],
+                        'cached_operations': sorted(cache)[:16],
+                        'cache_errors': {key: str(cache[key])[:512]
+                            for key in sorted(key for key in cache if key.endswith('.error'))[:8]}}
+                    raise AssertionError(f'{exc}; {json.dumps(diagnostic, sort_keys=True)}') from exc
                 for size in SIZES:
                     await pilot.resize_terminal(*size)
                     app.render_state()

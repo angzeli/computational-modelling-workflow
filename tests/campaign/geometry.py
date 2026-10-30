@@ -90,7 +90,7 @@ class GeometryProbe:
                 raise AssertionError(failure)
             try:
                 await asyncio.wait_for(app.screen.wait_for_refresh(), remaining)
-            except TimeoutError as exc:
+            except asyncio.TimeoutError as exc:
                 raise AssertionError(failure) from exc
             await asyncio.sleep(min(.01, remaining))
 

@@ -19,7 +19,7 @@ class JobsProfileTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='cmw-firstclass-multiwfn-')
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
 
     def prepared(self, profile):
         spec = make_spec(self.root / profile, profile)
