@@ -126,6 +126,39 @@ class PortalTests(unittest.IsolatedAsyncioTestCase):
     def backends(self):
         return {'MBP': FakeBackend('MBP'), 'MINI': FakeBackend('MINI', remote=True)}
 
+    def test_selection_discards_only_superseded_automatic_reads(self):
+        backends = self.backends()
+        app = NodesApp(backends)
+        old, selected = backends['MINI'].jobs[:2]
+        peer = backends['MBP'].jobs[0]
+        app.rows = {row_key(job['target']): (owner, job)
+                    for owner, backend in backends.items() for job in backend.jobs}
+        app.selected_key = row_key(old['target'])
+        lane = app.lanes['MINI']
+        lane.busy = True  # An already dispatched request remains owned by its worker.
+        app.queue('MINI', 'progress', target=old['target'], automatic=True)
+        app.queue('MINI', 'observe', target=old['target'], automatic=True)
+        app.queue('MINI', 'observe', target=selected['target'], automatic=True)
+        app.queue('MINI', 'progress', target=old['target'])
+        callback = lambda *_: None
+        app.queue('MINI', 'control', target=old['target'], callback=callback)
+        app.queue('MINI', 'history.release', target=old['target'])
+        app.queue('MINI', 'status', automatic=True)
+        app.queue('MBP', 'progress', target=peer['target'], automatic=True)
+        app.queue('MBP', 'sources.inspect', target=peer['target'], callback=callback)
+
+        app.select(row_key(selected['target']))
+
+        self.assertEqual([(item[0], item[2]) for item in lane.pending], [
+            ('history.release', old['target']), ('control', old['target']),
+            ('progress', old['target']), ('observe', selected['target']), ('status', None)])
+        self.assertIs(lane.pending[1][3], callback)
+        self.assertEqual([(item[0], item[2]) for item in app.lanes['MBP'].pending],
+                         [('sources.inspect', peer['target'])])
+        self.assertTrue(lane.busy)
+        self.assertEqual(app.selected_key, row_key(selected['target']))
+        self.assertFalse(any(backend.calls for backend in backends.values()))
+
     async def test_global_selection_and_framed_compact_rendering_at_required_sizes(self):
         backends = self.backends()
         app = NodesApp(backends, clock=lambda: 1000.)

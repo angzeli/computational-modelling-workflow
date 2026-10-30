@@ -185,7 +185,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
         lane = self.lanes[owner]
         if self.closed or len(lane.pending) >= 16:
             return False
-        request = (operation, params or {}, deepcopy(target), callback)
+        request = (operation, params or {}, deepcopy(target), callback, automatic)
         if automatic:
             if any(item[0] == operation and item[2] == target for item in lane.pending):
                 return False
@@ -213,7 +213,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
                 lane.busy = True
                 lane.request_started = now
                 def collect(owner=owner, lane=lane, request=request):
-                    operation, params, target, callback = request
+                    operation, params, target, callback = request[:4]
                     try:
                         result, error = lane.backend.call(operation, params, target), None
                     except Exception as exc:
@@ -241,7 +241,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
     def accept(self, owner, request, envelope, error):
         lane = self.lanes[owner]
         lane.busy = False
-        operation, params, target, callback = request
+        operation, params, target, callback = request[:4]
         now = self.clock()
         if error is not None:
             if getattr(error, 'code', 'UNREACHABLE') in _TRANSPORT_ERRORS:
@@ -253,7 +253,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
                 self.invalidate_session(owner)
                 # These requests were never sent; complete their waiting views
                 # without replaying operations after a transport/identity change.
-                for queued_operation, _, queued_target, queued_callback in abandoned:
+                for queued_operation, _, queued_target, queued_callback in (item[:4] for item in abandoned):
                     if queued_target is not None:
                         cache = lane.cache.setdefault(target_key(queued_target), {})
                         cache[queued_operation + '.error'] = str(error)
@@ -440,6 +440,12 @@ class NodesApp(NodeCatalogue, NavigationApp):
             return
         self.selected_key = key
         self.selection_generation += 1
+        # Superseded automatic reads cannot inform the new selection. Preserve
+        # explicit requests and any request already owned by a running worker.
+        for lane in self.lanes.values():
+            lane.pending = deque(request for request in lane.pending
+                if not (request[4] and request[0] in {'progress', 'observe'}
+                        and request[2] is not None and row_key(request[2]) != key))
         self.catalogue_hydrate(key)
         if self.is_mounted and key in self.row_keys:
             table = self.query_one('#table', DataTable)
