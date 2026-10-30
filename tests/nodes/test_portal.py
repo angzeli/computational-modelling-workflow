@@ -215,6 +215,65 @@ class PortalTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(app.selected_snapshot('MINI', lane.backend.jobs[0]))
                 self.assertTrue(lane.fresh(now[0]))
 
+    async def test_first_selected_progress_precedes_background_status_not_explicit_work(self):
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit):
+                now = [1000.]
+                app = NodesApp(self.backends(), clock=lambda: now[0])
+                with patch.object(app, 'set_interval'):
+                    async with app.run_test(size=(80, 24)) as pilot:
+                        await app.workers.wait_for_complete()
+                        await pilot.pause()
+                        lane = app.lanes['MINI']
+                        old, selected = lane.backend.jobs[:2]
+                        app.select(row_key(old['target']))
+                        active = ('observe', {}, old['target'], None, True)
+                        lane.active_request, lane.busy = active, True
+                        app.queue('MINI', 'status', automatic=True)
+                        callback = lambda *_: None
+                        if explicit:
+                            app.queue('MINI', 'sources.inspect', target=old['target'], callback=callback)
+                        app.select(row_key(selected['target']))
+                        lane.next_poll = now[0] + 10
+                        with patch.object(app, 'run_worker'):
+                            app.tick()
+                            self.assertIs(lane.active_request, active)
+                            expected = (['sources.inspect'] if explicit else []) + ['progress', 'status', 'observe']
+                            self.assertEqual([item[0] for item in lane.pending], expected)
+                            if explicit:
+                                self.assertIs(lane.pending[0][3], callback)
+                            progress = next(item for item in lane.pending if item[0] == 'progress')
+                            self.assertEqual(progress[2], selected['target'])
+                            now[0] += 1.5
+                            app.accept('MINI', active, lane.backend.call(*active[:3]), None)
+                            for operation in expected[:-1]:
+                                app.tick()
+                                request = lane.active_request
+                                self.assertEqual(request[0], operation)
+                                now[0] += 1.5
+                                app.accept('MINI', request, lane.backend.call(*request[:3]), None)
+                        self.assertIsNotNone(app.selected_snapshot('MINI', selected))
+                        self.assertEqual(app.selected_key, row_key(selected['target']))
+                        self.assertTrue(lane.fresh(now[0]))
+
+    def test_cached_other_target_and_other_owner_progress_keep_background_order(self):
+        for case in ('cached', 'other-target', 'other-owner'):
+            with self.subTest(case=case):
+                app = NodesApp(self.backends())
+                app.rows = {row_key(job['target']): (owner, job)
+                            for owner, lane in app.lanes.items() for job in lane.backend.jobs}
+                old, selected = app.lanes['MINI'].backend.jobs[:2]
+                app.selected_key = row_key(selected['target'])
+                owner = 'MBP' if case == 'other-owner' else 'MINI'
+                lane = app.lanes[owner]
+                target = old['target'] if case == 'other-target' else selected['target']
+                if case == 'cached':
+                    lane.cache[target_key(target)] = {'progress': ('existing response', 1000.)}
+                app.queue(owner, 'status', automatic=True)
+                app.queue(owner, 'observe', target=lane.backend.jobs[0]['target'], automatic=True)
+                app.queue(owner, 'progress', target=target, automatic=True)
+                self.assertEqual([item[0] for item in lane.pending], ['status', 'observe', 'progress'])
+
     def test_history_release_discards_only_pending_automatic_refreshes(self):
         app = NodesApp(self.backends())
         job = app.lanes['MINI'].backend.jobs[0]

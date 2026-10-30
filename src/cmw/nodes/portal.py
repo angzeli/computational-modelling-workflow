@@ -191,7 +191,17 @@ class NodesApp(NodeCatalogue, NavigationApp):
             if any(item is not None and item[:3] == request[:3]
                    for item in (*lane.pending, lane.active_request)):
                 return False
-            lane.pending.append(request)
+            if (operation == 'progress' and target is not None
+                    and self.rows.get(self.selected_key, (None,))[0] == owner
+                    and row_key(target) == self.selected_key
+                    and 'progress' not in lane.cache.get(target_key(target), {})):
+                # First selected evidence precedes background reads, never an
+                # explicit operation or the request already owned by a worker.
+                position = next((index for index, item in enumerate(lane.pending) if item[4]),
+                                len(lane.pending))
+                lane.pending.insert(position, request)
+            else:
+                lane.pending.append(request)
         else:
             lane.pending.appendleft(request)
         return True
@@ -203,7 +213,9 @@ class NodesApp(NodeCatalogue, NavigationApp):
         for owner, lane in self.lanes.items():
             selected = self.selected()
             if (selected and selected[0] == owner and lane.fresh(now)
-                    and now >= lane.next_progress and not lane.pending):
+                    and now >= lane.next_progress
+                    and (not lane.pending or 'progress' not in
+                         lane.cache.get(target_key(selected[1]['target']), {}))):
                 lane.next_progress = now + 4
                 self.collect_progress(automatic=True)
                 self.queue(owner, 'observe', target=selected[1]['target'], automatic=True)
