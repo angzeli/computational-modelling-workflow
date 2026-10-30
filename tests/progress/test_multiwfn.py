@@ -172,6 +172,30 @@ class MultiwfnProgressTests(unittest.TestCase):
         self.assertTrue(all(item.evidence[0].generation == initial_generation + 2
                             for item in again.settings if item.origin == 'pinned preparation association'))
 
+    def test_pinned_reverification_reconstructs_drained_history(self):
+        self.write_event(kind='prepared')
+        Path(self.sources[0].path).write_text(
+            'Version 2026.7.15\nLoaded /alias/source successfully!\n')
+        initial = self.service.poll(self.context)
+        first = self.service.history(self.context)
+        self.assertEqual(first.status, 'READY')
+        self.assertEqual(len(first.entries), 3)
+        metadata = Path(self.sources[3].path)
+        before = metadata.stat()
+        metadata.chmod(0o400)
+        after = metadata.stat()
+        self.assertEqual((before.st_ino, before.st_size, before.st_mtime_ns),
+                         (after.st_ino, after.st_size, after.st_mtime_ns))
+        self.assertNotEqual(before.st_ctime_ns, after.st_ctime_ns)
+        observed = self.service.poll(self.context)
+        self.assertEqual(observed.events, initial.events)
+        self.assertEqual(observed.scientific_validation, 'not-assessed')
+        self.assertEqual(self.service.history(self.context, cursor=first.cursor).status, 'CURSOR_INVALID')
+        current = self.service.history(self.context)
+        self.assertEqual(current.status, 'READY')
+        self.assertNotEqual(current.source_revision, first.source_revision)
+        self.assertEqual(current.entries, first.entries)
+
     def test_replaced_pinned_association_revokes_even_identical_bytes(self):
         self.validation()
         self.assertEqual(self.service.poll(self.context).scientific_validation, 'validator-recorded-passed')

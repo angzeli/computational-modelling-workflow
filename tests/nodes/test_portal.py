@@ -187,6 +187,34 @@ class PortalTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(callbacks[0][0])
             self.assertEqual(callbacks[0][1].code, 'UNREACHABLE')
 
+    async def test_slow_status_does_not_starve_selected_progress_or_status(self):
+        now = [1000.]
+        app = NodesApp(self.backends(), clock=lambda: now[0])
+        # Drive ticks explicitly so response duration, not wall timing, controls order.
+        with patch.object(app, 'set_interval'):
+            async with app.run_test(size=(80, 24)) as pilot:
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertEqual(len(app.rows), 10)
+                lane = app.lanes['MINI']
+                target = lane.backend.jobs[0]['target']
+                app.select(row_key(target))
+                lane.next_poll = lane.next_progress = 0
+                observed = []
+                with patch.object(app, 'run_worker'):
+                    for _ in range(6):
+                        app.tick()
+                        request = lane.active_request
+                        self.assertIsNotNone(request)
+                        observed.append(request[0])
+                        # Each response outlasts the two-second status cadence.
+                        now[0] += 2.5
+                        response = lane.backend.call(*request[:3])
+                        app.accept('MINI', request, response, None)
+                self.assertEqual(observed, ['progress', 'observe', 'status'] * 2)
+                self.assertIsNotNone(app.selected_snapshot('MINI', lane.backend.jobs[0]))
+                self.assertTrue(lane.fresh(now[0]))
+
     def test_history_release_discards_only_pending_automatic_refreshes(self):
         app = NodesApp(self.backends())
         job = app.lanes['MINI'].backend.jobs[0]

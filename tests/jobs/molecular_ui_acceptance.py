@@ -202,7 +202,11 @@ async def federated_render_cases(root, renders=None):
                 except AssertionError as exc:
                     lane = app.lanes['MINI']
                     cache = lane.cache.get(target_key(target), {})
+                    active = lane.active_request
                     diagnostic = {'profile': profile, 'target': target, 'selection': app.selected_key,
+                        'active': None if active is None else
+                            {'operation': active[0], 'target': active[2], 'automatic': active[4]},
+                        'active_age': None if lane.request_started is None else app.clock() - lane.request_started,
                         'lane_error': str(lane.error)[:512] if lane.error is not None else None,
                         'busy': lane.busy, 'pending_count': len(lane.pending),
                         'pending': [{'operation': item[0], 'target': item[2]} for item in list(lane.pending)[:8]],

@@ -201,15 +201,17 @@ class NodesApp(NodeCatalogue, NavigationApp):
             return
         now = self.clock()
         for owner, lane in self.lanes.items():
-            if not lane.busy and not lane.pending and now >= lane.next_poll:
-                self.queue(owner, 'status', automatic=True)
-                lane.next_poll = now + 2
             selected = self.selected()
             if (selected and selected[0] == owner and lane.fresh(now)
                     and now >= lane.next_progress and not lane.pending):
                 lane.next_progress = now + 4
                 self.collect_progress(automatic=True)
                 self.queue(owner, 'observe', target=selected[1]['target'], automatic=True)
+            # A slow status reply must not monopolize every idle tick. Queue it
+            # after selected reads so both remain serviced by the bounded lane.
+            if not lane.busy and now >= lane.next_poll:
+                self.queue(owner, 'status', automatic=True)
+                lane.next_poll = now + 2
             if lane.pending and not lane.busy:
                 request = lane.pending.popleft()
                 lane.busy = True

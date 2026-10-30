@@ -221,7 +221,11 @@ class ObservationService:
         if observation.history is not None:
             revision = source_revision(observation.context, states)
             if observation.history.revision != revision:
+                reconstruct = bool(observation.history.revision)
                 observation.history.reset(revision)
+                # Unchanged readers have already drained their history rows.
+                # Reconstruct them before treating the new revision as complete.
+                observation.history.trimmed = reconstruct
                 if observation.replay is not None:
                     self._close_observation(observation.replay.observation)
                     observation.replay = None
