@@ -480,6 +480,12 @@ bounded code/message response. A post-operation refusal is not a rollback;
 query the same durable request/transfer identity from a fresh isolated observer.
 No automatic operation replay, trust rewrite or enrollment change is introduced.
 
+A refused final recollection records both comparison operands: package root,
+member/directory inventories and resolved interpreter epochs, plus separate
+inventory/interpreter change flags, collector pass and the first refusal. These
+are failure-time observations; a subsequent successful enrollment or fresh
+observer does not reconstruct an earlier missing observation or erase its failure.
+
 ### Navigation qualification diagnostics
 
 Navigation return preserves the exact saved selection and viewport when content

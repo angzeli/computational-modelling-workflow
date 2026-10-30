@@ -193,11 +193,32 @@ def runtime_observed(*, diagnostics=None):
             # Uncached complete reread; an eligible stat delta is not a PASS.
             package_digest = _package_digest.__wrapped__(root, epoch)
             after = inventory(root)
-            if after != current or file_epoch(executable) != executable_before:
-                raise RuntimeRefusal('in_flight_change', phase='recollection-after-read',
-                                     before=dict(epoch), after=dict(after[1]))
-        except BaseException:
+            # Evaluate both operands once, before exception handling loses them.
+            executable_after = file_epoch(executable)
+            if after != current or executable_after != executable_before:
+                def operands(value, interpreter):
+                    return {'root': value[0], 'members': dict(value[1]),
+                            'directories': value[2], 'executable': interpreter}
+                refused = RuntimeRefusal('in_flight_change', phase='recollection-after-read',
+                    before=operands(current, executable_before),
+                    after=operands(after, executable_after), actual_digest=package_digest)
+                refused.evidence['comparison'] = {
+                    'inventory_changed': after != current,
+                    'executable_changed': executable_after != executable_before,
+                    'package_root': str(root), 'executable_lexical': sys.executable,
+                    'executable_resolved': str(executable),
+                    'file_epoch_fields': ['dev', 'ino', 'size', 'mtime_ns', 'ctime_ns',
+                        'mode', 'uid', 'gid', 'flags', 'nlink', 'security_digest', 'security_complete'],
+                    'directory_epoch_fields': ['dev', 'ino', 'mode', 'uid', 'gid',
+                        'flags', 'security_digest', 'security_complete'],
+                    'digest_scope': 'completed package reread before final comparison',
+                    'descriptor_epochs': 'not retained by inventory; native security checks remain strict'}
+                raise refused
+        except BaseException as failure:
             evidence['outcome'] = 'REFUSED'
+            if isinstance(failure, RuntimeRefusal):
+                failure.evidence.update(collector_pass=2, recovery_count=1,
+                                        first_refusal=exc.evidence)
             raise
         evidence['outcome'] = 'COHERENT_CURRENT_DISK_ONLY'
     if file_epoch(executable) != executable_before:
