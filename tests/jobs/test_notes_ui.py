@@ -176,11 +176,26 @@ class NoteEditorTests(unittest.IsolatedAsyncioTestCase):
         app = JobsApp(self.store)
         async with app.run_test(size=(80,24)) as pilot:
             await pilot.pause()
-            app.external_selected_id = 'E123'
+            app.external_selected_id = 'missing-external'
             await pilot.press('n')
             self.assertNotIsInstance(app.screen, NoteEditor)
-            self.assertIn('read-only', str(app.query_one('#message', Static).render()))
+            app.refresh_state()
+            self.assertIn('no longer observed', str(app.query_one('#message', Static).render()))
             app.external_selected_id = None
+            app.activity_projection['external_activity'] = {'state': 'BUSY',
+                'reason': 'Synthetic external activity', 'observations': [
+                {'id': 'E123', 'engine': 'FICTIONAL', 'pid': 123, 'status': 'sleeping',
+                 'nproc': 1, 'age_seconds': 60, 'exe': '/unexecuted/fixture', 'cwd': None,
+                 'ownership': 'External / unattributed', 'evidence': ['Synthetic identity']}]}
+            app.refresh_state()
+            await pilot.press('tab')
+            self.assertEqual(app.external_selected_id, 'E123')
+            await pilot.press('n')
+            app.refresh_state()
+            self.assertNotIsInstance(app.screen, NoteEditor)
+            self.assertIn('read-only', str(app.query_one('#message', Static).render()))
+            await pilot.press('shift+tab')
+            self.assertIsNone(app.external_selected_id)
             await pilot.press('n','q','ctrl+c')
         self.assertEqual(self.store.snapshot()['jobs'][0]['note'], '')
         self.assertEqual(self.store.snapshot()['jobs'][0]['status'], 'Hold')
