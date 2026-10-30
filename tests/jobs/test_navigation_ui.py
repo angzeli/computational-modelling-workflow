@@ -405,6 +405,36 @@ class NavigationUiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIs(app.screen, base)
                     self.assertIsNone(app.progress_identity())
 
+    async def test_external_cursor_survives_refresh_before_highlight_delivery(self):
+        app = self.app()
+        self.observer.observations = [
+            {'id': f'E{i:02}-birth', 'engine': 'FICTIONAL', 'pid': 1000 + i,
+             'status': 'sleeping', 'nproc': 1, 'age_seconds': 60,
+             'exe': '/unexecuted/fixture', 'cwd': None,
+             'ownership': 'External / unattributed', 'evidence': ['Synthetic identity']}
+            for i in range(1, 31)]
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.ready(app, pilot)
+            await pilot.press('tab')
+            external = app.query_one('#external', DataTable)
+            self.assertIs(app.focused, external)
+            external.move_cursor(row=23, animate=False)
+            await self.wait(pilot, lambda: app.external_selected_id == 'E24-birth')
+            generations = (app.files_generation, app.suspension_selection_generation)
+
+            external.action_cursor_down()
+            self.assertEqual(external.cursor_row, 24)
+            self.assertEqual(app.external_selected_id, 'E24-birth')
+            app.refresh_state()
+
+            self.assertEqual(app.external_selected_id, 'E25-birth')
+            self.assertEqual(external.cursor_row, 24)
+            await pilot.pause()
+            self.assertEqual(app.external_selected_id, 'E25-birth')
+            self.assertEqual(external.cursor_row, 24)
+            self.assertEqual((app.files_generation, app.suspension_selection_generation),
+                             tuple(value + 1 for value in generations))
+
     async def test_managed_and_external_focus_q_and_mouse_return(self):
         app = self.app()
         self.observer.observations = [

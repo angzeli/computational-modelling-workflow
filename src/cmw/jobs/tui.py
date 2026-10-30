@@ -1193,6 +1193,17 @@ class JobsApp(LocalCatalogue, NavigationApp):
         sharing.styles.max_height = 1 if compact else 4
         sharing.update(literal(sharing_text(display_state, compact=compact)))
         table = self.query_one("#external", DataTable)
+        origin = self.screen_stack[0]
+        # A key moves the cursor before its queued highlight updates selection.
+        # Read its old row identity before the refresh can rebuild or reset it.
+        if (table.has_focus and not self.navigation_pending(origin)
+                and not self.navigation_origin_covered(origin)
+                and self.external_selected() is not None
+                and 0 <= table.cursor_row < len(self.external_rows)):
+            key = self.external_rows[table.cursor_row]
+            if key != self.external_selected_id and self.external_observation(key) is not None:
+                self.external_selected_id = key
+                self.suspension_selection_generation += 1
         observations = (guard or {}).get("observations", [])
         table.styles.height = min(4, len(observations) + 1) if compact else 5
         external_heading = self.query_one("#external-heading", Static)
