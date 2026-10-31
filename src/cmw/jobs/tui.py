@@ -694,7 +694,9 @@ class JobsApp(LocalCatalogue, NavigationApp):
             return
         if generation != self.execution_generation or selection != self.execution_identity():
             self.sync_execution_selection()
-            self.set_timer(0.05, self.collect_execution)
+            # Sync may already start the current read; a delayed callback could
+            # otherwise repeat it after a later explicit selection completes.
+            self.collect_execution()
             return
         self.execution_observation = observation
         self.execution_error = error
