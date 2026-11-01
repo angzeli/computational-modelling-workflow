@@ -217,7 +217,7 @@ class VaspCrosscheckTests(unittest.TestCase):
         self.initial(8)
         self.append('OSZICAR', ''.join(electronic_row(i) for i in range(1, 9)))
         self.poll()
-        with patch('cmw.progress.vasp._same_printed', side_effect=AssertionError('unchanged prefix compared again')):
+        with patch('cmw.periodic.vasp.analysis_evidence._same_printed', side_effect=AssertionError('unchanged prefix compared again')):
             snapshot = self.poll()
         self.assertEqual(snapshot.verification[0].checked_frontier, 8)
         self.assertEqual(sum(source.bytes_read for source in snapshot.sources), 0)
