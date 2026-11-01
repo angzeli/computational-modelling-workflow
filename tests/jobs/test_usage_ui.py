@@ -30,14 +30,14 @@ def machine():
 
 class UsageFormatTests(unittest.TestCase):
     def test_units_quality_zero_and_large_values(self):
-        self.assertEqual(usage_cells(usage()), ('780%', '18.3 GiB RSS'))
+        self.assertEqual(usage_cells(usage()), ('780%', '18.3 GiB RSSΣ'))
         self.assertEqual(usage_cells(usage(cpu_cores=7.1))[0], '710%')
         self.assertEqual(usage_cells(usage(cpu_cores=0.1))[0], '10%')
         self.assertEqual(usage_cells(usage(cpu_cores=128.7))[0], '12870%')
         self.assertEqual(usage_cells(usage(cpu_cores=0))[0], '0%')
         self.assertEqual(usage_cells(usage(cpu_cores=None, cpu_quality='warming-up'))[0], '…')
         self.assertEqual(usage_cells(None), ('—', '—'))
-        self.assertEqual(usage_cells(usage(memory_quality='partial'))[1], '18.3 GiB RSS*')
+        self.assertEqual(usage_cells(usage(memory_quality='partial'))[1], '18.3 GiB RSSΣ*')
         self.assertEqual(usage_cells(usage(stale=True))[0], '780%~')
         self.assertIn('CPU 61%', machine_text(machine()))
         self.assertIn('23.8 / 36.0 GiB', machine_text(machine()))
@@ -95,7 +95,7 @@ class UsageTuiTests(unittest.IsolatedAsyncioTestCase):
                     managed_table = app.query_one('#table', DataTable)
                     external_table = app.query_one('#external', DataTable)
                     self.assertEqual(str(managed_table.get_cell(row['display_id'], 'cpu_now')), '10%')
-                    self.assertEqual(str(external_table.get_cell('E101-birth-17', 'ram_now')), '18.3 GiB RSS*')
+                    self.assertEqual(str(external_table.get_cell('E101-birth-17', 'ram_now')), '18.3 GiB RSSΣ*')
                     self.assertIn('CPU 61%', str(app.query_one('#machine', Static).render()))
                     await pilot.press('enter')
                     self.assertIsInstance(app.screen, Inspect)

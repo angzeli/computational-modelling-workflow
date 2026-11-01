@@ -1,10 +1,9 @@
 """Bounded, test-only lifecycle evidence captured before fixture teardown."""
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import wraps
 import json
 import os
 from pathlib import Path
-import sqlite3
 import sys
 import tempfile
 import time
@@ -63,7 +62,7 @@ def bounded_tail(path, limit=16384):
 
 
 def capture(store, destination, *, outcome, started_at):
-    """Copy only this isolated state; preserve SQLite consistency and bounded tails."""
+    """Retain a managed state snapshot and bounded tails, never copy a live database."""
     destination.mkdir(parents=True, exist_ok=True, mode=0o700)
     state = store.snapshot()
     metadata = {'started_at': started_at, 'captured_at': time.time(), 'outcome': outcome,
@@ -71,10 +70,6 @@ def capture(store, destination, *, outcome, started_at):
                 'controller_lock': lock_held(store.root/'controller.lock'),
                 'worker_locks': {}, 'receipts': {}, 'log_tails': {}}
     (destination/'state').mkdir(mode=0o700)
-    if store.path.exists():
-        with closing(sqlite3.connect(store.path.as_uri()+'?mode=ro', uri=True)) as source:
-            with closing(sqlite3.connect(destination/'state'/store.path.name)) as target, target:
-                source.backup(target)
     for job in state['jobs']:
         attempt = store.root/'attempts'/job['attempt_id']
         metadata['worker_locks'][job['attempt_id']] = lock_held(attempt/'worker.lock')

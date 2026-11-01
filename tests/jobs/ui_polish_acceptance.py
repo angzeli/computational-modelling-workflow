@@ -263,7 +263,7 @@ async def console_cases(store, cases, *, renders=None, scenarios=SCENARIOS, size
         with patch.dict(os.environ):
             os.environ.pop('NO_COLOR', None)
             app = JobsApp(store, clock=lambda: NOW, progress_service=service, progress_resolver=resolver,
-                          location_descriptors=(LocationDescriptor('output', str(store.root.parent)),), file_opener=opener)
+                          location_descriptors=(LocationDescriptor('output', selected['cwd']),), file_opener=opener)
         app.selected_id = selected['display_id']
         app.activity_projection = deepcopy(projection)
         app.job_usage = deepcopy(projection['job_usage'])

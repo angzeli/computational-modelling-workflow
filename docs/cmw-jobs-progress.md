@@ -38,8 +38,22 @@ only genuinely narrow or short viewports fall back to borderless text. CLI and
 Copy snapshots remain undecorated. The generic renderer
 does not infer engine semantics. The current native context remains separate
 from the latest complete row: SCF 9 may be active
-while the complete electronic values are labelled `@SCF8`. Latest force always
-retains its evaluation, and a static calculation has no ionic force stopping target.
+while the complete electronic values are labelled `@SCF8`. The native evaluation
+label includes effective positive NSW when available, such as `Eval 7/20`; missing or unqualified NSW leaves `Eval 7`. Latest force always
+retains its evaluation (for example `@E6` while evaluation 7 is current), and a
+static calculation has no ionic force stopping target.
+
+VASP retains these groups for empty, pending and diagnostic observations, with
+unavailable values shown as `—`. Before any reader can run, its registered
+read-free descriptors provide the same skeleton without inventing settings or
+native context. `BOUND` describes a declaration only. The footer distinguishes
+missing declarations, source conflicts, waiting for declared output, reader
+failures/catch-up, unsupported grammar and pending correspondence. A source
+configuration action is shown only for a missing declaration or required binding
+review; a native evidence conflict directs the user to Details. Cached values
+remain qualified and conflict-invalidated values are omitted from current cells.
+Full resolver/parser diagnostics remain in Details and Copy/JSON, including a
+superseded automatic-route warning when compatible explicit declarations suffice.
 
 The card preserves units, source qualification, checked frontier and scientific-data
 age. Details/History retain previous values, trends, timing, rms(c), source positions
@@ -67,9 +81,21 @@ convergence percentage, ETA, scientific-validity badge or automatic stop is show
 A missing electronic measurement does not hide a known target. The card obtains
 EDIFF and EDIFFG independently from qualified effective OUTCAR settings, falling
 back only to explicitly declared provisional INCAR evidence. Contradictory,
-unsupported or other-segment settings cannot restore a target. Before a force
-measurement and its constraint comparison exist, a negative EDIFFG is shown as a
-conditional threshold; static calculations remain target N/A.
+unsupported or other-segment settings cannot restore a target. Known effective
+settings remain visible even when the calculation or comparison is unsupported;
+this does not claim criterion satisfaction. A negative EDIFFG without a supported
+force/mask comparison is labelled `unapplied`; static calculations remain target N/A.
+
+Ordinary VASP 6.6.1 fixed-cell relaxation supports ISIF 0 and 2 within the existing
+electronic-mode and special-control restrictions. With a separately declared,
+validated whole-atom POSCAR mask, the compact FORCE row shows only `Fmax movable`
+and its conditional EDIFFG target. Completely fixed atoms do not control this
+comparison. All/fixed force norms remain in Details/JSON; absent or partial-direction
+constraints never turn the all-atom norm into a movable-force criterion. Input
+declarations retain their attempt association and current-input qualification.
+For newly queued supported `run-vasp.sh` routes, the automatic staged-input
+identity described below additionally checks the exact POSCAR bytes. Force
+comparisons remain provisional and never establish scientific acceptance.
 
 JSON, Details and Copy distinguish undeclared, empty, incomplete/catching-up,
 unparsed, malformed, unsupported, unavailable, source-local, partially matched,
@@ -195,6 +221,61 @@ remain conflicts. JSON, Details and Sources retain origin and qualification.
 A source declaration identifies a file to observe, not verified execution
 lineage, scientific acceptance or finalization provenance.
 
+### Automatic POSCAR identity for future VASP attempts
+
+Both `jobs add` and the programmatic `Store.add` API use the same optional
+registration hook for the recognized `run-vasp.sh --input … --output …
+--managed-foreground` route, including its controlled-suspension variant. No
+extra monitoring option is needed. Static and fixed-cell preparation share this
+route; ordinary and Selective Dynamics POSCAR files retain their exact bytes,
+atom order, geometry and flags.
+
+At enqueue, additive `progress_sources.vasp_input` metadata records the immutable
+Jobs attempt UUID, exact argv and input/output paths, output-parent identity and
+the prepared POSCAR SHA-256, byte count and source stat identity. This is a
+**prepared snapshot**, not evidence that staging or execution occurred. The
+output must not yet exist, matching the supported runner's exclusive staging
+contract. Missing, inaccessible, oversized or ambiguous evidence records a
+monitoring limitation without preventing enqueue or launch. The existing Jobs
+database schema and scheduler behavior are unchanged.
+
+During read-only resolution, CMW consumes only the declared output's bounded
+`RUN_METADATA.txt` staging prefix. It requires an ordered STAGING/RUNNING boundary,
+all four staged input identities, matching paths and mode, POSCAR hash/size and
+source stat, and a staging timestamp within the recorded Jobs attempt. It then
+checks the actual `<output>/POSCAR`. The bounded progress reader verifies the
+exact bytes it consumes against the immutable digest before exposing a complete
+constraint mask. The origin is `attempt-staged-input`; local runner evidence is
+not authenticated execution or scientific acceptance. Terminal failure does not
+undo a completed staging step. Finalization retains its separate, stricter
+terminal/receipt and scientific checks.
+
+The same immutable source metadata survives lifecycle saves and client/controller
+restarts. A retry is a new enqueue with a new Jobs UUID and a fresh input identity;
+there is no in-place Jobs retry operation. Historical observation continues to
+use its original staged path and expected digest even after the prepared input
+changes. Missing, replaced or modified staged bytes remain unavailable, with no
+fallback to the latest prepared POSCAR. Snapshotting the content is unnecessary;
+retention of the original runtime file is still required. Editing prepared inputs
+between enqueue and staging deliberately leaves the optional binding unqualified.
+
+An explicit incompatible POSCAR path remains a visible optional-source conflict.
+A failed staged expectation cannot be satisfied by an alternate add-time POSCAR.
+Invocation-local/session source overrides retain their existing explicit,
+unverified qualification. Opaque wrappers, layout-only declarations and runner
+invocations without the managed-foreground contract (including dry runs) have no
+registered staging contract and retain their existing current-input association;
+CMW does not invent an executed-input binding for them. CMW preparation publishes
+inputs but does not enqueue or launch VASP, and the generic workflow materializer
+has no standard VASP renderer.
+
+Legacy attempts are never backfilled. In particular, a historical OUTCAR/OSZICAR/
+stdout declaration without POSCAR does not acquire a durable POSCAR association
+from observation. Later historical association needs separately authorized exact
+attempt/runner records, original staged POSCAR identity and source closure; a
+current file or matching atom count alone is insufficient. No historical binding
+edit command is introduced by this feature.
+
 ### Invocation-local CLI sources
 
 The existing `progress --source` syntax still selects sources for one call only;
@@ -240,7 +321,9 @@ releases contexts no longer displayed; `close` releases the client's readers.
 Neither affects execution. No durable history database or daemon is created.
 
 The explicit lazy registry accepts
-`register_adapter(engine, factory, sources=(), source_roles=())`.
+`register_adapter(engine, factory, sources=(), source_roles=(), card_groups=None)`.
+The optional `card_groups(snapshot)` callback is read-free and supplies descriptors
+for pre-adapter states; it must not infer settings or create readers.
 A factory receives `RunContext` and returns an object implementing
 `update(tuple[SourceUpdate, ...], now) -> ProgressSnapshot`. Source updates contain
 complete lines, bounded byte/line evidence, file identity/generation, reset reason,
@@ -336,9 +419,15 @@ evaluation, its latest values remain in the card, Details and Copy; navigable
 History waits for that native context. Retention stays bounded, and no guessed
 outer-evaluation identity is assigned.
 
-Effective current-segment OUTCAR settings take precedence. A separately declared
-current INCAR supplies provisional input evidence only; differences from effective
-settings remain explicit. No historical launch-input linkage or default threshold
+Effective current-segment OUTCAR settings take precedence. The shared result/live
+parser requires typed records in the native parameter section or the exact NCORE
+distribution line; advice text cannot supply settings or resolve conflicts.
+Incomplete lines wait for completion, and source generations/segments retain
+independent setting evidence. Explicit unsupported controls, including hybrid
+LHFCALC or IALGO 53, remain visible before the first SCF row.
+
+A separately declared current INCAR supplies provisional input evidence only;
+differences from effective settings remain explicit. No historical launch-input linkage or default threshold
 is invented. EDIFF applies to supported |dE| and |d eps|, never rms or rms(c).
 EDIFF=0 is not ordinary threshold convergence. Negative EDIFFG is a conditional
 force criterion only within the supported relaxation/constraint contract;

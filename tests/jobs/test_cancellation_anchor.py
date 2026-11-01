@@ -287,9 +287,11 @@ class CancellationAnchorTests(unittest.TestCase):
 class PayloadReceiptTopologyTests(unittest.TestCase):
     def test_anchor_group_term_can_kill_receipt_writer_before_release(self):
         """Controlled demonstration of the shell hazard, not historical attribution."""
-        with tempfile.TemporaryDirectory(prefix='cmw-receipt-topology-') as temporary:
+        with tempfile.TemporaryDirectory(prefix='cmw-receipt-topology-') as temporary, \
+                tempfile.TemporaryDirectory(prefix='cmw-socket-', dir='/tmp') as socket_directory:
             root = Path(temporary)
-            endpoint = root/'control.sock'
+            # AF_UNIX paths must fit even when the campaign's TMPDIR is long.
+            endpoint = Path(socket_directory)/'control.sock'
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.addCleanup(listener.close)
             listener.bind(str(endpoint))

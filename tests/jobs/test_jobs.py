@@ -380,6 +380,7 @@ runtime.worker(Store(state),1,'test-claim')
         self.completed(1)
         self.assertEqual(self.jobs()[0]['status'], 'Done')
 
+    @retain_lifecycle_evidence
     def test_existing_workflow_runner_preserves_result_contract(self):
         import shutil
         from tests.workflows.test_opt_freq_sp import _config, RUNNER, STRUCTURE

@@ -11,6 +11,7 @@ from cmw.periodic.vasp.result_finalization import (
 )
 from .result_case import make_case, write_json, digest
 from .runner_case import add_runner
+from .handoff_case import wait_for_fixture_sources
 
 
 class RunnerFinalizationTests(unittest.TestCase):
@@ -28,8 +29,14 @@ class RunnerFinalizationTests(unittest.TestCase):
 
     def finalize(self, **options):
         c = self.case
-        return finalize_result(c["run"], policy_path=c["policy_path"], spec_path=c["spec_path"],
-                               scratch_root=c["scratch"], record_directory=options.pop("record_directory", "accepted"), **options)
+        wait_for_fixture_sources([*c["run"].iterdir(), c["policy_path"], c["spec_path"],
+                                  c["snapshot"], c["receipt"]], quiet_seconds=6, timeout=20)
+        record = finalize_result(c["run"], policy_path=c["policy_path"], spec_path=c["spec_path"],
+                                 scratch_root=c["scratch"], record_directory=options.pop("record_directory", "accepted"), **options)
+        if not options.get("dry_run", False):
+            # Prepare the new fixture record before verification, without retrying a refusal.
+            wait_for_fixture_sources([Path(record["publication"]["record_path"])], quiet_seconds=.25, timeout=3)
+        return record
 
     def test_actual_core_bundle_and_verification_retain_runner_source_closure(self):
         before = {p: p.read_bytes() for p in self.case["run"].iterdir()}
@@ -53,14 +60,17 @@ class RunnerFinalizationTests(unittest.TestCase):
 
     def test_changed_runtime_inputs_or_runner_record_prevent_reuse(self):
         for name in ("INCAR", "POSCAR", "KPOINTS", "POTCAR", "RUN_METADATA.txt"):
-            record = self.finalize(record_directory="before-changing-" + name)
-            self.assertTrue(verify_finalization(record["publication"]["record_path"])["valid"])
-            path = self.case["run"] / name
-            original = path.read_bytes()
             with self.subTest(name=name):
-                path.write_bytes(original + b"changed\n")
-                self.assertFalse(verify_finalization(record["publication"]["record_path"])["valid"])
-            path.write_bytes(original)
+                record = self.finalize(record_directory="before-changing-" + name)
+                checked = verify_finalization(record["publication"]["record_path"])
+                self.assertTrue(checked["valid"], checked["findings"])
+                path = self.case["run"] / name
+                original = path.read_bytes()
+                try:
+                    path.write_bytes(original + b"changed\n")
+                    self.assertFalse(verify_finalization(record["publication"]["record_path"])["valid"])
+                finally:
+                    path.write_bytes(original)
 
     def test_stored_runner_facts_and_source_closure_cannot_be_relabelled(self):
         original = self.finalize()

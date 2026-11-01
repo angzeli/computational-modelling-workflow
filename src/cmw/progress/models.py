@@ -16,6 +16,8 @@ class SourceDescriptor:
     root_identity: tuple[int, int] | None = None
     stage: str | None = None
     origins: tuple[str, ...] = ()
+    expected_sha256: str | None = None
+    expected_size: int | None = None
 
 
 @dataclass(frozen=True)

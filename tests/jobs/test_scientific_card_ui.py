@@ -136,9 +136,9 @@ async def scientific_card_views(root, renders=None):
                     assert app.query_one('#progress').region.bottom <= app.query_one('#command-bar').region.y, (scenario, size, 'scientific card clipped', geometry)
                     assert app.query_one('#progress').size.height >= len(card.splitlines()), (scenario, size, 'scientific rows clipped', geometry)
                     assert all(word in text for word in ('SCF', 'FORCE', 'ELECTRONIC', '791%', 'RSS')), (scenario, size)
-                    assert all(word in card for word in ('OUTCAR SCF 9/300', 'EDIFF (both) <1e-05 eV'))
+                    assert all(word in card for word in ('OUTCAR SCF 9/300', 'EDIFF 1E-5 eV'))
                     if scenario == 'force-decimal':
-                        assert '0.014864 eV/Å @E26' in card and 'Target <0.02 eV/Å' in card, (scenario, size, card)
+                        assert '0.014864 eV/Å @E26' in card and 'Target 0.020 eV/Å' in card, (scenario, size, card)
                         assert '1.4864e-02' not in card
                     else:
                         assert 'static' in card
@@ -162,7 +162,7 @@ async def scientific_card_views(root, renders=None):
                     if scenario == 'unverified-execution':
                         assert 'UNVERIFIED' in text and 'Reconciliation required' in text, (scenario, size)
                     else:
-                        assert 'Scope: worker + anchor only' in text, (scenario, size, 'execution scope hidden')
+                        assert 'Execution scope: worker + anchor' in text, (scenario, size, 'execution scope hidden')
                         assert 'Verified worker + anchor' in text, (scenario, size, 'execution observation hidden')
                     if scenario == 'suspended':
                         assert 'inactivity expected' in text and 'Continue job' in text, (scenario, size)

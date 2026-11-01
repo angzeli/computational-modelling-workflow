@@ -1,5 +1,10 @@
 # Multiwfn cube workflows
 
+The existing workflows also have a reviewed first-class **Multiwfn** Jobs route
+with explicit runtime evidence, held submission and automatic observation; see
+[Multiwfn in Jobs](multiwfn-jobs.md). The direct checkout workflow below remains
+available with its existing preparation and runtime-probe semantics.
+
 CMW provides shell-first downstream workflows for validated molecular results.
 These analyses are siblings of one another: FMO does not precede ESP, and
 neither is added to the ORCA `opt+freq+sp` mode string.

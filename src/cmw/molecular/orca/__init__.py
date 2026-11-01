@@ -1,5 +1,8 @@
 """ORCA-specific evidence and scientific validation contracts."""
 
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
 from .geometry import (
     ORCA_GEOMETRY_SCHEMA_VERSION,
     OrcaGeometryContractError,
@@ -42,50 +45,115 @@ from .renderer import (
     OrcaExecutionRenderer,
     orca_execution_plan_node,
 )
-from .properties import (
-    AtomicCharge,
-    FragmentOrbitalPopulation,
-    FrontierAtomicPopulation,
-    FrontierOrbital,
-    FrontierOrbitalSemantics,
-    OrcaGroundStateProperties,
-    OrbitalEnergy,
-    parse_ground_state_frontier_orbitals,
-    parse_ground_state_properties,
-)
-from .excited_states import (
-    DEFAULT_ENERGY_JOIN_TOLERANCE_EV,
-    ExcitedStateJoinError,
-    ExcitedStateParseError,
-    ORCA_EXCITED_STATE_GRAMMAR,
-    ORCA_EXCITED_STATE_PARSER_VERSION,
-    OrcaTDAProtocolMetadata,
-    ParsedOrcaExcitedStates,
-    UnsupportedExcitedStateFormatError,
-    parse_orca_tda_excited_states,
-    parse_orca_tda_excited_states_file,
-)
-from .led import (
-    DEFAULT_LED_RECONSTRUCTION_TOLERANCE_HARTREE,
-    IntermolecularLEDComponents,
-    IntermolecularLEDResult,
-    LEDReconstructionError,
-    LEDReferenceSemantics,
-    ORCA_INTERMOLECULAR_LED_GRAMMAR,
-    ORCA_INTERMOLECULAR_LED_PARSER_VERSION,
-    ORCA_LED_FRAGMENT_REFERENCE_GRAMMAR,
-    OrcaDimerLEDQuantities,
-    OrcaLEDError,
-    OrcaLEDFragmentPartition,
-    OrcaLEDFragmentReferenceQuantities,
-    OrcaLEDParseError,
-    UnsupportedOrcaLEDFormatError,
-    assemble_interfragment_led,
-    parse_orca_interfragment_led,
-    parse_orca_interfragment_led_file,
-    parse_orca_led_fragment_reference,
-    parse_orca_led_fragment_reference_file,
-)
+if TYPE_CHECKING:
+    from .properties import (
+        AtomicCharge,
+        FragmentOrbitalPopulation,
+        FrontierAtomicPopulation,
+        FrontierOrbital,
+        FrontierOrbitalSemantics,
+        OrcaGroundStateProperties,
+        OrbitalEnergy,
+        parse_ground_state_frontier_orbitals,
+        parse_ground_state_properties,
+    )
+    from .excited_states import (
+        DEFAULT_ENERGY_JOIN_TOLERANCE_EV,
+        ExcitedStateJoinError,
+        ExcitedStateParseError,
+        ORCA_EXCITED_STATE_GRAMMAR,
+        ORCA_EXCITED_STATE_PARSER_VERSION,
+        OrcaTDAProtocolMetadata,
+        ParsedOrcaExcitedStates,
+        UnsupportedExcitedStateFormatError,
+        parse_orca_tda_excited_states,
+        parse_orca_tda_excited_states_file,
+    )
+    from .led import (
+        DEFAULT_LED_RECONSTRUCTION_TOLERANCE_HARTREE,
+        IntermolecularLEDComponents,
+        IntermolecularLEDResult,
+        LEDReconstructionError,
+        LEDReferenceSemantics,
+        ORCA_INTERMOLECULAR_LED_GRAMMAR,
+        ORCA_INTERMOLECULAR_LED_PARSER_VERSION,
+        ORCA_LED_FRAGMENT_REFERENCE_GRAMMAR,
+        OrcaDimerLEDQuantities,
+        OrcaLEDError,
+        OrcaLEDFragmentPartition,
+        OrcaLEDFragmentReferenceQuantities,
+        OrcaLEDParseError,
+        UnsupportedOrcaLEDFormatError,
+        assemble_interfragment_led,
+        parse_orca_interfragment_led,
+        parse_orca_interfragment_led_file,
+        parse_orca_led_fragment_reference,
+        parse_orca_led_fragment_reference_file,
+    )
+
+_ANALYSIS_EXPORTS = {
+    'properties': (
+        'AtomicCharge',
+        'FragmentOrbitalPopulation',
+        'FrontierAtomicPopulation',
+        'FrontierOrbital',
+        'FrontierOrbitalSemantics',
+        'OrcaGroundStateProperties',
+        'OrbitalEnergy',
+        'parse_ground_state_frontier_orbitals',
+        'parse_ground_state_properties',
+    ),
+    'excited_states': (
+        'DEFAULT_ENERGY_JOIN_TOLERANCE_EV',
+        'ExcitedStateJoinError',
+        'ExcitedStateParseError',
+        'ORCA_EXCITED_STATE_GRAMMAR',
+        'ORCA_EXCITED_STATE_PARSER_VERSION',
+        'OrcaTDAProtocolMetadata',
+        'ParsedOrcaExcitedStates',
+        'UnsupportedExcitedStateFormatError',
+        'parse_orca_tda_excited_states',
+        'parse_orca_tda_excited_states_file',
+    ),
+    'led': (
+        'DEFAULT_LED_RECONSTRUCTION_TOLERANCE_HARTREE',
+        'IntermolecularLEDComponents',
+        'IntermolecularLEDResult',
+        'LEDReconstructionError',
+        'LEDReferenceSemantics',
+        'ORCA_INTERMOLECULAR_LED_GRAMMAR',
+        'ORCA_INTERMOLECULAR_LED_PARSER_VERSION',
+        'ORCA_LED_FRAGMENT_REFERENCE_GRAMMAR',
+        'OrcaDimerLEDQuantities',
+        'OrcaLEDError',
+        'OrcaLEDFragmentPartition',
+        'OrcaLEDFragmentReferenceQuantities',
+        'OrcaLEDParseError',
+        'UnsupportedOrcaLEDFormatError',
+        'assemble_interfragment_led',
+        'parse_orca_interfragment_led',
+        'parse_orca_interfragment_led_file',
+        'parse_orca_led_fragment_reference',
+        'parse_orca_led_fragment_reference_file',
+    ),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Load analysis exports only when callers request them."""
+    if name in _ANALYSIS_EXPORTS:
+        return import_module(f".{name}", __name__)
+    for module, names in _ANALYSIS_EXPORTS.items():
+        if name in names:
+            value = getattr(import_module(f".{module}", __name__), name)
+            globals()[name] = value
+            return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__) | set(_ANALYSIS_EXPORTS))
+
 
 __all__ = [
     "DEFAULT_LED_RECONSTRUCTION_TOLERANCE_HARTREE",

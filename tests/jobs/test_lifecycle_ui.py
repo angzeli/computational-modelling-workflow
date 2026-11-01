@@ -72,7 +72,21 @@ class LifecycleUiTests(unittest.IsolatedAsyncioTestCase):
         return Mock(side_effect=observe)
 
     def app(self, provider):
-        return JobsApp(self.store, clock=lambda: self.now, execution_provider=provider)
+        app = JobsApp(self.store, clock=lambda: self.now, execution_provider=provider)
+        schedule = app.set_interval
+        def set_interval(interval, callback=None, **kwargs):
+            # Provider counts follow explicit fixture actions, not CI rendering speed.
+            if callback == app.collect_execution:
+                kwargs['pause'] = True
+            timer = schedule(interval, callback, **kwargs)
+            if callback == app.collect_execution:
+                # Retain the paused timer until app shutdown and fixture cleanup.
+                self.addCleanup(timer.stop)
+            return timer
+        mocked = patch.object(app, 'set_interval', side_effect=set_interval)
+        mocked.start()
+        self.addCleanup(mocked.stop)
+        return app
 
     async def until(self, predicate):
         for _ in range(200):
@@ -205,6 +219,13 @@ class LifecycleUiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(app.execution_observation)
                     self.assertIn('Observation pending', self.card(app))
                     release.set()
+                    if change == 'attempt':
+                        # An observed replacement must be explicitly selected;
+                        # the old attempt's late result grants no authority.
+                        await self.until(lambda: not app.execution_busy)
+                        self.assertIsNone(app.selected())
+                        self.assertIsNone(app.execution_observation)
+                        await pilot.press('enter', 'escape')
                     await self.settled(app, pilot)
                     self.assertEqual(provider.call_count, 2)
                     self.assertEqual(app.execution_observation.attempt_id, app.selected()['attempt_id'])
@@ -212,6 +233,44 @@ class LifecycleUiTests(unittest.IsolatedAsyncioTestCase):
                     if change != 'selection-back':
                         self.assertNotEqual(first_key, app.execution_selection)
                     await pilot.press('q')
+
+    async def test_replaced_attempt_does_not_replay_a_delayed_stale_refresh(self):
+        started, release = threading.Event(), threading.Event()
+        original = self.provider()
+        def delayed(*args, **kwargs):
+            started.set()
+            release.wait(5)
+            return original(*args, **kwargs)
+        provider = Mock(side_effect=delayed)
+        app = self.app(provider)
+        callbacks = []
+        schedule = app.set_timer
+        def hold_execution_refresh(delay, callback=None, **kwargs):
+            if callback == app.collect_execution:
+                callbacks.append(callback)
+                return Mock()
+            return schedule(delay, callback, **kwargs)
+        with patch.object(app, 'set_timer', side_effect=hold_execution_refresh):
+            async with app.run_test(size=(77, 24)) as pilot:
+                await self.until(started.is_set)
+                with self.store.transaction() as con:
+                    job = self.store.get(con, 1)
+                    job['attempt_id'] = 'a' * 32
+                    self.store.save(con, job)
+                app.refresh_state()
+                release.set()
+                await self.until(lambda: not app.execution_busy)
+                self.assertIsNone(app.selected())
+                self.assertIsNone(app.execution_observation)
+                await pilot.press('enter', 'escape')
+                await self.settled(app, pilot)
+                self.assertEqual(provider.call_count, 2)
+                for callback in callbacks:
+                    callback()
+                await self.settled(app, pilot)
+                self.assertEqual(provider.call_count, 2)
+                self.assertEqual(app.execution_observation.attempt_id, 'a' * 32)
+                await pilot.press('q')
 
     async def test_note_update_does_not_invalidate_attempt_observation(self):
         started, release = threading.Event(), threading.Event()

@@ -8,7 +8,7 @@ No overall scientific acceptance is emitted without an explicit policy.
 ## Native dialect and modes
 
 The supported native dialect is VASP **6.6.1** ordinary self-consistent static
-calculations (`NSW=0`, `IBRION=-1`) and fixed-cell ionic relaxation (`ISIF=2`,
+calculations (`NSW=0`, `IBRION=-1`) and fixed-cell ionic relaxation (`ISIF=0/2`,
 `IBRION=1/2/3`). Non-spin-polarized and collinear settings (`ISPIN=1/2`), IALGO
 38/48 and DAV/RMM iteration tables are covered. The private read-only development
 sample established the DAV path in 6.6.1; RMM and collinear variants have synthetic
@@ -36,6 +36,14 @@ retain names, eV units and evaluation/source references. Native convergence,
 reconstructed dE **and** d eps comparisons, iteration budget, and history coverage
 remain separate. EDIFF=0 is fixed-count behavior. Reaching NELM can coincide with
 convergence; fewer iterations do not establish it. Missing rms(c) is preserved.
+
+Effective settings require typed native records in the `Startparameter for this run:`
+section or the exact native NCORE distribution record, with source references.
+The separately delimited INCAR echo is requested-input evidence. Boxed advice,
+line-leading recommendations outside that section and later prose assignments
+do not supply effective values. Malformed native records and genuine contradictory
+records remain conflicts; concatenated segments never share settings.
+
 An empty electronic table is unavailable evidence, not an observed contradiction;
 numeric acceptance remains unknown. A nonempty conflicting table is still refused.
 
@@ -191,13 +199,30 @@ The evidence layers retain separate meanings:
 | Optional explicit external-runner record | Connects a recognized wrapper input directory to its original output directory, with staged/effective four-file identities and lifecycle corroboration. Native Jobs completion remains mandatory. |
 | Finalization specification | A retrospective caller declaration associating those exact observations, selected segment, policy and intended artifacts. It is not a pre-run plan or authenticated input receipt. |
 
-The execution adapter accepts an explicitly supplied native **Jobs schema-2
-snapshot** and its original `state_directory/attempts/<attempt UUID>/payload-exit.json`.
+The execution adapter explicitly supports native **Jobs schema-2, schema-3 and
+schema-4 snapshots** and their original `state_directory/attempts/<attempt UUID>/payload-exit.json`.
 It requires one exact positive numeric Job ID and 32-character lowercase attempt
 UUID, matching run directory and attempt log paths, `Done`, zero exit in both
 records, explicit absent signal/cancellation, and ordered finite timestamps.
-A copied receipt at an unrelated path is insufficient. No Jobs store is opened
-or mutated. The default contract requires the Jobs working directory to equal
+A copied receipt at an unrelated path is insufficient. No queue is created or
+mutated. When the explicitly recorded original database exists, the adapter
+reads one selected native attempt and enrollment metadata without process scans.
+This rejects a schema-4 snapshot relabeled as schema 2/3 even if its exported
+enrollment fields were removed. Legacy schema-2/3 saved records without a
+database remain readable under the original local-evidence limitations.
+
+Schema 4 exports the exact `queue_identity` (node, queue, host, canonical state
+root and original root/database filesystem identities). These must match the
+original owner-node database; copied queues do not acquire authority. Old
+schema-4 exports lacking `queue_identity` remain UNKNOWN and require an explicit
+new export. Existing node-submission request/digest/runtime lineage and suspension
+facts are retained, never invented for locally submitted jobs. Unverified or
+unclosed suspension, termination and conflicting native attempt facts cannot
+establish clean completion. Terminal control inhibition alone is normal and
+does not contradict successful completion. Unknown future schemas are rejected explicitly.
+`inspect_execution_snapshot` applies the same decoder to a bounded in-memory
+observation without writing an export; its canonical digest is not a file source
+and does not replace finalization's explicit saved snapshot/specification. The default contract requires the Jobs working directory to equal
 the inspected output directory. The optional bounded runner association below
 handles an explicitly recorded wrapper with a separate payload directory.
 Saved local records remain caller-owned evidence, not tamper-proof authentication.

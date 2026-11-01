@@ -422,6 +422,7 @@ def _prepare_runtime(
     nprocs: int,
     mpi: MpiRuntimePolicy,
     orca_executable: Path,
+    include_helper_artifacts: bool = True,
 ) -> dict[str, object]:
     executable = orca_executable.expanduser().resolve()
     if not executable.is_file() or not os.access(executable, os.X_OK):
@@ -485,6 +486,11 @@ def _prepare_runtime(
     else:  # pragma: no cover - guarded by _runtime_environment
         raise _failure(f"unsupported dynamic-link platform: {system_name}")
     launch_overlay = _launch_overlay(dependencies, system_name=system_name)
+    if include_helper_artifacts:
+        dependencies["helper_artifacts"] = {
+            str(path): {"size_bytes": path.stat().st_size, "sha256": file_hash(path)}
+            for path in helpers
+        }
 
     identity: dict[str, object] = {
         "schema_version": ORCA_RUNTIME_SCHEMA_VERSION,
@@ -576,6 +582,7 @@ def validate_orca_runtime_contract(
             nprocs=int(value["nprocs"]),
             mpi=mpi,
             orca_executable=orca_executable,
+            include_helper_artifacts="helper_artifacts" in value.get("dependency_validation", {}),
         )
     except (KeyError, TypeError, ValueError) as exc:
         if isinstance(exc, OrcaRuntimeError):
@@ -822,3 +829,63 @@ __all__ = [
     "runtime_environment",
     "validate_orca_runtime_contract",
 ]
+
+
+def inspect_recorded_orca_runtime(
+    value: Mapping[str, Any], *, orca_executable: Path, nprocs: int
+) -> tuple[dict[str, object], ...]:
+    """Revalidate recorded runtime bytes without invoking ORCA, MPI or tools.
+
+    This checks stored evidence, not fresh loader/engine qualification. Older
+    records lacking helper identities cannot establish the parallel closure.
+    Full launch-time validation remains with the existing runner.
+    """
+    identity = {key: item for key, item in value.items() if key not in {"runtime_id", "validation"}}
+    if (value.get("schema_version") != ORCA_RUNTIME_SCHEMA_VERSION
+            or stable_hash(identity) != value.get("runtime_id")):
+        raise _failure("recorded runtime identity is malformed or changed")
+    if value.get("platform") != platform.system() or value.get("architecture") != platform.machine():
+        raise _failure("recorded runtime belongs to another platform or architecture")
+    if value.get("nprocs") != nprocs:
+        raise _failure("recorded runtime process count contradicts the job")
+    if value.get("validation", {}).get("status") != "PASSED":
+        raise _failure("recorded runtime validation is not passed")
+    try:
+        orca = value["orca"]
+        mpi = value["mpi"]
+        dependencies = value["dependency_validation"]
+        helpers = dependencies.get("helper_artifacts")
+        if not isinstance(helpers, dict):
+            raise _failure("recorded runtime lacks helper byte identities; fresh explicit qualification is required")
+        if set(helpers) != set(dependencies["helpers_inspected"]):
+            raise _failure("recorded helper identities are incomplete")
+        executable = orca_executable.resolve()
+        if Path(orca["executable"]) != executable:
+            raise _failure("recorded driver path differs from selected executable")
+        if nprocs > 1 and str(executable.parent / "orca_startup_mpi") not in helpers:
+            raise _failure("recorded parallel startup helper is absent")
+        selected = [(orca["executable"], orca["sha256"], None),
+                    (mpi["launcher"], mpi["launcher_sha256"], None),
+                    (mpi["capabilities"]["inspector"], mpi["capabilities"]["inspector_sha256"], None)]
+        selected.extend((path, record["sha256"], record["size_bytes"])
+                        for path, record in {**dependencies["library_artifacts"], **helpers}.items())
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise _failure("recorded runtime closure is malformed") from exc
+    if len(selected) > 256:
+        raise _failure("recorded runtime closure exceeds 256 artifacts")
+    result = []
+    for raw_path, digest, size in selected:
+        path = Path(raw_path)
+        if not path.is_absolute() or not path.is_file() or path.resolve() != path:
+            raise _failure(f"recorded runtime artifact is unavailable: {path}")
+        before = path.stat()
+        if before.st_size > 8 * 1024**3 or (size is not None and size != before.st_size):
+            raise _failure(f"recorded runtime artifact size is unsupported or changed: {path}")
+        actual = file_hash(path)
+        after = path.stat()
+        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                or actual != digest):
+            raise _failure(f"recorded runtime artifact bytes changed: {path}")
+        result.append({"path": str(path), "sha256": actual})
+    return tuple(result)

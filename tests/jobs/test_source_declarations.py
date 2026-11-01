@@ -215,21 +215,36 @@ class SourcePersistenceTests(unittest.TestCase):
         from cmw.jobs.progress import resolve_context
         from cmw.progress.service import ObservationService
         from tests.periodic.vasp.result_fixtures import write_run
-        write_run(self.root / 'future', relaxation=True, evaluations=2)
+        write_run(self.root / 'future', relaxation=True, evaluations=2,
+                  flags=((True,) * 3, (False,) * 3))
+        poscar = self.root / 'future' / 'POSCAR'
         sources = parse_sources([f'outcar@relax={self.sources[0].path}',
-                                 f'oszicar@relax={self.sources[1].path}'], 'VASP')
+                                 f'oszicar@relax={self.sources[1].path}',
+                                 f'poscar@relax={poscar}'], 'VASP')
         job = self.add(progress_sources=sources)
         self.assertEqual([(s.role, s.stage) for s in recorded_sources(job)],
-                         [('outcar', 'relax'), ('oszicar', 'relax')])
+                         [('outcar', 'relax'), ('oszicar', 'relax'), ('poscar', 'relax')])
+        before = self.store.path.read_bytes()
         context = resolve_context(Store(self.store.root), job['id'])
+        self.assertEqual(context.attempt_id, job['attempt_id'])
+        constraint_source = next(source for source in context.sources if source.role == 'poscar')
+        self.assertEqual(constraint_source.path, str(poscar))
+        self.assertEqual(constraint_source.origins, (SOURCE_ORIGIN,))
+        self.assertEqual(constraint_source.qualification, SOURCE_ORIGIN + ': ' + SOURCE_QUALIFICATION)
         observer = ObservationService()
         try:
             snapshot = observer.poll(context)
         finally:
             observer.close()
         self.assertEqual(snapshot.status, 'OBSERVED')
-        self.assertTrue(snapshot.metrics)
+        free_force = next(series.latest for series in snapshot.metrics
+                          if series.latest.semantic_id == 'vasp.force.maximum_atomic_norm.free')
+        self.assertAlmostEqual(free_force.value, (0.01 ** 2 + 0.002 ** 2 + 0.003 ** 2) ** 0.5)
+        self.assertEqual(free_force.qualification, 'provisional')
+        self.assertIsNotNone(free_force.criterion)
+        self.assertIn('historical binding unestablished', free_force.criterion.definition)
         self.assertEqual(context.stage, 'relax')
+        self.assertEqual(self.store.path.read_bytes(), before)
 
     def test_unknown_invocation_adapter_is_reported_without_changing_state(self):
         job = self.add()

@@ -34,3 +34,14 @@ Repository = "https://github.com/angzeli/computational-modelling-workflow"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cmw"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"scripts/runtime_python.sh" = "cmw/_runner_assets/scripts/runtime_python.sh"
+"scripts/orca/run_orca.sh" = "cmw/_runner_assets/scripts/orca/run_orca.sh"
+"scripts/workflows/run_opt_freq_sp.sh" = "cmw/_runner_assets/scripts/workflows/run_opt_freq_sp.sh"
+"scripts/multiwfn/run_ifct.sh" = "cmw/_runner_assets/scripts/multiwfn/run_ifct.sh"
+"scripts/multiwfn/multiwfn_runtime.sh" = "cmw/_runner_assets/scripts/multiwfn/multiwfn_runtime.sh"
+"scripts/workflows/multiwfn_cube_workflow.sh" = "cmw/_runner_assets/scripts/workflows/multiwfn_cube_workflow.sh"
+"scripts/workflows/generate_homo_lumo_cubes.sh" = "cmw/_runner_assets/scripts/workflows/generate_homo_lumo_cubes.sh"
+"scripts/workflows/generate_esp_cubes.sh" = "cmw/_runner_assets/scripts/workflows/generate_esp_cubes.sh"
+"scripts/workflows/generate_igmh_cubes.sh" = "cmw/_runner_assets/scripts/workflows/generate_igmh_cubes.sh"

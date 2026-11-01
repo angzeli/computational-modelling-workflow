@@ -238,7 +238,7 @@ class ProgressCardTests(unittest.TestCase):
         self.assertTrue(all(cell_width(line) <= 72 for line in card.splitlines()))
         for reason in reasons:
             self.assertEqual(card.count(reason), 1)
-        self.assertIn('Scientific: SOURCE_UNRESOLVED', card)
+        self.assertIn('Scientific: Sources unresolved', card)
         self.assertIn('[S] Configure Sources', card)
         self.assertNotIn(qualification, card)
         details = progress_text(snapshot, detailed=True)

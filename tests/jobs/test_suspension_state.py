@@ -738,6 +738,75 @@ class DomainTests(unittest.TestCase):
                         control.bind_domain(self.registration, ANCHOR)
         self.signal.assert_not_called()
 
+    def test_root_exit_between_identity_and_group_observation_is_pending(self):
+        for outcome in ('absent', 'zombie', 'zombie-topology-gone'):
+            with self.subTest(outcome=outcome), patch.object(control, 'identity') as identify:
+                root_sessions = 0
+
+                def session(pid):
+                    nonlocal root_sessions
+                    if pid == MEMBER['pid']:
+                        root_sessions += 1
+                        if root_sessions > 1 and outcome == 'zombie-topology-gone':
+                            raise ProcessLookupError()
+                    return ANCHOR['pid']
+
+                self.sid.side_effect = session
+                self.pgid.side_effect = ProcessLookupError(3, 'No such process')
+                identify.return_value = MEMBER
+                identify.side_effect = control.psutil.NoSuchProcess(MEMBER['pid']) if outcome == 'absent' else None
+                self.process.return_value.status.return_value = control.psutil.STATUS_ZOMBIE
+                with self.assertRaises(control.DomainPending) as raised:
+                    control.bind_domain(self.registration, ANCHOR)
+                self.assertIsInstance(raised.exception.__cause__, ProcessLookupError)
+                self.pgid.assert_called_with(MEMBER['pid'])
+                self.assertGreaterEqual(root_sessions, 1)
+        self.signal.assert_not_called()
+
+    def test_group_observation_loss_requires_positive_root_exit_proof(self):
+        for outcome in ('live', 'reused', 'denied', 'unreadable-zombie',
+                        'unreadable-status', 'escaped-session', 'topology-denied'):
+            with self.subTest(outcome=outcome), patch.object(control, 'identity') as identify:
+                root_sessions = 0
+
+                def session(pid):
+                    nonlocal root_sessions
+                    if pid == MEMBER['pid']:
+                        root_sessions += 1
+                        if root_sessions > 1 and outcome == 'escaped-session':
+                            return OTHER['pid']
+                        if root_sessions > 1 and outcome == 'topology-denied':
+                            raise PermissionError()
+                    return ANCHOR['pid']
+
+                self.sid.side_effect = session
+                self.pgid.side_effect = ProcessLookupError(3, 'No such process')
+                identify.return_value = ({**MEMBER, 'birth': MEMBER['birth']+1}
+                                         if outcome == 'reused' else MEMBER)
+                identify.side_effect = {'denied': control.psutil.AccessDenied(MEMBER['pid']),
+                                        'unreadable-zombie': control.psutil.ZombieProcess(MEMBER['pid'])}.get(outcome)
+                self.process.return_value.status.return_value = (control.psutil.STATUS_RUNNING
+                    if outcome == 'live' else control.psutil.STATUS_ZOMBIE)
+                self.process.return_value.status.side_effect = (control.psutil.NoSuchProcess(MEMBER['pid'])
+                    if outcome == 'unreadable-status' else None)
+                with self.assertRaises(ProcessLookupError):
+                    control.bind_domain(self.registration, ANCHOR)
+                self.pgid.assert_called_with(MEMBER['pid'])
+        self.signal.assert_not_called()
+
+    def test_protected_session_loss_cannot_become_exit_pending(self):
+        for protected in (ANCHOR, RUNNER):
+            with self.subTest(protected=protected['pid']):
+                def session(pid):
+                    if pid == protected['pid']:
+                        raise ProcessLookupError(3, 'No such process')
+                    return ANCHOR['pid']
+                self.sid.side_effect = session
+                with self.assertRaises(ProcessLookupError):
+                    control.bind_domain(self.registration, ANCHOR)
+        self.pgid.assert_not_called()
+        self.signal.assert_not_called()
+
     def test_reused_denied_and_protected_losses_do_not_become_pending(self):
         for member, outcome in ((MEMBER, 'reused'), (MEMBER, 'denied'), (MEMBER, 'unreadable-zombie'), (MEMBER, 'unreadable-status'),
                                 (RUNNER, 'absent'), (ANCHOR, 'absent')):

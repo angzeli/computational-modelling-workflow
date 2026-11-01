@@ -284,7 +284,7 @@ def _observe_receipt(store, job, worker, now):
 def _read_job(store, job_id):
     """One bounded read transaction; never migrate, create or repair state."""
     with _read_file(store, ('queue.sqlite3',)) as descriptor:
-        # CMW schema 1/2/3 uses rollback journalling. Refuse WAL rather than let a
+        # CMW schema 1/2/3/4 uses rollback journalling. Refuse WAL rather than let a
         # read-only SQLite connection create shared-memory sidecars.
         header = os.pread(descriptor, 20, 0)
         if len(header) < 20 or header[18:20] != b'\x01\x01':
@@ -294,9 +294,11 @@ def _read_job(store, job_id):
             con.execute('PRAGMA query_only=ON')
             con.execute('BEGIN')
             control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
-            if type(control.get('schema')) is not int or control['schema'] not in {1, 2, 3}:
+            if type(control.get('schema')) is not int or control['schema'] not in {1, 2, 3, 4}:
                 raise JobsError('Unsupported Jobs state schema')
-            if (control['schema'] == 3 and control.get('runtime_protocol') is not None and
+            if control['schema'] == 4:
+                store._queue_identity(con, control['schema'])
+            if (control['schema'] >= 3 and control.get('runtime_protocol') is not None and
                     (type(control['runtime_protocol']) is not int or control['runtime_protocol'] != 3)):
                 raise JobsError('Unsupported Jobs controller runtime protocol')
             if type(job_id) is int:
@@ -348,7 +350,7 @@ def _observe_suspension(job, schema):
     value = job.get('suspension')
     worker_protocol = job.get('worker_protocol')
     if worker_protocol is not None and (type(worker_protocol) is not int or
-            worker_protocol not in ({3} if schema == 3 else {2, 3})):
+            worker_protocol not in ({3} if schema >= 3 else {2, 3})):
         return Evidence('unsupported', 'Recorded worker runtime protocol is unsupported',
                         'unsupported_worker', {'worker_protocol': worker_protocol})
     if value is None:
@@ -361,7 +363,7 @@ def _observe_suspension(job, schema):
                ('phase', 'desired', 'revision', 'request', 'inhibited', 'backend', 'protocol', 'verified_at')}
     details.update(worker_protocol=job.get('worker_protocol'), stored_reason=value.get('reason', ''),
                    scope='persisted suspension metadata; no IPC/drainage revalidation')
-    if (schema != 3 or value.get('backend') not in BACKENDS or
+    if (schema not in {3, 4} or value.get('backend') not in BACKENDS or
             type(value.get('protocol')) is not int or value['protocol'] != PROTOCOL or
             value.get('phase') not in {'Run', 'Suspending', 'Suspended', 'Resuming', 'Unverified'} or
             value.get('desired') not in {'Run', 'Suspended', 'Terminated'} or

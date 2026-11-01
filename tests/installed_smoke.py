@@ -5,6 +5,7 @@ and fixed idle host samples; every cmw module comes from the installation under 
 """
 import argparse
 import asyncio
+import hashlib
 import importlib.util
 import json
 import os
@@ -608,6 +609,48 @@ def handoff_surface(root, cli):
             'live_recorded_owners_after_cleanup': 0}
 
 
+def settle_installed_runtime(output):
+    """Fixture setup only: observe a quiet epoch before any runtime binding."""
+    from cmw.nodes.identity import runtime_identity
+    from tests.periodic.vasp.handoff_case import wait_for_fixture_sources
+
+    root = Path(cmw.__file__).resolve().parent
+    def files():
+        return sorted(path for path in root.rglob('*') if path.is_file()
+            and '__pycache__' not in path.parts and path.suffix not in {'.pyc', '.pyo'}
+            and path.name != '.DS_Store')
+    def epoch(path):
+        value = path.lstat()
+        return [value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns]
+    paths = files()
+    assert 0 < len(paths) <= 4096
+    before = {str(path.relative_to(root)): epoch(path) for path in paths}
+    assert sum(value[2] for value in before.values()) <= 128 * 1024**2
+    initial_bytes = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+    report = {'package_origin': str(root), 'quiet_seconds': 12, 'timeout_seconds': 40,
+        'file_count': len(paths), 'bytes': sum(value[2] for value in before.values()),
+        'scope': 'Pre-binding fixture setup; no refused operation is retried. Metadata actor is unproven.'}
+    started = time.monotonic()
+    try:
+        wait_for_fixture_sources(paths, quiet_seconds=12, timeout=40)
+        assert files() == paths, 'Installed package members changed during setup'
+        after = {str(path.relative_to(root)): epoch(path) for path in paths}
+        report['epoch_deltas'] = [{'path': name, 'before': before[name], 'after': value}
+            for name, value in after.items() if before[name] != value]
+        changed = [str(path.relative_to(root)) for path in paths
+            if hashlib.sha256(path.read_bytes()).hexdigest() != initial_bytes[str(path.relative_to(root))]]
+        report['changed_byte_paths'], report['bytes_match'] = changed, not changed
+        assert not changed, 'Installed package bytes changed during setup'
+        report['runtime'] = runtime_identity()
+    except BaseException as exc:
+        report['error'] = f'{type(exc).__name__}: {exc}'
+        raise
+    finally:
+        report['seconds'] = time.monotonic()-started
+        output.write_text(json.dumps(report, indent=2)+'\n')
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kind', choices=('core', 'jobs', 'sdist', 'editable'), required=True)
@@ -623,6 +666,8 @@ def main():
     assert 'textual' not in sys.modules and 'rich' not in sys.modules
     assert (importlib.util.find_spec('textual') is not None) == (args.kind != 'core')
     assert (importlib.util.find_spec('rich') is not None) == (args.kind != 'core')
+    setup = (settle_installed_runtime(args.output/'runtime-setup.json')
+             if os.environ.get('CMW_ARTIFACT_QUIET') == '1' else None)
     lazy_probe = """import importlib.abc, sys
 class NoConsole(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
@@ -662,13 +707,15 @@ print('Lazy non-ORCA core observation: PASS')
                     assert app.query_one('#table') is not None
         asyncio.run(tui())
         assert not missing.exists()
+    from tests.nodes.acceptance import node_surface
     from tests.jobs.suspension_acceptance import suspension_surface
     from tests.jobs.progress_acceptance import progress_surface
     progress = progress_surface(args.output/'progress', console=args.kind != 'core')
     report = {'kind': args.kind, 'python': sys.version, 'package_origin': str(origin),
-              'cli_json_asset_optional_boundary': 'PASS',
+              'cli_json_asset_optional_boundary': 'PASS', 'runtime_setup': setup,
               'tui': 'not installed (expected)' if args.kind == 'core' else 'PASS',
               'progress_locations_history': progress,
+              'node_workflow': node_surface(args.output/'node-workflow'),
               'controlled_suspension': suspension_surface(args.output/'controlled-suspension', console=args.kind != 'core'),
               'annotations': annotation_surface(args.output/'annotations'),
               'vasp_preparation': preparation_surface(args.output/'vasp-preparation', cli),

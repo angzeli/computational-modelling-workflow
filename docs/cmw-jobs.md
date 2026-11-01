@@ -564,7 +564,16 @@ heartbeat age and stale/offline state are displayed independently of job state.
 The machine line describes the whole local Mac: CPU is a percentage from changes
 in host CPU-time counters. RAM shows used / total in GiB, with used defined as
 `total - available`. This is psutil's platform accounting, not a claim of byte-for-byte agreement
-with macOS Activity Monitor. It is independent of the visible workload totals.
+with macOS Activity Monitor. Details retain the `psutil T−avail` source
+explanation; the compact header omits that badge and retains the existing
+admission quantity. On macOS, psutil available memory is
+inactive plus raw free pages; CMW does not use psutil's separate active-plus-wired
+`used` field. The total-minus-available result includes physical compressor
+occupancy within system accounting; no logical compressed amount or swap is
+added to it. Native category counters are overlapping diagnostics, not terms to
+sum. Unsupported categories remain unavailable. System swap used is exposed
+separately in JSON and existing Details. No memory-pressure percentage is inferred.
+The machine measurement is independent of visible workload totals.
 
 CPU NOW displays **100% per fully busy logical CPU**: summed process CPU-time
 deltas divided by monotonic elapsed time, multiplied by 100. `710%` means roughly
@@ -577,7 +586,24 @@ The console retains its sampler and updates in the existing two-second backgroun
 observation cycle. One-shot `status`/`show` starts a new sampler, so CPU ordinarily
 warms up there while available RAM is reported immediately.
 
-RAM NOW is current aggregate RSS from verified live members. **Summing RSS can
+RAM NOW is current aggregate RSS from verified live members, labelled `RSSΣ`.
+The existing selected-job line adds measured process/rank coverage and sample age;
+it does not add a dashboard row. The separate execution observation's worker/anchor
+scope is not the resource scope. A payload-owned session includes verified members
+across its process groups, including MPI ranks; the outside guardian worker is not
+part of that payload sum. Members are deduplicated by birth identity and checked
+before and after measurement. Declared MPI-rank coverage is reported only when a
+rank count exists; missing executable metadata cannot establish complete coverage.
+A disappearing nominated member or missing/invalid counter leaves a partial sample.
+
+On macOS, an optional unprivileged `proc_pid_rusage(RUSAGE_INFO_V0)` read supplies
+`ri_phys_footprint`. Its separately labelled sum, source, timestamp and coverage
+appear in existing Details/JSON. Unsupported platforms and access failures retain
+RSS and mark footprint unavailable. Neither aggregate establishes unique physical
+RAM ownership or exact Activity Monitor equivalence. All values are bytes in JSON
+and divided by 2**30 for GiB; decimal GB would require division by 10**9.
+
+RAM NOW retains RSS as its primary metric. **Summing RSS can
 count shared pages more than once**; it is not exact physical memory ownership or
 reserved RAM. Requested CPU slots, MPI ranks, threads/rank and memory remain
 unchanged in job declarations and details. External requested resources remain
@@ -604,9 +630,90 @@ machine CPU alone cannot bypass BUSY. In explicitly enabled Bounded Sharing,
 fresh host telemetry adds admission vetoes after identity, declarations and
 commitment checks; it never releases an existing commitment. Existing ownership, guard, cancellation and
 completion evidence remain authoritative. There are no peaks, history, resource
-limits, automatic tuning, arbitrary parallel scheduling, IO/GPU/temperature metrics or
-ETA. The supported runtime boundary remains local macOS with the locked psutil
+limits, automatic tuning, arbitrary parallel scheduling, IO/GPU metrics or
+ETA. Optional CPU temperature below is independent host telemetry. The supported runtime boundary remains local macOS with the locked psutil
 dependency; tests use deterministic samples and owned benign processes.
+
+### Optional average CPU temperature
+
+The shared local and node-selected machine line is exactly:
+
+```text
+Machine: CPU 71%; avg 63°C RAM 27.1 / 36.0 GiB
+```
+
+These values are illustrative. CPU and RAM still use the psutil accounting above;
+macmon's CPU ratios and memory estimates are never substituted. Temperature is
+rounded to an integer Celsius value, from **the arithmetic average of supported
+CPU sensors reported by macmon**, not a maximum, GPU or SoC hotspot reading.
+No new panel, thermal warning colour or control is added.
+
+Temperature is disabled by default and has no package dependency. On macOS arm64,
+opt in for an observer using an explicitly trusted, absolute executable path:
+
+```sh
+CMW_THERMAL_MACMON=/Applications/macmon/0.10.0/macmon cmw jobs watch
+```
+
+The executable must already be installed and trusted. CMW does not install or
+discover an arbitrary PATH executable. CMW reads these environment variables,
+not `~/.config/cmw/thermal.env` automatically; a separate observer launcher must
+explicitly load a reviewed configuration file before starting CMW. Changing the
+configuration requires reopening that observer and does not change a running
+controller or other observers. The optional
+`CMW_THERMAL_INTERVAL_SECONDS` accepts 15–30 seconds (default 20). Executable
+version and pipe options are checked in the background before sampling. This
+adapter supports the inspected macmon 0.10.x interface: fixed argv
+`pipe --samples 1 --interval 1000`, one newline-delimited JSON object containing
+`temp.cpu_temp_avg`, in Celsius. Its native timestamp is retained when present;
+otherwise age conservatively starts at the sampling invocation. Other versions, null or
+missing sensors, incompatible units/schema, booleans, nonfinite numbers, zero
+sentinels and invalid readings produce unavailable diagnostics. No shell command
+is taken from telemetry JSON.
+
+The provider uses one worker and at most one direct child per observer, independent
+of redraws and scientific polling. Each version/help probe has a 2-second deadline, a sample has 3 seconds,
+and output is bounded to 64 KiB stdout / 4 KiB stderr. Stop allows 0.5 seconds
+after termination and 0.5 seconds after forced termination of its own child.
+Failures retry after 20 then 40 seconds at the default cadence; three consecutive
+failures disable the observer session. Redraws do not reset this limit. After
+correcting the reported configuration or provider problem, close and reopen the
+observer to start a new bounded session; no service restart or job action is
+needed. Closing the observer reaps its own provider child. Separate observers
+have separate provider bounds; no shared service is installed. An unconfigured provider creates no worker or child.
+One-shot CLI observation may finish before an optional thermal sample is ready.
+Blocked/missing thermal collection never waits in CPU/RAM sampling or control
+requests. Admission samplers do not start a thermal provider.
+
+Temperature has its own clock: up to 30 seconds is fresh, over 30 through 60
+seconds is stale (`avg 63°C~`), and older evidence displays `avg —`.
+Failures and invalid new samples can make temperature unavailable earlier.
+The source timestamp, age, Celsius units, kind, provider, quality and bounded
+reason remain in `machine_usage.thermal` and machine Details. Provider status,
+last failure category, consecutive failure and successful sample counts,
+last successful observation, retry delay and recovery guidance remain separate
+from observation freshness. Last-success age and retry delay are labelled as
+reported by the provider snapshot; cached or disconnected frontends do not turn
+these diagnostics into a live countdown. JSON retains the validated provider
+version and executable identity, including its content digest. Frozen Copy snapshots retain bounded recovery diagnostics
+and identity fields without copying provider environment, raw stderr or commands.
+No previous boot or previous observer sample is restored. CPU/RAM and temperature
+are not an atomic observation. No raw provider stderr or environment is copied by default.
+
+This is ephemeral, optional host observation. It never changes admission,
+commitments, scheduling, process ownership, Hold/Release, Suspend/Continue,
+cancellation, scientific evidence/convergence or finalization, and is not stored
+in the Jobs database. It does not diagnose throttling or certify hardware health.
+
+The macmon interface is qualified with synthetic provider fixtures and a bounded
+Apple M3 Max / macOS 27.2 / macmon 0.10.0 observation: eight scheduled samples
+at the default cadence, two independent observers and disposable dashboard
+renders. This establishes that tested combination only. Physical Mac mini
+qualification, including M5 Pro with its installed macOS and provider combination,
+remains pending; upstream chip support alone does not establish usable sensors.
+Unsupported systems retain CPU/RAM with `avg —`.
+See the [upstream pipe and sensor contract](https://github.com/vladkens/macmon)
+for its private macOS API and version limitations.
 
 ## Integration and foreground command contract
 
@@ -1067,3 +1174,11 @@ suite uses a private fixture-observation seam to avoid dependence on research
 processes; there is no production bypass. The feature does not implement arbitrary
 N-job scheduling, HPC, automatic retry, global machine locking, process adoption,
 SIGSTOP/SIGCONT time slicing or hard resource enforcement.
+
+## Reviewed molecular submission
+
+ORCA SP/OPT/FREQ and supported compositions, and Multiwfn HOMO/LUMO, density/ESP,
+IGMH and two-fragment IFCT have a shared read-only `jobs check --spec` and explicit
+held `jobs submit --spec` route. See the [reviewed molecular Jobs contract](molecular-jobs.md)
+for exact schemas, automatic source binding, installed runners, resource semantics
+and the distinction between process outcome and scientific validation.

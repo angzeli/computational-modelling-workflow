@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import sys
@@ -45,8 +46,34 @@ def usage_cells(usage):
     cores = usage.get("cpu_cores")
     cpu = metric(None if cores is None else cores * 100, usage.get("cpu_quality"), "{:.0f}%", stale=usage.get("stale", False))
     rss = usage.get("rss_bytes")
-    memory = metric(None if rss is None else rss / 2**30, usage.get("memory_quality"), "{:.1f} GiB RSS", stale=usage.get("stale", False))
+    memory = metric(None if rss is None else rss / 2**30, usage.get("memory_quality"), "{:.1f} GiB RSSΣ", stale=usage.get("stale", False))
     return cpu, memory
+
+
+def usage_summary(usage, *, width=None):
+    """Fit resource coverage into the existing selected-job line."""
+    value = usage or {}
+    cpu, memory = usage_cells(value)
+    parts = []
+    if value.get('total_members') is not None:
+        count = value.get('memory_members', 0)
+        total = value['total_members']
+        scope = 'session ' if value.get('scope') == 'verified payload session' else ''
+        parts.append(scope + (f'{count}p' if count == total else f'{count}/{total}p'))
+    expected, observed = value.get('expected_vasp_ranks'), value.get('observed_vasp_ranks')
+    if expected is not None:
+        parts.append(f"VASP {observed if observed is not None else '—'}/{expected}")
+    if value.get('coverage_quality') == 'partial':
+        parts.append('partial')
+    age = value.get('age_seconds')
+    parts.append(('stale ' if value.get('stale') else '') + (f'{age:.0f}s' if age is not None else 'age —'))
+    suffix = ' · ' + ' · '.join(parts) if usage else ''
+    text = f'CPU NOW: {cpu}   RAM NOW: {memory}' + suffix
+    if width is not None and len(text) > width:
+        text = f'CPU {cpu} · {memory}' + suffix
+    if width is not None and len(text) > width:
+        text = text[:max(0, width-1)] + '…'
+    return text
 
 
 def usage_detail(usage):
@@ -54,12 +81,29 @@ def usage_detail(usage):
         return "CPU NOW: —   RAM NOW: — (no current workload sample)"
     cpu, memory = usage_cells(usage)
     age = usage.get("age_seconds")
-    return (f"CPU NOW: {cpu} (100% = one logical CPU)   RAM NOW: {memory} (aggregate RSS)\n"
-            f"Measurement age: {'—' if age is None else f'{age:.1f}s'}{' STALE' if usage.get('stale') else ''}\n"
-            f"CPU quality: {usage.get('cpu_quality', 'unavailable')} ({usage.get('cpu_members', 0)}/{usage.get('total_members', 0)} members); "
-            f"RAM quality: {usage.get('memory_quality', 'unavailable')} ({usage.get('memory_members', 0)}/{usage.get('total_members', 0)} members)\n"
-            "RSS sums may count shared pages more than once; usage is not requested resources.\n"
-            f"{usage.get('reason') or ''}")
+    observed = usage.get('observed_at')
+    stamp = '—' if observed is None else datetime.fromtimestamp(observed, timezone.utc).isoformat()
+    footprint = usage.get('footprint_bytes')
+    footprint_text = metric(None if footprint is None else footprint / 2**30,
+                            usage.get('footprint_quality'), '{:.1f} GiB', stale=usage.get('stale', False))
+    lines = [f"CPU NOW: {cpu} (100% = one logical CPU)   RAM NOW: {memory}",
+             f"Resource scope: {usage.get('scope', 'verified observed members')} · "
+             f"Coverage: {usage.get('coverage_quality', 'not recorded')}",
+             f"Measurement age: {'—' if age is None else f'{age:.1f}s'}{' STALE' if usage.get('stale') else ''}",
+             f"Sample time: {stamp}",
+             f"CPU quality: {usage.get('cpu_quality', 'unavailable')} ({usage.get('cpu_members', 0)}/{usage.get('total_members', 0)} members); "
+             f"RAM quality: {usage.get('memory_quality', 'unavailable')} ({usage.get('memory_members', 0)}/{usage.get('total_members', 0)} members)",
+             f"RSS source: {usage.get('memory_source', 'psutil.Process.memory_info().rss')}",
+             f"Job footprint Σ: {footprint_text} · {usage.get('footprint_quality', 'unavailable')} "
+             f"({usage.get('footprint_members', 0)}/{usage.get('total_members', 0)} members)",
+             f"Footprint source: {usage.get('footprint_source') or 'unavailable'}"]
+    expected, observed = usage.get('expected_vasp_ranks'), usage.get('observed_vasp_ranks')
+    if expected is not None:
+        lines.append(f"VASP ranks observed/declared: {observed if observed is not None else '—'}/{expected}")
+    lines.extend(["RSS sums may count shared pages more than once; aggregates are not unique physical RAM or machine Memory Used.",
+                  "Observed usage is not requested resources or scientific acceptance.",
+                  usage.get('coverage_reason') or '', usage.get('reason') or ''])
+    return '\n'.join(line for line in lines if line)
 
 
 def machine_text(usage):
@@ -69,8 +113,68 @@ def machine_text(usage):
     memory = "—" if used is None or total is None else f"{used / 2**30:.1f} / {total / 2**30:.1f} GiB"
     if usage.get("stale"):
         memory += "~"
-    warm = " (warming up)" if usage.get("cpu_quality") == "warming-up" else ""
-    return f"Machine: CPU {cpu}{warm}   RAM {memory}"
+    from .thermal import age_thermal
+    thermal = age_thermal(usage.get('thermal'), now=0.)
+    temperature = thermal.get('temperature_celsius')
+    temp = '—' if temperature is None or thermal['quality'] == 'unavailable' else f'{temperature:.0f}°C'
+    if thermal['quality'] == 'stale' and temp != '—':
+        temp += '~'
+    return f"Machine: CPU {cpu}; avg {temp} RAM {memory}"
+
+
+def machine_detail(usage):
+    """Explain native counters in the existing details view, without summing categories."""
+    value = usage or {}
+    def gib(counter):
+        return 'unavailable' if counter is None else f'{counter / 2**30:.2f} GiB'
+    lines = [machine_text(value),
+             'Machine RAM = total − available; availability follows psutil platform accounting.',
+             f"Machine source: {value.get('memory_source', 'psutil.virtual_memory')}",
+             f"System swap used: {gib(value.get('swap_used_bytes'))}; separate from physical RAM."]
+    from .thermal import age_thermal
+    thermal = age_thermal(value.get('thermal'), now=0.)
+    age = thermal.get('sample_age')
+    lines.extend([
+        'RAM convention: psutil T−avail; available is platform-defined and includes reclaimable/cache accounting.',
+        f"Machine CPU source: psutil.cpu_times(); quality: {value.get('cpu_quality', 'unavailable')}; "
+        f"CPU/RAM sample: {value.get('observed_at', '—')}; age: {value.get('age_seconds', '—')}s.",
+        f"CPU temperature: {thermal.get('temperature_celsius') if thermal['quality'] != 'unavailable' else '—'} "
+        f"{thermal.get('units', 'Celsius')}; kind: {thermal.get('temperature_kind', 'average CPU sensors')}; "
+        f"source: {thermal.get('source') or 'unavailable'}; quality: {thermal['quality']}.",
+        f"Thermal sample: {thermal.get('sample_timestamp')}; age: {'—' if age is None else f'{age:.1f}s'}; "
+        f"reason: {thermal.get('availability_reason') or 'available'}.",
+        'CPU, RAM and thermal observations have independent sample clocks; they are not atomic.'
+    ])
+    def diagnostic(item, fallback='—', limit=256):
+        return name_text(fallback if item is None else item)[:limit]
+    lines.extend([
+        f"Thermal provider: {diagnostic(thermal.get('provider_status'), 'not reported', 64)}; "
+        f"version: {diagnostic(thermal.get('provider_version'), limit=32)}; "
+        f"observation: {diagnostic(thermal.get('observation_status'), thermal['quality'], 32)}.",
+        f"Thermal failures: {diagnostic(thermal.get('consecutive_failures'), limit=16)} consecutive; "
+        f"category: {diagnostic(thermal.get('failure_category'), 'none', 64)}; "
+        f"successful samples: {diagnostic(thermal.get('successful_samples'), limit=16)}."
+    ])
+    last_success = thermal.get('last_successful_observation')
+    if isinstance(last_success, dict):
+        lines.append(
+            f"Thermal last success (historical, not current evidence): "
+            f"{diagnostic(last_success.get('temperature_celsius'), limit=32)} Celsius; "
+            f"sample: {diagnostic(last_success.get('sample_timestamp'), limit=32)}; "
+            f"reported age: {diagnostic(last_success.get('sample_age'), limit=32)}s.")
+    elif 'last_successful_observation' in thermal:
+        lines.append('Thermal last success: none in this observer session.')
+    retry = thermal.get('retry_after_seconds')
+    if retry is not None:
+        lines.append(f"Thermal retry delay (reported): {diagnostic(retry, limit=32)}s.")
+    if thermal.get('retry_guidance'):
+        lines.append('Thermal recovery: ' + diagnostic(thermal['retry_guidance']))
+    categories = value.get('memory_categories_bytes') or {}
+    if categories:
+        lines.append('Native memory categories (overlapping; do not add): ' + '; '.join(
+            f'{name}: {gib(counter)}' for name, counter in categories.items()))
+    lines.append('This is not an Activity Monitor equivalence claim or a memory-pressure percentage.')
+    return '\n'.join(lines)
 
 
 def tail(path, limit=16384):
@@ -268,16 +372,43 @@ def register(subcommands):
                     "Telemetry may veto admission but never proves completion or releases commitments. "
                     "Resource declarations are not hard OS limits; external activity observation provides no machine-wide exclusion.")
     parser.add_argument("--state", type=Path, help="isolated state directory (or CMW_JOBS_STATE)")
+    parser.add_argument("--node", help="explicitly enrolled execution node; no local fallback")
+    parser.add_argument("--queue", help="enrolled queue alias on the selected node")
+    parser.add_argument("--nodes-config", type=Path, help="private frontend connection registry")
     operations = parser.add_subparsers(dest="jobs_operation", required=True)
     for name in ("status", "start", "stop", "pause", "resume", "watch"):
         command = operations.add_parser(name)
         if name == "watch":
+            command.add_argument("--all-nodes", action="store_true", help="observe explicitly configured node default queues; never starts execution")
             command.description = ("Observe Jobs without starting execution. Enter: details; F: files; N: edit a managed job note. "
                 "Editor: Ctrl-S saves, Esc cancels, Ctrl-C detaches without saving; Q inserts text. "
                 "U opens selected-job Suspend/Continue readiness and confirmation. Outside text input Q or Ctrl-C detaches with execution state unchanged.")
         if name != "watch":
             command.add_argument("--json", action="store_true")
+        if name in {"start", "stop", "pause", "resume"}:
+            command.add_argument("--preview", action="store_true", help="node-selected control preview")
+            command.add_argument("--request-id", help="durable node control UUID; inspect the original request after a timeout")
         command.set_defaults(handler=handle)
+    check = operations.add_parser("check", help="read-only molecular input, provenance and resource preflight")
+    check.add_argument("--spec", type=Path, required=True)
+    check.add_argument("--json", action="store_true")
+    check.set_defaults(handler=handle)
+    submit = operations.add_parser("submit", help="reviewed held submission locally or on an explicit node")
+    submit.add_argument("--spec", type=Path, required=True)
+    submit.add_argument("--preview", action="store_true", help="prepare a local manifest and inspect destination preflight; no remote mutation")
+    submit.add_argument("--json", action="store_true")
+    submit.set_defaults(handler=handle)
+    fetch = operations.add_parser("fetch", help="explicit node only: copy selected declared artifacts as verified replicas")
+    fetch.add_argument("job_id")
+    fetch.add_argument("--spec", type=Path, required=True)
+    fetch.add_argument("--destination", type=Path, required=True)
+    fetch.add_argument("--request-id")
+    fetch.add_argument("--json", action="store_true")
+    fetch.set_defaults(handler=handle)
+    request = operations.add_parser("request", help="explicit node only: look up the original durable request identity")
+    request.add_argument("request_id")
+    request.add_argument("--json", action="store_true")
+    request.set_defaults(handler=handle)
     add = operations.add_parser("add", help="enqueue trusted foreground argv; never starts execution")
     add.add_argument("--name", required=True)
     add.add_argument("--note", default="", help="optional plain-text human annotation (4096 Unicode code points); before --")
@@ -307,6 +438,9 @@ def register(subcommands):
         command = operations.add_parser(name)
         command.add_argument("job_id")
         command.add_argument("--json", action="store_true")
+        if name in {"hold", "release", "move", "cancel"}:
+            command.add_argument("--preview", action="store_true", help="node-selected control preview")
+            command.add_argument("--request-id", help="durable node control request UUID")
         if name == "move":
             command.add_argument("position", type=int)
         if name == "cancel":
@@ -323,6 +457,8 @@ def register(subcommands):
                         "Memory, storage and admission commitments remain held; continuation is manual.")
         command.add_argument("job_id")
         command.add_argument("--preview", action="store_true", help="inspect readiness without creating or migrating Jobs state")
+        command.add_argument("--request-id", help="durable node control request UUID")
+        command.add_argument("--yes", action="store_true", help="confirm a node-selected suspend/continue request")
         command.add_argument("--reason", default="", help="optional literal operational reason; does not replace the job note")
         command.add_argument("--expected-revision", type=int, help="reject a request if suspension revision changed")
         command.add_argument("--expected-attempt-id", help="require this immutable attempt identity")
@@ -350,6 +486,15 @@ def register(subcommands):
     files.add_argument("--role", help="select one location role, for example output or working-directory")
     files.add_argument("--key", help="select the exact location key from files JSON")
     files.set_defaults(handler=handle)
+
+    from .review_cli import register as register_review
+    register_review(operations, handle)
+    from .catalogue_cli import register as register_catalogue
+    register_catalogue(operations, handle)
+    from .study_cli import register as register_study
+    register_study(operations, handle)
+    from .successor_cli import register as register_successor
+    register_successor(operations, handle)
 
     progress = operations.add_parser("progress", help="observe declared scientific progress; never controls execution")
     progress.add_argument("job_id")
@@ -523,6 +668,19 @@ def inspect_progress(store, args):
 
 
 def handle(args):
+    if args.jobs_operation in {"request", "fetch"} and not getattr(args, "node", None):
+        print("request/fetch require an explicitly enrolled --node; no local fallback")
+        return 2
+    if getattr(args, "node", None) or getattr(args, "queue", None) or getattr(args, "all_nodes", False):
+        from cmw.nodes.jobs_cli import handle as handle_node
+        return handle_node(args)
+    if ((getattr(args, "request_id", None) is not None and args.jobs_operation not in {"catalogue", "register-next", "study"}) or
+            (getattr(args, "preview", False) and args.jobs_operation in {"start", "stop", "pause", "resume", "hold", "release", "move", "cancel"})):
+        print("These preview/request options require an explicitly enrolled --node")
+        return 2
+    if args.jobs_operation in {"check", "submit"}:
+        from .molecular import handle as handle_molecular
+        return handle_molecular(args)
     store = Store(args.state)
     operation = args.jobs_operation
     from .activity import project
@@ -543,6 +701,21 @@ def handle(args):
             return inspect_reconciliation(store, args)
         if operation == "files":
             return inspect_files(store, args)
+        if operation in {"query", "catalogue"}:
+            from .catalogue_cli import local
+            try:
+                return local(store, args)
+            except ValueError as exc:
+                raise JobsError(str(exc)) from exc
+        if operation in {"plan-next", "materialize-next", "register-next"}:
+            from .successor_cli import local
+            return local(store, args)
+        if operation == "study":
+            from .study_cli import local
+            return local(store, args)
+        if operation == "review":
+            from .review_cli import local
+            return local(store, args)
         if operation == "progress":
             return inspect_progress(store, args)
         if operation == "watch":
@@ -620,6 +793,9 @@ def handle(args):
                 raise JobsError(f"No such job: {args.job_id}")
             result = candidates[0]
             if operation == "show":
+                if result.get('molecular_submission'):
+                    from .molecular import inspect_result
+                    result = {**result, 'scientific_result': inspect_result(result)}
                 from .lifecycle import observe_execution
                 from .store import ACTIVE
                 if result['status'] in ACTIVE:

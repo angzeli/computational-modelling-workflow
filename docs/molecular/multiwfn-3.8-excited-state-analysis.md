@@ -194,3 +194,11 @@ Reduced verbatim fixtures and their byte identities are recorded in
 the historical PDI S1/T1/T2 Multiwfn 3.8 session logs. Numerical text was not
 edited; only unrelated menu repetition and progress animation were omitted by
 documented line-range extraction.
+
+## Jobs integration boundary
+
+The [reviewed Multiwfn Jobs route](multiwfn-jobs.md) supports the existing exact
+2026.7.15 two-fragment IFCT runner. NTO and non-fragment HEA remain typed
+renderer/parser/finalizer APIs; their availability is not a submit/run/observe
+workflow. Jobs rejects those profile names explicitly rather than disguising
+them as engine-validated Command jobs.

@@ -665,7 +665,7 @@ def _scientific_artifact(
     return igmh
 
 
-def finalize_analysis(
+def inspect_analysis(
     *,
     target_path: Path,
     runtime_path: Path,
@@ -674,6 +674,7 @@ def finalize_analysis(
     process_exit_code: int,
     repository: Path | None = None,
 ) -> dict[str, object]:
+    """Apply the existing profile validator without publishing result records."""
     layout_record = read_json(attempt_directory / "execution-layout.json")
     layout = resolve_recorded_layout(
         layout_record, metadata_path=attempt_directory / "execution-layout.json"
@@ -823,7 +824,23 @@ def finalize_analysis(
         density,
         metadata_path=attempt_directory / "attempt.json",
     ).to_dict()
+    return {**attempt_record, "result_path": str(target_path.parent / "result.json")}
+
+
+def finalize_analysis(
+    *,
+    target_path: Path,
+    runtime_path: Path,
+    menu_path: Path,
+    attempt_directory: Path,
+    process_exit_code: int,
+    repository: Path | None = None,
+) -> dict[str, object]:
+    record = inspect_analysis(target_path=target_path, runtime_path=runtime_path,
+        menu_path=menu_path, attempt_directory=attempt_directory,
+        process_exit_code=process_exit_code, repository=repository)
+    result_path = record["result_path"]
+    attempt_record = {key: value for key, value in record.items() if key != "result_path"}
     atomic_write_json(attempt_directory / "attempt.json", attempt_record)
-    result_path = target_path.parent / "result.json"
-    atomic_write_json(result_path, attempt_record)
-    return {**attempt_record, "result_path": str(result_path)}
+    atomic_write_json(Path(result_path), attempt_record)
+    return record

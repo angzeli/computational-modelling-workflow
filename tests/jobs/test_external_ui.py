@@ -144,7 +144,12 @@ class ExternalTuiTests(unittest.IsolatedAsyncioTestCase):
                     app.accept_activity(cleared)
                     await pilot.pause()
                     self.assertEqual(table.row_count, 0)
-                    self.assertIsNone(app.external_selected_id)
+                    # Retain the unavailable observation instead of giving its
+                    # selection authority to a managed row underneath it.
+                    self.assertEqual(app.external_selected_id, 'E101-birth-17')
+                    self.assertIsNone(app.external_selected())
+                    self.assertTrue(table.has_class('navigation-unavailable'))
+                    self.assertIn('no longer observed', str(app.query_one('#selected', Static).render()))
                     self.assertFalse((Path(directory) / 'state').exists())
                     await pilot.press('q')
 

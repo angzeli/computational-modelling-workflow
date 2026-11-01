@@ -63,7 +63,7 @@ class MpiFamilyTests(unittest.TestCase):
         for pid in range(110,118):
             processes[pid].cpu_times.return_value = SimpleNamespace(user=1.0, system=0.0)
             processes[pid].memory_info.return_value = SimpleNamespace(rss=pid)
-        sampler = telemetry.Sampler(process_factory=lambda pid: processes[pid], identity_provider=owner,
+        sampler = telemetry.Sampler(footprint=None, swap_memory=None, process_factory=lambda pid: processes[pid], identity_provider=owner,
             cpu_times=lambda: CPU(1,0,10,0,0,0), virtual_memory=lambda: SimpleNamespace(total=10000, available=8000),
             monotonic=lambda: clock[0])
         with patch.object(telemetry.os, 'getpgid', side_effect=lambda pid: processes[pid].group_value):

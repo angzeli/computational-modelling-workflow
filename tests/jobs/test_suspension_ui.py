@@ -144,6 +144,13 @@ class SuspensionPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(app.screen, SuspensionConfirm)
         return app.screen
 
+    async def submitted(self, app, pilot, modal):
+        for _ in range(80):
+            if app.screen is not modal:
+                return
+            await pilot.pause(.05)
+        self.fail('Submission did not dismiss its confirmation')
+
     async def test_visible_button_and_confirmation_at_all_required_sizes(self):
         for width, height in ((77, 24), (80, 24), (140, 40)):
             with self.subTest(size=(width, height)):
@@ -215,7 +222,7 @@ class SuspensionPortalTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.store.snapshot()['controller']['dispatch'])
             app.submit_suspension(modal, modal.query_one(Input).value)
             app.submit_suspension(modal, 'duplicate click')
-            await pilot.pause()
+            await self.submitted(app, pilot, modal)
             self.assertEqual(self.submit.call_count, 1)
             self.assertEqual(self.submit.call_args.args[2], 'suspend')
             self.assertEqual(self.submit.call_args.kwargs['reason'], 'ucpxq')
@@ -266,7 +273,7 @@ class SuspensionPortalTests(unittest.IsolatedAsyncioTestCase):
             await pilot.resize_terminal(140, 40)
             await pilot.pause()
             app.submit_suspension(modal, 'manual')
-            await pilot.pause()
+            await self.submitted(app, pilot, modal)
             self.assertEqual(self.submit.call_args.args[2], 'continue')
             self.assertEqual(self.store.snapshot()['jobs'][0]['note'], 'ucpx')
             await pilot.press('q')

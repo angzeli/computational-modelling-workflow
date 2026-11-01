@@ -14,41 +14,34 @@ from tests.jobs.lifecycle_evidence import capture, owned_members, retain_lifecyc
 
 
 class EvidenceTests(unittest.TestCase):
-    def test_capture_closes_connections_after_success_or_backup_failure(self):
+    def test_capture_uses_managed_snapshot_without_database_copy(self):
         connect = sqlite3.connect
-        for fail_backup in (False, True):
-            with self.subTest(fail_backup=fail_backup), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                store = Store(root/'state')
-                job = store.add(argv=['/unexecuted/fixture'], cwd=root, name='evidence', hold=True)
-                connections = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = Store(root/'state')
+            job = store.add(argv=['/unexecuted/fixture'], cwd=root, name='evidence', hold=True)
+            connections = []
 
-                class Connection(sqlite3.Connection):
-                    def backup(self, target):
-                        if fail_backup:
-                            raise sqlite3.OperationalError('injected backup failure')
-                        return super().backup(target)
+            class Connection(sqlite3.Connection):
+                def backup(self, target):
+                    raise AssertionError('Diagnostic capture must not copy a live database')
 
-                def tracked_connect(*args, **kwargs):
-                    con = connect(*args, **kwargs, factory=Connection)
-                    connections.append(con)
-                    self.addCleanup(con.close)
-                    return con
+            def tracked_connect(*args, **kwargs):
+                con = connect(*args, **kwargs, factory=Connection)
+                connections.append(con)
+                self.addCleanup(con.close)
+                return con
 
-                destination = root/'retained'
-                with patch('tests.jobs.lifecycle_evidence.sqlite3.connect', side_effect=tracked_connect):
-                    if fail_backup:
-                        with self.assertRaisesRegex(sqlite3.OperationalError, 'injected backup failure'):
-                            capture(store, destination, outcome='PASS', started_at=time.time())
-                    else:
-                        capture(store, destination, outcome='PASS', started_at=time.time())
-                self.assertEqual(len(connections), 3)
-                for con in connections:
-                    with self.assertRaisesRegex(sqlite3.ProgrammingError, 'closed database'):
-                        con.execute('SELECT 1')
-                if not fail_backup:
-                    retained = Store(destination/'state').snapshot()
-                    self.assertEqual(retained['jobs'][0]['attempt_id'], job['attempt_id'])
+            destination = root/'retained'
+            with patch('sqlite3.connect', side_effect=tracked_connect):
+                capture(store, destination, outcome='PASS', started_at=time.time())
+            self.assertEqual(len(connections), 1)
+            for con in connections:
+                with self.assertRaisesRegex(sqlite3.ProgrammingError, 'closed database'):
+                    con.execute('SELECT 1')
+            retained = json.loads((destination/'capture.json').read_text())
+            self.assertEqual(retained['snapshot']['jobs'][0]['attempt_id'], job['attempt_id'])
+            self.assertFalse((destination/'state'/store.path.name).exists())
 
     def test_capture_failure_preserves_original_assertion(self):
         @retain_lifecycle_evidence
@@ -101,4 +94,4 @@ class EvidenceTests(unittest.TestCase):
             self.assertFalse(data['worker_locks'][job['attempt_id']])
             self.assertEqual(len(next(iter(data['log_tails'].values()))), 16384)
             self.assertTrue(self.store.path.exists())
-            self.assertTrue((retained/'state'/self.store.path.name).exists())
+            self.assertFalse((retained/'state'/self.store.path.name).exists())

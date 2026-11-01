@@ -23,7 +23,7 @@ jobs:
             os: ubuntu-24.04
             python: '3.10'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 90
     env:
       PYTHONDONTWRITEBYTECODE: '1'
     steps:

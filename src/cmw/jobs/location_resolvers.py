@@ -124,17 +124,24 @@ def _unknown(detail, *, stage=None, origin='recognized-runner-argv'):
                               qualification='unresolved', detail=detail)
 
 
-def vasp_runner_locations(job):
-    """Interpret the known run-vasp.sh argv dialect without terminal receipts."""
+def vasp_runner_arguments(job):
+    """Return the registered literal staging route, without executing the runner."""
     argv = _script_argv(job)
     if not argv or Path(argv[0]).name != 'run-vasp.sh':
-        return ()
+        return None
+    options = _options(argv, _VASP_PAIRS,
+                       {'--managed-foreground', '--controlled-suspension', '--dry-run'},
+                       {'--extra-input'}, equals=True)
+    return options, _path(options['--input'], job), _path(options['--output'], job)
+
+
+def vasp_runner_locations(job):
+    """Interpret the known run-vasp.sh argv dialect without terminal receipts."""
     try:
-        options = _options(argv, _VASP_PAIRS,
-                           {'--managed-foreground', '--controlled-suspension', '--dry-run'},
-                           {'--extra-input'}, equals=True)
-        source = _path(options['--input'], job)
-        output = _path(options['--output'], job)
+        route = vasp_runner_arguments(job)
+        if route is None:
+            return ()
+        options, source, output = route
     except (KeyError, TypeError, ValueError) as exc:
         return (_unknown(f'Unresolved run-vasp.sh declaration: {exc}'),)
     return (_decl('inputs', source, kind='directory'),
@@ -205,6 +212,8 @@ def orca_workflow_locations(job):
     argv = _script_argv(job)
     if not argv or Path(argv[0]).name != 'run_opt_freq_sp.sh':
         return ()
+    if len(argv) == 3 and argv[1] == '--state':
+        return ()
     try:
         options = _options(argv, _WORKFLOW_PAIRS,
                            {'--require-minimum', '--no-require-minimum', '--new-attempt', '--plan', '--json'})
@@ -223,6 +232,9 @@ def orca_workflow_locations(job):
 
 
 def _workflow_state_argv(job):
+    script = _script_argv(job)
+    if script and Path(script[0]).name == 'run_opt_freq_sp.sh' and len(script) == 3 and script[1] == '--state':
+        return ('prepared-workflow', *script[1:])
     argv = _argv(job)
     if not argv or not Path(argv[0]).name.startswith('python'):
         return ()
@@ -306,6 +318,7 @@ def orca_workflow_state_locations(job):
 
 
 def builtin_resolvers():
+    from .molecular import locations as molecular_locations
     """Explicit registration; clients may add resolvers without engine branches."""
     return (vasp_runner_locations, orca_runner_locations, orca_workflow_locations,
-            orca_workflow_state_locations)
+            orca_workflow_state_locations, molecular_locations)

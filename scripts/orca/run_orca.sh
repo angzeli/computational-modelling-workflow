@@ -145,7 +145,7 @@ if [[ -n "$external_scratch_root" || -n "$external_scratch_mount" || -n "$extern
   external_configured=1
 fi
 
-export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+source "$REPO_ROOT/scripts/runtime_python.sh"
 
 if [[ -n "$minimum_free_disk_gb" || -n "$disk_check_path" ]]; then
   if [[ -z "$minimum_free_disk_gb" || -z "$disk_check_path" ]]; then

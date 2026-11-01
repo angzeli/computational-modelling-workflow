@@ -45,6 +45,17 @@ from cmw.core.mutable_metadata import (
 from cmw.core.provenance import atomic_write_json
 
 
+# Fixed installed entry points; enumerating support must not import optional
+# scientific providers merely to explain why one of them is missing.
+COMMAND_MODULES = {
+    'cleanup-attempts': 'core/attempt_cleanup.py',
+    'migrate-execution-layout': 'core/execution_layout_migration.py',
+    'execution-layout-status': 'core/execution_layout.py',
+    'jobs': 'jobs/cli.py', 'nodes': 'nodes/cli.py', 'vasp': 'periodic/vasp/cli.py',
+    'structure': 'structure/embedding.py', 'doctor': 'doctor/cli.py',
+}
+
+
 def _cleanup_attempts(args: argparse.Namespace) -> int:
     if not args.superseded_only:
         raise CleanupError(
@@ -186,7 +197,8 @@ def _execution_layout_status(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cmw", description=__doc__)
-    parser.add_argument("--version", action="version", version=CLEANUP_TOOL_VERSION)
+    from cmw.doctor.service import distribution_version
+    parser.add_argument("--version", action="version", version="CMW distribution " + distribution_version())
     subcommands = parser.add_subparsers(dest="command", required=True)
     cleanup = subcommands.add_parser(
         "cleanup-attempts",
@@ -319,17 +331,32 @@ def build_parser() -> argparse.ArgumentParser:
     layout_status.set_defaults(handler=_execution_layout_status)
     from cmw.jobs.cli import register
     register(subcommands)
+    from cmw.nodes.cli import register as register_nodes
+    register_nodes(subcommands)
     from cmw.periodic.vasp.cli import register as register_vasp
     register_vasp(subcommands)
     from cmw.structure.embedding import register as register_structure
     register_structure(subcommands)
+    from cmw.doctor.cli import register as register_doctor
+    register_doctor(subcommands)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
+    values = list(sys.argv[1:] if argv is None else argv)
+    # Doctor/version remain usable when scientific command dependencies are broken.
+    if values and values[0] == 'doctor':
+        parser = argparse.ArgumentParser(prog='cmw', description=__doc__)
+        from cmw.doctor.cli import register as register_doctor
+        register_doctor(parser.add_subparsers(dest='command', required=True))
+    elif values == ['--version']:
+        from cmw.doctor.service import distribution_version
+        print('CMW distribution ' + distribution_version())
+        return 0
+    else:
+        parser = build_parser()
     try:
-        args = parser.parse_args(argv)
+        args = parser.parse_args(values)
         return int(args.handler(args))
     except CleanupError as exc:
         json_requested = bool("--json" in (argv if argv is not None else sys.argv[1:]))

@@ -24,6 +24,53 @@ ITERATION = re.compile(r"\bIteration\s+(\d+)\(\s*(\d+)\)")
 BANNER = re.compile(r"^\s*vasp\.(\d+\.\d+\.\d+)\b", re.I)
 SETTINGS = set("EDIFF NELM NELMIN NELMDL EDIFFG IBRION ISIF NSW ISPIN IALGO ICHARG ISTART ENCUT ISMEAR SIGMA NELECT NCORE KPAR NPAR GGA METAGGA LHFCALC LSORBIT LNONCOLLINEAR ML_LMLFF ML_MODE IMAGES ICHAIN I_CONSTRAINED_M EFIELD EFIELD_PEAD LPEAD LEPSILON LCALCEPS LOPTICS LCHIMAG LORBMOM LATTICE_CONSTRAINTS EFIRST EFOR LRPA LMP2 LMP2LT LSHIFT LVEL LTIME_EVOLUTION IVDW LDAU LDIPOL IDIPOL ALGO".split())
 SET_RE = re.compile(r"\b(" + "|".join(sorted(SETTINGS, key=len, reverse=True)) + r")\s*=\s*([^\s;]+)")
+# OUTCAR parameter records have a native line-leading assignment; prose and
+# bordered advice do not. Types are tag-specific, including unsupported modes.
+INTEGER_SETTINGS = set("NELM NELMIN NELMDL IBRION ISIF NSW ISPIN IALGO ICHARG ISTART ISMEAR NCORE KPAR NPAR IMAGES ICHAIN I_CONSTRAINED_M IVDW IDIPOL".split())
+REAL_SETTINGS = set("EDIFF EDIFFG ENCUT SIGMA NELECT EFIELD EFIELD_PEAD EFOR".split())
+TEXT_SETTINGS = {"GGA", "METAGGA", "ML_MODE", "ALGO"}
+DISTR_NCORE = re.compile(r"^\s*distr:\s+one band on NCORE\s*=\s*(\d+)\s+cores,\s*\d+\s+groups\s*$")
+
+
+def outcar_setting_records(text, *, echoed=False, parameters=False):
+    """Yield typed native assignments; None marks a malformed recognized value.
+
+    Callers supply complete lines, their own evidence and native section state.
+    Effective assignments require the Startparameter section; the exact native
+    distribution record is independently eligible. Advice is not a section.
+    """
+    if not echoed:
+        distribution = DISTR_NCORE.fullmatch(text)
+        if distribution:
+            yield "NCORE", int(distribution[1])
+            return
+        if not parameters:
+            return
+    remaining = re.split(r"[!#]", text, maxsplit=1)[0] if echoed else text
+    remaining = remaining.lstrip()
+    while match := SET_RE.match(remaining):
+        key, token = match[1], match[2]
+        tail = remaining[match.end():].lstrip(" \t;")
+        # These parallelization controls have assignment-only records. An
+        # illustrative recommendation such as NCORE=2 up to ... is not one.
+        if not echoed and key in {"NCORE", "NPAR", "KPAR"} and tail.strip() and not SET_RE.match(tail):
+            return
+        value = token.upper() if key in TEXT_SETTINGS else _scalar(token)
+        if key in INTEGER_SETTINGS:
+            valid = type(value) is int
+        elif key in REAL_SETTINGS:
+            valid = type(value) in (int, float)
+        elif key == "LATTICE_CONSTRAINTS":
+            # Presence remains unsupported even when the first component is 0.
+            valid = type(value) in (int, bool)
+        elif key in TEXT_SETTINGS:
+            valid = isinstance(value, str) and bool(re.fullmatch(r"[A-Z0-9][A-Z0-9_-]*|--", value))
+        else:
+            valid = type(value) is bool
+        yield key, value if valid else None
+        remaining = tail
+
+
 POSITION_TOLERANCE = 2e-5  # Angstrom; OUTCAR position components printed to 5 decimals.
 CELL_TOLERANCE = 2e-6      # Angstrom; observed lattice components printed to 7 decimals.
 
@@ -113,7 +160,7 @@ def parse_outcar(path, *, max_bytes=None, analysis=False):
     segments, current, evaluation = [], None, None
     block, rows, block_ref = None, [], None
     pending_geometry = None
-    in_echo, in_final_energy = False, False
+    in_echo, in_parameters, in_final_energy = False, False, False
     force_end_pending = False
     with SnapshotReader(path, "OUTCAR", max_bytes=max_bytes) as reader:
         for line in reader:
@@ -134,18 +181,24 @@ def parse_outcar(path, *, max_bytes=None, analysis=False):
                     segments.append(current)
                 current = _segment(len(segments), line, banner[1] if banner else None)
                 evaluation, block, rows, pending_geometry = None, None, [], None
-                in_echo, in_final_energy = False, False
+                in_echo, in_parameters, in_final_energy = False, False, False
             current["range"].update(line_end=line.line_number, byte_end=line.byte_end)
-            if "INCAR:" in text:
+            if re.fullmatch(r"\s*INCAR:\s*", text):
                 in_echo = True
-            if "POTCAR:" in text:
+            if re.match(r"^\s*POTCAR:", text):
+                in_echo = False
+            if re.fullmatch(r"\s*Startparameter for this run:\s*", text):
+                in_parameters = True
                 in_echo = False
             # Effective settings are read only before the electronic loop. The raw
             # INCAR echo is retained separately; later filesystem INCAR is never substituted.
-            if evaluation is None and not (analysis and text.lstrip().startswith("|")):
-                for match in SET_RE.finditer(text):
+            if evaluation is None and text.endswith("\n"):
+                for key, value in outcar_setting_records(text, echoed=in_echo, parameters=in_parameters):
                     target = current["echoed_incar"] if in_echo else current["settings"]
-                    key, value = match[1].upper(), _scalar(match[2])
+                    if value is None:
+                        current["conflicts"].append({"code": "malformed_setting", "tag": key,
+                                                     "reference": reference(line)})
+                        continue
                     if key in target and target[key]["value"] != value:
                         current["conflicts"].append({"code": "conflicting_setting", "tag": key,
                                                      "previous": target[key], "reference": reference(line)})
@@ -447,7 +500,7 @@ def _scope(segment):
         reasons.append("unsupported_meta_gga")
     if values.get("NSW") == 0 and values.get("IBRION") == -1:
         mode = "static"
-    elif type(values.get("NSW")) is int and values["NSW"] > 0 and values.get("IBRION") in (1, 2, 3) and values.get("ISIF") == 2:
+    elif type(values.get("NSW")) is int and values["NSW"] > 0 and values.get("IBRION") in (1, 2, 3) and values.get("ISIF") in (0, 2):
         mode = "fixed-cell-relaxation"
     else:
         mode = "unsupported"

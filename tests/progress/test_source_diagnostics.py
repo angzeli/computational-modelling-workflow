@@ -47,12 +47,14 @@ class SourceDiagnosticTests(unittest.TestCase):
         self.assertEqual(self.diagnostic(snapshot, 'oszicar').status, 'EMPTY')
         self.assertEqual(self.diagnostic(snapshot, 'stdout').status, 'UNDECLARED')
         text = card_text(snapshot, width=80, now=self.now)
-        self.assertIn('oszicar empty', text)
-        self.assertIn('stdout not declared', text)
+        self.assertIn('Waiting for output', text)
+        details = progress_text(snapshot, detailed=True)
+        self.assertIn('Source parser oszicar: EMPTY', details)
+        self.assertIn('Source parser stdout: UNDECLARED', details)
         self.assertNotIn('source-only', text)
         self.assertNotIn('source-local', text)
         self.assertNotIn('data observed', text)
-        self.assertIn('EDIFF (both) <1e-06 eV', text)
+        self.assertIn('EDIFF 1E-6 eV', text)
 
     def test_unparsed_partial_malformed_and_unsupported_are_distinct(self):
         cases = (('header only\n', 'UNPARSED'), ('DAV: 1 ', 'NOT_YET_PARSED'),
@@ -166,7 +168,7 @@ class SourceDiagnosticTests(unittest.TestCase):
             self.assertEqual([level.kind for level in series.latest.context], ['electronic'])
             self.assertIsNone(series.latest.criterion)
         self.assertIsNone(snapshot.verification[0].checked_frontier)
-        self.assertNotIn('EDIFF (both) <', card_text(snapshot, width=80, now=self.now))
+        self.assertNotIn('EDIFF 1E-', card_text(snapshot, width=80, now=self.now))
 
     def test_failed_read_advances_only_attempt_clock(self):
         source = self.context.sources[-1]

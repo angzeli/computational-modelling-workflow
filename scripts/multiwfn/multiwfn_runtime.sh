@@ -5,6 +5,7 @@
 
 MULTIWFN_RUNTIME_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 MULTIWFN_RUNTIME_ROOT=$(cd "$MULTIWFN_RUNTIME_DIR/../.." && pwd -P)
+source "$MULTIWFN_RUNTIME_ROOT/scripts/runtime_python.sh"
 MULTIWFN_RUNTIME_PYTHON=${PYTHON_BIN:-python3}
 MULTIWFN_NTHREADS=${MULTIWFN_NTHREADS-}
 MULTIWFN_EXECUTION_CONFIG=${MULTIWFN_EXECUTION_CONFIG:-}
@@ -14,8 +15,7 @@ MULTIWFN_RUN_SETTINGS_PATH=""
 MULTIWFN_RUN_SETTINGS_DIRECTORY=""
 
 multiwfn_runtime_python() {
-  PYTHONPATH="$MULTIWFN_RUNTIME_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
-    "$MULTIWFN_RUNTIME_PYTHON" -m cmw.molecular.multiwfn.cli "$@"
+  "$MULTIWFN_RUNTIME_PYTHON" -m cmw.molecular.multiwfn.cli "$@"
 }
 
 multiwfn_runtime_json_value() {
@@ -42,6 +42,24 @@ multiwfn_runtime_prepare() {
   MULTIWFN_RUN_SETTINGS_PATH=$(printf '%s' "$prepared" | multiwfn_runtime_json_value settings_path)
   MULTIWFN_RUN_SETTINGS_DIRECTORY=${MULTIWFN_RUN_SETTINGS_PATH%/settings.ini}
   export MULTIWFN_EXE MULTIWFN_NTHREADS
+}
+
+# Load an already checked, immutable attempt contract without a version probe.
+multiwfn_runtime_load() {
+  local metadata=$1 prepared
+  prepared=$("$MULTIWFN_RUNTIME_PYTHON" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["runtime"]))' "$metadata")
+  MULTIWFN_EXE=$(printf '%s' "$prepared" | multiwfn_runtime_json_value executable)
+  MULTIWFN_VERSION=$(printf '%s' "$prepared" | multiwfn_runtime_json_value version)
+  MULTIWFN_NTHREADS=$(printf '%s' "$prepared" | multiwfn_runtime_json_value requested_nthreads)
+  MULTIWFN_RUN_SETTINGS_PATH=$(printf '%s' "$prepared" | multiwfn_runtime_json_value settings_path)
+  MULTIWFN_RUN_SETTINGS_DIRECTORY=${MULTIWFN_RUN_SETTINGS_PATH%/settings.ini}
+  export MULTIWFN_EXE MULTIWFN_NTHREADS
+}
+
+multiwfn_jobs_event() {
+  local attempt=$1 kind=$2 value=${3:-}
+  [[ -f "$attempt/jobs-association.json" ]] || return 0
+  "$MULTIWFN_RUNTIME_PYTHON" -m cmw.molecular.multiwfn.jobs event "$attempt" "$kind" --value "$value"
 }
 
 multiwfn_runtime_launch() {
@@ -126,6 +144,9 @@ multiwfn_runtime_launch() {
   Multiwfnpath="$alias_path" OMP_NUM_THREADS="$MULTIWFN_NTHREADS" \
     "$MULTIWFN_EXE" "$@" <&9 &
   child_pid=$!
+  # Telemetry failure must never bypass drainage of the child we just launched.
+  multiwfn_jobs_event "$PWD" child_launched "$child_pid" || \
+    printf 'CMW runner launch evidence could not be recorded; child supervision continues\n' >&2
   # A trap can run between launch and assigning $!.
   if ((interrupted != 0)); then forward_multiwfn_signal "$interrupt_signal" "$interrupted"; fi
   # A signal just before a blocking wait would otherwise strand a resistant child.

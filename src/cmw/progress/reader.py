@@ -3,9 +3,11 @@
 Prefix and last-consumed-byte sentinels detect common same-inode rewrites. They
 cannot establish immutability of arbitrary unsampled interior bytes; a live
 reader deliberately does not hash or rescan an entire scientific output.
+Explicitly identity-pinned small inputs use bounded incremental SHA-256 instead.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import stat
@@ -17,6 +19,7 @@ from .models import Evidence, SourceDescriptor, SourceLine, SourceState, SourceU
 READ_BUDGET = 64 * 1024
 MAX_LINE_BYTES = 16 * 1024
 SENTINEL_BYTES = 128
+MAX_PINNED_BYTES = 1024 * 1024
 REWRITE_LIMIT = ('Bounded prefix/tail checks cannot detect every in-place interior rewrite; '
                  'live observations are not immutable source verification.')
 
@@ -50,6 +53,9 @@ class RegularFileReader:
         self._poll_bytes = 0
         self._closed = False
         self._warnings = ()
+        self._pinned = source.expected_sha256 is not None or source.expected_size is not None
+        self._digest = hashlib.sha256()
+        self._integrity_error = None
 
     def close(self):
         self._close_fd()
@@ -69,6 +75,8 @@ class RegularFileReader:
         self._warnings = ()
         self._last_change = now
         self._last_size = None
+        self._digest = hashlib.sha256()
+        self._integrity_error = None
 
     @staticmethod
     def _identity_of(info):
@@ -98,7 +106,8 @@ class RegularFileReader:
             has_more=has_more, last_attempt_at=self._last_attempt, last_success_at=self._last_success,
             last_growth_at=self._last_growth, last_change_at=self._last_change,
             bytes_read=self._poll_bytes, total_bytes_read=self._total_bytes,
-            limitations=tuple(dict.fromkeys((REWRITE_LIMIT, *self._warnings, *limitations))),
+            limitations=tuple(dict.fromkeys((*(() if self._pinned else (REWRITE_LIMIT,)),
+                                               *self._warnings, *limitations))),
         )
         return SourceUpdate(self.source, state, tuple(lines), reset, reason)
 
@@ -134,6 +143,109 @@ class RegularFileReader:
             cursor = stop
         return lines, tuple(dict.fromkeys(limitations))
 
+    def _pinned_failure(self, now, health, reason, *, cache=False):
+        self._reset(now)
+        if cache:
+            self._integrity_error = reason
+        else:
+            self._close_fd()
+            self._signature = None
+        return self._update(health, reset=True, reason=reason)
+
+    def _poll_pinned(self, now):
+        """Hash the consumed input bytes incrementally; never rescan outputs.
+
+        A signature change invalidates the entire pinned input, including edits
+        outside the ordinary append reader's bounded prefix/tail sentinels.
+        """
+        digest, size = self.source.expected_sha256, self.source.expected_size
+        if (not isinstance(digest, str) or len(digest) != 64 or
+                any(char not in '0123456789abcdef' for char in digest) or
+                not isinstance(size, int) or isinstance(size, bool) or
+                not 0 <= size <= MAX_PINNED_BYTES):
+            return self._pinned_failure(now, 'INTEGRITY_ERROR',
+                'Pinned input requires a lowercase SHA-256 and byte size within the 1 MiB bound')
+
+        def root_matches():
+            if not self.source.root_path or self.source.root_identity is None:
+                return True
+            root = os.stat(self.source.root_path)
+            return stat.S_ISDIR(root.st_mode) and self._identity_of(root) == self.source.root_identity
+
+        reset, reason = False, None
+        try:
+            if not root_matches():
+                return self._pinned_failure(now, 'BINDING_CHANGED', 'Pinned input directory identity changed')
+            info = os.lstat(self.source.path)
+            if stat.S_ISLNK(info.st_mode):
+                return self._pinned_failure(now, 'INTEGRITY_ERROR', 'Pinned input cannot follow a symbolic link')
+            if not stat.S_ISREG(info.st_mode):
+                return self._pinned_failure(now, 'NOT_REGULAR', 'Only regular pinned input files are observed')
+            identity = self._identity_of(info)
+            if self._fd is None or identity != self._identity:
+                self._close_fd()
+                fd = os.open(self.source.path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) |
+                             getattr(os, 'O_NOFOLLOW', 0))
+                opened = os.fstat(fd)
+                if (not stat.S_ISREG(opened.st_mode) or self._identity_of(opened) != identity or
+                        self._signature_of(opened) != self._signature_of(info)):
+                    os.close(fd)
+                    return self._pinned_failure(now, 'INTEGRITY_ERROR', 'Pinned input changed while opening')
+                self._fd = fd
+                if identity != self._identity:
+                    reason = 'initial' if self._identity is None else 'replacement'
+                    self._reset(now)
+                    reset = True
+                    self._identity = identity
+                    self._signature = None
+            signature = self._signature_of(info)
+            if self._signature is not None and signature != self._signature:
+                self._reset(now)
+                reset, reason = True, 'pinned input signature changed'
+            if self._integrity_error:
+                return self._update('INTEGRITY_ERROR', reason=self._integrity_error)
+            if signature != self._signature:
+                self._last_change = now
+            if info.st_size > (self._last_size or 0):
+                self._last_growth = now
+            self._last_size, self._signature = info.st_size, signature
+            if info.st_size != size:
+                return self._pinned_failure(now, 'INTEGRITY_ERROR',
+                    'Pinned input byte size differs from the declared identity', cache=True)
+            start = self._offset
+            data = self._read_at(min(self.byte_budget, size-start), start) if start < size else b''
+            after, current = os.fstat(self._fd), os.lstat(self.source.path)
+            if not root_matches():
+                return self._pinned_failure(now, 'BINDING_CHANGED', 'Pinned input directory changed during read')
+            if (not stat.S_ISREG(current.st_mode) or self._identity_of(current) != self._identity or
+                    self._signature_of(after) != signature or self._signature_of(current) != signature or
+                    len(data) != min(self.byte_budget, size-start)):
+                return self._pinned_failure(now, 'INTEGRITY_ERROR',
+                    'Pinned input changed during read; consumed bytes discarded')
+            self._offset += len(data)
+            self._digest.update(data)
+            lines, limitations = self._lines(data, start, now)
+            self._warnings = tuple(dict.fromkeys((*self._warnings, *limitations)))
+            if self._offset < size:
+                self._last_success = now
+                return self._update('VERIFYING', lines=lines, reset=reset, reason=reason, has_more=True)
+            if self._digest.hexdigest() != digest:
+                return self._pinned_failure(now, 'INTEGRITY_ERROR',
+                    'Pinned input SHA-256 differs from the declared identity', cache=True)
+            if self._partial or self._dropping_line:
+                self._warnings = tuple(dict.fromkeys((*self._warnings, 'Pinned input has an incomplete final line')))
+            self._last_success = now
+            return self._update('MALFORMED' if self._warnings else 'OK', lines=lines,
+                                reset=reset, reason=reason)
+        except PermissionError as exc:
+            return self._pinned_failure(now, 'PERMISSION_DENIED', str(exc))
+        except FileNotFoundError as exc:
+            missing_volume = (self.source.path.startswith('/Volumes/') and
+                              not Path('/Volumes', Path(self.source.path).parts[2]).exists())
+            return self._pinned_failure(now, 'VOLUME_UNAVAILABLE' if missing_volume else 'MISSING', str(exc))
+        except OSError as exc:
+            return self._pinned_failure(now, 'READ_ERROR', f'{type(exc).__name__}: {exc}')
+
     def poll(self, now=None):
         """Read at most one data budget, plus at most two bounded sentinels."""
         now = time.time() if now is None else now
@@ -143,6 +255,8 @@ class RegularFileReader:
             return self._update('CLOSED', reason='Reader is closed')
         if not Path(self.source.path).is_absolute() or '\x00' in self.source.path:
             return self._update('SOURCE_UNRESOLVED', reason='Source must be an absolute filesystem path')
+        if self._pinned:
+            return self._poll_pinned(now)
         reset = False
         reason = None
         try:

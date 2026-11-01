@@ -353,11 +353,23 @@ def _baseline(value: object, base: Path, files: dict, runtime: dict) -> tuple[di
     return result, sources, protected
 
 
-def prepare(spec_path: str | Path, *, output: str | Path, scratch_root: str | Path,
-            record_directory: str | Path, scratch_mount: str | Path | None = None,
-            dry_run: bool = False) -> dict:
-    """Resolve actual source snapshots anew and publish only validated candidates."""
-    spec = load_spec(spec_path)
+def resolve_preparation(spec_path: str | Path, *, output: str | Path, scratch_root: str | Path,
+                        record_directory: str | Path, scratch_mount: str | Path | None = None) -> tuple[dict, dict, dict]:
+    """Resolve and check candidate bytes without creating any files."""
+    return resolve_preparation_spec(load_spec(spec_path), output=output, scratch_root=scratch_root,
+                                    record_directory=record_directory, scratch_mount=scratch_mount)
+
+
+def resolve_preparation_spec(spec: PreparationSpec, *, output: str | Path, scratch_root: str | Path,
+                             record_directory: str | Path,
+                             scratch_mount: str | Path | None = None) -> tuple[dict, dict, dict]:
+    """Resolve a typed caller-owned specification without a temporary sidecar.
+
+    Study planners derive explicit cases from a previously loaded specification;
+    the same scientific validation and split-publication rules apply to each.
+    """
+    if not isinstance(spec, PreparationSpec):
+        raise TypeError("A loaded PreparationSpec is required")
     incar, mesh, potentials, runtime, origins = _resolve_settings(spec)
     source = _source(spec.data["structure"], spec.path.parent)
     poscar = source.read_bytes()
@@ -415,6 +427,18 @@ def prepare(spec_path: str | Path, *, output: str | Path, scratch_root: str | Pa
               "renderer": {"cmw_version": _cmw_version(), "preparation_schema": 1, "input_parser": "cmw-bounded-v1"}}
     if spec.data["calculation"] == "fixed-cell-relaxation":
         record["stopping_convention"] = "force (eV/Angstrom)" if incar["EDIFFG"] < 0 else "energy (eV)"
+    return files, record, plan
+
+
+def prepare(spec_path: str | Path, *, output: str | Path, scratch_root: str | Path,
+            record_directory: str | Path, scratch_mount: str | Path | None = None,
+            dry_run: bool = False, expected_resolution: str | None = None) -> dict:
+    """Resolve fresh candidates; an optional digest binds explicit preview approval."""
+    files, record, plan = resolve_preparation(spec_path, output=output, scratch_root=scratch_root,
+        record_directory=record_directory, scratch_mount=scratch_mount)
+    if expected_resolution is not None and stable_hash({"record": record, "plan": plan}) != expected_resolution:
+        raise PreparationError("Preparation source content or destination differs from approved resolution",
+                               code="PREPARATION_CHANGED")
     if dry_run:
         return {**record, "dry_run": True, "publication": {"state": "preview", "input_path": plan["input_path"], "record_path": plan["record_path"]},
                 "publication_plan": plan}

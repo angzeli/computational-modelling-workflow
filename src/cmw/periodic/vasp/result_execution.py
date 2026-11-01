@@ -1,17 +1,19 @@
-"""Read explicitly supplied native Jobs execution evidence without opening Jobs state.
+"""Read versioned native Jobs execution evidence without modifying Jobs state.
 
-Jobs records foreground completion, not scientific output identities. This adapter
-checks an exported schema-2 or schema-3 snapshot against its original payload-exit receipt;
-the finalization specification must separately bind the scientific snapshot.
+Jobs records foreground completion, not scientific output identities. Schema 4
+also requires the original enrolled queue and its retained node lineage. The
+finalization specification must separately bind the scientific snapshot.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from pathlib import Path
 import re
 
-from .result_sources import SourceSnapshotError, read_json_source
+from .result_sources import MAX_JSON_BYTES, SourceSnapshotError, read_json_source
 
 
 def _timestamp(value: object) -> bool:
@@ -35,7 +37,7 @@ def _recorded_path(value: object) -> Path | None:
         return None
 
 
-def inspect_execution(
+def _inspect_execution(
     snapshot_path: Path | str | None,
     receipt_path: Path | str | None,
     *,
@@ -44,6 +46,8 @@ def inspect_execution(
     run_directory: Path | str,
     runner_record: dict | None = None,
     native_sources=(),
+    expected_target: dict | None = None,
+    snapshot_document: dict | None = None,
 ) -> dict:
     """Check a selected Jobs invocation and its native receipt, read-only.
 
@@ -98,6 +102,19 @@ def inspect_execution(
 
     documents = {}
     for role, path in (("jobs_snapshot", snapshot_path), ("jobs_receipt", receipt_path)):
+        if role == "jobs_snapshot" and snapshot_document is not None:
+            try:
+                raw = json.dumps(snapshot_document, sort_keys=True, separators=(",", ":"),
+                                 allow_nan=False).encode("utf-8")
+                if len(raw) > MAX_JSON_BYTES:
+                    raise ValueError("snapshot exceeds bounded JSON limit")
+                documents[role] = json.loads(raw)
+                result["snapshot_identity"] = {"kind": "in-memory-jobs-snapshot",
+                                               "sha256": hashlib.sha256(raw).hexdigest()}
+                check(role, True, "The supplied snapshot was captured as bounded JSON")
+            except (ValueError, TypeError, RecursionError) as exc:
+                check(role, False, f"Cannot use in-memory Jobs snapshot: {exc}")
+            continue
         if path is None:
             check(role, None, f"Explicit {role} is required for operational completion evidence")
             continue
@@ -118,9 +135,9 @@ def inspect_execution(
     snapshot = documents["jobs_snapshot"]
     receipt = documents["jobs_receipt"]
     snapshot_shape = (isinstance(snapshot, dict) and type(snapshot.get("schema")) is int
-                      and snapshot["schema"] in {2, 3} and isinstance(snapshot.get("jobs"), list)
+                      and snapshot["schema"] in {2, 3, 4} and isinstance(snapshot.get("jobs"), list)
                       and all(isinstance(item, dict) for item in snapshot["jobs"]))
-    check("snapshot_schema", snapshot_shape, "Expected an exported native Jobs schema-2 or schema-3 snapshot")
+    check("snapshot_schema", snapshot_shape, "Expected a supported native Jobs schema-2, schema-3 or schema-4 snapshot")
     receipt_shape = (isinstance(receipt, dict) and set(receipt) == {"exit_code", "recorded_at"}
                      and type(receipt.get("exit_code")) is int and 0 <= receipt["exit_code"] <= 255
                      and _timestamp(receipt.get("recorded_at")))
@@ -140,7 +157,8 @@ def inspect_execution(
     result["job"] = {name: job.get(name) for name in (
         "id", "display_id", "attempt_id", "engine", "argv", "cwd", "layout",
         "status", "started_at", "finished_at", "exit_code", "signal",
-        "cancel_requested", "logs",
+        "cancel_requested", "termination_requested", "logs", "worker_protocol",
+        "suspension", "node_submission",
     )}
     result["exit_code"] = job.get("exit_code")
     result["signal"] = job.get("signal")
@@ -156,6 +174,25 @@ def inspect_execution(
         "scientific_layout": job.get("layout"),
         "scientific_source_binding": "not_provided_by_jobs",
     }
+    result["snapshot_schema"] = snapshot["schema"]
+    _inspect_queue(snapshot, job, root, expected_target, result, check)
+    suspension = job.get("suspension")
+    if suspension is not None:
+        supported = (isinstance(suspension, dict) and type(suspension.get("protocol")) is int
+                     and suspension["protocol"] == 1
+                     and suspension.get("backend") in {"local-command-v1", "vasp-port-v1", "orca-local-v1"})
+        check("suspension_schema", supported, "Suspension evidence must use its supported protocol and backend")
+        if supported:
+            intervals = suspension.get("intervals")
+            closed = (isinstance(intervals, list) and all(isinstance(item, dict)
+                      and _timestamp(item.get("start")) and _timestamp(item.get("end"))
+                      and item["end"] >= item["start"] for item in intervals))
+            check("suspension_terminal", suspension.get("phase") == "Run"
+                  and suspension.get("desired") == "Run" and closed,
+                  "Unverified or unfinished suspension cannot establish clean completion")
+    if "termination_requested" in job:
+        check("not_terminated", job["termination_requested"] is None or job["termination_requested"] is False,
+              "A terminated producer is not successful execution evidence")
     actual_run = _recorded_path(str(Path(run_directory).absolute()))
     if runner_record is None:
         check("working_directory", actual_run is not None and _recorded_path(job.get("cwd")) == actual_run,
@@ -202,4 +239,91 @@ def inspect_execution(
     return finish()
 
 
-__all__ = ["inspect_execution"]
+def _inspect_queue(snapshot, job, root, expected_target, result, check):
+    """Revalidate one explicit original queue, never discover or create state."""
+    schema = snapshot["schema"]
+    declared = snapshot.get("queue_identity")
+    if schema < 4:
+        check("schema_lineage", declared is None and job.get("node_submission") is None
+              and (isinstance(snapshot.get("controller", {}), dict)
+                   and snapshot.get("controller", {}).get("schema", schema) == schema),
+              "Enrolled schema-4 evidence must not be downgraded to a legacy snapshot")
+    actual, current = None, None
+    if root is not None and (root / "queue.sqlite3").exists():
+        from cmw.jobs.lifecycle import read_job
+        from cmw.jobs.store import JobsError, Store
+        try:
+            store = Store(root)
+            current, control = read_job(store, job["id"])
+            actual = store.queue_identity()
+            check("native_queue_schema", control["schema"] == schema,
+                  "Snapshot schema must match its original native queue schema")
+            keys = ("id", "attempt_id", "engine", "argv", "cwd", "layout", "status", "started_at",
+                    "finished_at", "exit_code", "signal", "cancel_requested", "termination_requested",
+                    "logs", "node_submission", "worker_protocol")
+            same = all(job.get(key) == current.get(key) for key in keys)
+            suspension_keys = ("backend", "protocol", "phase", "desired", "revision", "request",
+                               "inhibited", "intervals", "capability", "clock", "accounting_uncertain")
+            saved_suspension, current_suspension = job.get("suspension") or {}, current.get("suspension") or {}
+            same = (same and isinstance(saved_suspension, dict) and isinstance(current_suspension, dict)
+                    and all(saved_suspension.get(key) == current_suspension.get(key) for key in suspension_keys))
+            check("native_attempt", same, "Saved invocation must match the selected original native attempt")
+        except (JobsError, OSError, ValueError, TypeError, KeyError) as exc:
+            check("native_queue", False, f"Original queue identity or attempt is unavailable: {exc}")
+    elif schema == 4:
+        check("native_queue", None, "Enrolled completion requires its original queue to remain available on its owner node")
+    if schema == 4:
+        check("queue_identity", declared == actual if declared is not None and actual is not None else None,
+              "Schema-4 completion needs matching exported original enrollment; re-export older snapshots missing queue_identity")
+        if declared is not None:
+            result["binding"]["queue_identity"] = declared
+    if job.get("node_submission") is not None:
+        submission = job["node_submission"]
+        valid = (isinstance(submission, dict) and type(submission.get("schema")) is int
+                 and submission["schema"] == 1 and actual is not None
+                 and all(submission.get(key) == actual[key] for key in ("node_id", "queue_id"))
+                 and all(isinstance(submission.get(key), str) and re.fullmatch(pattern, submission[key])
+                         for key, pattern in (("request_id", r"[a-f0-9]{32}"), ("digest", r"[a-f0-9]{64}"))))
+        check("node_submission", bool(valid), "Recorded node request must match the original enrollment and exact request identity")
+        result["binding"]["node_submission"] = submission
+    if expected_target is not None:
+        required = {"node_id", "queue_id", "job_id", "attempt_id"}
+        valid = (isinstance(expected_target, dict) and required <= set(expected_target)
+                 and not set(expected_target) - required - {"host_id", "runtime_id"}
+                 and type(expected_target.get("job_id")) is int
+                 and expected_target["job_id"] == job["id"]
+                 and expected_target.get("attempt_id") == job["attempt_id"]
+                 and actual is not None
+                 and all(expected_target.get(key) == actual[key] for key in ("node_id", "queue_id")))
+        if valid and "host_id" in expected_target:
+            valid = expected_target["host_id"] == actual["host_id"]
+        check("owner_target", bool(valid), "Review target must match the original node, queue and operational attempt")
+        if isinstance(expected_target, dict) and "runtime_id" in expected_target:
+            submission = job.get("node_submission")
+            runtime = submission.get("runtime_id") if isinstance(submission, dict) else None
+            check("submission_runtime", expected_target["runtime_id"] == runtime if runtime else None,
+                  "Requested runtime identity needs matching recorded submission-runtime evidence")
+
+
+def inspect_execution(snapshot_path, receipt_path, *, job_id, attempt_id, run_directory,
+                      runner_record=None, native_sources=(), expected_target=None):
+    """Inspect explicit saved records; retain their complete file source identities."""
+    return _inspect_execution(snapshot_path, receipt_path, job_id=job_id, attempt_id=attempt_id,
+                              run_directory=run_directory, runner_record=runner_record,
+                              native_sources=native_sources, expected_target=expected_target)
+
+
+def inspect_execution_snapshot(snapshot, receipt_path, *, job_id, attempt_id, run_directory,
+                               runner_record=None, native_sources=(), expected_target=None):
+    """Inspect a captured native snapshot without writing an export or queue file.
+
+    Its canonical digest is an in-memory observation identity, never a fabricated
+    file source. Finalization still requires an explicit saved snapshot/spec.
+    """
+    return _inspect_execution(None, receipt_path, job_id=job_id, attempt_id=attempt_id,
+                              run_directory=run_directory, runner_record=runner_record,
+                              native_sources=native_sources, expected_target=expected_target,
+                              snapshot_document=snapshot)
+
+
+__all__ = ["inspect_execution", "inspect_execution_snapshot"]

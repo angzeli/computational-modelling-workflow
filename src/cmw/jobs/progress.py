@@ -153,6 +153,17 @@ def resolve_context(store, job_id, *, expected_attempt_id=None, descriptors=(), 
     plans = registration.sources if registration else ()
     automatic, issues = _automatic(found, registration)
     persisted = recorded_sources(job)
+    if 'vasp_input' in job.get('progress_sources', {}):
+        from .input_sources import resolve_vasp_input
+        staged, input_issues = resolve_vasp_input(job, selected_engine)
+        # A recorded staged-input expectation never falls back to mutable prepared
+        # inputs. Explicit alternatives remain subject to normal conflict review.
+        automatic = [item for item in automatic if source_role(item) != 'poscar']
+        if staged is not None:
+            automatic.append(staged)
+        else:
+            persisted = tuple(item for item in persisted if source_role(item) != 'poscar')
+        issues.extend(input_issues)
     if persisted and selected_engine != str(job['engine']).upper():
         raise JobsError('Persisted sources belong to the recorded engine')
     declarations = tuple(_source_identity(item) for item in (*automatic, *persisted))

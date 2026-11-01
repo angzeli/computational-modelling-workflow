@@ -118,13 +118,11 @@ def _read_job(store, job_id):
         raise JobsError('External observations have no managed Jobs file identity')
     try:
         before = store.path.stat()
-        con = sqlite3.connect(store.path.as_uri() + '?mode=ro', uri=True, timeout=2)
-        try:
-            con.execute('BEGIN')
-            Store.control(con)  # Reject unsupported schema without migration.
+        with store.read_transaction() as con:
+            control = Store.control(con)  # Reject unsupported schema without migration.
+            if control['schema'] == 4:
+                store._queue_identity(con, control['schema'])
             job = Store.get(con, job_id)
-        finally:
-            con.close()
         after = store.path.stat()
     except FileNotFoundError as exc:
         raise JobsError(f'No such job: {job_id}') from exc

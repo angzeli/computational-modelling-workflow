@@ -56,7 +56,7 @@ def molden_output(*, lumo_energy: float = -0.05) -> str:
 class OrcaWavefunctionConversionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.geometry = self.root / "input.xyz"
         self.geometry.write_text(
             "2\nsource\nH 0.0 0.0 0.0\nH 0.0 0.0 0.74\n", encoding="utf-8"

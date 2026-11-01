@@ -48,7 +48,7 @@ def initial_state(backend):
 def enroll_state(store, con):
     """Migration is opt-in and cannot invalidate a live legacy supervisor."""
     control = store.control(con)
-    if control['schema'] == 3:
+    if control['schema'] >= 3:
         return
     if (lock_held(store.root/'controller.lock') or owner_alive(control.get('owner'))):
         if control.get('runtime_protocol') != 3:
@@ -207,37 +207,45 @@ def submit(store, job_id, action, *, reason='', expected_attempt_id=None,
     reason = validate_note(reason)
     preview = readiness(store, job_id, action)
     with store.transaction(create=False) as con:
-        job = store.get(con, job_id)
-        value = job.get('suspension') or {}
-        for actual, expected, label in ((job['attempt_id'], expected_attempt_id, 'attempt'),
-                (value.get('revision', 0), expected_revision, 'revision'),
-                (value.get('phase', 'Run'), expected_phase, 'phase'),
-                (_authority(job), expected_authority, 'authority')):
-            if expected is not None and actual != expected:
-                raise JobsError(f'Stale suspension {label}; open a fresh confirmation')
-        if job['status'] != 'Run' or job.get('cancel_requested') or job.get('termination_requested'):
-            raise JobsError('Termination or terminal evidence takes precedence')
-        if not _alive_authority(store, job):
-            raise JobsError('Execution authority unavailable; no request accepted')
-        previous = value.get('request') or {}
-        duplicate = previous.get('action') == action and value.get('phase') in (
-            {'Suspending', 'Suspended'} if action == 'suspend' else {'Resuming', 'Run'})
-        if duplicate:
-            blocking = [item for item in preview['reasons'] if not item.startswith(action.capitalize()+' requires verified ')]
-            if blocking:
-                raise JobsError('; '.join(blocking))
-            return {**preview, 'result': 'COMPLETED' if value['phase'] in {'Suspended', 'Run'} else 'PENDING'}
-        if not preview['ready'] or value.get('revision', 0) != preview['revision'] or _authority(job) != preview['authority']:
-            raise JobsError('; '.join(preview['reasons']) or 'State changed; inspect readiness again')
-        revision = value['revision']+1
-        request = dict(id=uuid4().hex, action=action, revision=revision, reason=reason,
-                       expected_phase=value['phase'], attempt_id=job['attempt_id'],
-                       authority=_authority(job), state_identity=_file_identity(store.path), requested_at=time.time())
-        value.update(revision=revision, request=request, desired='Suspended' if action == 'suspend' else 'Run',
-                     phase='Suspending' if action == 'suspend' else 'Resuming', inhibited=True, reason=reason)
-        job['suspension'] = value
-        store.save(con, job)
-        store.event(con, job['id'], f'{action.capitalize()} request accepted at revision {revision}')
+        return _submit(store, con, job_id, action, preview, reason=reason,
+                       expected_attempt_id=expected_attempt_id, expected_revision=expected_revision,
+                       expected_phase=expected_phase, expected_authority=expected_authority)
+
+
+def _submit(store, con, job_id, action, preview, *, reason='', expected_attempt_id=None,
+            expected_revision=None, expected_phase=None, expected_authority=None):
+    """Shared intent insertion; only the owning worker acts on this request."""
+    job = store.get(con, job_id)
+    value = job.get('suspension') or {}
+    for actual, expected, label in ((job['attempt_id'], expected_attempt_id, 'attempt'),
+            (value.get('revision', 0), expected_revision, 'revision'),
+            (value.get('phase', 'Run'), expected_phase, 'phase'),
+            (_authority(job), expected_authority, 'authority')):
+        if expected is not None and actual != expected:
+            raise JobsError(f'Stale suspension {label}; open a fresh confirmation')
+    if job['status'] != 'Run' or job.get('cancel_requested') or job.get('termination_requested'):
+        raise JobsError('Termination or terminal evidence takes precedence')
+    if not _alive_authority(store, job):
+        raise JobsError('Execution authority unavailable; no request accepted')
+    previous = value.get('request') or {}
+    duplicate = previous.get('action') == action and value.get('phase') in (
+        {'Suspending', 'Suspended'} if action == 'suspend' else {'Resuming', 'Run'})
+    if duplicate:
+        blocking = [item for item in preview['reasons'] if not item.startswith(action.capitalize()+' requires verified ')]
+        if blocking:
+            raise JobsError('; '.join(blocking))
+        return {**preview, 'result': 'COMPLETED' if value['phase'] in {'Suspended', 'Run'} else 'PENDING'}
+    if not preview['ready'] or value.get('revision', 0) != preview['revision'] or _authority(job) != preview['authority']:
+        raise JobsError('; '.join(preview['reasons']) or 'State changed; inspect readiness again')
+    revision = value['revision']+1
+    request = dict(id=uuid4().hex, action=action, revision=revision, reason=reason,
+                   expected_phase=value['phase'], attempt_id=job['attempt_id'],
+                   authority=_authority(job), state_identity=_file_identity(store.path), requested_at=time.time())
+    value.update(revision=revision, request=request, desired='Suspended' if action == 'suspend' else 'Run',
+                 phase='Suspending' if action == 'suspend' else 'Resuming', inhibited=True, reason=reason)
+    job['suspension'] = value
+    store.save(con, job)
+    store.event(con, job['id'], f'{action.capitalize()} request accepted at revision {revision}')
     return {**preview, 'revision': revision, 'phase': value['phase'], 'result': 'ACCEPTED'}
 
 
@@ -385,7 +393,13 @@ def bind_domain(registration, anchor):
     _check_identity(runner, anchor); _check_identity(root, anchor, allow_exit=True)
     if not _descends(runner['pid'], anchor['pid']) or not _descends(root['pid'], runner['pid']):
         raise JobsError('Runtime handshake is not bound to the owned payload ancestry')
-    if os.getpgid(root['pid']) == anchor['pid']:
+    try:
+        root_group = os.getpgid(root['pid'])
+    except ProcessLookupError as exc:
+        if _observed_exit(root['pid'], root, anchor, allow_zombie_topology_loss=True):
+            raise DomainPending('Computational root exited during group observation') from exc
+        raise
+    if root_group == anchor['pid']:
         raise JobsError('Computation shares the protected ownership group')
     strategy = registration.get('strategy')
     if strategy not in {'direct-tree', 'openmpi', 'orca-tree'}:

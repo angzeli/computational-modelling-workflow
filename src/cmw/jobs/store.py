@@ -159,8 +159,10 @@ class Store:
             con.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, time REAL, job_id INTEGER, message TEXT)")
             con.execute("INSERT OR IGNORE INTO meta VALUES ('control', ?)", (json.dumps({"schema": 2, "dispatch": False, "stop": False, "reason": "Not started", "heartbeat": None, "owner": None, "scheduler": scheduler_defaults()}),))
             raw_control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
-            if type(raw_control.get('schema')) is not int or raw_control['schema'] not in {1, 2, 3}:
+            if type(raw_control.get('schema')) is not int or raw_control['schema'] not in {1, 2, 3, 4}:
                 raise JobsError("Unsupported Jobs state schema")
+            if raw_control['schema'] == 4:
+                self._queue_identity(con, raw_control['schema'])
             if raw_control['schema'] == 1:
                 # Old supervisors reject schema 2 on their next receipt/finalize
                 # transaction. Keep their state readable until they are done.
@@ -184,18 +186,251 @@ class Store:
         finally:
             con.close()
 
+    def _queue_identity(self, con, schema):
+        row = con.execute("SELECT value FROM meta WHERE key='queue_identity'").fetchone()
+        if row is None:
+            if schema == 4:
+                raise JobsError('Unsupported Jobs state schema: enrolled queue identity is missing')
+            return None
+        try:
+            record = json.loads(row[0])
+            expected = {'schema', 'node_id', 'host_id', 'queue_id', 'state_root',
+                        'root_identity', 'database_identity'}
+            if (not isinstance(record, dict) or set(record) != expected
+                    or type(record['schema']) is not int or record['schema'] != 1
+                    or schema != 4 or not re.fullmatch(r'[a-f0-9]{32}', record['queue_id'])
+                    or any(not isinstance(record[key], list) or len(record[key]) != 2
+                           or any(type(value) is not int or value < 0 for value in record[key])
+                           for key in ('root_identity', 'database_identity'))
+                    or any(not isinstance(record[key], str) or not record[key]
+                           or len(record[key]) > 256 or any(ord(char) < 33 for char in record[key])
+                           for key in ('node_id', 'host_id'))):
+                raise ValueError('Malformed queue identity')
+            root_info = self.root.lstat()
+            database_info = self.path.lstat()
+            if (not stat.S_ISDIR(root_info.st_mode) or not stat.S_ISREG(database_info.st_mode)
+                    or self.root.resolve(strict=True) != self.root
+                    or record['state_root'] != str(self.root)
+                    or record['root_identity'] != [root_info.st_dev, root_info.st_ino]
+                    or record['database_identity'] != [database_info.st_dev, database_info.st_ino]):
+                raise JobsError('Enrolled queue was moved, replaced or copied; explicit new enrollment is required')
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            if isinstance(exc, JobsError):
+                raise
+            raise JobsError(f'Enrolled queue identity is malformed or unavailable: {exc}') from exc
+        return record
+
+    @contextmanager
+    def read_transaction(self):
+        """Observe an existing rollback-journal database without sidecar creation."""
+        before = self.path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise JobsError('Queue database is not a regular file')
+        con = sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True, timeout=2)
+        try:
+            con.execute('PRAGMA query_only=ON')
+            # SQLite retains its read lock across format and identity checks.
+            # Exclusive mode refuses WAL without creating SHM/WAL sidecars.
+            con.execute('PRAGMA locking_mode=EXCLUSIVE')
+            con.execute('BEGIN')
+            try:
+                journal_mode = con.execute('PRAGMA journal_mode').fetchone()[0]
+            except sqlite3.Error as exc:
+                raise JobsError('Unsupported database journal format for read-only observation') from exc
+            if journal_mode != 'delete':
+                raise JobsError('Unsupported database journal format for read-only observation')
+            yield con
+            after = self.path.lstat()
+            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                raise JobsError('Queue database changed while reading observation')
+        finally:
+            con.close()
+
+    def queue_identity(self):
+        """Read enrollment without initializing, migrating or probing execution."""
+        if not self.path.exists():
+            return None
+        try:
+            with self.read_transaction() as con:
+                tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if not tables:
+                    return None
+                control = self.control(con)
+                return self._queue_identity(con, control['schema'])
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, IndexError) as exc:
+            if isinstance(exc, JobsError):
+                raise
+            raise JobsError(f'Queue identity unavailable: {exc}') from exc
+
+    def enroll_queue(self, node_id, host_id):
+        """Explicitly enroll an inactive queue, retaining existing jobs and IDs."""
+        for label, value in (('Node', node_id), ('Host', host_id)):
+            if (not isinstance(value, str) or not value or len(value) > 256
+                    or any(ord(char) < 33 for char in value)):
+                raise JobsError(f'{label} identity must be a nonempty bounded identifier')
+        with self.transaction() as con:
+            control = self.control(con)
+            existing = self._queue_identity(con, control['schema'])
+            if existing is not None:
+                if (existing['node_id'], existing['host_id']) != (node_id, host_id):
+                    raise JobsError('Queue is already enrolled to another node or host identity')
+                return existing
+            from .ownership import lock_held, owner_alive
+            if (any(job['status'] in ACTIVE for job in self.rows(con))
+                    or lock_held(self.root / 'controller.lock') or owner_alive(control.get('owner'))):
+                raise JobsError('Queue enrollment requires no active or unresolved attempts and an offline controller')
+            root_info, database_info = self.root.stat(), self.path.stat()
+            record = {'schema': 1, 'node_id': node_id, 'host_id': host_id,
+                      'queue_id': uuid4().hex, 'state_root': str(self.root),
+                      'root_identity': [root_info.st_dev, root_info.st_ino],
+                      'database_identity': [database_info.st_dev, database_info.st_ino]}
+            con.execute("INSERT INTO meta(key, value) VALUES ('queue_identity', ?)", (json.dumps(record),))
+            # Older workers reject this schema rather than bypass node-local gates.
+            control['schema'] = 4
+            self.set_control(con, control)
+            self.event(con, None, 'Queue explicitly enrolled for node access')
+            return record
+
+    @staticmethod
+    def record_request(con, request_id, operation, digest, result):
+        """Persist a receipt in the same transaction as its accepted queue change."""
+        if (operation not in {'submit', 'control'} or not re.fullmatch(r'[a-f0-9]{32}', request_id)
+                or not re.fullmatch(r'[a-f0-9]{64}', digest)):
+            raise JobsError('Invalid node request receipt identity')
+        con.execute('CREATE TABLE IF NOT EXISTS node_requests ('
+                    'request_id TEXT PRIMARY KEY, operation TEXT NOT NULL, '
+                    'digest TEXT NOT NULL, result TEXT NOT NULL)')
+        con.execute('INSERT INTO node_requests(request_id,operation,digest,result) VALUES (?,?,?,?)',
+                    (request_id, operation, digest, json.dumps(result, allow_nan=False)))
+
+    @staticmethod
+    def _request_record(con, request_id):
+        row = None
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_requests'").fetchone():
+            row = con.execute('SELECT operation,digest,result FROM node_requests WHERE request_id=?',
+                              (request_id,)).fetchone()
+        if row is None:
+            # An immutable job binding proves a receipt is missing, not its outcome.
+            bound = con.execute("SELECT id FROM jobs WHERE json_extract(data, '$.node_submission.request_id')=? LIMIT 1",
+                                (request_id,)).fetchone()
+            if bound is not None:
+                raise JobsError('Recorded node request journal is missing for an existing attempt; recovery refused')
+            return None
+        try:
+            result = json.loads(row[2])
+            if (row[0] not in {'submit', 'control'} or not re.fullmatch(r'[a-f0-9]{64}', row[1])
+                    or not isinstance(result, dict)):
+                raise ValueError('Unsupported request receipt')
+            binding = result.get('node_submission', {}) if row[0] == 'submit' else result
+            if (binding.get('request_id') != request_id or binding.get('digest') != row[1]
+                    or row[0] == 'control' and result.get('status') not in {'ACCEPTED', 'COMPLETED'}):
+                raise ValueError('Request identity differs from its recorded outcome')
+            if row[0] == 'submit':
+                job_row = con.execute('SELECT data FROM jobs WHERE id=?', (result.get('id'),)).fetchone()
+                job = json.loads(job_row[0]) if job_row is not None else None
+                if (not isinstance(job, dict) or result.get('attempt_id') != job.get('attempt_id')
+                        or binding != job.get('node_submission')):
+                    raise ValueError('Request outcome differs from its immutable attempt binding')
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise JobsError(f'Recorded node request is malformed: {exc}') from exc
+        return {'request_id': request_id, 'operation': row[0], 'digest': row[1], 'result': result}
+
+    def request_lookup(self, request_id):
+        """Read a durable request outcome without creating or changing state."""
+        if not isinstance(request_id, str) or not re.fullmatch(r'[a-f0-9]{32}', request_id):
+            raise JobsError('Request ID must be a lowercase UUID hex identity')
+        identity = self.queue_identity()
+        if identity is None:
+            return None
+        try:
+            con = sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True, timeout=2)
+            try:
+                con.execute('PRAGMA query_only=ON')
+                con.execute('BEGIN')
+                if self._queue_identity(con, self.control(con)['schema']) != identity:
+                    raise JobsError('Queue identity changed while reading request outcome')
+                result = self._request_record(con, request_id)
+                if self._queue_identity(con, self.control(con)['schema']) != identity:
+                    raise JobsError('Queue identity changed while reading request outcome')
+                return result
+            finally:
+                con.close()
+        except sqlite3.Error as exc:
+            raise JobsError(f'Queue request lookup unavailable: {exc}') from exc
+
+    def _prepare_node_request(self, request, metadata):
+        if (not isinstance(request, dict) or set(request) != {'request_id', 'digest'}
+                or not isinstance(request['request_id'], str)
+                or not re.fullmatch(r'[a-f0-9]{32}', request['request_id'])
+                or not isinstance(request['digest'], str)
+                or not re.fullmatch(r'[a-f0-9]{64}', request['digest'])):
+            raise JobsError('Remote registration requires one request ID and semantic SHA-256 digest')
+        required = {'schema', 'node_id', 'queue_id', 'request_id', 'digest'}
+        if (not isinstance(metadata, dict) or not required <= set(metadata)
+                or type(metadata['schema']) is not int or metadata['schema'] != 1
+                or metadata['request_id'] != request['request_id'] or metadata['digest'] != request['digest']):
+            raise JobsError('Node submission metadata does not match the registration request')
+        try:
+            encoded = json.dumps(metadata, allow_nan=False, ensure_ascii=True)
+            if len(encoded) > 65536:
+                raise ValueError('Node submission metadata exceeds 64 KiB')
+            metadata = json.loads(encoded)
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise JobsError(f'Invalid node submission metadata: {exc}') from exc
+        identity = self.queue_identity()
+        if identity is None or any(metadata[key] != identity[key] for key in ('node_id', 'queue_id')):
+            raise JobsError('Node submission requires the matching explicitly enrolled queue')
+        return metadata
+
+    @staticmethod
+    def _same_request(record, request):
+        if record['operation'] != 'submit' or record['digest'] != request['digest']:
+            raise JobsError('Request identity conflict: this request ID already names different semantics')
+        return record['result']
+
     @staticmethod
     def control(con):
         control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
-        if type(control.get('schema')) is not int or control['schema'] not in {1, 2, 3}:
+        if type(control.get('schema')) is not int or control['schema'] not in {1, 2, 3, 4}:
             raise JobsError('Unsupported Jobs state schema')
         control['schema'] = max(2, control['schema'])
         control['scheduler'] = {**scheduler_defaults(), **control.get('scheduler', {})}
         return control
 
     @staticmethod
+    def node_revision(record):
+        value = record.get('node_control_revision', 0)
+        if type(value) is not int or value < 0:
+            raise JobsError('Invalid node control revision')
+        return value
+
+    @staticmethod
+    def _job_control_state(job):
+        keys = ('id', 'attempt_id', 'display_id', 'name', 'engine', 'argv', 'cwd', 'env',
+                'status', 'order', 'claim', 'claimed_at', 'worker', 'worker_protocol', 'group',
+                'started_at', 'finished_at', 'cancel_requested', 'termination_requested',
+                'resources', 'scheduling', 'sharing_anchor', 'on_failure')
+        result = {key: job.get(key) for key in keys}
+        suspension = job.get('suspension') or {}
+        result['suspension'] = {key: suspension.get(key) for key in
+            ('backend', 'protocol', 'phase', 'desired', 'revision', 'request', 'inhibited', 'capability', 'clock')}
+        return result
+
+    @staticmethod
     def set_control(con, control):
+        current = Store.control(con)
+        if control['schema'] == 4:
+            keys = ('schema', 'dispatch', 'stop', 'owner', 'scheduler', 'runtime_protocol')
+            changed = any(current.get(key) != control.get(key) for key in keys)
+            control['node_control_revision'] = Store.node_revision(current) + int(changed)
         con.execute("UPDATE meta SET value=? WHERE key='control'", (json.dumps(control),))
+
+    @staticmethod
+    def bump_control_revision(con):
+        control = Store.control(con)
+        if control['schema'] == 4:
+            control['node_control_revision'] = Store.node_revision(control) + 1
+            con.execute("UPDATE meta SET value=? WHERE key='control'", (json.dumps(control),))
 
     @staticmethod
     def rows(con):
@@ -239,9 +474,30 @@ class Store:
                         or job.get('engine') != current.get('engine')):
                     raise JobsError('Progress source attempt and engine identity are immutable')
                 job['progress_sources'] = current['progress_sources']
+            if 'molecular_submission' in job and ('molecular_submission' not in current
+                    or job['molecular_submission'] != current['molecular_submission']):
+                raise JobsError('Molecular submission metadata is immutable; register a new attempt')
+            if 'molecular_submission' in current:
+                if (job.get('attempt_id') != current.get('attempt_id')
+                        or job.get('engine') != current.get('engine')):
+                    raise JobsError('Molecular submission attempt identity is immutable')
+                job['molecular_submission'] = current['molecular_submission']
+            if 'node_submission' in job and ('node_submission' not in current
+                    or job['node_submission'] != current['node_submission']):
+                raise JobsError('Node submission metadata is immutable; register a new attempt')
+            if 'node_submission' in current:
+                if (job.get('attempt_id') != current.get('attempt_id')
+                        or job.get('engine') != current.get('engine')):
+                    raise JobsError('Node submission attempt and engine identity are immutable')
+                job['node_submission'] = current['node_submission']
         elif 'progress_sources' in job:
             from .source_declarations import recorded_sources
             recorded_sources(job)
+        if Store.control(con)['schema'] == 4:
+            changed = Store._job_control_state(current) != Store._job_control_state(job)
+            job['node_control_revision'] = Store.node_revision(current) + int(changed)
+            if changed:
+                Store.bump_control_revision(con)
         con.execute("UPDATE jobs SET data=? WHERE id=?", (json.dumps(job), job["id"]))
 
     @staticmethod
@@ -258,7 +514,17 @@ class Store:
             mpi_ranks=None, threads_per_rank=None, env=None, hold=False,
             on_failure="pause", layout=None, role="primary", allow_auxiliary=False,
             independent=False, resource_contract=None, write_scope=None, note='', suspension_backend=None,
-            progress_sources=()):
+            progress_sources=(), remote_request=None, node_submission=None, molecular_submission=None):
+        if remote_request is not None or node_submission is not None:
+            node_submission = self._prepare_node_request(remote_request, node_submission)
+            previous = self.request_lookup(remote_request['request_id'])
+            if previous is not None:
+                return self._same_request(previous, remote_request)
+            hold = True
+        if molecular_submission is not None:
+            from .molecular import validate_binding
+            molecular_submission = validate_binding(molecular_submission)
+            hold = True
         from .source_declarations import declaration_record, validate_sources
         progress_sources = validate_sources(engine, progress_sources, require_complete=bool(progress_sources))
         note = validate_note(note)
@@ -303,6 +569,26 @@ class Store:
             independent=independent, resource_contract=resource_contract,
             write_scope=str(directory) if write_scope is None else write_scope), resources, directory)
         with self.transaction() as con:
+            if remote_request is not None:
+                identity = self._queue_identity(con, self.control(con)['schema'])
+                if identity is None or any(node_submission[key] != identity[key] for key in ('node_id', 'queue_id')):
+                    raise JobsError('Node submission queue identity changed before registration')
+                previous = self._request_record(con, remote_request['request_id'])
+                if previous is not None:
+                    return self._same_request(previous, remote_request)
+            successor = (node_submission or {}).get('successor')
+            if successor:
+                for existing in self.rows(con):
+                    prior = existing.get('node_submission', {}).get('successor', {})
+                    if prior.get('record_path') == successor.get('record_path'):
+                        raise JobsError('Successor materialization already registered; reuse its original request ID')
+            if molecular_submission is not None:
+                for existing in self.rows(con):
+                    prior = existing.get('molecular_submission', {})
+                    if prior.get('request_id') == molecular_submission['request_id']:
+                        if prior['digest'] != molecular_submission['digest']:
+                            raise JobsError('Request ID already belongs to a different molecular submission')
+                        return existing
             if suspension_backend:
                 from .suspension import enroll_state
                 enroll_state(self, con)
@@ -317,14 +603,32 @@ class Store:
                    "finished_at": None, "exit_code": None, "signal": None, "reason": "",
                    "worker": None, "group": None, "claim": None, "claimed_at": None,
                    "cancel_requested": False, "scheduling": scheduling, "sharing_anchor": None}
-            if progress_sources:
-                job['progress_sources'] = declaration_record(engine, job['attempt_id'], progress_sources)
+            if node_submission is not None:
+                job['node_submission'] = node_submission
+            if molecular_submission is not None:
+                job['molecular_submission'] = molecular_submission
+                from .molecular import launch_blocker
+                blocker = launch_blocker(job)
+                if blocker:
+                    raise JobsError(blocker)
+            from .input_sources import prepare_vasp_input
+            vasp_input = prepare_vasp_input(job)
+            if progress_sources or vasp_input is not None:
+                job['progress_sources'] = declaration_record(engine, job['attempt_id'], progress_sources,
+                                                             vasp_input=vasp_input)
+                if molecular_submission is not None:
+                    job['progress_sources']['origin'] = 'automatic-engine-plan'
+                    job['progress_sources']['qualification'] = 'reviewed engine plan; scientific acceptance remains separate'
+                    from .source_declarations import recorded_sources
+                    recorded_sources(job)
             if suspension_backend:
                 from .suspension import initial_state
                 job['suspension'] = initial_state(suspension_backend)
             job["logs"] = {stream: str(self.root / "attempts" / job["attempt_id"] / f"{stream}.log") for stream in ("stdout", "stderr")}
             self.save(con, job)
             self.event(con, number, f"Enqueued at order {job['order']}")
+            if remote_request is not None:
+                self.record_request(con, remote_request['request_id'], 'submit', remote_request['digest'], job)
         return job
 
     def annotate(self, job_id, note, *, expected_revision=None, expected_attempt_id=None):
@@ -447,56 +751,75 @@ class Store:
 
     def dispatch(self, enabled):
         with self.transaction() as con:
-            control = self.control(con)
-            if enabled and any(j["status"] in {"Unknown", "Cancelling"} for j in self.rows(con)):
-                raise JobsError("Needs attention or cancellation is unresolved; dispatch remains paused")
-            control.update(dispatch=bool(enabled), reason="" if enabled else "User pause")
-            self.set_control(con, control)
-            self.event(con, None, "Dispatch resumed" if enabled else "Dispatch paused")
+            self._dispatch(con, enabled)
 
-    def change(self, job_id, action, *, position=None, confirm=False, expected=None):
+    def _dispatch(self, con, enabled):
+        control = self.control(con)
+        if enabled and any(j["status"] in {"Unknown", "Cancelling"} for j in self.rows(con)):
+            raise JobsError("Needs attention or cancellation is unresolved; dispatch remains paused")
+        control.update(dispatch=bool(enabled), reason="" if enabled else "User pause")
+        self.set_control(con, control)
+        self.event(con, None, "Dispatch resumed" if enabled else "Dispatch paused")
+
+    def change(self, job_id, action, *, position=None, confirm=False, expected=None,
+               expected_attempt_id=None):
         with self.transaction() as con:
+            return self._change(con, job_id, action, position=position, confirm=confirm,
+                                expected=expected, expected_attempt_id=expected_attempt_id)
+
+    def _change(self, con, job_id, action, *, position=None, confirm=False, expected=None,
+                expected_attempt_id=None):
+        # Captured UI/node targets use internal IDs, never mutable display aliases.
+        if expected_attempt_id is not None and type(job_id) is int:
+            row = con.execute("SELECT data FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise JobsError(f"No such job: {job_id}")
+            job = _job_defaults(json.loads(row[0]))
+        else:
             job = self.get(con, job_id)
-            if expected is not None and job["status"] != expected:
-                raise JobsError("Job changed since selection; refresh and try again")
-            status = job["status"]
-            if action in {"hold", "release", "move"} and status not in PENDING:
-                raise JobsError("Only pending jobs can be held, released or reordered")
-            if action == "hold":
-                job["status"] = "Hold"
-            elif action == "release":
-                job["status"] = "Queue"
-            elif action == "move":
-                pending = sorted((j for j in self.rows(con) if j["status"] in PENDING), key=lambda j: j["order"])
-                if position is None or not 1 <= position <= len(pending):
-                    raise JobsError(f"Order must be between 1 and {len(pending)}")
-                pending = [j for j in pending if j["id"] != job["id"]]
-                pending.insert(position - 1, job)
-                for index, item in enumerate(pending, 1):
-                    item["order"] = index
-                    self.save(con, item)
-                job["order"] = position
-            elif action == "cancel":
-                if status in PENDING:
-                    job.update(status="Cancelled", finished_at=time.time(), order=None, reason="Cancelled before execution")
-                elif status in {"Starting", "Run"}:
-                    if not confirm:
-                        raise JobsError("Running cancellation requires --yes; it terminates the managed process group")
-                    job.update(status="Cancelling", cancel_requested=True, reason="Waiting for confirmed termination")
-                    control = self.control(con)
-                    control.update(dispatch=False, reason="Cancellation requested; resume manually after termination")
-                    self.set_control(con, control)
-                else:
-                    raise JobsError(f"Cannot cancel {status}; no unverified process will be signalled")
+        if expected_attempt_id is not None and job["attempt_id"] != expected_attempt_id:
+            raise JobsError("Attempt changed since selection; refresh and try again")
+        if expected is not None and job["status"] != expected:
+            raise JobsError("Job changed since selection; refresh and try again")
+        status = job["status"]
+        if action in {"hold", "release", "move"} and status not in PENDING:
+            raise JobsError("Only pending jobs can be held, released or reordered")
+        if action == "hold":
+            job["status"] = "Hold"
+        elif action == "release":
+            job["status"] = "Queue"
+        elif action == "move":
+            pending = sorted((j for j in self.rows(con) if j["status"] in PENDING), key=lambda j: j["order"])
+            if position is None or not 1 <= position <= len(pending):
+                raise JobsError(f"Order must be between 1 and {len(pending)}")
+            pending = [j for j in pending if j["id"] != job["id"]]
+            pending.insert(position - 1, job)
+            for index, item in enumerate(pending, 1):
+                item["order"] = index
+                self.save(con, item)
+            job["order"] = position
+        elif action == "cancel":
+            if status in PENDING:
+                job.update(status="Cancelled", finished_at=time.time(), order=None, reason="Cancelled before execution")
+            elif status in {"Starting", "Run"}:
+                if not confirm:
+                    raise JobsError("Running cancellation requires --yes; it terminates the managed process group")
+                job.update(status="Cancelling", cancel_requested=True, reason="Waiting for confirmed termination")
+                control = self.control(con)
+                control.update(dispatch=False, reason="Cancellation requested; resume manually after termination")
+                self.set_control(con, control)
             else:
-                raise JobsError(f"Unknown operation: {action}")
-            self.save(con, job)
-            self.normalize(con)
-            self.event(con, job["id"], f"{action.capitalize()} requested")
+                raise JobsError(f"Cannot cancel {status}; no unverified process will be signalled")
+        else:
+            raise JobsError(f"Unknown operation: {action}")
+        self.save(con, job)
+        self.normalize(con)
+        self.event(con, job["id"], f"{action.capitalize()} requested")
         return job
 
     def snapshot(self, *, now=None):
         now = time.time() if now is None else now
+        queue_identity = None
         empty = {"schema": 2, "scheduler": scheduler_defaults(), "dispatch": False, "stop": False, "owner": None, "heartbeat": None, "reason": "No queue; use cmw jobs add, then start"}
         if not self.path.exists():
             control, jobs, events = empty, [], []
@@ -515,6 +838,8 @@ class Store:
                     control, jobs, events = empty, [], []
                 else:
                     control, jobs = self.control(con), self.rows(con)
+                    if control['schema'] == 4:
+                        queue_identity = self._queue_identity(con, control['schema'])
                     events = [dict(zip(("id", "time", "job_id", "message"), row)) for row in con.execute("SELECT * FROM events ORDER BY id DESC LIMIT 30")][::-1]
             except sqlite3.Error as exc:
                 raise JobsError(f"Queue database unavailable: {exc}") from exc
@@ -547,7 +872,8 @@ class Store:
                 from .suspension import project_timing
                 project_timing(job)
             job["check"] = None
-        return {"schema": control["schema"], "state_directory": str(self.root), "controller_log": str(self.root / "controller.log"),
+        return {"schema": control["schema"], **({"queue_identity": queue_identity} if queue_identity else {}),
+                "state_directory": str(self.root), "controller_log": str(self.root / "controller.log"),
                 "controller": {**control, "online": online, "stale": stale, "age_seconds": age},
                 "mode": "Bounded Sharing" if control["scheduler"]["mode"] == "bounded-sharing" else "Sequential",
                 "scheduler": control["scheduler"], "observed_at": now, "jobs": jobs, "events": events}

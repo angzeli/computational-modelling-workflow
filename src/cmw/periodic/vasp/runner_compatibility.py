@@ -173,7 +173,7 @@ def _parser_options(text):
     raise ValueError('Parser factory has no recognized return')
 
 
-def check_runner(runner, argv, *, project_root=None):
+def check_runner(runner, argv, *, project_root=None, allow_planned_input=False):
     """Inspect a selected port checkout and intended argv; grant no run authority."""
     runner = Path(runner).expanduser().absolute()
     records = []
@@ -225,7 +225,11 @@ def check_runner(runner, argv, *, project_root=None):
     try:
         source, output = validate_runner_argv([str(runner), *argv])
         if not source.is_dir():
-            raise ValueError('The explicit input directory must exist; use check-inputs separately for its contents')
+            if not allow_planned_input or os.path.lexists(source):
+                raise ValueError('The explicit input directory must exist; use check-inputs separately for its contents')
+            result['input_availability'] = 'planned; validate published inputs before registration'
+        else:
+            result['input_availability'] = 'existing; contents not validated by this interface check'
         if os.path.lexists(output):
             raise ValueError('The intended output must be a new directory, not an existing path')
     except (ValueError, TypeError, OverflowError) as exc:
