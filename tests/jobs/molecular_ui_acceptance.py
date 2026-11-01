@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -141,12 +142,28 @@ class JsonEndpointTransport:
         self.backend.close()
 
 
-async def _until(pilot, condition):
-    for _ in range(160):
-        if condition():
-            return
+async def _until(pilot, condition, *, timeout=10):
+    # Real endpoint identity checks can take seconds on macOS. This is a
+    # functional check, not a four-second latency benchmark; retain a bounded
+    # deadline matching the normal node transport's operation timeout.
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() >= deadline:
+            app = pilot.app
+            lanes = {owner: {'busy': lane.busy,
+                'active': None if lane.active_request is None else lane.active_request[0],
+                'pending': [request[0] for request in lane.pending], 'error': lane.error}
+                for owner, lane in app.lanes.items()}
+            raise AssertionError('The actual endpoint/frontend observation did not settle; '
+                                 f'screen={type(app.screen).__name__}; lanes={lanes}')
         await pilot.pause(.025)
-    raise AssertionError('The actual endpoint/frontend observation did not settle')
+
+
+async def _back_to_portal(pilot):
+    # A batched Escape/shortcut can deliver the shortcut to the closing modal.
+    await pilot.press('escape')
+    await _until(pilot, lambda: len(pilot.app.screen_stack) == 1
+                 and not pilot.app.navigation_pending())
 
 
 def _endpoint_projection(store):
@@ -233,7 +250,8 @@ async def federated_render_cases(root, renders=None):
                                   'useful_rows': table.size.height - table.header_height})
                 await pilot.press('enter')
                 assert isinstance(app.screen, FrozenText) and 'Multiwfn' in app.screen.text
-                await pilot.press('escape', 'g')
+                await _back_to_portal(pilot)
+                await pilot.press('g')
                 try:
                     await _until(pilot, lambda: isinstance(app.screen, ProgressHistory) and app.screen.page is not None)
                 except AssertionError as exc:
@@ -255,14 +273,17 @@ async def federated_render_cases(root, renders=None):
                             for key in sorted(key for key in cache if key.endswith('.error'))[:8]}}
                     raise AssertionError(f'{exc}; {json.dumps(diagnostic, sort_keys=True)}') from exc
                 assert app.screen.page.entries
-                await pilot.press('escape', 's')
+                await _back_to_portal(pilot)
+                await pilot.press('s')
                 await _until(pilot, lambda: isinstance(app.screen, Sources) and app.screen.inspection is not None)
                 assert any(source.role == 'multiwfn_session' for source in app.screen.inspection.context.sources)
-                await pilot.press('escape', 'f')
+                await _back_to_portal(pilot)
+                await pilot.press('f')
                 await _until(pilot, lambda: isinstance(app.screen, NodeFiles))
-                await pilot.press('escape', 'y')
+                await _back_to_portal(pilot)
+                await pilot.press('y')
                 await _until(pilot, lambda: isinstance(app.screen, NodeCopyPreview))
-                await pilot.press('escape')
+                await _back_to_portal(pilot)
                 assert app.selected_key == row_key(target)
                 controls.append(profile)
             # A delayed reply for one node cannot follow an equal display ID to another.
