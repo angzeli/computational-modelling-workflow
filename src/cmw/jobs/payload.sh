@@ -24,6 +24,9 @@ while kill -0 "$payload_pid" 2>/dev/null; do
     wait "$payload_pid"
     code=$?
 done
+# The payload has exited. Keep TERM from killing its receipt writer or
+# interrupting the shell wait before the guardian can verify drainage.
+trap '' TERM INT
 /usr/bin/env -u PYTHONHOME PYTHONPATH="$cmw_import_path" "$python_bin" -m cmw.jobs.runtime receipt "$receipt" "$code" || exit 125
 # Remain the live group leader until the guardian has drained descendants.
 while ! IFS= read -r instruction; do

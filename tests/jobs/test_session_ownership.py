@@ -200,7 +200,8 @@ class SendTimeDisappearanceTests(unittest.TestCase):
             stack.enter_context(patch('cmw.jobs.ownership.time.monotonic', side_effect=lambda: now[0]))
             stack.enter_context(patch('cmw.jobs.ownership.time.sleep', side_effect=lambda seconds: now.__setitem__(0, now[0]+seconds)))
             try:
-                signal_session(owners[10], signal.SIGTERM, absence_grace=grace, include_leader=include_leader)
+                signal_session(owners[10], signal.SIGTERM, include_leader=include_leader,
+                               **({} if grace is None else {"absence_grace": grace}))
             except Exception as exc:
                 error = exc
             membership.assert_called_once_with(10, session=True)
@@ -237,6 +238,12 @@ class SendTimeDisappearanceTests(unittest.TestCase):
         self.assertIsInstance(error, JobsError)
         self.assertIn('ownership lost', str(error))
         self.assertEqual(calls, [(11, signal.SIGTERM), (11, 0)])
+
+    def test_default_grace_handles_proven_send_time_disappearance(self):
+        calls, elapsed, error, _ = self.observe("missing", ["denied", "absent"], grace=None)
+        self.assertIsNone(error)
+        self.assertEqual(calls, [(11, signal.SIGTERM), (11, 0), (11, 0)])
+        self.assertLessEqual(elapsed, 2.0)
 
     def test_legacy_zero_grace_preserves_original_send_failure(self):
         original = PermissionError(1, 'original legacy denial')

@@ -285,8 +285,8 @@ class CancellationAnchorTests(unittest.TestCase):
 
 
 class PayloadReceiptTopologyTests(unittest.TestCase):
-    def test_anchor_group_term_can_kill_receipt_writer_before_release(self):
-        """Controlled demonstration of the shell hazard, not historical attribution."""
+    def test_anchor_group_term_preserves_receipt_writer_until_release(self):
+        """The receipt writer survives TERM while the pinned anchor awaits RELEASE."""
         with tempfile.TemporaryDirectory(prefix='cmw-receipt-topology-') as temporary, \
                 tempfile.TemporaryDirectory(prefix='cmw-socket-', dir='/tmp') as socket_directory:
             root = Path(temporary)
@@ -304,6 +304,8 @@ s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
 s.connect(os.environ['FIXTURE_RECEIPT_SOCKET'])
 s.sendall(json.dumps({'pid':os.getpid(),'birth':psutil.Process().create_time(),'pgid':os.getpgrp(),'sid':os.getsid(0)}).encode()+b'\\n')
 s.recv(1)
+from pathlib import Path
+Path(sys.argv[4]).write_text(json.dumps({'exit_code': 0, 'recorded_at': 1}))
 raise SystemExit(0)
 ''')
             executable.chmod(0o700)
@@ -326,8 +328,15 @@ raise SystemExit(0)
                 self.assertEqual(ownership.identity(process.pid), anchor)
                 self.assertEqual(psutil.Process(child['pid']).create_time(), child['birth'])
                 os.killpg(process.pid, signal.SIGTERM)
-                self.assertEqual(process.wait(timeout=5), 125)
-                self.assertFalse(receipt.exists())
+                self.assertIsNone(process.poll())
+                self.assertTrue(ownership.owner_alive(anchor))
+                self.assertEqual(psutil.Process(child['pid']).create_time(), child['birth'])
+                connection.sendall(b'R')
+                from tests.jobs.test_jobs import wait_for
+                wait_for(receipt.exists)
+                process.stdin.write(b'RELEASE\n'); process.stdin.flush()
+                self.assertEqual(process.wait(timeout=5), 0)
+                self.assertEqual(json.loads(receipt.read_text())['exit_code'], 0)
                 self.assertFalse(ownership.group_exists(process.pid))
             finally:
                 if connection is not None:

@@ -179,12 +179,14 @@ def snapshot_owned_session(owner, known=()):
     return result
 
 
-def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
+def signal_session(owner, signum, *, include_leader=True, absence_grace=2.0):
     """Signal birth-verified groups in an explicitly owned session.
 
     A trusted sole foreground payload may exclude the protected leader group
     when draining its child subgroups. The caller must establish that exclusive
     topology before launching children; this option grants no new ownership.
+    A denied send gets a bounded absence check only if its original witness
+    has exited; live or inaccessible witnesses still fail immediately.
     """
     sid = owner['pid']
 
