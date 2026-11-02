@@ -140,11 +140,35 @@ explicit operations, and a held queue head retains the existing blocking order.
 Managed VASP specifications use engine/profile `VASP`, exactly four `inputs/`
 files (INCAR, POSCAR, KPOINTS, POTCAR), and explicit `vasp` fields `ncore`, `kpar`,
 `mpi_mode`, `timeout`, `stop_before`. The recognized runner is resolved on the
-target, keeps the existing eight-rank limit and receives a new absent native
+target, enforces the explicitly enrolled rank limit and receives a new absent native
 output directory. Prepared POSCAR provenance is registered only after target
 publication; source inode, attempt, staging and finalization records are never
 imported. Runtime, queue, storage, profile and destination working-directory
 identity are checked again through the existing local admission gate.
+
+### Explicit VASP ranks up to 16
+
+VASP profiles may explicitly enroll `max_cpus: 16` and `max_ranks: 16`;
+submission resources may request `cpus: 16`, `mpi_ranks: 16`,
+`threads_per_rank: 1`. Omitted VASP `max_ranks` still defaults to min(8, max_cpus).
+Existing eight-rank profiles and queue records are unchanged and refuse a
+16-rank request. Ranks cannot exceed profile CPUs or the ordinary maximum 16.
+
+Preview checks the actual target runner's shared 16-rank guard in both planner
+and MPI launcher. Old eight-rank or unrecognized runner implementations refuse
+expanded requests. The current port's exact host-toolchain wrapper is recognized
+without execution; helper, defaults and any local override are pinned dependencies.
+A newly appearing unpinned override also refuses readiness. No automatic
+re-enrollment or schema migration is performed.
+
+Use valid NCORE/KPAR divisibility (for example 4/1 at 16 ranks), verified
+runtime/storage/queue identities, available resources and compatible scientific
+inputs. The physical M5 Pro qualification covers native Open MPI 5.0.11 / PRRTE
+4.1.0, harmless 16-rank cleanup and one retained Si2 PBE VASP 6.6.1 fixture.
+CMW preview and held registration were separately checked against that runner
+source; no real calculation was dispatched through a research queue.
+Controlled VASP suspension remains limited to eight ranks. GPU acceleration is
+separate and is not established by this work.
 
 ## Explicit controls and outcome lookup
 

@@ -70,6 +70,45 @@ class RunnerCompatibilityTests(unittest.TestCase):
             + body + "\n" + suffix + "    return p\n"
         )
 
+    def expanded_rank_contract(self):
+        with self.entrypoint.open('a') as stream:
+            stream.write("\nimport launch\ndef plan(args):\n"
+                         "    require(type(args.ranks) is int and 1 <= args.ranks <= launch.MAX_MPI_RANKS, 'rank limit')\n")
+        (self.scripts / 'launch.py').write_text(
+            "MAX_MPI_RANKS = 16\ndef mpi_command(program, ranks, mode):\n"
+            "    if type(ranks) is not int or not 1 <= ranks <= MAX_MPI_RANKS or mode not in ('native', 'synthetic'):\n"
+            "        raise ValueError('rank limit')\n")
+
+    def test_expanded_rank_contract_and_legacy_runner_refusal(self):
+        self.argv[self.argv.index('--ranks') + 1] = '16'
+        self.argv[self.argv.index('--ncore') + 1] = '4'
+        self.assertNotEqual(self.check()['exit_code'], 0)
+        self.expanded_rank_contract()
+        self.assertEqual(self.check()['exit_code'], 0)
+        original = (self.scripts / 'launch.py').read_text()
+        for altered in (original.replace('MAX_MPI_RANKS = 16', 'MAX_MPI_RANKS = 8'),
+                        original.replace('<= MAX_MPI_RANKS', '<= 8'),
+                        original.replace('MAX_MPI_RANKS = 16', 'MAX_MPI_RANKS = int("16")')):
+            (self.scripts / 'launch.py').write_text(altered)
+            self.assertNotEqual(self.check()['exit_code'], 0)
+        (self.scripts / 'launch.py').write_text(original)
+        self.entrypoint.write_text(self.entrypoint.read_text().replace('<= launch.MAX_MPI_RANKS', '<= 8'))
+        self.assertNotEqual(self.check()['exit_code'], 0)
+
+    def test_rank_and_decomposition_boundaries(self):
+        self.expanded_rank_contract()
+        for rank in ('1', '2', '4', '8', '16'):
+            self.argv[self.argv.index('--ranks') + 1] = rank
+            self.assertEqual(self.check()['exit_code'], 0)
+        for rank in ('0', '-1', '17', 'malformed', '1.5'):
+            self.argv[self.argv.index('--ranks') + 1] = rank
+            self.assertNotEqual(self.check()['exit_code'], 0)
+        self.argv[self.argv.index('--ranks') + 1] = '16'
+        for ncore, kpar in (('3', '1'), ('4', '3'), ('16', '2')):
+            self.argv[self.argv.index('--ncore') + 1] = ncore
+            self.argv[self.argv.index('--kpar') + 1] = kpar
+            self.assertNotEqual(self.check()['exit_code'], 0)
+
     def snapshot(self):
         return {str(path.relative_to(self.root)): path.read_bytes()
                 for path in self.root.rglob("*")

@@ -16,6 +16,8 @@ import re
 from .result_sources import SnapshotReader, SourceSnapshotError
 
 
+MAX_MPI_RANKS = 16
+
 DIALECT = "vasp-run-metadata-text-v1"
 CONTROLLED_DIALECT = "vasp-run-metadata-text-v2"
 _INPUTS = ("INCAR", "POSCAR", "POTCAR", "KPOINTS")
@@ -25,7 +27,7 @@ _STAGED = re.compile(
     r"source_stat=\(([0-9]+), ([0-9]+), ([0-9]+), ([0-9]+)\); SHA256=([0-9a-f]{64})\Z")
 _KEYS = frozenset({
     "state", "child_status", "staging_start_utc", "source", "output", "donor", "binary", "sha",
-    "parallel", "origins", "active_opt", "istart", "icharg", "variant", "requested_version",
+    "toolchain", "parallel", "origins", "active_opt", "istart", "icharg", "variant", "requested_version",
     "launcher_repository", "input_repository", "mpi", "command", "threads", "hard_budget_seconds",
     "stop_before_seconds", "managed_foreground", "restart_requested", "restart_preflight", "warnings",
     "incar_overrides", "staged_file", "original_incar_sha256", "effective_incar_sha256", "status",
@@ -102,8 +104,8 @@ def validate_runner_argv(argv):
     for key in ("--ranks", "--ncore", "--kpar"):
         _require(re.fullmatch(r"[1-9][0-9]*", options[key]) is not None, "Invalid runner parallel count")
     ranks, ncore, kpar = (int(options[k]) for k in ("--ranks", "--ncore", "--kpar"))
-    # The observed external runner explicitly restricts launches to 1..8 ranks.
-    _require(ranks <= 8 and ranks % kpar == 0 and ranks // kpar % ncore == 0,
+    # Ordinary execution and controlled suspension have separate qualifications.
+    _require(ranks <= (8 if controlled else MAX_MPI_RANKS) and ranks % kpar == 0 and ranks // kpar % ncore == 0,
              "Unsupported runner parallel decomposition")
     timeout, stop = float(options["--timeout"]), float(options["--stop-before"])
     _require(math.isfinite(timeout) and math.isfinite(stop) and 0 <= stop < timeout,
@@ -168,6 +170,15 @@ def _parse_record(content, allowed_keys):
         _require(key in _REPEATED or key not in values, "Repeated runner metadata identity or terminal key")
         values.setdefault(key, []).append(value)
         positions.setdefault(key, []).append(index)
+        if key == "toolchain":
+            source, separator, versions = value.partition('; ')
+            expected = ('PORT_GCC_VERSION', 'PORT_OPENMPI_VERSION', 'PORT_PRRTE_VERSION',
+                        'PORT_OPENBLAS_VERSION', 'PORT_SCALAPACK_VERSION', 'PORT_FFTW_VERSION')
+            fields = versions.split(', ')
+            _require(separator and source in {'config/toolchain-defaults.txt', 'private/toolchain.env'}
+                     and len(fields) == len(expected)
+                     and all(re.fullmatch(name + r'=[0-9][0-9A-Za-z._-]*', field)
+                             for name, field in zip(expected, fields)), 'Malformed runner toolchain declaration')
         if key == "staged_file":
             match = _STAGED.fullmatch(value)
             _require(match is not None, "Malformed staged-file identity")

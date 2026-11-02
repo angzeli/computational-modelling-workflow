@@ -1,6 +1,7 @@
 """Held synthetic VASP handoff through real endpoints; no runner is executed."""
 from copy import deepcopy
 import hashlib
+import os
 from pathlib import Path
 import unittest
 from uuid import uuid4
@@ -22,10 +23,14 @@ class VaspSubmissionTests(unittest.TestCase):
     publish = endpoint_fixture.SubmissionEndpointTests.publish
     register = endpoint_fixture.SubmissionEndpointTests.register
 
-    def node(self):
+    def node(self, *, max_ranks=8, expanded=False):
         fixture = runner_fixture.RunnerCompatibilityTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
+        if expanded:
+            fixture.expanded_rank_contract()
+            if os.environ.get('CMW_VASP_PORT'):
+                fixture.runner = Path(os.environ['CMW_VASP_PORT']) / 'scripts/run-vasp.sh'
         root = self.root / 'mini'
         root.mkdir(mode=0o700)
         storage = root / 'calculation'
@@ -33,7 +38,7 @@ class VaspSubmissionTests(unittest.TestCase):
         spec = {'queues': {'research': str(root / 'queue-research')},
                 'storages': {'scratch': str(storage)},
                 'profiles': {'vasp': {'engine': 'VASP', 'runner': str(fixture.runner),
-                                     'max_cpus': 8, 'max_ranks': 8}}}
+                                     'max_cpus': max_ranks, 'max_ranks': max_ranks}}}
         config = enroll(root / 'node', spec)
         node = {'root': root, 'storage': storage, 'runner': fixture.runner,
                 'config': config, 'backends': {}}
@@ -95,6 +100,33 @@ class VaspSubmissionTests(unittest.TestCase):
         self.assertFalse(any(node['root'].rglob('OUTCAR')))
         self.assertFalse(any(node['root'].rglob('RUN_METADATA.txt')))
 
+    def test_explicit_sixteen_rank_preview_and_held_registration(self):
+        node = self.node(max_ranks=16, expanded=True)
+        spec, prepared, _ = self.prepare(node)
+        spec['resources'].update(cpus=16, mpi_ranks=16)
+        spec['vasp'].update(ncore=4, kpar=1)
+        backend = node['backends']['research']
+        preview = backend.call('submit.preview', {'spec': spec})['result']
+        self.assertEqual(preview['resources'], spec['resources'])
+        self.assertEqual(preview['argv'][preview['argv'].index('--ranks') + 1], '16')
+        self.publish(node, spec, prepared)
+        job = self.register(backend, spec)['job']
+        self.assertEqual(job['status'], 'Hold')
+        self.assertEqual(job['argv'], preview['argv'])
+        self.assertEqual(job['node_submission']['node_id'], node['config']['node_id'])
+        self.assertNotEqual(job['attempt_id'], spec['request_id'])
+        self.assertIsNone(job['worker'])
+        self.assertFalse(Path(preview['native_output']).exists())
+        self.assertFalse(self.store(node).snapshot()['controller']['dispatch'])
+
+    def test_sixteen_rank_profile_does_not_upgrade_old_runner(self):
+        node = self.node(max_ranks=16)
+        spec, _, _ = self.prepare(node)
+        spec['resources'].update(cpus=16, mpi_ranks=16)
+        with self.assertRaisesRegex(NodeError, 'expanded MPI rank contract'):
+            node['backends']['research'].call('submit.preview', {'spec': spec})
+        self.assertEqual(self.store(node).snapshot()['jobs'], [])
+
     def test_invalid_four_file_structure_never_registers(self):
         node = self.node()
         spec, prepared, _ = self.prepare(node, invalid=True)
@@ -110,7 +142,7 @@ class VaspSubmissionTests(unittest.TestCase):
         backend = node['backends']['research']
         oversized = deepcopy(spec)
         oversized['resources'].update(cpus=16, mpi_ranks=16)
-        with self.assertRaisesRegex(NodeError, 'eight ranks'):
+        with self.assertRaisesRegex(NodeError, 'pinned profile limits'):
             backend.call('submit.preview', {'spec': oversized})
         preview = backend.call('submit.preview', {'spec': spec})['result']
         self.publish(node, spec, prepared)

@@ -96,13 +96,54 @@ class IdentityTests(unittest.TestCase):
 
     def test_bad_profile_and_unsupported_vasp_ranks_do_not_enroll_queue(self):
         for change in ({'max_cpus': True}, {'max_cpus': 0}, {'dependencies': [{}]},
-                       {'engine': 'VASP', 'max_cpus': 16, 'max_ranks': 16}):
+                       {'engine': 'VASP', 'max_cpus': 17, 'max_ranks': 17}):
             spec = copy.deepcopy(self.spec)
             spec['profiles']['benign'].update(change)
             with self.subTest(change=change), self.assertRaises(ValueError):
                 enroll(self.config, spec, **self.enrollment)
             self.assertFalse(self.state.exists())
             self.assertFalse(self.config.exists())
+
+    def test_vasp_explicit_ranks_and_conservative_default(self):
+        from cmw.nodes.identity import _profile
+        from tests.periodic.vasp.test_runner_compatibility import RunnerCompatibilityTests
+        fixture = RunnerCompatibilityTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        spec = {'engine': 'VASP', 'runner': str(fixture.runner), 'max_cpus': 16}
+        self.assertEqual(_profile(spec, RUNTIME)['max_ranks'], 8)
+        for rank in (1, 2, 4, 8, 16):
+            self.assertEqual(_profile({**spec, 'max_ranks': rank}, RUNTIME)['max_ranks'], rank)
+        for rank in (0, -1, 17, True, '16'):
+            with self.subTest(rank=rank), self.assertRaises(ValueError):
+                _profile({**spec, 'max_ranks': rank}, RUNTIME)
+        with self.assertRaises(ValueError):
+            _profile({**spec, 'max_cpus': 8, 'max_ranks': 16}, RUNTIME)
+
+    def test_host_toolchain_dependencies_are_pinned_and_new_override_refuses(self):
+        from cmw.periodic.vasp.runner_compatibility import _TOOLCHAIN_ENVIRONMENT
+        from tests.periodic.vasp.test_runner_compatibility import RunnerCompatibilityTests
+        fixture = RunnerCompatibilityTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        (fixture.scripts / 'environment.sh').write_text('\n'.join(_TOOLCHAIN_ENVIRONMENT) + '\n')
+        (fixture.scripts / 'toolchain.py').write_text('# synthetic helper, never executed\n')
+        (fixture.port / 'config').mkdir()
+        defaults = fixture.port / 'config/toolchain-defaults.txt'
+        defaults.write_text('PORT_OPENMPI_VERSION=5.0.11\n')
+        self.spec['profiles'] = {'vasp': {'engine': 'VASP', 'runner': str(fixture.runner),
+                                        'max_cpus': 16, 'max_ranks': 16}}
+        config = enroll(self.config, self.spec, **self.enrollment)
+        self.assertEqual(load_node(self.config), config)
+        self.assertTrue(check_node(config, **self.checks)['profiles_ready'])
+        defaults.write_text('PORT_OPENMPI_VERSION=5.0.10\n')
+        self.assertFalse(check_node(config, **self.checks)['profiles_ready'])
+        defaults.write_text('PORT_OPENMPI_VERSION=5.0.11\n')
+        # An added override cannot escape the previously enrolled dependency set.
+        (fixture.port / 'private').mkdir()
+        (fixture.port / 'private/toolchain.env').write_text('PORT_OPENMPI_VERSION=5.0.10\n')
+        self.assertFalse(check_node(config, **self.checks)['profiles_ready'])
+        self.assertEqual(load_node(self.config), config)
 
     def test_duplicate_queue_and_storage_aliases_refused(self):
         for section, value in (('queues', str(self.state)), ('storages', str(self.storage))):

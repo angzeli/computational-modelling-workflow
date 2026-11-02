@@ -14,6 +14,8 @@ import sys
 from uuid import UUID, uuid4
 
 from cmw.core.provenance import canonical_json_bytes, stable_hash
+from cmw.periodic.vasp.result_runner import MAX_MPI_RANKS
+
 from .storage import identify_storage, check_storage, validate_storage
 from .runtime_observation import (RuntimeRefusal, RuntimeVerifier, file_epoch, inventory,
                                   observation, validate_observation, RuntimeCollection)
@@ -238,8 +240,8 @@ def _profile(spec, runtime):
     if type(cpus) is not int or not 1 <= cpus <= 256:
         raise ValueError('Profile max_cpus must be an integer in 1..256')
     ranks = spec.get('max_ranks', min(8, cpus) if spec['engine'] == 'VASP' else cpus if spec['engine'] == 'ORCA' else 1)
-    if type(ranks) is not int or not 1 <= ranks <= (8 if spec['engine'] == 'VASP' else cpus) or ranks > cpus:
-        raise ValueError('VASP profiles retain the supported 1..8 rank limit')
+    if type(ranks) is not int or not 1 <= ranks <= (MAX_MPI_RANKS if spec['engine'] == 'VASP' else cpus) or ranks > cpus:
+        raise ValueError('Profile ranks must fit CPU resources and VASP supports at most 16 ranks')
     runner = _file_identity(spec['runner'])
     if not os.access(spec['runner'], os.R_OK if spec['engine'] == 'Multiwfn' else os.X_OK):
         raise ValueError('Configured runner is not executable')
@@ -253,6 +255,8 @@ def _profile(spec, runtime):
             raise ValueError('VASP profile requires the recognized run-vasp.sh entry point')
         required = [str(Path(spec['runner']).parent / name)
                     for name in ('run_vasp.py', 'environment.sh', 'launch.py', 'observables.py')]
+        from cmw.periodic.vasp.runner_compatibility import toolchain_sources
+        required += [str(path) for path in toolchain_sources(spec['runner'])]
         dependencies = sorted(set(dependencies + required))
     runtime_record = {}
     if spec['engine'] in {'ORCA', 'Multiwfn'}:
@@ -384,7 +388,7 @@ def _validate_config(value):
         if (not isinstance(profile['engine'], str) or profile['engine'] not in {'Command', 'VASP', 'ORCA', 'Multiwfn'} or type(profile['max_cpus']) is not int
                 or not 1 <= profile['max_cpus'] <= 256 or type(profile['max_ranks']) is not int
                 or not 1 <= profile['max_ranks'] <= profile['max_cpus']
-                or profile['engine'] == 'VASP' and profile['max_ranks'] > 8):
+                or profile['engine'] == 'VASP' and profile['max_ranks'] > MAX_MPI_RANKS):
             raise ValueError('Unsupported pinned runner resources')
         _validate_file(profile['runner_identity'])
         if profile['runner'] != profile['runner_identity']['path']:
@@ -536,6 +540,11 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
             result['errors'].append(f'{alias}: {observed.get("error", "Storage unavailable")}')
     for alias, profile in profiles.items():
         try:
+            if profile['engine'] == 'VASP':
+                from cmw.periodic.vasp.runner_compatibility import toolchain_sources
+                pinned = {item['path'] for item in profile['dependencies']}
+                if any(str(path) not in pinned for path in toolchain_sources(profile['runner'])):
+                    raise ValueError('VASP toolchain dependency is not pinned')
             for expected in [profile['runner_identity'], *profile['dependencies']]:
                 if _file_identity(expected['path']) != expected:
                     raise ValueError('Pinned runner/dependency identity changed')

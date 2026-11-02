@@ -28,8 +28,42 @@ _WRAPPER_EXEC = {
 _PORT_ROOT = 'PORT_ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)'
 
 
+# Exact current port wrapper; arbitrary shell evaluation is still unassessed.
+_TOOLCHAIN_ENVIRONMENT = (
+    'PORT_ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)',
+    'PORT_SOURCE=/Applications/Academic/vasp.6.6.1',
+    'port_toolchain=$(/usr/bin/python3 -I -B "$PORT_ROOT/scripts/toolchain.py" --shell) || return 1',
+    'eval "$port_toolchain"',
+    'unset port_toolchain',
+    'PORT_GNU=/opt/homebrew/Cellar/gcc/$PORT_GCC_VERSION',
+    'PORT_MPI=/opt/homebrew/Cellar/open-mpi/$PORT_OPENMPI_VERSION',
+    'PORT_MAKE=/opt/homebrew/bin/gmake',
+    'export OMPI_FC="$PORT_GNU/bin/gfortran"',
+    'export OMPI_CC="$PORT_GNU/bin/gcc-${PORT_GCC_VERSION%%.*}"',
+    'export OMPI_CXX="$PORT_GNU/bin/g++-${PORT_GCC_VERSION%%.*}"',
+    'export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PORT_MPI/bin:$PORT_GNU/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"',
+    'export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1',
+    'export PYTHONDONTWRITEBYTECODE=1',
+    'unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH LD_LIBRARY_PATH',
+)
+
+
+def toolchain_sources(runner):
+    """Additional identities used by the current host-local toolchain wrapper."""
+    scripts = Path(runner).parent
+    if 'port_toolchain=$(' not in _source(scripts / 'environment.sh', 'environment', []):
+        return []
+    paths = [scripts / 'toolchain.py', scripts.parent / 'config/toolchain-defaults.txt']
+    local = scripts.parent / 'private/toolchain.env'
+    if os.path.lexists(local):
+        paths.append(local)
+    return paths
+
+
 def _environment_relationship(text):
     lines = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+    if tuple(lines) == _TOOLCHAIN_ENVIRONMENT:
+        return
     if not lines or lines[0] != _PORT_ROOT:
         raise ValueError('Environment does not establish the selected checkout as PORT_ROOT')
     # Accept only inert assignments/exports after the one known root expression.
@@ -38,6 +72,37 @@ def _environment_relationship(text):
         if 'PORT_ROOT' in line or not (re.fullmatch(r'(?:export )?' + assignment + r'(?: ' + assignment + r')*', line)
                                              or re.fullmatch(r'unset [A-Z_][A-Z0-9_]*(?: [A-Z_][A-Z0-9_]*)*', line)):
             raise ValueError('Environment contains unassessed shell operations; wrapper association is unknown')
+
+
+def _expanded_rank_limit(runner_text, launch_text):
+    """Recognize the shared ordinary-rank guard, without executing runner code."""
+    launcher = ast.parse(launch_text)
+    declarations = [node for node in launcher.body if isinstance(node, ast.Assign)
+                    and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == 'MAX_MPI_RANKS']
+    if len(declarations) != 1:
+        raise ValueError('Runner lacks the explicit expanded MPI rank contract')
+    limit = ast.literal_eval(declarations[0].value)
+    if type(limit) is not int or limit != 16:
+        raise ValueError('Runner expanded rank limit is not the supported 16-rank contract')
+    checks = ((launcher, 'mpi_command',
+               "type(ranks) is not int or not 1 <= ranks <= MAX_MPI_RANKS or mode not in ('native', 'synthetic')"),
+              (ast.parse(runner_text), 'plan',
+               'type(args.ranks) is int and 1 <= args.ranks <= launch.MAX_MPI_RANKS'))
+    for tree, name, expression in checks:
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name]
+        expected = ast.dump(ast.parse(expression, mode='eval').body)
+        guards = []
+        if len(functions) == 1:
+            for node in functions[0].body:
+                if name == 'mpi_command' and isinstance(node, ast.If) and any(isinstance(x, ast.Raise) for x in node.body):
+                    guards.append(node.test)
+                if (name == 'plan' and isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                        and isinstance(node.value.func, ast.Name) and node.value.func.id == 'require' and node.value.args):
+                    guards.append(node.value.args[0])
+        if not any(ast.dump(guard) == expected for guard in guards):
+            raise ValueError(f'Runner {name} does not enforce the recognized expanded rank contract')
+    return limit
 
 
 def _source(path, role, records):
@@ -248,12 +313,17 @@ def check_runner(runner, argv, *, project_root=None, allow_planned_input=False):
         if len(lines) != 3 or lines[:2] != _WRAPPER_PREFIX or lines[2] not in _WRAPPER_EXEC:
             raise ValueError('Shell wrapper is outside the recognized run-vasp.sh delegation; no shell/help probe performed')
         _environment_relationship(contents['environment.sh'])
+        for path in toolchain_sources(runner):
+            _source(path, 'runner_toolchain:' + path.name, records)
         interface['wrapper_relationship'] = 'run-vasp.sh -> environment.sh -> scripts/run_vasp.py'
         options = _parser_options(contents['run_vasp.py'])
         result['observed_capabilities']['argument_declarations'] = options
         # argv has already passed the existing result-association grammar.
         intended = dict(zip([item for item in argv if item != '--managed-foreground'][::2],
                             [item for item in argv if item != '--managed-foreground'][1::2]))
+        if int(intended['--ranks']) > 8:
+            result['observed_capabilities']['max_mpi_ranks'] = _expanded_rank_limit(
+                contents['run_vasp.py'], contents['launch.py'])
         required = set(intended) | {'--managed-foreground'}
         for name, declaration in options.items():
             if not isinstance(declaration.get('required', False), bool):

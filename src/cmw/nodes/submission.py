@@ -162,7 +162,9 @@ def _argv(spec, profile, bundle, work, native, *, input_directory=None):
     validate_runner_argv(argv)
     from cmw.periodic.vasp.runner_compatibility import check_runner
     interface = check_runner(profile['runner'], argv[1:], allow_planned_input=True)
-    _require(interface['exit_code'] == 0, 'Target runner interface is unqualified: ' + '; '.join(interface['missing_requirements']))
+    reason = ('; '.join(interface['missing_requirements'])
+              or str(interface['interface_compatibility'].get('reason', 'unknown interface')))
+    _require(interface['exit_code'] == 0, 'Target runner interface is unqualified: ' + reason)
     return argv
 
 
@@ -178,7 +180,7 @@ def preview(config, queue, spec):
     profile = config['profiles'][spec['profile']]
     _require(profile['engine'] == spec['engine'], 'Submission engine differs from target runtime profile')
     _require(spec['resources']['cpus'] <= profile['max_cpus'] and spec['resources']['mpi_ranks'] <= profile['max_ranks'],
-             'Requested resources exceed the pinned profile limits; VASP qualification remains at most eight ranks')
+             'Requested resources exceed the pinned profile limits')
     bundle, work, native = _paths(config, spec)
     molecular = spec['engine'] in {'ORCA', 'Multiwfn'}
     if molecular:

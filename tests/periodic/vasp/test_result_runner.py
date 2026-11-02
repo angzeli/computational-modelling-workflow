@@ -66,6 +66,18 @@ class RunnerBindingTests(unittest.TestCase):
         self.assertTrue(result["valid"], result)
         self.assertIn("runner_input:POTCAR", {s["role"] for s in result["sources"]})
 
+    def test_optional_current_toolchain_record_preserves_legacy_binding(self):
+        self.assertEqual(self.inspect()['status'], 'eligible')
+        line = ('toolchain: private/toolchain.env; PORT_GCC_VERSION=16.2.0, '
+                'PORT_OPENMPI_VERSION=5.0.11, PORT_PRRTE_VERSION=4.1.0_1, '
+                'PORT_OPENBLAS_VERSION=0.3.34, PORT_SCALAPACK_VERSION=2.2.3, PORT_FFTW_VERSION=3.3.11\n')
+        self.replace_metadata(self.original.replace('state: RUNNING', line + 'state: RUNNING'))
+        self.assertEqual(self.inspect()['status'], 'eligible')
+        for malformed in (line.replace('private/toolchain.env', '/unknown'),
+                          line.replace('5.0.11', '$(command)'), line + line):
+            self.replace_metadata(self.original.replace('state: RUNNING', malformed + 'state: RUNNING'))
+            self.assertNotEqual(self.inspect()['status'], 'eligible')
+
     def test_record_hash_and_dialect_are_explicit(self):
         for field, value in (("sha256", "d" * 64), ("dialect", "unknown")):
             original = self.spec["execution"]["runner_record"][field]
