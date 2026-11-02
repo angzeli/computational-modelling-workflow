@@ -153,7 +153,10 @@ def _force_summary(vectors, flags=None):
             "partial": [i for i, f in enumerate(flags) if any(f) and not all(f)]}
 
 
-def parse_outcar(path, *, max_bytes=None):
+def parse_outcar(path, *, max_bytes=None, analysis=False):
+    # Optional observations do not alter the established acceptance dialect.
+    if analysis:
+        from .analysis_outcar import collect_analysis_line
     segments, current, evaluation = [], None, None
     block, rows, block_ref = None, [], None
     pending_geometry = None
@@ -162,6 +165,10 @@ def parse_outcar(path, *, max_bytes=None):
     with SnapshotReader(path, "OUTCAR", max_bytes=max_bytes) as reader:
         for line in reader:
             text = line.text
+            if analysis and not text.endswith("\n"):
+                if current is not None:
+                    current.setdefault("analysis_findings", []).append({"code": "partial_trailing_line"})
+                continue
             if force_end_pending and text.strip():
                 if set(text.strip()) != {"-"}:
                     current["conflicts"].append({"code": "force_block_terminator", "reference": reference(line)})
@@ -240,6 +247,9 @@ def parse_outcar(path, *, max_bytes=None):
                     evaluation["native_convergence_reference"] = reference(line)
                 if re.search(r"\b(?:trial:|trial-energy|ZBRENT:|curvature:)\b", text):
                     evaluation["trial_messages"].append(reference(line))
+            if analysis:
+                collect_analysis_line(current, evaluation, line, in_echo=in_echo,
+                                      in_final_energy=in_final_energy)
             if "direct lattice vectors" in text:
                 block, rows, block_ref = "cell", [], reference(line)
                 continue
@@ -312,6 +322,8 @@ def parse_outcar(path, *, max_bytes=None):
                     evaluation["complete"] = all(v["value"] is not None for v in evaluation["energies"].values())
                     if evaluation["complete"]:
                         current["endpoint"] = pending_geometry
+                        if analysis:
+                            evaluation["geometry"] = pending_geometry
                 in_final_energy = False
             if "reached required accuracy - stopping structural energy minimisation" in text:
                 current["ionic_stop"] = reference(line)
@@ -367,12 +379,15 @@ def parse_ionic_summary(line, role="OSZICAR"):
             "reference": reference(line, role)}
 
 
-def parse_oszicar(path, role="OSZICAR", *, max_bytes=None):
+def parse_oszicar(path, role="OSZICAR", *, max_bytes=None, complete_lines_only=False):
     """Keep chronological evaluation groups, including unfinished trailing groups."""
     segments, evaluations, rows = [], [], []
     with SnapshotReader(path, role, max_bytes=max_bytes) as reader:
         for line in reader:
             text = line.text
+            if complete_lines_only and not text.endswith("\n"):
+                reader.record["partial_trailing_line"] = True
+                continue
             row = parse_electronic_row(line, role)
             if row:
                 if row["label"] == 1 and rows:

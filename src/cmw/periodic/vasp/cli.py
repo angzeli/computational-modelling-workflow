@@ -171,3 +171,6 @@ def register(subcommands: argparse._SubParsersAction) -> None:
     from .result_cli import register as register_results
 
     register_results(commands)
+    from .analysis_cli import register as register_analysis
+
+    register_analysis(commands)
