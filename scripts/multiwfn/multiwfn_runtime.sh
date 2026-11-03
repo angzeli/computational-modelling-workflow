@@ -65,6 +65,7 @@ multiwfn_jobs_event() {
 multiwfn_runtime_launch() {
   local alias_root alias_path child_pid="" source_alias="" source_name="" source_path="" status=0
   local previous_exit previous_int previous_term interrupted=0 interrupt_signal="" probe
+  local child_query_failed=0
   if [[ -z "$MULTIWFN_RUN_SETTINGS_DIRECTORY" || ! -s "$MULTIWFN_RUN_SETTINGS_PATH" ]]; then
     printf 'Multiwfn run-local settings were not prepared\n' >&2
     return 64
@@ -79,18 +80,23 @@ multiwfn_runtime_launch() {
   alias_root=$(mktemp -d "${TMPDIR:-/tmp}/cmw-multiwfn.XXXXXXXX") || return 70
   alias_path=$alias_root/runtime
   multiwfn_child_active() {
-    local owned IFS=$' \t\n'
+    local owned
     [[ -n "$child_pid" ]] || return 1
-    # The shell's own job table retains authority across interrupted waits.
-    for owned in $(jobs -pr) $(jobs -ps); do
+    # Stay in the owning shell: a signal during command-substitution parsing
+    # can abort even a simple trap before its handler executes on Bash 5.2.
+    if ! { jobs -pr && jobs -ps; } > "$alias_root/jobs.snapshot"; then
+      child_query_failed=1
+      return 0
+    fi
+    while IFS= read -r owned; do
       [[ "$owned" != "$child_pid" ]] || return 0
-    done
+    done < "$alias_root/jobs.snapshot" || { child_query_failed=1; return 0; }
     return 1
   }
   cleanup_multiwfn_alias() {
     if multiwfn_child_active; then return 0; fi
     [[ -z "$source_alias" ]] || rm -f -- "$source_alias"
-    rm -f -- "$alias_path"
+    rm -f -- "$alias_path" "$alias_root/jobs.snapshot"
     rmdir "$alias_root" 2>/dev/null || true
   }
   record_multiwfn_signal() {
@@ -150,17 +156,19 @@ multiwfn_runtime_launch() {
     printf 'CMW runner launch evidence could not be recorded; child supervision continues\n' >&2
   # A signal just before a blocking wait would otherwise strand a resistant child.
   # Recorded intent also covers a trap between launch and assigning $!.
-  while multiwfn_child_active && ((interrupted == 0)); do sleep 0.1 || true; done
-  if ((interrupted != 0)) && multiwfn_child_active; then
-    kill -"$interrupt_signal" "$child_pid" 2>/dev/null || true
+  while multiwfn_child_active && ((interrupted == 0 && child_query_failed == 0)); do sleep 0.1 || true; done
+  if ((interrupted != 0 || child_query_failed != 0)) && multiwfn_child_active; then
+    if ((child_query_failed == 0)); then kill -"$interrupt_signal" "$child_pid" 2>/dev/null || true; fi
     # Give the direct child two seconds to cooperate, then bound KILL drainage.
     for probe in {1..40}; do
       multiwfn_child_active || break
+      ((child_query_failed == 0)) || break
       sleep 0.05 || true
     done
-    if multiwfn_child_active; then kill -KILL "$child_pid" 2>/dev/null || true; fi
+    if multiwfn_child_active && ((child_query_failed == 0)); then kill -KILL "$child_pid" 2>/dev/null || true; fi
     for probe in {1..40}; do
       multiwfn_child_active || break
+      ((child_query_failed == 0)) || break
       sleep 0.05 || true
     done
     if multiwfn_child_active; then
