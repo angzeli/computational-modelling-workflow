@@ -15,7 +15,7 @@ from .locations import LocationDescriptor, read_location_metadata
 _VASP_PAIRS = frozenset({
     '--input', '--output', '--binary', '--ranks', '--ncore', '--kpar',
     '--mpi-mode', '--restart', '--restart-from', '--timeout', '--stop-before',
-    '--extra-input', '--execution-budget',
+    '--extra-input', '--execution-budget', '--binary-manifest',
 })
 _ORCA_PAIRS = frozenset({
     '--input', '--target', '--metadata', '--output', '--stderr', '--layout',
@@ -144,9 +144,15 @@ def vasp_runner_locations(job):
         options, source, output = route
     except (KeyError, TypeError, ValueError) as exc:
         return (_unknown(f'Unresolved run-vasp.sh declaration: {exc}'),)
-    return (_decl('inputs', source, kind='directory'),
-            _decl('output', output, kind='directory', expected_creation='--dry-run' not in options,
-                  detail='Declared VASP output; no process or scientific-result association verified.'))
+    declared = (_decl('inputs', source, kind='directory'),
+                _decl('output', output, kind='directory', expected_creation='--dry-run' not in options,
+                      detail='Declared VASP output; no process or scientific-result association verified.'))
+    if '--binary-manifest' in options and '--dry-run' not in options:
+        declared += (_decl('backend-reports', output / 'vmb-reports', kind='directory', expected_creation=True,
+                           detail='Experimental per-rank backend reports (vmb.rank-report.v1).'),
+                     _decl('backend-evidence', output / 'vmb-evidence.json', expected_creation=True,
+                           detail='Aggregated backend evidence written by the pinned aggregator.'))
+    return declared
 
 
 def _orca_stage(options, job):

@@ -796,6 +796,10 @@ def handle(args):
                 if result.get('molecular_submission'):
                     from .molecular import inspect_result
                     result = {**result, 'scientific_result': inspect_result(result)}
+                from cmw.periodic.vasp.backend_evidence import summarize
+                backend = summarize(result)
+                if backend is not None:
+                    result = {**result, 'backend_evidence': backend}
                 from .lifecycle import observe_execution
                 from .store import ACTIVE
                 if result['status'] in ACTIVE:
