@@ -184,17 +184,18 @@ def _validate_backend_metadata(scalar, positions, running, finished, job, manife
     _require(origin == "cmw" and attempt == job.get("attempt_id"),
              "Backend reports are not bound to this Jobs attempt")
     _require(scalar["backend_report_dir"] == str(output / "vmb-reports"), "Backend report directory moved")
-    status = scalar["backend_evidence_status"]
-    _require(status in ("COMPLETE", "INCOMPLETE", "INVALID", "AGGREGATION_FAILED"),
-             "Unknown backend evidence status")
-    summary = None
-    if status != "AGGREGATION_FAILED":
-        summary = backend_evidence.check_summary(json.loads(scalar["backend_summary"]))
-        _require(summary["evidence"] == status, "Backend summary contradicts its evidence status")
+    _require(scalar["backend_mode"] in ("off", "auto", "force") and scalar["backend_check"] in ("True", "False"),
+             "Malformed backend mode/check metadata")
+    # Integrity failures (moved, missing, altered or contradictory evidence) refuse
+    # the association; honest INCOMPLETE/INVALID/AGGREGATION_FAILED evidence is
+    # retained as a fact and is never GPU-qualified.
+    facts = backend_evidence.verify_record(
+        scalar, output, attempt_id=attempt, world_size=int(job["argv"][job["argv"].index("--ranks") + 1]),
+        mode=scalar["backend_mode"], check=scalar["backend_check"] == "True")
     return {"manifest": name, "manifest_sha256": digest, "mode": scalar["backend_mode"],
-            "shadow_check": scalar["backend_check"] == "True", "attempt_id": attempt,
-            "evidence_status": status, "summary": summary,
-            "qualification": "runner-recorded backend evidence; not scientific acceptance or speed"}
+            "shadow_check": scalar["backend_check"] == "True", "attempt_id": attempt, **facts,
+            "qualification": "verified backend evidence; operational association only, not "
+                             "scientific acceptance or speed"}
 
 
 def _parse_record(content, allowed_keys):

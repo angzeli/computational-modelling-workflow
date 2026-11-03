@@ -300,13 +300,21 @@ keys only for this argv. It requires:
 - `backend_attempt_id` to equal the Jobs attempt;
 - the selection keys in the staging block and the evidence keys in the terminal
   block;
-- a backend summary whose own invariants hold.
+- `OUTPUT/vmb-evidence.json` whose bytes match the recorded SHA-256;
+- a `vmb.attempt-evidence.v1` document for this attempt, mode, check and world
+  size, whose counters, rank sets and verdicts are re-derived and agree;
+- a compact runner summary equal to the one derived from that file.
+
+Integrity failures refuse the association. Honest INCOMPLETE, INVALID or
+AGGREGATION_FAILED evidence is kept as a fact and is never GPU-qualified. The
+aggregator is never executed by CMW.
 
 The association facts carry `backend`.
 
 **Display.** `cmw jobs show` (local, or `--node`) adds `backend_evidence`, with a
 one-line summary. It reads the manifest, runner metadata and evidence as data,
-and verifies the evidence digest. The line keeps these verdicts separate:
+and applies the same verification. An unverifiable record shows
+`evidence UNVERIFIED` and no verdict; it is never shown as CPU-only or qualified. The line keeps these verdicts separate:
 - evidence completeness;
 - CPU-only or GPU-consumed execution;
 - the shadow check;

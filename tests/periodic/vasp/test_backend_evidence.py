@@ -21,6 +21,18 @@ SUMMARY = {'evidence': 'COMPLETE', 'execution': 'GPU_CONSUMED', 'shadow_check': 
            'gpu_qualified': True, 'mode': 'force', 'check': True, 'world_size': 16,
            'max_check_ratio': 0.04, 'ranks_reported': 16, 'missing_ranks': [], 'ranks_with_consumed': 3,
            'calls': 10, 'consumed': 6, 'cpu_calls': 4, 'gpu_submitted': 6, 'range_fallbacks': 4, 'problems': 0}
+_STATUS_NAMES = ('ok', 'disabled', 'trivial', 'badarg', 'nonfinite', 'too_small', 'too_large',
+                 'no_device', 'gpu_error', 'gpu_nonfinite', 'check_failed', 'range', 'auto_cpu')
+# Consistent synthetic vmb.attempt-evidence.v1 matching SUMMARY (attempt filled per test).
+EVIDENCE = {'schema': 'vmb.attempt-evidence.v1', 'attempt_id': None, 'world_size': 16,
+            'report_dir': '/synthetic/vmb-reports', 'evidence': 'COMPLETE', 'problems': [],
+            'ranks_reported': list(range(16)), 'missing_ranks': [], 'claimed_without_report': [],
+            'totals': {'calls': 10, 'gpu_submitted': 6, 'gpu_completed': 6, 'consumed': 6, 'cpu_calls': 4,
+                       'checked': 6},
+            'statuses': {**dict.fromkeys(_STATUS_NAMES, 0), 'ok': 6, 'range': 4},
+            'max_check_ratio': 0.04, 'ranks_with_consumed': [0, 5, 9], 'execution': 'GPU_CONSUMED',
+            'shadow_check': 'PASSED', 'gpu_qualified': True, 'backend': None, 'mode': 'force', 'check': True,
+            'executable': '/synthetic/vasp_std_vmb', 'hostname': 'synthetic', 'limitations': []}
 
 
 def sha(path):
@@ -118,52 +130,246 @@ class BackendEvidenceTests(unittest.TestCase):
         roles = {d.role for d in vasp_runner_locations({'argv': self.argv, 'cwd': str(self.inputs)})}
         self.assertTrue({'backend-reports', 'backend-evidence', 'output'} <= roles)
 
-    def metadata(self, *, status='COMPLETE', summary=SUMMARY, attempt=None, extra_terminal=''):
-        self.output.mkdir()
-        evidence = self.output / 'vmb-evidence.json'
-        evidence.write_text(json.dumps({'schema': 'vmb.attempt-evidence.v1', 'attempt_id': attempt or self.attempt,
-                                        'evidence': status, 'missing_ranks': [], 'problems': []}))
+    def evidence(self, **changes):
+        doc = json.loads(json.dumps(EVIDENCE))
+        doc['attempt_id'] = self.attempt
+        for dotted, value in changes.items():
+            target = doc
+            *parents, leaf = dotted.split('__')
+            for key in parents:
+                target = target[key]
+            target[leaf] = value
+        return doc
+
+    def metadata(self, *, status='COMPLETE', evidence=None, summary=None, attempt=None, digest=None,
+                 mode='force', check='True', write_evidence=True, launcher_status='0'):
+        """Write a runner record whose terminal keys describe OUTPUT/vmb-evidence.json."""
+        if not self.output.exists():
+            self.output.mkdir()
+        path = self.output / 'vmb-evidence.json'
+        doc = self.evidence() if evidence is None else evidence
+        if write_evidence:
+            path.write_text(json.dumps(doc, indent=1))
+        recorded = digest or (sha(path) if path.exists() else '0' * 64)
         manifest = self.manifest()
         lines = ['state: STAGING', f'binary: {self.exe}', 'binary_selection: manifest',
                  f'binary_manifest: {manifest}; sha256={sha(manifest)}; name=gpu-force',
                  'backend: vasp-metal-backend 1.2.3; source_commit=c; source_digest=d; library_sha256=e',
-                 'backend_mode: force', 'backend_check: True',
+                 f'backend_mode: {mode}', f'backend_check: {check}',
                  f'backend_attempt_id: {attempt or self.attempt}; origin=cmw',
                  f'backend_report_dir: {self.output / "vmb-reports"}', 'state: RUNNING',
-                 f'backend_evidence: {evidence}; sha256={sha(evidence)}',
-                 f'backend_evidence_status: {status}',
-                 f'backend_summary: {json.dumps(summary, separators=(",", ":"))}', extra_terminal,
+                 f'launcher_status: {launcher_status}',
+                 f'backend_evidence: {path}; sha256={recorded}', f'backend_evidence_status: {status}',
+                 f'backend_summary: {json.dumps(SUMMARY if summary is None else summary, separators=(",", ":"))}',
                  'state: FINISHED']
-        (self.output / 'RUN_METADATA.txt').write_text('\n'.join(l for l in lines if l) + '\n')
+        (self.output / 'RUN_METADATA.txt').write_text('\n'.join(lines) + '\n')
         return {'argv': self.argv, 'attempt_id': self.attempt}
 
-    def test_summary_complete_qualified(self):
-        result = be.summarize(self.metadata())
-        self.assertEqual(result['problems'], [])
-        self.assertEqual(result['state'], 'FINISHED')
-        self.assertIn('GPU_CONSUMED: consumed 6 of 10 calls on 3 ranks; shadow PASSED', result['line'])
-        self.assertIn('GPU qualified yes', result['line'])
+    def reset_output(self):
+        if self.output.exists():
+            for item in sorted(self.output.rglob('*'), reverse=True):
+                item.unlink()
+            self.output.rmdir()
 
-    def test_summary_problems_remain_visible(self):
-        incomplete = {**SUMMARY, 'evidence': 'INCOMPLETE', 'ranks_reported': 15, 'missing_ranks': [7],
-                      'gpu_qualified': False}
-        result = be.summarize(self.metadata(status='INCOMPLETE', summary=incomplete))
-        self.assertIn('PROBLEM: backend evidence INCOMPLETE', result['line'])
-        self.assertIn('GPU qualified NO', result['line'])
+    def bind(self, job):
+        """Strict result-binding path: the runner-record backend validation."""
+        lines = (self.output / 'RUN_METADATA.txt').read_text().splitlines()
+        keys = [line.partition(': ')[0] for line in lines]
+        values = {k: line.partition(': ')[2] for k, line in zip(keys, lines) if k != 'state'}
+        positions = {k: [i] for i, k in enumerate(keys) if k != 'state'}
+        running, finished = keys.index('state', 1), len(lines) - 1
+        return _validate_backend_metadata(values, positions, running, finished, job, 'gpu-force', self.output)
 
-    def test_summary_rejects_contradictions(self):
-        cases = [dict(summary={**SUMMARY, 'gpu_qualified': False}),
-                 dict(summary={**SUMMARY, 'calls': 11}),
-                 dict(summary={**SUMMARY, 'execution': 'CPU_ONLY'}),
-                 dict(attempt='b' * 32)]
-        for case in cases:
-            with self.subTest(case=case):
-                if self.output.exists():
-                    for p in sorted(self.output.rglob('*'), reverse=True):
-                        p.unlink()
-                    self.output.rmdir()
-                result = be.summarize(self.metadata(**case))
-                self.assertTrue(result['problems'], result)
+    def assert_refused(self, job, fragment):
+        """Integrity failures refuse binding and leave display without a verdict."""
+        with self.assertRaisesRegex(ValueError, fragment):
+            self.bind(job)
+        shown = be.summarize(job)
+        self.assertFalse(shown['verified'])
+        self.assertIsNone(shown['summary'])
+        self.assertIn('evidence UNVERIFIED', shown['line'])
+        self.assertNotIn('CPU_ONLY', shown['line'])
+        self.assertNotIn('GPU qualified yes', shown['line'])
+
+    def test_complete_evidence_binds_and_displays(self):
+        job = self.metadata()
+        facts = self.bind(job)
+        self.assertTrue(facts['verified'] and facts['gpu_qualified'])
+        self.assertEqual((facts['evidence_status'], facts['execution'], facts['shadow_check']),
+                         ('COMPLETE', 'GPU_CONSUMED', 'PASSED'))
+        self.assertEqual(facts['summary'], SUMMARY)
+        shown = be.summarize(job)
+        self.assertEqual(shown['problems'], [])
+        self.assertIn('GPU_CONSUMED: consumed 6 of 10 calls on 3 ranks; shadow PASSED', shown['line'])
+        self.assertIn('GPU qualified yes', shown['line'])
+
+    def test_missing_or_altered_evidence_file(self):
+        job = self.metadata()
+        (self.output / 'vmb-evidence.json').unlink()
+        self.assert_refused(job, 'unreadable')
+        self.reset_output()
+        job = self.metadata()
+        path = self.output / 'vmb-evidence.json'
+        path.write_text(path.read_text().replace('"calls": 10', '"calls": 11'))  # digest not updated
+        self.assert_refused(job, 'differ from the recorded digest')
+        self.reset_output()
+        job = self.metadata()
+        text = (self.output / 'RUN_METADATA.txt').read_text()
+        (self.output / 'RUN_METADATA.txt').write_text(
+            text.replace(f'{self.output}/vmb-evidence.json', f'{self.root}/vmb-evidence.json'))
+        self.assert_refused(job, 'OUTPUT/vmb-evidence.json')
+
+    def test_summary_must_match_evidence(self):
+        for change in ({'consumed': 7}, {'gpu_qualified': False}, {'missing_ranks': [3]},
+                       {'ranks_with_consumed': 2}, {'range_fallbacks': 0}, {'max_check_ratio': 0.05},
+                       {'problems': 1}, {'world_size': 8}):
+            with self.subTest(change=change):
+                self.reset_output()
+                self.assert_refused(self.metadata(summary={**SUMMARY, **change}), 'summary differs|world size')
+
+    def test_tampered_counters_with_recomputed_digest(self):
+        cases = [{'totals__calls': 11}, {'totals__consumed': 5}, {'statuses__ok': 5},
+                 {'totals__gpu_completed': 5}, {'totals__checked': 0}, {'statuses__range': 3},
+                 {'totals__consumed': 5, 'totals__cpu_calls': 5, 'statuses__ok': 5, 'statuses__range': 5,
+                  'totals__gpu_submitted': 5, 'totals__gpu_completed': 5, 'totals__checked': 5}]
+        for change in cases:
+            with self.subTest(change=change):
+                self.reset_output()
+                self.assert_refused(self.metadata(evidence=self.evidence(**change)),
+                                    'inconsistent|summary differs|contradict|checked')
+
+    def test_identity_mismatches(self):
+        cases = [(dict(evidence=self.evidence(attempt_id='b' * 32)), 'another attempt'),
+                 (dict(mode='auto'), 'mode/check'), (dict(check='False'), 'mode/check'),
+                 (dict(evidence=self.evidence(world_size=8)), 'world size'),
+                 (dict(evidence=self.evidence(schema='vmb.attempt-evidence.v0')), 'not vmb.attempt-evidence.v1')]
+        for kwargs, fragment in cases:
+            with self.subTest(kwargs=kwargs):
+                self.reset_output()
+                self.assert_refused(self.metadata(**kwargs), fragment)
+
+    def test_rank_sets_must_be_consistent(self):
+        cases = [{'missing_ranks': [3]}, {'ranks_reported': list(range(15))},
+                 {'ranks_with_consumed': [0, 5, 99]}, {'ranks_with_consumed': [0, 0, 5]},
+                 {'ranks_with_consumed': [1, 2, 20]}, {'claimed_without_report': [4]},
+                 {'ranks_with_consumed': []}]
+        for change in cases:
+            with self.subTest(change=change):
+                self.reset_output()
+                self.assert_refused(self.metadata(evidence=self.evidence(**change)),
+                                    'rank|COMPLETE|Consumed')
+
+    def test_malformed_and_nonfinite_values(self):
+        cases = [{'max_check_ratio': -1.0}, {'max_check_ratio': 'inf'}, {'totals__calls': 10.0},
+                 {'totals__calls': True}, {'statuses__ok': '6'}, {'gpu_qualified': 1}, {'problems': 'none'},
+                 {'evidence': 'MOSTLY'}, {'totals': {'calls': 10}}]
+        for change in cases:
+            with self.subTest(change=change):
+                self.reset_output()
+                self.assert_refused(self.metadata(evidence=self.evidence(**change)), '.')
+        self.reset_output()
+        job = self.metadata()
+        path = self.output / 'vmb-evidence.json'
+        path.write_text(path.read_text().replace('0.04', 'NaN'))
+        text = (self.output / 'RUN_METADATA.txt').read_text()
+        (self.output / 'RUN_METADATA.txt').write_text(
+            '\n'.join(l.replace(l.partition('sha256=')[2], sha(path)) if l.startswith('backend_evidence:') else l
+                      for l in text.splitlines()) + '\n')
+        self.assert_refused(job, 'non-finite')
+
+    def test_honest_bad_evidence_binds_but_never_qualifies(self):
+        incomplete = self.evidence(evidence='INCOMPLETE', ranks_reported=[r for r in range(16) if r != 7],
+                                   missing_ranks=[7], claimed_without_report=[7], gpu_qualified=False)
+        invalid = self.evidence(evidence='INVALID', problems=['rank 3: report belongs to another attempt'],
+                                ranks_reported=[r for r in range(16) if r != 3], gpu_qualified=False)
+        for status, doc, missing in (('INCOMPLETE', incomplete, [7]), ('INVALID', invalid, [])):
+            with self.subTest(status=status):
+                self.reset_output()
+                summary = {**SUMMARY, 'evidence': status, 'gpu_qualified': False, 'ranks_reported': 15,
+                           'missing_ranks': missing, 'problems': len(doc['problems'])}
+                job = self.metadata(status=status, evidence=doc, summary=summary)
+                facts = self.bind(job)  # process exited 0; the association stays, never qualified
+                self.assertEqual((facts['evidence_status'], facts['gpu_qualified']), (status, False))
+                self.assertTrue(facts['problems'])
+                shown = be.summarize(job)
+                self.assertIn(f'PROBLEM: backend evidence {status}', shown['line'])
+                self.assertIn('GPU qualified NO', shown['line'])
+        self.reset_output()
+        job = self.metadata(status='AGGREGATION_FAILED', write_evidence=False, digest='NONE',
+                            summary={'error': 'aggregator exited 1'})
+        facts = self.bind(job)
+        self.assertEqual((facts['verified'], facts['gpu_qualified'], facts['execution']), (False, False, None))
+        shown = be.summarize(job)
+        self.assertIn('evidence AGGREGATION_FAILED; no verified backend verdict', shown['line'])
+        self.assertIn('PROBLEM: backend aggregation failed', shown['line'])
+        self.assertNotIn('CPU_ONLY', shown['line'])
+        self.reset_output()
+        with self.assertRaisesRegex(ValueError, 'aggregation-failure'):
+            self.bind(self.metadata(status='AGGREGATION_FAILED', summary=SUMMARY))
+
+    def test_shadow_failure_is_not_qualified(self):
+        failed = self.evidence(max_check_ratio=2.5, shadow_check='FAILED', gpu_qualified=False)
+        job = self.metadata(evidence=failed, summary={**SUMMARY, 'max_check_ratio': 2.5,
+                                                       'shadow_check': 'FAILED', 'gpu_qualified': False})
+        facts = self.bind(job)
+        self.assertEqual((facts['shadow_check'], facts['gpu_qualified']), ('FAILED', False))
+        self.assertIn('shadow check failed', be.summarize(job)['line'])
+
+    def show_surfaces(self, job):
+        """`cmw jobs show --json` locally and the node endpoint's `show` for one stored job."""
+        from contextlib import redirect_stdout
+        from copy import deepcopy
+        import io
+        from uuid import uuid4
+        from cmw.cli import main
+        from cmw.nodes.backend import LocalBackend
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(main(['jobs', '--state', str(self.store.root), 'show', job['display_id'], '--json']), 0)
+        local = json.loads(out.getvalue())
+        if not hasattr(self, 'node_record'):
+            node_id = uuid4().hex
+            self.node_record = node_id, self.store.enroll_queue(node_id, 'linux:synthetic-only')
+        node_id, record = self.node_record
+        config = {'schema': 1, 'node_id': node_id, 'host_id': 'linux:synthetic-only',
+                  'host': {'platform': 'linux', 'hardware_id': 'synthetic-only'},
+                  'runtime': {'fingerprint': 'synthetic-runtime', 'version': '0.1.0'},
+                  'queues': {'research': {**record, 'state': str(self.store.root)}},
+                  'storages': {}, 'profiles': {}}
+        readiness = {'ready': True, 'identity_ready': True, 'runtime_ready': True, 'storage_ready': True,
+                     'profiles_ready': True, 'identity_errors': [], 'runtime_errors': [], 'errors': [],
+                     'host': config['host'], 'runtime': config['runtime'], 'queues': {'research': record},
+                     'storages': {}}
+        backend = LocalBackend(self.root / 'node-config', 'research', clock=lambda: 100.,
+                               identity_loader=lambda _: deepcopy(config),
+                               identity_checker=lambda _: deepcopy(readiness),
+                               activity_projector=lambda store: store.snapshot(now=100.),
+                               boot_provider=lambda: 10.)
+        self.addCleanup(backend.close)
+        node = backend.call('show', target=backend.target(job))['result']
+        return local.get('backend_evidence'), node.get('backend_evidence')
+
+    def test_jobs_show_local_and_node_surfaces(self):
+        from cmw.jobs.store import Store
+        self.store = Store(self.root / 'queue')
+        job = self.store.add(argv=self.argv, cwd=self.inputs, name='Synthetic manifest job', hold=True,
+                             write_scope=str(self.root))
+        self.attempt = job['attempt_id']
+        self.metadata()
+        for surface in self.show_surfaces(job):
+            self.assertTrue(surface['verified'])
+            self.assertIn('GPU qualified yes', surface['line'])
+        path = self.output / 'vmb-evidence.json'
+        path.write_text(path.read_text().replace('"consumed": 6', '"consumed": 7'))
+        for surface in self.show_surfaces(job):
+            self.assertFalse(surface['verified'])
+            self.assertIn('evidence UNVERIFIED', surface['line'])
+            self.assertNotIn('GPU qualified', surface['line'])
+        stock = [a for a in self.argv if a not in ('--binary-manifest', 'gpu-force')]
+        stock[stock.index('--output') + 1] = str(self.root / 'stock-output')
+        ordinary = self.store.add(argv=stock, cwd=self.inputs, name='Ordinary VASP', hold=True,
+                                  write_scope=str(self.root))
+        self.assertEqual(self.show_surfaces(ordinary), (None, None))
 
     def test_planned_job_shows_selection(self):
         self.manifest()
@@ -171,22 +377,6 @@ class BackendEvidenceTests(unittest.TestCase):
         self.assertEqual((result['state'], result['selection']['executable']), ('NOT_STARTED', str(self.exe)))
         self.assertIn('mode=force, check=1', result['line'])
         self.assertIsNone(be.summarize({'argv': [a for a in self.argv if a not in ('--binary-manifest', 'gpu-force')]}))
-
-    def test_result_binding_requires_attempt_and_block_order(self):
-        self.metadata()
-        lines = (self.output / 'RUN_METADATA.txt').read_text().splitlines()
-        values = {l.partition(': ')[0]: l.partition(': ')[2] for l in lines if l.partition(': ')[0] != 'state'}
-        positions = {k: [i] for i, l in enumerate(lines) for k in [l.partition(': ')[0]]}
-        running, finished = 9, len(lines) - 1
-        job = {'argv': self.argv, 'attempt_id': self.attempt}
-        facts = _validate_backend_metadata(values, positions, running, finished, job, 'gpu-force', self.output)
-        self.assertEqual((facts['evidence_status'], facts['summary']['consumed']), ('COMPLETE', 6))
-        with self.assertRaisesRegex(ValueError, 'not bound to this Jobs attempt'):
-            _validate_backend_metadata(values, positions, running, finished, {**job, 'attempt_id': 'b' * 32},
-                                       'gpu-force', self.output)
-        moved = dict(positions, backend_mode=[running + 1])
-        with self.assertRaisesRegex(ValueError, 'staging or terminal block'):
-            _validate_backend_metadata(values, moved, running, finished, job, 'gpu-force', self.output)
 
     def test_profile_pins_manifest_sources(self):
         from cmw.nodes.identity import _profile
