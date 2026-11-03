@@ -307,6 +307,39 @@ class BackendEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'aggregation-failure'):
             self.bind(self.metadata(status='AGGREGATION_FAILED', summary=SUMMARY))
 
+    def accounting(self, ranks, consumed):
+        """Aggregate and summary whose counters are consistent with `consumed` GPU results."""
+        cpu = 10 - consumed
+        doc = self.evidence(ranks_with_consumed=ranks,
+                            totals={'calls': 10, 'gpu_submitted': consumed, 'gpu_completed': consumed,
+                                    'consumed': consumed, 'cpu_calls': cpu, 'checked': consumed},
+                            statuses={**dict.fromkeys(_STATUS_NAMES, 0), 'ok': consumed, 'range': cpu},
+                            max_check_ratio=0.04 if consumed else None,
+                            execution='GPU_CONSUMED' if consumed else 'CPU_ONLY',
+                            shadow_check='PASSED' if consumed else 'NO_CHECKS', gpu_qualified=bool(consumed))
+        summary = {**SUMMARY, 'consumed': consumed, 'cpu_calls': cpu, 'gpu_submitted': consumed,
+                   'range_fallbacks': cpu, 'ranks_with_consumed': len(ranks),
+                   'max_check_ratio': doc['max_check_ratio'], 'execution': doc['execution'],
+                   'shadow_check': doc['shadow_check'], 'gpu_qualified': doc['gpu_qualified']}
+        return doc, summary
+
+    def test_consumed_ranks_cannot_exceed_consumed_calls(self):
+        doc, summary = self.accounting([0, 1, 2], 1)  # three ranks claim GPU work; only one result exists
+        with self.assertRaisesRegex(ValueError, 'more consumed ranks than consumed'):
+            be.verify_aggregate(doc, attempt_id=self.attempt, world_size=16, mode='force', check=True)
+        self.assert_refused(self.metadata(evidence=doc, summary=summary), 'more consumed ranks than consumed')
+
+    def test_consumed_rank_accounting_positive_controls(self):
+        for ranks, consumed, execution in (([0, 5], 2, 'GPU_CONSUMED'), ([], 0, 'CPU_ONLY')):
+            with self.subTest(consumed=consumed):
+                self.reset_output()
+                doc, summary = self.accounting(ranks, consumed)
+                derived = be.verify_aggregate(doc, attempt_id=self.attempt, world_size=16, mode='force', check=True)
+                self.assertEqual(derived, summary)
+                facts = self.bind(self.metadata(evidence=doc, summary=summary))
+                self.assertEqual((facts['verified'], facts['execution'], facts['gpu_qualified']),
+                                 (True, execution, bool(consumed)))
+
     def test_shadow_failure_is_not_qualified(self):
         failed = self.evidence(max_check_ratio=2.5, shadow_check='FAILED', gpu_qualified=False)
         job = self.metadata(evidence=failed, summary={**SUMMARY, 'max_check_ratio': 2.5,

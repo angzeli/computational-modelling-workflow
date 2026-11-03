@@ -238,6 +238,8 @@ def verify_aggregate(evidence, *, attempt_id, world_size, mode, check):
                  'Backend evidence counters are inconsistent')
         _require(reported or all(v == 0 for v in counts.values()), 'Counters recorded without any rank report')
     _require((counts['consumed'] > 0) == bool(consumed_ranks), 'Consumed ranks contradict consumed calls')
+    # Each listed rank consumed at least one GPU result.
+    _require(len(consumed_ranks) <= counts['consumed'], 'Evidence lists more consumed ranks than consumed calls')
     ev_mode, ev_check = evidence.get('mode'), evidence.get('check')
     if reported:
         _require(ev_mode in _MODES and ev_mode == mode and type(ev_check) is bool and ev_check == check,
