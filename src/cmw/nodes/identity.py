@@ -24,7 +24,7 @@ from .runtime_observation import (RuntimeRefusal, RuntimeVerifier, file_epoch, i
 MAX_CONFIG_BYTES = 1024 * 1024
 _ALIAS = re.compile(r'[A-Za-z][A-Za-z0-9_-]{0,47}\Z')
 _CONFIG_FIELDS = {'schema', 'node_id', 'host_id', 'host', 'runtime', 'queues', 'storages', 'profiles'}
-_PROFILE_FIELDS = {'engine', 'runner', 'max_cpus', 'max_ranks', 'dependencies', 'runtime'}
+_PROFILE_FIELDS = {'engine', 'runner', 'max_cpus', 'max_ranks', 'dependencies', 'runtime', 'binary_manifests'}
 MAX_PROFILE_FILE_BYTES = 2 * 1024**3
 
 
@@ -257,6 +257,15 @@ def _profile(spec, runtime):
                     for name in ('run_vasp.py', 'environment.sh', 'launch.py', 'observables.py')]
         from cmw.periodic.vasp.runner_compatibility import toolchain_sources
         required += [str(path) for path in toolchain_sources(spec['runner'])]
+        manifests = spec.get('binary_manifests', [])
+        if not isinstance(manifests, list) or len(manifests) > 4 or len(set(manifests)) != len(manifests):
+            raise ValueError('binary_manifests must be an explicit unique list of at most four names')
+        from cmw.periodic.vasp import backend_evidence
+        for name in manifests:
+            if not isinstance(name, str) or backend_evidence.NAME.fullmatch(name) is None:
+                raise ValueError('binary_manifests entries must be plain manifest names')
+            # Pin the manifest, the selected executable, its aggregator and libraries.
+            required += [str(path) for path in backend_evidence.manifest_sources(spec['runner'], name)]
         dependencies = sorted(set(dependencies + required))
     runtime_record = {}
     if spec['engine'] in {'ORCA', 'Multiwfn'}:

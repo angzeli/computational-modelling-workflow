@@ -14,6 +14,7 @@ import re
 import stat
 import subprocess
 
+from . import backend_evidence
 from .result_runner import DIALECT, validate_runner_argv
 from .result_sources import SnapshotReader
 
@@ -351,6 +352,22 @@ def check_runner(runner, argv, *, project_root=None, allow_planned_input=False):
             'status': 'IDENTIFIED' if isinstance(managed.get('help'), str) else 'NOT_IDENTIFIED',
             'text': managed.get('help'), 'qualification': 'declaration only; implementation not qualified'}
         result['observed_capabilities']['thread_propagation'] = 'No --threads option in the supported binding route; inspect the shell environment separately.'
+        name = backend_evidence.manifest_name([str(runner), *argv])
+        if name is not None:
+            # Static reads and digests only; the selected executable is never run.
+            try:
+                versions = {}
+                for path in toolchain_sources(runner):
+                    if path.name.endswith(('.txt', '.env')):
+                        for line in _source(path, 'runner_toolchain:' + path.name, records).splitlines():
+                            key, sep, value = line.strip().partition('=')
+                            if sep and key.startswith('PORT_') and not line.lstrip().startswith('#'):
+                                versions[key.strip()] = value.strip()
+                selection = backend_evidence.verify_selection(runner, name, versions or None)
+                selection['pinned_sources'] = [str(p) for p in backend_evidence.manifest_sources(runner, name)]
+                result['observed_capabilities']['binary_selection'] = selection
+            except (OSError, ValueError, KeyError) as exc:
+                result['missing_requirements'].append(f'Binary manifest {name} is not usable: {exc}')
         if result['missing_requirements']:
             result['status'] = 'incompatible'
             interface['status'] = 'INCOMPATIBLE'

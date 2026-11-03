@@ -322,6 +322,8 @@ def worker(store, job_id, claim):
         env = runtime_environment()
         env.update(job["env"])
         env.pop('CMW_SUSPENSION_CONTEXT', None)
+        # Payloads may bind their own evidence to this exact attempt.
+        env['CMW_JOBS_ATTEMPT_ID'] = job['attempt_id']
         coordinator = None
         if job.get('suspension'):
             env['CMW_SUSPENSION_CONTEXT'] = str(attempt/'suspension'/'context.json')

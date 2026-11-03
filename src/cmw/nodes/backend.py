@@ -356,6 +356,10 @@ class LocalBackend:
             if job.get('molecular_submission') is not None:
                 from cmw.jobs.molecular import inspect_result
                 result['scientific_result'] = inspect_result(job)
+            from cmw.periodic.vasp.backend_evidence import summarize
+            backend = summarize(job)
+            if backend is not None:
+                result['backend_evidence'] = backend
             return result
         if operation == 'observe':
             _params(params)

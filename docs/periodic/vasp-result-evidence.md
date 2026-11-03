@@ -278,6 +278,44 @@ directory; the original specification is retained separately from resolved paths
 
 ### Optional external-runner association
 
+#### Experimental binary-manifest route
+
+A run-vasp.sh argv may add `--binary-manifest NAME` together with
+`--binary std`. The port and backend contracts are in the port's
+docs/LAUNCHER.md and vasp-metal-backend docs/CONTRACT-v0.3.md.
+
+**Argv and static checks.**
+- `validate_runner_argv` accepts the pair only outside controlled suspension.
+- `cmw vasp check-runner` reads `PORT_ROOT/private/binary-manifests/NAME.json`
+  and digests the selected executable, aggregator and pinned libraries. It never
+  executes them. The selection and the files to pin are recorded under
+  `observed_capabilities.binary_selection`.
+- A VASP node profile may list `binary_manifests: [NAME]`, so that those files
+  join the pinned dependencies and any later change refuses readiness.
+
+**Attempt binding.** Workers export `CMW_JOBS_ATTEMPT_ID`.
+
+**Result association.** Runner-record association accepts the backend metadata
+keys only for this argv. It requires:
+- `backend_attempt_id` to equal the Jobs attempt;
+- the selection keys in the staging block and the evidence keys in the terminal
+  block;
+- a backend summary whose own invariants hold.
+
+The association facts carry `backend`.
+
+**Display.** `cmw jobs show` (local, or `--node`) adds `backend_evidence`, with a
+one-line summary. It reads the manifest, runner metadata and evidence as data,
+and verifies the evidence digest. The line keeps these verdicts separate:
+- evidence completeness;
+- CPU-only or GPU-consumed execution;
+- the shadow check;
+- GPU qualification.
+
+**What stays visible.** Problems are shown even when the payload exits 0. None
+of these verdicts is scientific acceptance or a speed claim. Files declares
+`backend-reports` and `backend-evidence`.
+
 #### Check a managed runner interface
 
 Before configuring this specific external-port handoff, inspect the selected
