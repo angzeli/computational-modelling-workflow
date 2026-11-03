@@ -103,7 +103,17 @@ def detail(job, *, narrow=False):
             f"Status: {effective_status(job)}    Order: {job['order'] or '—'}    Engine: {job['engine']}\n"
             f"{usage_summary(job.get('usage'))}\n"
             f"{resources}"
-            f"Working directory: {job['cwd']}\n{job['reason'] or '—'}")
+            f"Working directory: {job['cwd']}\n{_backend_line(job)}{job['reason'] or '—'}")
+
+
+def _backend_line(job):
+    """Argv-only marker; evidence itself is read by `cmw jobs show` on the owner."""
+    argv = job.get('argv') or []
+    if '--binary-manifest' not in argv:
+        return ''
+    index = argv.index('--binary-manifest')
+    name = argv[index + 1] if index + 1 < len(argv) else '?'
+    return f"Backend: EXPERIMENTAL binary manifest {name}; evidence via `cmw jobs show`\n"
 
 
 class Prompt(ModalScreen):

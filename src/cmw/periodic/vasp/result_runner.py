@@ -4,6 +4,8 @@ The dialect name versions CMW's interpretation of an unversioned local record;
 it does not authenticate the runner, or turn its scientific summaries into facts.
 Only the observed single-image, no-restart, managed-foreground invocation is
 supported. Relocated output trees and archived copies are intentionally excluded.
+The experimental ``--binary-manifest NAME`` selection adds backend keys to the
+same record (backend_evidence.py); they are accepted only for that argv.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ import json
 from pathlib import Path
 import re
 
+from . import backend_evidence
 from .result_sources import SnapshotReader, SourceSnapshotError
 
 
@@ -86,6 +89,11 @@ def validate_runner_argv(argv):
     controlled = "--controlled-suspension" in argv
     if controlled:
         pairs = pairs | {"--execution-budget"}
+    manifest = backend_evidence.manifest_name(argv)
+    _require(manifest is None or not controlled,
+             "The binary-manifest route is not qualified for controlled suspension")
+    if manifest is not None:
+        pairs = pairs | {"--binary-manifest"}
     options = {}
     index = 1
     while index < len(argv):
@@ -161,6 +169,35 @@ def _validate_controlled_metadata(scalar, positions, running, finished, argv):
     _require(abs(total - suspended) <= .05, "Controlled suspension total differs from its intervals")
 
 
+def _validate_backend_metadata(scalar, positions, running, finished, job, manifest, output):
+    """Selection keys precede the payload; evidence keys occupy the terminal block."""
+    _require(backend_evidence.STAGING_KEYS | backend_evidence.TERMINAL_KEYS <= scalar.keys(),
+             "Incomplete binary-manifest runner metadata")
+    _require(all(0 < positions[key][0] < running for key in backend_evidence.STAGING_KEYS)
+             and all(running < positions[key][0] < finished for key in backend_evidence.TERMINAL_KEYS),
+             "Backend metadata must occupy its staging or terminal block")
+    path, _, rest = scalar["binary_manifest"].partition("; sha256=")
+    digest, _, name = rest.partition("; name=")
+    _require(name == manifest and _DIGEST.fullmatch(digest) is not None
+             and scalar["binary_selection"] == "manifest", "Runner metadata names a different binary manifest")
+    attempt, _, origin = scalar["backend_attempt_id"].partition("; origin=")
+    _require(origin == "cmw" and attempt == job.get("attempt_id"),
+             "Backend reports are not bound to this Jobs attempt")
+    _require(scalar["backend_report_dir"] == str(output / "vmb-reports"), "Backend report directory moved")
+    _require(scalar["backend_mode"] in ("off", "auto", "force") and scalar["backend_check"] in ("True", "False"),
+             "Malformed backend mode/check metadata")
+    # Integrity failures (moved, missing, altered or contradictory evidence) refuse
+    # the association; honest INCOMPLETE/INVALID/AGGREGATION_FAILED evidence is
+    # retained as a fact and is never GPU-qualified.
+    facts = backend_evidence.verify_record(
+        scalar, output, attempt_id=attempt, world_size=int(job["argv"][job["argv"].index("--ranks") + 1]),
+        mode=scalar["backend_mode"], check=scalar["backend_check"] == "True")
+    return {"manifest": name, "manifest_sha256": digest, "mode": scalar["backend_mode"],
+            "shadow_check": scalar["backend_check"] == "True", "attempt_id": attempt, **facts,
+            "qualification": "verified backend evidence; operational association only, not "
+                             "scientific acceptance or speed"}
+
+
 def _parse_record(content, allowed_keys):
     values, positions, staged = {}, {}, {}
     lines = content.splitlines()
@@ -213,7 +250,9 @@ def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
         controlled = "--controlled-suspension" in job["argv"]
         _require((declaration["dialect"] == CONTROLLED_DIALECT) == controlled,
                  "Runner metadata dialect must match the explicit invocation contract")
-        allowed_keys = _KEYS | (_CONTROLLED_KEYS if controlled else frozenset())
+        manifest = backend_evidence.manifest_name(job["argv"])
+        allowed_keys = (_KEYS | (_CONTROLLED_KEYS if controlled else frozenset())
+                        | (backend_evidence.STAGING_KEYS | backend_evidence.TERMINAL_KEYS if manifest else frozenset()))
         _require(_absolute(job.get("cwd")) == source, "Jobs wrapper cwd must equal the runner's explicit input")
         _require(_absolute(str(run_directory)) == output, "Native run must occupy the exact recorded runner output")
         path = _absolute(declaration["path"])
@@ -260,6 +299,9 @@ def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
                  and chain == sorted(chain), "Runner lifecycle must lie within the exact Jobs attempt and receipt")
         if controlled:
             _validate_controlled_metadata(scalar, positions, running, finished, job["argv"])
+        backend = None
+        if manifest:
+            backend = _validate_backend_metadata(scalar, positions, running, finished, job, manifest, output)
         effective = scalar.get("effective_incar_sha256")
         _require(isinstance(effective, str) and _DIGEST.fullmatch(effective) is not None
                  and scalar.get("original_incar_sha256") == staged["INCAR"]["sha256"],
@@ -288,7 +330,7 @@ def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
             "payload_cwd": str(output), "input_identities": identities,
             "original_incar_sha256": scalar["original_incar_sha256"], "staged_input_identities": staged,
             "lifecycle": values["state"], "times": times,
-            "launcher_repository": scalar.get("launcher_repository"),
+            "launcher_repository": scalar.get("launcher_repository"), "backend": backend,
             "limitations": ["Local runner text and retrospective declarations are not authenticated.",
                             "Runner code at execution, including dirty changes, is not authenticated by a current source checkout.",
                             "Input byte identity does not validate potentials, k-point adequacy or scientific convergence."],

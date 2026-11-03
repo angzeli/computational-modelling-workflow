@@ -15,7 +15,7 @@ from .locations import LocationDescriptor, read_location_metadata
 _VASP_PAIRS = frozenset({
     '--input', '--output', '--binary', '--ranks', '--ncore', '--kpar',
     '--mpi-mode', '--restart', '--restart-from', '--timeout', '--stop-before',
-    '--extra-input', '--execution-budget',
+    '--extra-input', '--execution-budget', '--binary-manifest',
 })
 _ORCA_PAIRS = frozenset({
     '--input', '--target', '--metadata', '--output', '--stderr', '--layout',
@@ -160,6 +160,11 @@ def vasp_runner_locations(job):
         else:
             locations.append(_decl('vasp-stdout', stdout, expected_creation=True,
                 detail='Managed VASP scientific stdout; distinct from Jobs operational stdout.'))
+    if '--binary-manifest' in options and '--dry-run' not in options:
+        locations.extend((_decl('backend-reports', output / 'vmb-reports', kind='directory', expected_creation=True,
+                                detail='Experimental per-rank backend reports (vmb.rank-report.v1).'),
+                          _decl('backend-evidence', output / 'vmb-evidence.json', expected_creation=True,
+                                detail='Aggregated backend evidence written by the pinned aggregator.')))
     return tuple(locations)
 
 

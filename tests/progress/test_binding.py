@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from cmw.jobs.location_resolvers import vasp_runner_locations
 from cmw.jobs.locations import LocationDescriptor
 from cmw.jobs.progress import resolve_context
 from cmw.jobs.store import JobsError, Store
@@ -70,6 +71,23 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(conflict.binding_status, 'SOURCE_CONFLICT')
         self.assertFalse(conflict.sources)
         self.assertTrue(any('stdout: conflicting declarations' in item for item in conflict.limitations))
+
+    def test_managed_binary_manifest_keeps_stdout_and_backend_locations(self):
+        flags = ('--binary', 'std', '--binary-manifest', 'synthetic-metal')
+        job = self.managed_job(flags=flags)
+        locations = {item.role: item for item in vasp_runner_locations(job)}
+        self.assertEqual(set(locations),
+                         {'inputs', 'output', 'vasp-stdout', 'backend-reports', 'backend-evidence'})
+        for role, name in (('vasp-stdout', 'stdout.log'), ('backend-reports', 'vmb-reports'),
+                           ('backend-evidence', 'vmb-evidence.json')):
+            self.assertEqual(locations[role].path, self.output / name)
+            self.assertTrue(locations[role].expected_creation)
+        context = resolve_context(self.store, job['id'])
+        self.assertEqual(next(source.path for source in context.sources if source.role == 'stdout'),
+                         str(self.output / 'stdout.log'))
+        dry = self.managed_job(flags=(*flags, '--dry-run'))
+        self.assertEqual({item.role for item in vasp_runner_locations(dry)}, {'inputs', 'output'})
+        self.assertNotIn('stdout', {source.role for source in resolve_context(self.store, dry['id']).sources})
 
     def test_optional_stdout_missing_empty_or_redirected_preserves_native_evidence(self):
         texts = native_texts()
