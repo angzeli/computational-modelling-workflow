@@ -93,9 +93,8 @@ multiwfn_runtime_launch() {
     rm -f -- "$alias_path"
     rmdir "$alias_root" 2>/dev/null || true
   }
-  forward_multiwfn_signal() {
+  record_multiwfn_signal() {
     if ((interrupted == 0)); then interrupted=$2; interrupt_signal=$1; fi
-    if multiwfn_child_active; then kill -"$1" "$child_pid" 2>/dev/null || true; fi
   }
   restore_multiwfn_traps() {
     trap - EXIT TERM INT
@@ -104,8 +103,10 @@ multiwfn_runtime_launch() {
     [[ -z "$previous_int" ]] || eval "$previous_int"
   }
   trap cleanup_multiwfn_alias EXIT
-  trap 'forward_multiwfn_signal TERM 143' TERM
-  trap 'forward_multiwfn_signal INT 130' INT
+  # Do not reenter job-table substitutions from a signal trap: Bash may still
+  # be parsing the interrupted polling substitution. Supervise after it returns.
+  trap 'record_multiwfn_signal TERM 143' TERM
+  trap 'record_multiwfn_signal INT 130' INT
   ln -s "$MULTIWFN_RUN_SETTINGS_DIRECTORY" "$alias_path"
   if (($#)); then
     source_path=$1
@@ -147,11 +148,11 @@ multiwfn_runtime_launch() {
   # Telemetry failure must never bypass drainage of the child we just launched.
   multiwfn_jobs_event "$PWD" child_launched "$child_pid" || \
     printf 'CMW runner launch evidence could not be recorded; child supervision continues\n' >&2
-  # A trap can run between launch and assigning $!.
-  if ((interrupted != 0)); then forward_multiwfn_signal "$interrupt_signal" "$interrupted"; fi
   # A signal just before a blocking wait would otherwise strand a resistant child.
+  # Recorded intent also covers a trap between launch and assigning $!.
   while multiwfn_child_active && ((interrupted == 0)); do sleep 0.1 || true; done
   if ((interrupted != 0)) && multiwfn_child_active; then
+    kill -"$interrupt_signal" "$child_pid" 2>/dev/null || true
     # Give the direct child two seconds to cooperate, then bound KILL drainage.
     for probe in {1..40}; do
       multiwfn_child_active || break
