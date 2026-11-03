@@ -57,6 +57,8 @@ def capture_interrupt_failure(root, *, test_id, failure, started, parent, parent
             'markers': {name: (root/name).exists() for name in
                         ('ready.json', 'signal-seen', 'release', 'alias-lost-while-live')},
             'ready': ready,
+            'launcher_signals': (bounded_tail(root/'signal-state.json', 4096)
+                                 if (root/'signal-state.json').is_file() else None),
             'aliases': [{'path': path, 'exists': Path(path).exists(),
                          'is_symlink': Path(path).is_symlink()}
                         for path in (ready or {}).get('aliases', [])[:2]],
@@ -80,7 +82,8 @@ def capture_interrupt_failure(root, *, test_id, failure, started, parent, parent
 
 
 class InterruptTests(unittest.TestCase):
-    def exercise(self, signum=signal.SIGTERM, *, queued=False, unresolved=False, early_interrupt=False):
+    def exercise(self, signum=signal.SIGTERM, *, queued=False, unresolved=False, early_interrupt=False,
+                 inherited_int=False):
         with tempfile.TemporaryDirectory(prefix='cmw-interrupt-') as directory, install():
             root = Path(directory)
             attempt = root/'attempt'
@@ -148,13 +151,38 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                     stderr_path = Path(job['logs']['stderr'])
                     runtime.start(store)
                 else:
+                    # A noninteractive Bash cannot reset an inherited ignored
+                    # INT. Establish this fixture's catchable signal in its own
+                    # child, without changing the unittest host or runner code.
+                    launch = [sys.executable, '-c', '''import json,os,signal,sys
+from pathlib import Path
+before={'ignored':signal.getsignal(signal.SIGINT)==signal.SIG_IGN,
+        'blocked':signal.SIGINT in signal.pthread_sigmask(signal.SIG_BLOCK, [])}
+signal.signal(signal.SIGINT,signal.SIG_DFL)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGINT])
+after={'default':signal.getsignal(signal.SIGINT)==signal.SIG_DFL,
+       'blocked':signal.SIGINT in signal.pthread_sigmask(signal.SIG_BLOCK, [])}
+(Path(os.environ['CMW_TEST_ROOT'])/'signal-state.json').write_text(json.dumps({'before':before,'after':after}))
+os.execv(sys.argv[1],sys.argv[1:])
+''', *command]
+                    if inherited_int:
+                        launch = [sys.executable, '-c', '''import os,signal,sys
+signal.signal(signal.SIGINT,signal.SIG_IGN)
+signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGINT])
+os.execv(sys.argv[1],sys.argv[1:])
+''', *launch]
                     with (root/'wrapper.stderr').open('w') as stderr_file:
-                        parent = subprocess.Popen(command, cwd=attempt, env=env, stdout=subprocess.DEVNULL,
+                        parent = subprocess.Popen(launch, cwd=attempt, env=env, stdout=subprocess.DEVNULL,
                                                   stderr=stderr_file)
                     parent_owner = identity(parent.pid)
                 wait_for((root/'ready.json').exists, timeout=5)
                 ready = json.loads((root/'ready.json').read_text())
                 child = ready['owner']
+                if not queued:
+                    signals = json.loads((root/'signal-state.json').read_text())
+                    self.assertEqual(signals['after'], {'default': True, 'blocked': False})
+                    if inherited_int:
+                        self.assertEqual(signals['before'], {'ignored': True, 'blocked': True})
                 if queued:
                     store.change(job['id'], 'cancel', confirm=True)
                 elif not early_interrupt:
@@ -209,6 +237,13 @@ while not (root/'release').exists() and time.monotonic()<deadline:
 
     def test_int_resistant_direct_child_preserves_interrupt_status(self):
         self.exercise(signal.SIGINT)
+
+    def test_int_fixture_isolates_inherited_ignored_and_blocked_signal_state(self):
+        handler = signal.getsignal(signal.SIGINT)
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        self.exercise(signal.SIGINT, inherited_int=True)
+        self.assertEqual(signal.getsignal(signal.SIGINT), handler)
+        self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, []), mask)
 
     def test_jobs_wrapped_child_ends_before_terminal_state(self):
         self.exercise(queued=True)
