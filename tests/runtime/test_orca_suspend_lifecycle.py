@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 import psutil
 
@@ -134,6 +135,8 @@ print('ORCA TERMINATED NORMALLY')
             self.assertEqual(identity(driver_pid), driver)
             self.assertEqual(identity(member['pid']), member)
             self.assertEqual(json.loads(path.read_text())['sentinel'], before['sentinel'])
+            if stage == 1 and getattr(self, 'exit_during_observation', False):
+                wait_for((self.root/'exit-observation-ready').exists)
             (self.root / f'release-{stage}').touch()
         def terminal():
             job = self.current()
@@ -154,6 +157,11 @@ print('ORCA TERMINATED NORMALLY')
         record = json.loads(self.metadata.read_text())
         self.assertTrue(record)
         self.assertEqual(self.current()['exit_code'], 0)
+
+    def test_normal_runner_exit_during_run_observation_keeps_completion_authority(self):
+        self.exit_during_observation = True
+        with patch.dict(os.environ, {'CMW_TEST_RUNNER_EXIT_RACE': '1'}):
+            self.test_two_module_transitions_preserve_process_and_finalize_only_after_continue()
 
     @retain_lifecycle_evidence
     def test_cancel_suspended_driver_does_not_advance_or_finalize(self):

@@ -133,7 +133,7 @@ def retain_lifecycle_evidence(method):
 @contextmanager
 def trace_runtime(root):
     """Instrument owned fixture workers, without changing production signal decisions."""
-    from cmw.jobs import runtime
+    from cmw.jobs import runtime, suspension
     if os.environ.get('CMW_TEST_LIFECYCLE_TRACE') != '1':
         yield
         return
@@ -156,6 +156,8 @@ def trace_runtime(root):
             return None
 
     killpg, exists, finish, unknown = os.killpg, runtime.group_exists, runtime.finish, runtime.mark_unknown
+    update = suspension.Coordinator.update
+    validate = suspension.Coordinator._validate
     previous = {}
 
     def signal_group(pgid, signum):
@@ -188,9 +190,42 @@ def trace_runtime(root):
                members=members(job['group']['pid']) if job.get('group') else [])
         return unknown(store, con, job, reason)
 
+    def updated(coordinator, job, **changes):
+        if changes.get('phase') == 'Unverified':
+            record('suspension-unverified', reason=changes.get('reason'),
+                   traceback=traceback.format_exc()[-8192:])
+        return update(coordinator, job, **changes)
+
+    def validating(coordinator):
+        job = coordinator.current()
+        state = job['suspension']
+        if (os.environ.get('CMW_TEST_RUNNER_EXIT_RACE') != '1' or state['phase'] != 'Run'
+                or len(state['intervals']) != 2):
+            return validate(coordinator)
+        session = os.getsid
+        fixture = coordinator.store.root.parent
+
+        def exiting_session(pid):
+            if pid == coordinator.registration['runner']['pid']:
+                (fixture/'exit-observation-ready').touch()
+                deadline = time.monotonic()+5
+                while not (fixture/'release-1').exists() and time.monotonic() < deadline:
+                    time.sleep(.005)
+                while owner_alive(coordinator.registration['runner']) and time.monotonic() < deadline:
+                    time.sleep(.005)
+                if owner_alive(coordinator.registration['runner']):
+                    raise AssertionError('Synthetic runner did not finish inside the observation window')
+            return session(pid)
+
+        with patch.object(os, 'getsid', exiting_session):
+            return validate(coordinator)
+
     with ExitStack() as patches:
         patches.enter_context(patch.object(os, 'killpg', signal_group))
         patches.enter_context(patch.object(runtime, 'group_exists', group_exists))
         patches.enter_context(patch.object(runtime, 'finish', finished))
         patches.enter_context(patch.object(runtime, 'mark_unknown', uncertain))
+        patches.enter_context(patch.object(suspension.Coordinator, 'update', updated))
+        if os.environ.get('CMW_TEST_RUNNER_EXIT_RACE') == '1':
+            patches.enter_context(patch.object(suspension.Coordinator, '_validate', validating))
         yield

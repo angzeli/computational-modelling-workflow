@@ -452,6 +452,13 @@ class StateTests(unittest.TestCase):
         coordinator._validate.side_effect = control.DomainPending('Computational member exited during observation')
         with patch.object(control.time, 'monotonic', return_value=1):
             coordinator.tick(job)
+        pending = self.current()
+        self.assertEqual(pending['status'], 'Run')
+        self.assertEqual(pending['suspension']['phase'], 'Run')
+        self.assertIsNone(pending['suspension']['evidence'])
+        self.assertIsNone(pending['suspension']['verified_at'])
+        self.assertEqual(pending['resources'], job['resources'])
+        coordinator.channel.write.assert_not_called()
         with patch.object(control.time, 'monotonic', return_value=1 + control.TRANSITION_TIMEOUT):
             coordinator.tick(self.current())
         current = self.current()
@@ -721,6 +728,53 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(domain.protected, (ANCHOR, RUNNER))
         self.signal.assert_not_called()
 
+    def test_runner_exit_between_live_and_session_probes_waits_only_with_root_exit(self):
+        def session(pid):
+            if pid == RUNNER['pid']:
+                raise ProcessLookupError(3, 'synthetic exit during lookup')
+            return ANCHOR['pid']
+
+        def observed(pid):
+            if pid in {RUNNER['pid'], MEMBER['pid']}:
+                raise control.psutil.NoSuchProcess(pid)
+            return self.records[pid]
+
+        self.sid.side_effect = session
+        self.process.return_value.status.return_value = control.psutil.STATUS_RUNNING
+        with patch.object(control, 'identity', side_effect=observed):
+            with self.assertRaisesRegex(control.DomainPending, 'runner and computation exited'):
+                control.bind_domain(self.registration, ANCHOR)
+        self.signal.assert_not_called()
+
+    def test_runner_exit_requires_independent_root_exit_and_live_anchor(self):
+        for outcome in ('root-live', 'root-reused', 'root-denied', 'root-unreadable-zombie',
+                        'anchor-lost', 'anchor-stopped'):
+            with self.subTest(outcome=outcome):
+                def observed(pid):
+                    if pid == RUNNER['pid']:
+                        raise control.psutil.NoSuchProcess(pid)
+                    if pid == MEMBER['pid']:
+                        if outcome == 'root-denied':
+                            raise control.psutil.AccessDenied(pid)
+                        if outcome == 'root-unreadable-zombie':
+                            raise control.psutil.ZombieProcess(pid)
+                        if outcome == 'root-reused':
+                            return {**MEMBER, 'birth': MEMBER['birth']+1}
+                        if outcome.startswith('anchor-'):
+                            raise control.psutil.NoSuchProcess(pid)
+                    return self.records[pid]
+
+                self.process.return_value.status.return_value = (
+                    control.psutil.STATUS_STOPPED if outcome == 'anchor-stopped'
+                    else control.psutil.STATUS_RUNNING)
+                with patch.object(control, 'identity', side_effect=observed), \
+                     patch.object(control, 'owner_alive', side_effect=lambda member:
+                                  member != RUNNER and not (outcome == 'anchor-lost' and member == ANCHOR)):
+                    with self.assertRaises(JobsError) as raised:
+                        control.bind_domain(self.registration, ANCHOR)
+                self.assertNotIsInstance(raised.exception, control.DomainPending)
+        self.signal.assert_not_called()
+
     def test_absent_or_zombie_computational_members_are_pending(self):
         for member in (MEMBER, OTHER):
             self.children = [self.child(OTHER)] if member == OTHER else []
@@ -821,7 +875,11 @@ class DomainTests(unittest.TestCase):
                     identify.return_value = member
                     self.process.return_value.status.side_effect = control.psutil.NoSuchProcess(member['pid'])
                 elif outcome == 'absent':
-                    identify.side_effect = control.psutil.NoSuchProcess(member['pid'])
+                    def observed(pid):
+                        if pid == member['pid']:
+                            raise control.psutil.NoSuchProcess(pid)
+                        return self.records[pid]
+                    identify.side_effect = observed
                 else:
                     identify.return_value = {**member, 'birth': member['birth'] + 1}
                 with self.assertRaises(JobsError) as raised:

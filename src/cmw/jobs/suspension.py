@@ -385,12 +385,29 @@ def _executable_matches(pid, records):
         raise JobsError('Runtime executable cannot be verified') from exc
 
 
+def _check_runner(registration, anchor, *, check_stopped=False):
+    runner, root = registration['runner'], registration['root']
+    try:
+        _check_identity(runner, anchor, allow_exit=True)
+        if check_stopped and _stopped(runner, exit_anchor=anchor):
+            raise JobsError('Runnable runner authority lost')
+    except DomainPending as exc:
+        # The Run root probe can precede both ordinary exits. This grants only
+        # the existing bounded receipt wait, never drainage or signal authority.
+        if _observed_exit(root['pid'], root, anchor, allow_zombie_topology_loss=True):
+            _check_identity(anchor, anchor)
+            if _stopped(anchor):
+                raise JobsError('Protected ownership anchor is not runnable') from exc
+            raise DomainPending('Registered runner and computation exited during observation') from exc
+        raise JobsError('Runnable runner authority lost while computation remains unverified') from exc
+
+
 def bind_domain(registration, anchor):
     """Classify only descendants of an enrolled runner in the pinned session."""
     if not owner_alive(anchor) or os.getsid(anchor['pid']) != anchor['pid']:
         raise JobsError('Protected ownership anchor is unavailable')
     runner, root = registration['runner'], registration['root']
-    _check_identity(runner, anchor); _check_identity(root, anchor, allow_exit=True)
+    _check_runner(registration, anchor); _check_identity(root, anchor, allow_exit=True)
     if not _descends(runner['pid'], anchor['pid']) or not _descends(root['pid'], runner['pid']):
         raise JobsError('Runtime handshake is not bound to the owned payload ancestry')
     try:
@@ -620,8 +637,7 @@ class Coordinator:
         if clock_descriptor() != self.context['clock']:
             raise JobsError('Clock/boot discontinuity; retained state is unverified')
         _storage(self.registration['storage'])
-        if not owner_alive(self.registration['runner']) or _stopped(self.registration['runner']):
-            raise JobsError('Runnable runner authority lost')
+        _check_runner(self.registration, self.anchor, check_stopped=True)
         domain = bind_domain(self.registration, self.anchor)
         self.last_domain = domain
         self.observe_session()

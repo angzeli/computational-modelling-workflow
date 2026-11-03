@@ -60,6 +60,25 @@ class EvidenceTests(unittest.TestCase):
                 os.killpg(987654, 15)
             signal_group.assert_called_once_with(987654, 15)
 
+    def test_unverified_trace_retains_original_exception_without_changing_update(self):
+        from cmw.jobs.suspension import Coordinator
+        coordinator = object.__new__(Coordinator)
+        job = {'id': 1}
+        changes = {'phase': 'Unverified', 'reason': 'synthetic disappearance'}
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {'CMW_TEST_LIFECYCLE_TRACE': '1'}), \
+             patch.object(Coordinator, 'update', return_value='unchanged') as update:
+            with trace_runtime(directory):
+                try:
+                    raise ProcessLookupError(3, 'synthetic disappearance')
+                except ProcessLookupError:
+                    self.assertEqual(coordinator.update(job, **changes), 'unchanged')
+            update.assert_called_once_with(coordinator, job, **changes)
+            record = json.loads(next(Path(directory).glob('lifecycle-trace-*.jsonl')).read_text())
+        self.assertEqual(record['event'], 'suspension-unverified')
+        self.assertIn('ProcessLookupError', record['traceback'])
+        self.assertLessEqual(len(record['traceback']), 8192)
+
     def test_reused_group_identity_is_not_inspected_as_owned(self):
         state = {'jobs': [{'group': {'pid': 10, 'birth': 1}}]}
         with patch('tests.jobs.lifecycle_evidence.identity', return_value={'pid': 10, 'birth': 2}), \
