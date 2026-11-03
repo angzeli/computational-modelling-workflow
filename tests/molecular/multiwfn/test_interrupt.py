@@ -55,7 +55,8 @@ def capture_interrupt_failure(root, *, test_id, failure, started, parent, parent
             'parent': interrupt_owner_observation(parent_owner),
             'child': interrupt_owner_observation(child),
             'markers': {name: (root/name).exists() for name in
-                        ('ready.json', 'signal-seen', 'release', 'alias-lost-while-live')},
+                        ('ready.json', 'signal-seen', 'release', 'alias-lost-while-live',
+                         'query-entered', 'query-release', 'trap-job-query')},
             'ready': ready,
             'launcher_signals': (bounded_tail(root/'signal-state.json', 4096)
                                  if (root/'signal-state.json').is_file() else None),
@@ -83,7 +84,7 @@ def capture_interrupt_failure(root, *, test_id, failure, started, parent, parent
 
 class InterruptTests(unittest.TestCase):
     def exercise(self, signum=signal.SIGTERM, *, queued=False, unresolved=False, early_interrupt=False,
-                 inherited_int=False):
+                 inherited_int=False, query_interrupt=False):
         with tempfile.TemporaryDirectory(prefix='cmw-interrupt-') as directory, install():
             root = Path(directory)
             attempt = root/'attempt'
@@ -120,6 +121,21 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                 'MULTIWFN_RUN_SETTINGS_PATH="$3"; MULTIWFN_RUN_SETTINGS_DIRECTORY=${3%/settings.ini}; '
                 'if [[ ${CMW_TEST_REFUSE_KILL:-0} == 1 ]]; then '
                 'kill() { if [[ "$1" == -KILL ]]; then return 1; fi; builtin kill "$@"; }; fi; '
+                # Pause an actual job-table substitution and record any nested
+                # job query in a signal handler, independently of Bash version.
+                'if [[ ${CMW_TEST_QUERY_INTERRUPT:-0} == 1 ]]; then '
+                'trap() { if [[ $# == 2 && "$1" != -p && "$1" != - && '
+                '( "$2" == INT || "$2" == TERM ) ]]; then '
+                '''builtin trap "CMW_TEST_IN_TRAP=1; $1; CMW_TEST_IN_TRAP=0" "$2"; '''
+                'else builtin trap "$@"; fi; }; '
+                'jobs() { '
+                'if [[ ${CMW_TEST_IN_TRAP:-0} == 1 ]]; then : > "$CMW_TEST_ROOT/trap-job-query"; fi; '
+                'if [[ -f $CMW_TEST_ROOT/ready.json && ! -f $CMW_TEST_ROOT/query-entered ]]; then '
+                ': > "$CMW_TEST_ROOT/query-entered"; '
+                'for query_probe in {1..250}; do '
+                '[[ ! -f $CMW_TEST_ROOT/query-release && ! -f $CMW_TEST_ROOT/release ]] || break; '
+                'sleep 0.02; done; [[ -f $CMW_TEST_ROOT/query-release ]] || return 75; fi; '
+                'builtin jobs "$@"; }; fi; '
                 # Deliver TERM after $! is captured but before the first wait/poll.
                 'if [[ ${CMW_TEST_EARLY_INTERRUPT:-0} == 1 ]]; then set -T; '
                 '''trap 'if [[ -n ${child_pid:-} && ${CMW_TEST_EARLY_INTERRUPT:-0} == 1 ]]; then '''
@@ -135,6 +151,8 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                 env['CMW_TEST_REFUSE_KILL'] = '1'
             if early_interrupt:
                 env['CMW_TEST_EARLY_INTERRUPT'] = '1'
+            if query_interrupt:
+                env['CMW_TEST_QUERY_INTERRUPT'] = '1'
             sentinel = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(35)'])
             sentinel_owner = identity(sentinel.pid)
             parent = None
@@ -186,8 +204,15 @@ os.execv(sys.argv[1],sys.argv[1:])
                 if queued:
                     store.change(job['id'], 'cancel', confirm=True)
                 elif not early_interrupt:
+                    if query_interrupt:
+                        wait_for((root/'query-entered').exists, timeout=5)
                     parent.send_signal(signum)
+                    if query_interrupt:
+                        (root/'query-release').touch()
                 wait_for((root/'signal-seen').exists, timeout=2)
+                if query_interrupt:
+                    self.assertFalse((root/'trap-job-query').exists(),
+                                     'Signal trap reentered job-table command substitution')
                 self.assertTrue(owner_alive(child))
                 self.assertTrue(all(Path(p).exists() for p in ready['aliases']))
                 self.assertFalse((root/'alias-lost-while-live').exists())
@@ -244,6 +269,11 @@ os.execv(sys.argv[1],sys.argv[1:])
         self.exercise(signal.SIGINT, inherited_int=True)
         self.assertEqual(signal.getsignal(signal.SIGINT), handler)
         self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, []), mask)
+
+    def test_signal_during_job_query_defers_supervision_until_trap_returns(self):
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signum):
+                self.exercise(signum, query_interrupt=True)
 
     def test_jobs_wrapped_child_ends_before_terminal_state(self):
         self.exercise(queued=True)
