@@ -58,6 +58,10 @@ superseded automatic-route warning when compatible explicit declarations suffice
 The card preserves units, source qualification, checked frontier and scientific-data
 age. Details/History retain previous values, trends, timing, rms(c), source positions
 and full warnings. Missing current rms(c) is absent; an older value cannot fill it.
+An unchecked source-local row additionally exposes `E (SCF)`, electronic iteration
+free energy with its own SCF label and native precision where space permits.
+It is not final ionic energy.
+The card keeps `|dE|` as a magnitude; Details and JSON retain its signed value.
 `*` identifies provisional evidence/targets and `?` a precision-uncertain relation;
 neither is a scientific outcome badge. Source conflicts, unsupported evidence and
 cached-read errors remain visible. Direct selection freezes only the selected
@@ -77,6 +81,17 @@ Name, Note, Status, Elapsed and existing controls retain their purposes. No over
 convergence percentage, ETA, scientific-validity badge or automatic stop is shown.
 
 ### Source evidence and independent targets
+
+For the recognized literal `run-vasp.sh --managed-foreground` route (excluding
+dry runs), the recorded output directory also declares optional scientific
+`stdout.log`. This is separate from Jobs' operational stdout. The ordinary source
+reconciliation and bounded reader consume it without a Sources override; equal
+explicit declarations merge and disagreements retain the existing conflict policy.
+Missing or empty stdout does not discard usable OUTCAR/OSZICAR. A stdout symlink
+escaping the output directory is diagnosed and omitted, without replacing other
+native evidence. Unknown wrappers and legacy routes without this contract do not
+gain a guessed stdout path. These declarations do not authenticate an executable
+or establish scientific ownership or acceptance.
 
 A missing electronic measurement does not hide a known target. The card obtains
 EDIFF and EDIFFG independently from qualified effective OUTCAR settings, falling

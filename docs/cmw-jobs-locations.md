@@ -33,7 +33,7 @@ process association is unknown.
 |---|---|---|
 | Persisted Jobs record | Working directory, stdout and stderr | cwd is never implicitly output; no process/controller probe is needed |
 | Explicit Jobs execution layout | Output/inputs, provenance and log locations, linked layout record | Existing layout identity checks and migration contract apply |
-| `run-vasp.sh` argv | Explicit `--input` and `--output` | Known argv grammar only; no script execution, restart inference or finalized receipt required |
+| `run-vasp.sh` argv | Explicit `--input` and `--output`; managed scientific `vasp-stdout` at `<output>/stdout.log` | Known argv grammar only; stdout requires `--managed-foreground` without `--dry-run` and cannot escape the output directory through a symlink. No script execution, restart inference or finalized receipt required |
 | `run_orca.sh` argv | Explicit input/output/stderr, target, finalization metadata, layout, geometry/runtime records and declared artifacts | Output files navigate through their containing directory; target metadata may identify the stage |
 | `run_opt_freq_sp.sh` argv | Explicit workflow root, structure and configuration | Individual hashed stage paths remain unknown without exact recorded metadata |
 | `python -m cmw.molecular.workflows.cli next/advance --state …` | Recorded stage runner/artifact locations and metadata | Only the explicit v1 OPT/FREQ/SP state record is read; stage/target/attempt relationships are checked |

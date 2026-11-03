@@ -66,6 +66,12 @@ def vasp_card_groups(snapshot):
         valid_budget = (type(budget) is int and budget > 0 and not any(
             item.name == 'NELM' and item.qualification != 'effective' for item in snapshot.settings))
         scf_text = f'OUTCAR SCF {native.index}/' + (str(budget) if valid_budget else '—')
+    energy_rows = ()
+    # Expose an unchecked complete row independently of the native SCF prefix.
+    if any(series.latest.semantic_id == 'vasp.electronic.free_energy'
+           and series.latest.qualification == 'source-local' for series in snapshot.metrics):
+        energy_rows = ((CardCell(('vasp.electronic.free_energy',), 'E (SCF)',
+            context_kinds=('electronic',), context_labels=labels, value_format='native'),),)
     return (
         CardGroup('SCF', ((CardCell(kind='text', text=evaluation_text),
                            CardCell(kind='text', text=scf_text)),)),
@@ -77,5 +83,5 @@ def vasp_card_groups(snapshot):
              CardCell((energy_ids[1],), '|d eps|', **electronic)),
             (CardCell(('vasp.electronic.rms',), 'rms', **electronic),
              CardCell(energy_ids, 'EDIFF', kind='target', text=energy_target, value_format='scientific')),
-        )),
+        ) + energy_rows),
     )

@@ -10,6 +10,8 @@ from cmw.jobs.progress import resolve_context
 from cmw.jobs.store import JobsError, Store
 from cmw.progress.models import (Criterion, Evidence, IterationLevel, Metric, MetricSeries,
                                   SourceDescriptor, comparable)
+from cmw.progress.service import ObservationService
+from tests.periodic.vasp.result_fixtures import native_texts
 
 
 class BindingTests(unittest.TestCase):
@@ -37,6 +39,65 @@ class BindingTests(unittest.TestCase):
                           'poscar': str(self.inputs/'POSCAR'), 'incar': str(self.inputs/'INCAR')})
         self.assertFalse(context.process_ownership)
         self.assertEqual(self.store.path.read_bytes(), before)
+
+    def managed_job(self, *, progress_sources=(), flags=()):
+        if progress_sources:
+            progress_sources = (SourceDescriptor('outcar', str(self.output / 'OUTCAR')), *progress_sources)
+        return self.store.add(argv=['/not-executed/run-vasp.sh', '--input', str(self.inputs),
+            '--output', str(self.output), '--managed-foreground', *flags], cwd=self.inputs,
+            engine='VASP', name='synthetic managed attempt', hold=True, progress_sources=progress_sources)
+
+    def test_managed_stdout_exact_path_and_attempt_identity(self):
+        job = self.managed_job()
+        context = resolve_context(self.store, job['id'], expected_attempt_id=job['attempt_id'])
+        stdout = next(source for source in context.sources if source.role == 'stdout')
+        self.assertEqual(stdout.path, str(self.output / 'stdout.log'))
+        self.assertEqual(stdout.root_path, str(self.output))
+        self.assertTrue(stdout.optional)
+        self.assertEqual(stdout.origins, ('recognized-runner-argv',))
+        with self.assertRaises(JobsError):
+            resolve_context(self.store, job['id'], expected_attempt_id='another-attempt')
+        dry = resolve_context(self.store, self.managed_job(flags=('--dry-run',))['id'])
+        self.assertNotIn('stdout', {source.role for source in dry.sources})
+
+    def test_managed_stdout_reconciles_explicit_same_or_wrong_attempt_path(self):
+        same = self.managed_job(progress_sources=(SourceDescriptor('stdout', str(self.output / 'stdout.log')),))
+        bound = resolve_context(self.store, same['id'])
+        stdout = next(source for source in bound.sources if source.role == 'stdout')
+        self.assertEqual(set(stdout.origins), {'recognized-runner-argv', 'user-declared-at-add'})
+        other = self.managed_job(progress_sources=(SourceDescriptor('stdout', str(self.root / 'other-attempt/stdout.log')),))
+        conflict = resolve_context(self.store, other['id'])
+        self.assertEqual(conflict.binding_status, 'SOURCE_CONFLICT')
+        self.assertFalse(conflict.sources)
+        self.assertTrue(any('stdout: conflicting declarations' in item for item in conflict.limitations))
+
+    def test_optional_stdout_missing_empty_or_redirected_preserves_native_evidence(self):
+        texts = native_texts()
+        for name in ('OUTCAR', 'OSZICAR'):
+            (self.output / name).write_text(texts[name])
+        (self.inputs / 'INCAR').write_text(texts['INCAR'])
+        job = self.managed_job()
+        service = ObservationService()
+        self.addCleanup(service.close)
+        stdout = self.output / 'stdout.log'
+        foreign = self.root / 'wrong-attempt.log'
+        foreign.write_text('DAV: 999 -9.0 -.1 -.1 12 .1 .1\n')
+        for state in ('missing', 'empty', 'escape'):
+            with self.subTest(state=state):
+                if state == 'empty':
+                    stdout.write_text('')
+                elif state == 'escape':
+                    stdout.unlink()
+                    stdout.symlink_to(foreign)
+                context = resolve_context(self.store, job['id'])
+                self.assertEqual(context.binding_status, 'BOUND')
+                snapshot = service.poll(context)
+                self.assertTrue(snapshot.metrics)
+                self.assertNotIn(snapshot.status, ('READ_ERROR', 'ADAPTER_ERROR'))
+                if state == 'escape':
+                    self.assertNotIn('stdout', {source.role for source in context.sources})
+                    self.assertTrue(any('escapes the declared output' in item for item in context.limitations))
+                    self.assertFalse(any(level.index == 999 for metric in snapshot.metrics for level in metric.latest.context))
 
     def test_unknown_wrapper_never_guesses_and_explicit_sources_are_session_local(self):
         job = self.job(False)

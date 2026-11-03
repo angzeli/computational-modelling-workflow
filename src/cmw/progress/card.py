@@ -79,7 +79,13 @@ def _cell(cell, snapshot, width, *, main_card=False):
     # Units and complete-row labels take precedence over verbose metric labels.
     suffix = value_text(metric, compact=True)
     # Preserve useful native digits when the complete value/unit/context fits.
-    if main_card and cell.value_format == 'scientific' and metric.value is not None and math.isfinite(metric.value):
+    if cell.value_format == 'native':
+        suffix = value_text(metric)
+        unit = (' ' + metric.unit.replace('Angstrom', 'Å')) if metric.unit and metric.unit != 'native' else ''
+        room = width - cell_width(label + ' ' + unit + _reference(cell, metric))
+        if cell_width(suffix) > room and metric.value is not None and math.isfinite(metric.value):
+            suffix = _scientific_value(metric, room)
+    elif main_card and cell.value_format == 'scientific' and metric.value is not None and math.isfinite(metric.value):
         unit = (' ' + metric.unit.replace('Angstrom', 'Å')) if metric.unit and metric.unit != 'native' else ''
         marker = '*' if metric.qualification == 'current-input-derived' else ''
         suffix = _scientific_value(metric, width - cell_width(label + ' ' + unit + _reference(cell, metric) + marker))

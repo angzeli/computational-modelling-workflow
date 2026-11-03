@@ -49,9 +49,10 @@ def _orca(context):
 
 _REGISTRY = {'VASP': Registration(_vasp, (
     SourcePlan('outcar', 'OUTCAR'), SourcePlan('oszicar', 'OSZICAR', alternatives=('stdout',)),
+    SourcePlan('stdout', None, 'vasp-stdout', optional=True),
     SourcePlan('poscar', 'POSCAR', 'inputs', True),
     SourcePlan('incar', 'INCAR', 'inputs', True),
-), (SourcePlan('stdout', None, optional=True),), _vasp_card), 'ORCA': Registration(_orca, (
+), (), _vasp_card), 'ORCA': Registration(_orca, (
     SourcePlan('orca_output', None, 'orca-output', stages=True),
 )), 'MULTIWFN': Registration(_multiwfn, (
     SourcePlan('multiwfn_session', None),

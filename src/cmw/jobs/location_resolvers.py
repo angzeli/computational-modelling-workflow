@@ -144,9 +144,23 @@ def vasp_runner_locations(job):
         options, source, output = route
     except (KeyError, TypeError, ValueError) as exc:
         return (_unknown(f'Unresolved run-vasp.sh declaration: {exc}'),)
-    return (_decl('inputs', source, kind='directory'),
-            _decl('output', output, kind='directory', expected_creation='--dry-run' not in options,
-                  detail='Declared VASP output; no process or scientific-result association verified.'))
+    locations = [_decl('inputs', source, kind='directory'),
+                 _decl('output', output, kind='directory', expected_creation='--dry-run' not in options,
+                       detail='Declared VASP output; no process or scientific-result association verified.')]
+    if '--managed-foreground' in options and '--dry-run' not in options:
+        # This runner creates scientific stdout here; the Jobs log is a separate
+        # operational stream. Do not follow a file redirected to another attempt.
+        stdout = output / 'stdout.log'
+        try:
+            if stdout.resolve(strict=False).parent != output.resolve(strict=False):
+                raise ValueError('scientific stdout escapes the declared output directory')
+        except (OSError, RuntimeError, ValueError) as exc:
+            locations.append(LocationDescriptor('vasp-stdout', None, qualification='unresolved',
+                origin='recognized-runner-argv', detail=f'Unresolved managed VASP stdout: {exc}'))
+        else:
+            locations.append(_decl('vasp-stdout', stdout, expected_creation=True,
+                detail='Managed VASP scientific stdout; distinct from Jobs operational stdout.'))
+    return tuple(locations)
 
 
 def _orca_stage(options, job):

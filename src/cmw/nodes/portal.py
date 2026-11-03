@@ -47,6 +47,23 @@ def row_key(target):
     return '/'.join(map(str, target_key(target)))
 
 
+class NodesTable(DataTable):
+    BINDINGS = [Binding('enter', 'select_cursor', 'Details')]
+
+    async def _on_click(self, event):
+        # Match the local JobsTable's rendered-cell hit test, but select the
+        # complete remote target before dispatching an identity-bound request.
+        row, column = event.style.meta.get('row'), event.style.meta.get('column')
+        if (isinstance(row, int) and isinstance(column, int) and 0 <= row < self.row_count
+                and 0 <= column < len(self.ordered_columns)
+                and self.ordered_columns[column].key.value == 'files'):
+            event.stop()
+            event.prevent_default()  # Suppress RowSelected / Details for this click.
+            self.app.select(self.ordered_rows[row].key.value)
+            self.app.render_state()
+            self.app.action_files()
+
+
 @dataclass
 class NodeLane:
     backend: object
@@ -127,7 +144,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
     def compose(self):
         yield Static('CMW / JOBS                                    ALL NODES', id='heading', markup=False)
         yield Static('Connecting to explicitly enrolled nodes…', id='node-summary', markup=False)
-        yield DataTable(id='table', cursor_type='row', zebra_stripes=True)
+        yield NodesTable(id='table', cursor_type='row', zebra_stripes=True)
         yield SelectableStatic(id='selected', markup=False)
         yield Static(id='execution', markup=False)
         yield ScientificProgress(id='progress', markup=False)
