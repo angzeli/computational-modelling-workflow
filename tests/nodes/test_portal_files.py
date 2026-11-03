@@ -38,6 +38,10 @@ class PortalFilesTests(unittest.IsolatedAsyncioTestCase):
         app.render_state()
         await pilot.pause()
 
+    async def files_ready(self, app, pilot):
+        await self.until(pilot, lambda: isinstance(app.screen, NodeFiles) and app.screen.is_mounted
+                         and app.screen.query_one(DataTable).row_count == len(app.screen.locations))
+
     def assert_files(self, app, job):
         self.assertIsInstance(app.screen, NodeFiles)
         self.assertEqual(len(app.screen_stack), 2)
@@ -63,18 +67,18 @@ class PortalFilesTests(unittest.IsolatedAsyncioTestCase):
             column = next(i for i, item in enumerate(table.ordered_columns) if item.key.value == 'files')
             region = table._get_cell_region(Coordinate(app.row_keys.index(row_key(b['target'])), column))
             self.assertTrue(await pilot.click('#table', offset=(region.x + 1, region.y)))
-            await self.until(pilot, lambda: len(app.screen_stack) > 1)
+            await self.files_ready(app, pilot)
             self.assert_files(app, b)
             self.assertEqual([target for operation, _, target in backend.calls if operation == 'locations'], [b['target']])
             await pilot.press('escape')
             await pilot.pause()
             self.assertEqual(app.selected_key, row_key(b['target']))
             await pilot.press('f')
-            await self.until(pilot, lambda: isinstance(app.screen, NodeFiles))
+            await self.files_ready(app, pilot)
             self.assert_files(app, b)
             await pilot.press('escape')
             await pilot.press('enter')
-            await self.until(pilot, lambda: isinstance(app.screen, FrozenText))
+            await self.until(pilot, lambda: isinstance(app.screen, FrozenText) and app.screen.is_mounted)
             self.assertEqual(len(app.screen_stack), 2)
             await pilot.press('escape')
             await pilot.pause()
@@ -94,5 +98,5 @@ class PortalFilesTests(unittest.IsolatedAsyncioTestCase):
             await self.until(pilot, lambda: not app.lanes['mini'].busy)
             self.assertEqual(len(app.screen_stack), 1)
             await pilot.press('f')
-            await self.until(pilot, lambda: isinstance(app.screen, NodeFiles))
+            await self.files_ready(app, pilot)
             self.assert_files(app, backend.jobs[1])
