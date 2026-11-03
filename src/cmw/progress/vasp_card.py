@@ -66,15 +66,16 @@ def vasp_card_groups(snapshot):
         valid_budget = (type(budget) is int and budget > 0 and not any(
             item.name == 'NELM' and item.qualification != 'effective' for item in snapshot.settings))
         scf_text = f'OUTCAR SCF {native.index}/' + (str(budget) if valid_budget else '—')
-    energy_rows = ()
+    scf_cells = (CardCell(kind='text', text=evaluation_text), CardCell(kind='text', text=scf_text))
     # Expose an unchecked complete row independently of the native SCF prefix.
     if any(series.latest.semantic_id == 'vasp.electronic.free_energy'
            and series.latest.qualification == 'source-local' for series in snapshot.metrics):
-        energy_rows = ((CardCell(('vasp.electronic.free_energy',), 'E (SCF)',
-            context_kinds=('electronic',), context_labels=labels, value_format='native'),),)
+        # Reuse the context row so warning-heavy small views retain the evidence footer.
+        scf_cells = (CardCell(kind='text', text=evaluation_text + '; ' + scf_text),
+                     CardCell(('vasp.electronic.free_energy',), 'E (SCF)',
+                              context_kinds=('electronic',), context_labels=labels, value_format='native'))
     return (
-        CardGroup('SCF', ((CardCell(kind='text', text=evaluation_text),
-                           CardCell(kind='text', text=scf_text)),)),
+        CardGroup('SCF', (scf_cells,)),
         CardGroup('FORCE', ((CardCell(force_ids, label=force_label, text='— (not observed)',
                                       context_kinds=('evaluation',), context_labels=labels),
                              CardCell(force_ids, kind='target', text=target, value_format='fixed3')),)),
@@ -83,5 +84,5 @@ def vasp_card_groups(snapshot):
              CardCell((energy_ids[1],), '|d eps|', **electronic)),
             (CardCell(('vasp.electronic.rms',), 'rms', **electronic),
              CardCell(energy_ids, 'EDIFF', kind='target', text=energy_target, value_format='scientific')),
-        ) + energy_rows),
+        )),
     )

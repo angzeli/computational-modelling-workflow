@@ -662,8 +662,15 @@ def assert_native(snapshot, evaluation):
     assert [(level.kind, level.index) for level in snapshot.iteration] == [('evaluation', evaluation), ('electronic', 3)]
     assert snapshot.context.binding_status == 'BOUND', snapshot.context.binding_status
     assert snapshot.read_health == 'OK', snapshot.read_health
-    assert {source.role for source in snapshot.sources} == {'outcar', 'oszicar', 'incar'}
-    assert all(source.health == 'OK' and not source.has_more for source in snapshot.sources)
+    sources = {source.role: source for source in snapshot.sources}
+    assert set(sources) == {'outcar', 'oszicar', 'incar', 'stdout'}
+    assert all(sources[role].health == 'OK' and not sources[role].has_more
+               for role in ('outcar', 'oszicar', 'incar'))
+    stdout = sources['stdout']
+    assert stdout.health == 'MISSING' and not stdout.has_more and stdout.offset == 0
+    declaration = next(source for source in snapshot.context.sources if source.role == 'stdout')
+    assert declaration.optional and declaration.path == stdout.path
+    assert stdout.path == str(Path(sources['outcar'].path).with_name('stdout.log'))
     metrics = {metric.latest.semantic_id: metric.latest for metric in snapshot.metrics}
     assert all(metric.qualification == 'row-correspondence'
                for name, metric in metrics.items() if name.startswith('vasp.electronic.'))

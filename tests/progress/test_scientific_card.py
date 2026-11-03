@@ -34,6 +34,26 @@ def example(*, active=9, complete=8, checked=8, calculation='static'):
 
 
 class ScientificCardTests(unittest.TestCase):
+    def test_source_local_energy_reuses_context_row_and_keeps_small_card_qualifiers(self):
+        snapshot = example(active=34, complete=35, checked=34)
+        energy = Metric('vasp.electronic.free_energy', 'E (SCF)', 'Synthetic electronic energy',
+                        'eV', -1264.75780537, (IterationLevel('electronic', 35, 'SCF 35'),),
+                        qualification='source-local', observed_at=100,
+                        printed='-1264.75780537', precision=5e-9)
+        snapshot = replace(snapshot, metrics=(*snapshot.metrics, MetricSeries(energy)),
+                           settings=(SettingObservation('EDIFF', 1e-6, 'INCAR', 'provisional'),))
+        snapshot = replace(snapshot, card_groups=vasp_card_groups(snapshot))
+        for width in (68, 70, 71, 95, 180):
+            with self.subTest(width=width):
+                text = progress_text(snapshot, width=width, framed=True, max_lines=6, now=112)
+                self.assertLessEqual(len(text.splitlines()), 6)
+                self.assertTrue(all(cell_width(line) <= width for line in text.splitlines()))
+                for value in ('Eval 1', 'OUTCAR SCF 34/300', 'E (SCF)', '@SCF35',
+                              'source-local', 'provisional', 'data 12s'):
+                    self.assertIn(value, text)
+                if width == 180:
+                    self.assertIn('-1264.75780537 eV @SCF35', text)
+
     def test_three_stable_groups_aligned_at_all_required_widths(self):
         snapshot = example()
         before = snapshot.to_dict()
@@ -122,7 +142,8 @@ class ScientificCardTests(unittest.TestCase):
                 snapshot = service.poll(context)
                 before = snapshot.to_dict()
                 text = progress_text(snapshot, width=80, now=112)
-                self.assertEqual(' '.join(text.splitlines()[1].split()), 'SCF Eval 1 OUTCAR SCF 3/120')
+                self.assertEqual(' '.join(text.splitlines()[1].split()),
+                                 'SCF Eval 1; OUTCAR SCF 3/120 E (SCF) -623.000000000 eV @SCF4')
                 self.assertIn('3.1087 eV @SCF4', text)
                 self.assertIn('2.9332 eV @SCF4', text)
                 self.assertIn('evaluation 1 (native 7)', progress_text(snapshot, detailed=True))
