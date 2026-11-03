@@ -1,8 +1,8 @@
 """Read-only evidence for the experimental run-vasp.sh binary-manifest route.
 
 The VASP port may select a relinked executable only through a reviewed private
-manifest (``--binary std --binary-manifest NAME``; vasp-metal-backend
-docs/CONTRACT-v0.3.md). This module reads that manifest, the runner's metadata
+manifest (``--binary std --binary-manifest NAME``; the port's docs/LAUNCHER.md).
+This module reads that manifest, the runner's metadata
 and the backend's aggregated attempt evidence as data. It never executes the
 runner, the executable or the backend aggregator, and never initialises a GPU.
 

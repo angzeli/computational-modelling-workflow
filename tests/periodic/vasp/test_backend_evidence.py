@@ -62,7 +62,7 @@ class BackendEvidenceTests(unittest.TestCase):
         data = {'schema': 'vasp-port.binary-manifest.v1', 'name': 'gpu-force', 'status': 'reviewed',
                 'executable': {'path': str(self.exe), 'sha256': sha(self.exe), 'bytes': self.exe.stat().st_size},
                 'vasp': {'version': '6.6.1', 'variant': 'std'},
-                'backend': {'name': 'vasp-metal-backend', 'version': '0.3.0', 'source_commit': 'c' * 40,
+                'backend': {'name': 'vasp-metal-backend', 'version': '1.2.3', 'source_commit': 'c' * 40,
                             'source_digest': 'd' * 64, 'source_dirty': True, 'library_sha256': 'e' * 64,
                             'report_schema': 'vmb.rank-report.v1',
                             'aggregator': {'path': str(self.aggregator), 'sha256': sha(self.aggregator)}},
@@ -126,7 +126,7 @@ class BackendEvidenceTests(unittest.TestCase):
         manifest = self.manifest()
         lines = ['state: STAGING', f'binary: {self.exe}', 'binary_selection: manifest',
                  f'binary_manifest: {manifest}; sha256={sha(manifest)}; name=gpu-force',
-                 'backend: vasp-metal-backend 0.3.0; source_commit=c; source_digest=d; library_sha256=e',
+                 'backend: vasp-metal-backend 1.2.3; source_commit=c; source_digest=d; library_sha256=e',
                  'backend_mode: force', 'backend_check: True',
                  f'backend_attempt_id: {attempt or self.attempt}; origin=cmw',
                  f'backend_report_dir: {self.output / "vmb-reports"}', 'state: RUNNING',

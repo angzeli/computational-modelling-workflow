@@ -281,8 +281,8 @@ directory; the original specification is retained separately from resolved paths
 #### Experimental binary-manifest route
 
 A run-vasp.sh argv may add `--binary-manifest NAME` together with
-`--binary std`. The port and backend contracts are in the port's
-docs/LAUNCHER.md and vasp-metal-backend docs/CONTRACT-v0.3.md.
+`--binary std`. The runner contract is in the VASP port's docs/LAUNCHER.md
+("Experimental pinned binary").
 
 **Argv and static checks.**
 - `validate_runner_argv` accepts the pair only outside controlled suspension.
