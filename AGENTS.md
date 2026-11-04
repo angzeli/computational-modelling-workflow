@@ -187,3 +187,56 @@ Keep CI lean and proportional to project risk. Prioritize meaningful
 correctness checks, fast feedback, and minimal maintenance. Do not introduce
 additional workflows, extensive matrices, or expensive validation without a
 demonstrated need.
+
+## Test verification policy
+
+The full test suite is CI's job. Local runs verify the change; they do not
+repeat CI.
+
+### Where tests run
+- **Qualified combinations** are those listed in README "Tested support"
+  (currently Python 3.11 on Ubuntu 24.04 x64, run on every PR, and Python 3.14
+  on macOS 15 Apple Silicon, run on main after merge and available as a manual
+  workflow run on a branch). Only these are merge gates.
+- **Locally**, run the tests related to the change on the local qualified
+  interpreter. Run the full local suite only when asked, or when the change
+  touches cross-cutting runtime code (Jobs runtime, process groups, the nodes
+  endpoint, transport or identity), and never while a calculation on that
+  machine is running; use the manual macOS CI run instead.
+- **macOS-specific code** (process groups, mounts and volumes, `ioreg`,
+  `sysctl`, TCC-protected paths, ACLs and extended attributes, sleep
+  assertions) is exercised by PR CI only on Ubuntu. Before merging, trigger the
+  manual macOS CI run on the branch, and always wait for and report the
+  post-merge main CI result.
+- Unqualified combinations (for example macOS with the minimum Python) are not
+  merge gates. Report failures there as findings; do not block on them or fix
+  them silently.
+
+### How to run
+- Never run two full test suites at the same time on one machine. Run
+  lifecycle, profile and other timing-sensitive tests one test process at a
+  time.
+- Each worktree uses its own environment installed from that worktree, so
+  comparisons between commits test the intended code.
+- Pushing and opening a PR may proceed while local targeted diagnosis runs;
+  merging waits for both.
+
+### Triage before calling a failure real
+1. **Load:** rerun the failing test alone. If it passes, it is load-induced.
+   In CI, a test recorded as known-flaky in an open issue (currently the study
+   lifecycle timeout and the test_names.py restoration race) may be rerun once.
+2. **Pre-existing:** if it fails alone, run it on the base commit with the same
+   kind of environment. If it fails there too, it is pre-existing.
+3. **Introduced:** fails only on the branch.
+
+Only introduced failures block a merge, with one exception: a PR that changes
+the CI test matrix must fix, within the same PR, any test that fails on the
+newly gated combination, even if the failure is pre-existing. Record other
+pre-existing failures and recurring load failures as issues, stating whether
+they affect real behaviour or only tests.
+
+### Never
+- Change code or tests just to make CI pass without approval.
+- Bypass checks or branch protection (`--admin` or equivalent).
+- Treat a skipped, cancelled or unfinished check as passing.
+- Report a suite as passing without test counts.
