@@ -70,8 +70,9 @@ class QueueTests(unittest.TestCase):
         start(self.store)
         self.started = True
 
-    def completed(self, count):
-        return wait_for(lambda: len(self.jobs()) == count and all(j['status'] in {'Done','Fail','Cancelled'} for j in self.jobs()))
+    def completed(self, count, timeout=12):
+        return wait_for(lambda: len(self.jobs()) == count and all(j['status'] in {'Done','Fail','Cancelled'} for j in self.jobs()),
+                        timeout)
 
     def test_sequential_order_logs_unicode_and_fixed_elapsed(self):
         for name in 'ABC':
@@ -394,7 +395,8 @@ runtime.worker(Store(state),1,'test-claim')
             cwd=self.root, name='existing fake ORCA workflow', engine='ORCA',
             env={'PYTHON_BIN': sys.executable, 'FAKE_ORCA_LOG': str(self.root/'fake.log')})
         self.run_queue()
-        self.completed(1)
+        # Functional deadline for a real multi-stage workflow run, not a latency bound.
+        self.completed(1, timeout=30)
         self.assertEqual(self.jobs()[0]['status'], 'Done', self.jobs()[0])
         results = list((output/'workflows').glob('*/workflow_result.json'))
         self.assertEqual(len(results), 1)

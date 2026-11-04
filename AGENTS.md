@@ -167,3 +167,10 @@ Do not include long command transcripts, repeated status summaries, or forensic 
   in shell.
 - Process health is advisory operational evidence and never scientific success
   or an automatic termination policy.
+
+## 12. Continuous integration
+
+Keep CI lean and proportional to project risk. Prioritize meaningful
+correctness checks, fast feedback, and minimal maintenance. Do not introduce
+additional workflows, extensive matrices, or expensive validation without a
+demonstrated need.

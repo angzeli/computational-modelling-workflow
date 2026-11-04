@@ -12,6 +12,7 @@ import sys
 from uuid import uuid4
 
 from textual import events
+from textual.app import App
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Input, Static, TextArea

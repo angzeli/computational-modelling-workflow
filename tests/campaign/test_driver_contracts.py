@@ -225,6 +225,7 @@ assert os.waitstatus_to_exitcode(status) == 0
                     evidence['remaining'] = ledger.cleanup(time.monotonic()+3.)
                     evidence['records'] = ledger.records
                     if destination := os.environ.get('CMW_TEST_EVIDENCE_DIR'):
+                        Path(destination).mkdir(parents=True, exist_ok=True, mode=0o700)
                         closure_workflows.save(Path(destination)/'zombie-lifecycle.json', evidence)
             self.assertFalse(evidence['remaining'])
 

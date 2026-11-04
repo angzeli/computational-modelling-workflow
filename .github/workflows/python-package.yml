@@ -1,31 +1,67 @@
-name: Python regressions and installed artifacts
+name: CI
 
+# PRs get the Linux/Python 3.10 lower-bound suite plus the core wheel install.
+# Main pushes and manual runs add macOS/Python 3.14; a manual run also checks
+# every installed-artifact mode (core, jobs, sdist, editable).
 on:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
 jobs:
-  regression-package:
-    name: ${{ matrix.label }}
+  checks:
+    name: Lint and publication hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Lint (syntax errors and undefined names only)
+        run: pipx run --spec ruff==0.17.3 ruff check --select E9,F63,F7,F82 --output-format github .
+      # Scans every tracked file, docs included, so it also runs for docs-only changes.
+      - name: Tracked-source publication hygiene
+        run: python3 tests/distribution_hygiene.py --source-root .
+      # Only docs/ and top-level Markdown other than README.md (package metadata) are docs-only.
+      - name: Detect docs-only pull requests
+        id: scope
+        run: |
+          code=true
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            changed=$(git diff --name-only HEAD^1 HEAD)
+            if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qvE '^docs/|^[^/]+\.md$' \
+                && ! printf '%s\n' "$changed" | grep -qx README.md; then
+              code=false
+            fi
+          fi
+          printf 'code=%s\n' "$code" >> "$GITHUB_OUTPUT"
+
+  tests:
+    name: Tests / ${{ matrix.os }} / Python ${{ matrix.python }}
+    needs: checks
+    if: needs.checks.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - label: macOS acceptance / Python 3.14
-            os: macos-15
-            python: '3.14'
-          - label: Linux lower-bound check / Python 3.10
-            os: ubuntu-24.04
-            python: '3.10'
+        include: ${{ fromJSON(github.event_name == 'pull_request'
+          && '[{"os":"ubuntu-24.04","python":"3.10"}]'
+          || '[{"os":"ubuntu-24.04","python":"3.10"},{"os":"macos-15","python":"3.14"}]') }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    env:
-      PYTHONDONTWRITEBYTECODE: '1'
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -35,15 +71,44 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: pyproject.toml
-      - name: Isolate Jobs state and lifecycle evidence
-        run: |
-          printf '%s\n' "CMW_JOBS_STATE=$RUNNER_TEMP/cmw-ci-unused-state" >> "$GITHUB_ENV"
-          printf '%s\n' "CMW_TEST_EVIDENCE_DIR=$RUNNER_TEMP/cmw-lifecycle-evidence" >> "$GITHUB_ENV"
-      - name: Install test and build dependencies
-        run: python -m pip install -e '.[jobs]' build
-      # Discovery includes controlled suspension state, worker, runner, portal
-      # and PTY regressions. Native MPI/engine/sleep qualification is separate.
-      - name: Full deterministic offline suite (synthetic engines only)
-        run: python -m unittest discover -s tests
+      - name: Install test dependencies
+        run: python -m pip install -e '.[jobs]'
+      # Thousands of test subprocesses import cmw; without cached bytecode each
+      # recompiles it (~0.18 s). Compile once; PYTHONDONTWRITEBYTECODE still stops
+      # writes during tests, and runtime inventories ignore __pycache__.
+      - name: Precompile bytecode
+        run: python -m compileall -q src tests
+      # Full deterministic offline suite (synthetic engines only): one unittest
+      # process per module, one per CPU, isolated state. Native engine qualification is separate.
+      - name: Offline suite
+        run: PYTHON_BIN="$(command -v python)" bash scripts/ci/run_tests.sh "$RUNNER_TEMP/cmw-tests"
+
+  artifacts:
+    name: Installed artifacts / ${{ matrix.os }} / ${{ github.event_name == 'workflow_dispatch' && 'all modes' || 'core wheel' }}
+    needs: checks
+    if: needs.checks.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'pull_request'
+          && '[{"os":"ubuntu-24.04","python":"3.10"}]'
+          || '[{"os":"ubuntu-24.04","python":"3.10"},{"os":"macos-15","python":"3.14"}]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install build frontend
+        run: python -m pip install build
+      # The wheel is built from the sdist; core mode installs it without the
+      # optional console and runs the installed smoke outside the checkout.
       - name: Build, inspect and test fresh installations outside checkout
+        env:
+          CMW_ARTIFACT_MODES: ${{ github.event_name == 'workflow_dispatch' && 'all' || 'core' }}
         run: PYTHON_BIN="$(command -v python)" bash scripts/ci/check_artifacts.sh "$RUNNER_TEMP/cmw-artifact-check"
