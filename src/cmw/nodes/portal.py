@@ -32,12 +32,10 @@ from cmw.progress.formatting import progress_text
 from cmw.progress.models import HistoryPage, ProgressSnapshot
 from .codec import decode_typed, encode_typed
 from .connections import observed_machine_usage
+from .contracts import Reachability, NodeEvent, NodeState, transition, estimate_clock_skew
 from .protocol import NodeError
+from .transport_events import classify_failure, compatible_capabilities, FailureKind
 from .portal_views import FetchDialog, NodeControlConfirm, NodeCopyPreview, NodeFiles
-
-
-_TRANSPORT_ERRORS = {'DISCONNECTED', 'UNREACHABLE', 'OUTCOME_UNKNOWN', 'ENDPOINT_CHANGED', 'INVALID_RESPONSE',
-                     'SSH_IDENTITY_CHANGED', 'SSH_IDENTITY_UNVERIFIED', 'RUNTIME_MISMATCH', 'CLOSED'}
 
 
 def target_key(target):
@@ -75,9 +73,16 @@ class NodeLane:
     status_envelope: dict | None = None
     received: float | None = None
     request_started: float | None = None
+    request_wall_started: float | None = None
     status_transport_age: float = 0.
     error: str | None = None
-    failures: int = 0
+    reachability: Reachability = field(default_factory=Reachability)
+    handshake_required: bool = True
+    status_confirmed: bool = False
+    reconnect_required: bool = False
+    refusal_generation: int = 0
+    refusal: FailureKind | None = None
+    clock_skew: object | None = None
     next_poll: float = 0
     next_progress: float = 0
     session: str | None = None
@@ -85,11 +90,13 @@ class NodeLane:
     cache: dict = field(default_factory=dict)
 
     def age(self, now):
-        return None if self.received is None else max(0., now - self.received)
+        return None if self.received is None else now - self.received
 
     def fresh(self, now):
         age = self.age(now)
-        return self.error is None and age is not None and age <= 10
+        return (self.error is None and not self.handshake_required and self.status_confirmed and self.refusal is None
+                and self.reachability.state == NodeState.REACHABLE
+                and age is not None and 0 <= age <= 10)
 
 
 class NodesApp(NodeCatalogue, NavigationApp):
@@ -112,7 +119,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
         Binding('q', 'quit', 'Detach', priority=True), Binding('ctrl+c', 'detach', 'Detach', priority=True)]
 
     def __init__(self, backends, *, backend_factory=None, request_root=None,
-                 clock=None, clipboard_backend=None):
+                 clock=None, wall_clock=None, clipboard_backend=None):
         super().__init__()
         if not backends or len(backends) > 8:
             raise ValueError('Select one to eight explicitly enrolled nodes')
@@ -123,6 +130,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
         self.backend_factory = backend_factory
         self.request_root = request_root
         self.clock = clock or time.monotonic
+        self.wall_clock = wall_clock or time.time
         self.clipboard_backend = clipboard_backend
         self.selected_key = None
         self.rows = {}
@@ -240,16 +248,27 @@ class NodesApp(NodeCatalogue, NavigationApp):
             # A slow status reply must not monopolize every idle tick. Queue it
             # after selected reads so both remain serviced by the bounded lane.
             if not lane.busy and now >= lane.next_poll:
-                self.queue(owner, 'status', automatic=True)
+                self.queue(owner, 'capabilities' if lane.handshake_required else 'status', automatic=True)
                 lane.next_poll = now + 2
             if lane.pending and not lane.busy:
-                request = lane.pending.popleft()
+                if lane.handshake_required:
+                    handshake = next((item for item in lane.pending if item[0] == 'capabilities'), None)
+                    if handshake is None:
+                        continue
+                    lane.pending.remove(handshake)
+                    lane.pending.appendleft(handshake)
+                request = (*lane.pending.popleft(), lane.refusal_generation)
                 lane.busy = True
                 lane.active_request = request
                 lane.request_started = now
+                lane.request_wall_started = self.wall_clock()
                 def collect(owner=owner, lane=lane, request=request):
                     operation, params, target, callback = request[:4]
                     try:
+                        if operation == 'capabilities' and lane.reconnect_required:
+                            reconnect = getattr(lane.backend, 'reconnect', lane.backend.close)
+                            reconnect()
+                            lane.reconnect_required = False
                         result, error = lane.backend.call(operation, params, target), None
                     except Exception as exc:
                         result, error = None, exc
@@ -273,29 +292,54 @@ class NodesApp(NodeCatalogue, NavigationApp):
             if view is not None and view.selection[:2] == prefix and view.is_mounted:
                 view.invalidate()
 
+    def refuse_lane(self, owner, error, operation):
+        lane = self.lanes[owner]
+        failure = classify_failure(error, operation=operation)
+        if not failure.controls_refused:
+            return failure
+        lane.error = str(error)
+        lane.refusal_generation += 1
+        if failure.event is not None:
+            lane.reachability = transition(lane.reachability, failure.event)
+        lane.refusal = failure.kind if failure.kind in {
+            FailureKind.SECURITY, FailureKind.READINESS, FailureKind.AUTHENTICATION,
+            FailureKind.INCOMPATIBLE} else lane.refusal
+        lane.handshake_required = lane.reconnect_required = True
+        lane.status_confirmed = False
+        lane.next_poll = self.clock() + (30 if lane.refusal is not None else 5)
+        abandoned = tuple(lane.pending)
+        lane.pending.clear()
+        self.invalidate_session(owner)
+        for queued_operation, _, queued_target, queued_callback in (item[:4] for item in abandoned):
+            if queued_target is not None:
+                cache = lane.cache.setdefault(target_key(queued_target), {})
+                cache[queued_operation + '.error'] = str(error)
+            if queued_callback is not None:
+                queued_callback(None, NodeError(getattr(error, 'code', 'DISCONNECTED'),
+                    'Queued request was not sent because the owner connection changed: ' + str(error)))
+        return failure
+
     def accept(self, owner, request, envelope, error):
         lane = self.lanes[owner]
         lane.busy = False
         lane.active_request = None
         operation, params, target, callback = request[:4]
         now = self.clock()
+        if len(request) > 5 and request[5] != lane.refusal_generation:
+            # A separate control worker can refuse identity while this read is
+            # in flight. Its older handshake must not clear the newer refusal.
+            if callback is not None:
+                callback(None, NodeError('HANDSHAKE_REQUIRED',
+                    'Reply predates a newer owner refusal; fresh handshake required'))
+            self.render_state()
+            return
+        if error is None and operation == 'capabilities':
+            try:
+                compatible_capabilities(envelope)
+            except NodeError as exc:
+                error, envelope = exc, None
         if error is not None:
-            if getattr(error, 'code', 'UNREACHABLE') in _TRANSPORT_ERRORS:
-                lane.error = str(error)
-                lane.failures += 1
-                lane.next_poll = now + min(30, 2 ** min(5, lane.failures))
-                abandoned = tuple(lane.pending)
-                lane.pending.clear()
-                self.invalidate_session(owner)
-                # These requests were never sent; complete their waiting views
-                # without replaying operations after a transport/identity change.
-                for queued_operation, _, queued_target, queued_callback in (item[:4] for item in abandoned):
-                    if queued_target is not None:
-                        cache = lane.cache.setdefault(target_key(queued_target), {})
-                        cache[queued_operation + '.error'] = str(error)
-                    if queued_callback is not None:
-                        queued_callback(None, NodeError(getattr(error, 'code', 'DISCONNECTED'),
-                            'Queued request was not sent because the owner connection changed: ' + str(error)))
+            self.refuse_lane(owner, error, operation)
             if target is not None:
                 cache = lane.cache.setdefault(target_key(target), {})
                 cache[operation + '.error'] = str(error)
@@ -313,9 +357,28 @@ class NodesApp(NodeCatalogue, NavigationApp):
                     cached['progress.error'] = 'Endpoint session changed; earlier cached scientific evidence.'
                     cached['observe.error'] = 'Endpoint session changed; earlier cached worker evidence.'
             lane.session, lane.clock_id = envelope['session_id'], envelope['clock_id']
-            lane.error, lane.failures = None, 0
+            if operation == 'capabilities':
+                lane.reachability = transition(lane.reachability, NodeEvent.HANDSHAKE_SUCCESS, received_at=now)
+                lane.error = lane.refusal = None
+                lane.handshake_required = False
+                lane.status_confirmed = False
+                lane.next_poll = 0
+            elif changed or lane.handshake_required:
+                # An old in-flight reply cannot clear a refusal or establish a
+                # new endpoint session's authority without capabilities.
+                error = NodeError('HANDSHAKE_REQUIRED',
+                    'Fresh compatible capabilities required after connection change')
+                self.refuse_lane(owner, error, operation)
+            else:
+                lane.reachability = transition(lane.reachability, NodeEvent.SUCCESS, received_at=now)
+            try:
+                lane.clock_skew = estimate_clock_skew(lane.request_wall_started,
+                    self.wall_clock(), envelope['observed_at'])
+            except (NodeError, KeyError):
+                lane.clock_skew = None
             if operation == 'status':
                 lane.state = envelope['result']['state']
+                lane.status_confirmed = error is None and not lane.handshake_required
                 lane.status_envelope, lane.received = envelope, now
                 lane.status_transport_age = max(0., now - lane.request_started) if lane.request_started is not None else 0.
                 for request_id, pending in tuple(self.unknown_controls.items()):
@@ -334,6 +397,8 @@ class NodesApp(NodeCatalogue, NavigationApp):
         if callback is not None:
             callback(envelope, error)
         self.render_state()
+        if operation == 'capabilities' and error is None:
+            self.tick()
 
     def selected(self):
         selected = self.rows.get(self.selected_key)
@@ -345,15 +410,22 @@ class NodesApp(NodeCatalogue, NavigationApp):
     def connection_text(self, owner):
         lane = self.lanes[owner]
         age = lane.age(self.clock())
-        if lane.error:
+        if lane.refusal is not None:
+            state = lane.refusal.value + ' refused'
+        elif lane.reachability.state == NodeState.UNREACHABLE:
             state = 'node unreachable'
+        elif lane.error:
+            state = f'connection lost ({lane.reachability.consecutive_failures}/3)'
         elif age is None:
             state = 'connecting'
         elif not lane.fresh(self.clock()):
             state = 'stale transport'
         else:
             state = 'Online'
-        return state + (' · received —' if age is None else f' · received {age:.0f}s ago')
+        skew = lane.clock_skew
+        clock = (' · clock skew unassessed' if skew is None else
+                 f' · clock {skew.seconds:+.1f}s ±{skew.uncertainty_seconds:.1f}s ({skew.level.value.lower()})')
+        return state + (' · received —' if age is None else f' · received {age:.0f}s ago') + clock
 
     def machine_usage(self, owner):
         lane = self.lanes[owner]
@@ -392,7 +464,9 @@ class NodesApp(NodeCatalogue, NavigationApp):
             counts = (lane.status_envelope or {}).get('result',{}).get('status_counts',{})
             count = counts.get('Run',sum(job.get('status') == 'Run' for job in state.get('jobs', ())))
             unknown = counts.get('Unknown',sum(job.get('status') == 'Unknown' for job in state.get('jobs', ())))
-            condition = 'Online' if lane.fresh(now) else 'Unreachable' if lane.error else 'Connecting' if lane.received is None else 'Stale'
+            condition = ('Online' if lane.fresh(now) else lane.refusal.value if lane.refusal is not None
+                         else 'Unreachable' if lane.reachability.state == NodeState.UNREACHABLE
+                         else 'Disconnected' if lane.error else 'Connecting' if lane.received is None else 'Stale')
             control = 'ctrl on' if controller.get('online') else 'ctrl off'
             age = lane.age(now)
             received = '—' if age is None else f'{age:.0f}s'
@@ -449,7 +523,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
             lane = self.lanes[owner]
             status = effective_status(job)
             if not lane.fresh(now):
-                status = 'Last reported ' + status + ' — ' + ('node unreachable' if lane.error else 'transport stale')
+                status = 'Last reported ' + status + ' — ' + self.connection_text(owner).split(' · received')[0]
             usage = (lane.state or {}).get('job_usage', {}).get(job['attempt_id'], job.get('usage'))
             usage = deepcopy(usage or {})
             if usage.get('age_seconds') is not None:
@@ -969,26 +1043,32 @@ class NodesApp(NodeCatalogue, NavigationApp):
         def controlling():
             backend = None
             unknown = False
+            error = None
             try:
                 from .client import apply_control
                 backend = self.new_backend(view.owner)
                 result = apply_control(backend, deepcopy(view.preview), root=self.request_root, confirm=True, reason=reason, request_id=request_id)
                 text = json.dumps(result, ensure_ascii=True)[:3000]
             except Exception as exc:
-                unknown = getattr(exc, 'code', None) in _TRANSPORT_ERRORS
+                error = exc
+                unknown = classify_failure(exc, operation='control').outcome_unknown
                 text = 'Request ' + request_id + ': ' + str(exc) + ' · Query this original ID; no automatic replay.'
             finally:
                 if backend is not None:
                     backend.close()
             if not self.closed:
-                self.call_from_thread(self.finish_control, view, text, unknown)
+                self.call_from_thread(self.finish_control, view, text, unknown, error)
         self.run_worker(controlling, thread=True, group='control-' + view.owner, exit_on_error=False)
 
-    def finish_control(self, view, text, unknown=False):
+    def finish_control(self, view, text, unknown=False, error=None):
         if unknown:
             self.unknown_controls[view.request_id] = (view.owner, view)
         self.operation_busy.discard(view.owner)
         self.lanes[view.owner].next_poll = 0
+        if error is not None:
+            self.refuse_lane(view.owner, error, 'control')
+        if unknown:
+            self.check_control_result(view.owner, view.request_id, view)
         if view.is_mounted:
             view.query_one('#node-control-status', Static).update(literal(text))
         self.message(text)

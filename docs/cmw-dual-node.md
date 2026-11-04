@@ -243,7 +243,7 @@ including local endpoint connections. The frontend's optional user settings file
 is not an endpoint configuration. The SSH bootstrap neither forwards these values
 nor requires an interactive shell startup file. The future mini must opt in using
 its own private file, provider installation and qualification; the MacBook's
-provider path cannot authorize it. Enrollment, SSH/Tailscale configuration and
+provider path cannot authorize it. Enrollment, SSH configuration and
 runner-profile dependencies are unchanged. An older peer with no thermal record
 or an unsupported provider remains operational under its existing readiness rules.
 The additive status record does not relax scientific-model decoding.
@@ -528,3 +528,31 @@ shape and add versioned `runner_profiles` interpreter metadata. A capability's
 This change adds data and observation only. Runner argv, environment and launch
 selection remain unchanged. P3a will set `CMW_MANAGED_PYTHON` explicitly from the
 profile pin; this Phase 1 record alone does not prove launch use.
+
+## Portal reachability and recovery
+
+Each selected node has its own reachability state. Connection loss disables
+controls immediately and qualifies retained rows as last reported. The first two
+transport failures preserve the prior state; the third marks UNREACHABLE.
+Authentication failure and incompatible capabilities are immediate states;
+host-key, runtime, identity or readiness refusal immediately disables controls.
+An unreachable/changed address is a transport failure; a presented key differing
+from the pinned key is a security refusal, never an automatic pin update.
+
+Recovery uses a new compatible capabilities handshake and fresh status. A reply
+from before a newer refusal cannot restore controls. Unsent requests are abandoned;
+mutations never replay. Unknown mutation outcomes are queried by their original
+request ID on a separate verified connection. Transport failures retry after 5 s;
+explicit refusals retry only a read-only handshake after 30 s. Authentication
+classification requires complete local OpenSSH negotiation records, a verified
+pin and exit status; arbitrary stderr text or exit 255 alone is insufficient.
+
+The selected node displays signed clock skew and round-trip uncertainty. Absolute
+skew of at least 5 s is amber and at least 60 s is red; a backwards frontend
+wall-clock interval is unassessed. Skew is display-only and never grants freshness
+or alters ordering, deadlines, endpoint checks or control authority.
+
+The current MacBook-to-Mini route is direct SSH through `cmw-mini` to a literal
+routable IPv6 address; there is no Tailscale. This code change does not configure
+that route. Address stability, routable-SSH security and alias-based host-key
+pinning need the pre-P3b review recorded in the architecture specification.

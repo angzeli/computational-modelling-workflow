@@ -1,11 +1,13 @@
 # Multi-host CMW nodes: delta specification
 
-Status: **Phase 0 contracts; runtime changes are future work.** This specification
-extends the existing `cmw nodes` implementation. It introduces no second jobs
-protocol, scheduler, manifest, provenance format, transport, or portal. The pure
-APIs described below are not imported by a CLI, endpoint operation, or portal.
+Status: **Phase 0 contracts with Phase 1 observation code implemented; not
+deployed.** This specification extends the existing `cmw nodes` implementation.
+It introduces no second jobs protocol, scheduler, manifest, provenance format,
+transport or portal. P1 wires reachability/clock decisions, cheap status and
+independent telemetry, and records interpreter pins; cancellation/plan contracts
+and the deployment cutover remain separate work.
 
-The inspected baseline is cached `origin/main` commit `1563c2f`, which includes
+The historical Phase 0 inspected baseline was cached `origin/main` commit `1563c2f`, which includes
 PR #3 and the existing nodes implementation. The local `main` reference was
 older and lacked `src/cmw/nodes`. The earlier `phase0-multi-host-contracts`
 commit `4c9f9b9` and its uncommitted follow-up were reference material only; that
@@ -13,9 +15,14 @@ branch was neither merged, rebased nor removed. Existing architecture documents
 remain in place. [The implemented nodes contract](../cmw-dual-node.md) and
 [Jobs contract](../cmw-jobs.md) describe current supported behaviour.
 
+The production nodes currently connect by direct SSH: the MacBook uses the
+`cmw-mini` alias for a literal routable IPv6 address. There is no Tailscale or
+tailnet. This task does not contact the Mini or change SSH configuration.
+
 ## 1. Baseline
 
-This section records code behaviour, not physical two-machine qualification.
+This section records the Phase 0 baseline behaviour, not the P1 implementation
+or physical two-machine qualification.
 The proposed aliases do not establish that either production enrollment or a
 reverse connection has been configured or tested.
 
@@ -350,14 +357,24 @@ that establishes or restores `REACHABLE`.
 | Incompatible handshake | Immediately `INCOMPATIBLE`; reset transport-failure count; retain last observation as historical. |
 
 Every prior state, including the unconfirmed state, follows this table. A
-transport classification adapter must distinguish authentication, incompatible
-capabilities, host identity refusal and outcome-unknown mutations; the current
-SSH transport does not expose all of those as separate events yet. Host-key or
-runtime mismatch is never three tolerable failures before mutation refusal.
-Explicit security/readiness refusals disable controls immediately even while
-reachability counts are below three. Recovery never silently replays a mutation.
-Retry cadence/automatic authentication retry policy remains an integration
-question, independent of this pure transition function.
+transport classification adapter now distinguishes authentication, incompatible
+capabilities, host identity/readiness refusal and unknown mutation outcomes.
+`ProcessTransport` uses complete OpenSSH pre-authentication records plus verified
+pinned host key and SSH exit 255 to identify exhausted authentication. Exit 255
+or arbitrary stderr substrings alone remain transport failures. Presented key
+mismatch is an immediate security refusal, including pipe-close races; an
+unreachable or changed IPv6 address is a counted transport failure. Pins are
+never updated automatically. Structured endpoint error codes retain authority.
+
+The portal now wires these events into the table above. A first disconnect
+retains the last state/rows but immediately disables controls; the third counts
+as UNREACHABLE. Security/readiness refusal disables controls immediately, without
+waiting for three failures. Recovery opens a fresh observer and requires a
+compatible handshake followed by status. A response predating a newer refusal
+cannot clear it. Unsent work is abandoned, and mutations are never replayed.
+Unknown control outcomes retain their original request ID for independent lookup.
+Transport retry is every 5 s; explicit auth/security/readiness/incompatibility
+refusals retry a read-only handshake after 30 s, never a mutation or pin change.
 
 P1 status polling becomes 5 s. The Phase 0 interpretation of “about 15 s” keeps
 the existing inclusive freshness convention: age `<= 15 s` is fresh, `> 15 s`
@@ -706,12 +723,13 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    pending. The proposed simpler all-transfers-before-Hold flow is a draft;
    choose the intended sequencing before designing its states/receipts. Both
    release and launch must enforce the final artifact barrier in either case.
-4. **D10/D11 event integration (P1):** current SSH failures do not fully distinguish
-   authentication from transport disconnection. Specify trustworthy classification
-   and retry policy, including host-key/readiness refusals, without relying on
-   arbitrary stderr substrings as sufficient authority. Pure `None` initial
-   state, handshake-only recovery and fresh `<= 15 s` are executable Phase 0
-   interpretations; review their UI wording without weakening mutation guards.
+4. **D10/D25 event integration resolved in P1 code, deployment pending:**
+   structured transport events and portal state now follow §3.4, including
+   immediate security/readiness refusal, three counted transport failures,
+   handshake-only recovery, no mutation replay and display-only skew. SSH
+   authentication requires complete pre-authentication evidence and exit status;
+   ambiguous failures remain transport failures. Retry policy is specified in
+   §3.4. No live SSH qualification was performed for this code task.
 5. **D11 telemetry-expiry conflict resolved in P1 code, deployment pending:**
    the Phase 0 measurement found six of nine warm CPU observations warming up
    because 5 s polling plus jitter exceeded the existing 5 s baseline cutoff.
@@ -770,3 +788,11 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
 11. **D26 journal (P4):** decide durable append/receipt atomicity, sequence recovery,
     migration/linkage to queue history, retention and export. The decision calls
     for permanent node-local history, not cross-node total time ordering.
+
+12. **P3b transfer throughput:** throughput between these nodes is unmeasured.
+    No local synthetic or localhost throughput establishes their direct-SSH
+    transfer performance; qualify it separately before selecting transfer tuning.
+13. **Direct routable IPv6 SSH security (before P3b):** review the security
+    implications of exposing SSH on the routable IPv6 address, address stability
+    and host-key pinning by alias. An address change does not authorize a key
+    change, and no automatic pin update is permitted. No tailnet is assumed.

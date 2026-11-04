@@ -65,7 +65,10 @@ class FakeBackend:
         if target is not None:
             assert target['node_id'] == self.node_id and target['queue_id'] == self.queue_id
         self.sequence += 1
-        if operation == 'status':
+        if operation == 'capabilities':
+            result = {'operations': ['capabilities', 'status'],
+                      'readiness': {'identity_ready': True, 'runtime_ready': True, 'ready': True}}
+        elif operation == 'status':
             result = {'state': {'jobs': deepcopy(self.jobs), 'controller': {'online': True, 'dispatch': True},
                 'job_usage': {self.jobs[0]['attempt_id']: {'cpu_cores': 7.91, 'cpu_quality': 'complete',
                     'rss_bytes': 2**30, 'memory_quality': 'complete', 'age_seconds': 0}},
@@ -349,7 +352,7 @@ class PortalTests(unittest.IsolatedAsyncioTestCase):
             app.lanes['MINI'].next_poll = 0
             await self.until(pilot, lambda: app.lanes['MINI'].error is not None)
             selected = str(app.query_one('#selected', Static).render())
-            self.assertIn('Last reported Run — node unreachable', selected)
+            self.assertIn('Last reported Run — connection lost (1/3)', selected)
             self.assertIn('791%~', selected)
             self.assertTrue(all(len(line) <= 70 for line in selected.splitlines()), selected)
             before = len(backends['MINI'].calls)
