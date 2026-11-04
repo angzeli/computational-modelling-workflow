@@ -209,7 +209,7 @@ class PortalTests(unittest.IsolatedAsyncioTestCase):
                         request = lane.active_request
                         self.assertIsNotNone(request)
                         observed.append(request[0])
-                        # Each response outlasts the two-second status cadence.
+                        # Two responses span the five-second status cadence.
                         now[0] += 2.5
                         response = lane.backend.call(*request[:3])
                         app.accept('MINI', request, response, None)

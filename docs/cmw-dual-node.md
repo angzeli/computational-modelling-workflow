@@ -531,6 +531,11 @@ profile pin; this Phase 1 record alone does not prove launch use.
 
 ## Portal reachability and recovery
 
+Status polling is every 5 s. A receipt remains fresh through 15 s inclusive,
+measured only by the portal monotonic clock; older or future receipts cannot
+authorize controls. Stale/disconnected rows are labelled last reported. Unknown
+Jobs states keep their existing display and refusal semantics.
+
 Each selected node has its own reachability state. Connection loss disables
 controls immediately and qualifies retained rows as last reported. The first two
 transport failures preserve the prior state; the third marks UNREACHABLE.

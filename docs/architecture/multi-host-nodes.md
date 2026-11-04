@@ -376,7 +376,7 @@ Unknown control outcomes retain their original request ID for independent lookup
 Transport retry is every 5 s; explicit auth/security/readiness/incompatibility
 refusals retry a read-only handshake after 30 s, never a mutation or pin change.
 
-P1 status polling becomes 5 s. The Phase 0 interpretation of “about 15 s” keeps
+P1 status polling is now 5 s. The Phase 0 interpretation of “about 15 s” keeps
 the existing inclusive freshness convention: age `<= 15 s` is fresh, `> 15 s`
 is stale, no receipt is unavailable. Age is measured solely with the portal's
 monotonic clock; no negative/future local age is accepted. Retained rows are
@@ -689,7 +689,7 @@ sleep assertions.
 | Immediate operating rules | D32: one production configuration per node; sandbox namespaces for benchmarks/experiments, never production queues. D33: no new Mini submissions until its current research job finishes. | Effective now; no deployment implied |
 | P0 | This delta specification; ported pure logic; local status-cost measurement | — |
 | 3.11 PR | Minimum Python 3.11; CI adjustment | P0 merged |
-| P1 | Cheap status; 3-failure rule and 5 s polling; default registry and aliases; canonical production configuration of both machines in both directions; thermal configuration; D30 interpreter profile pins; D31 qualified `51d8209` immutable snapshot cutover; D33 single Mini consolidation | 3.11 PR merged; runner qualification before production use; Mini cutover only after its current research job finishes |
+| P1 | **Code implemented, not deployed:** cheap status, independent telemetry, 3-failure rule, 5 s polling/15 s freshness and D30 profile data. **Cutover pending:** default registry and aliases; canonical production configuration of both machines in both directions; thermal configuration; D30 interpreter profile pins; D31 qualified `51d8209` immutable snapshot cutover; D33 single Mini consolidation | 3.11 PR merged; runner qualification before production use; Mini cutover only after its current research job finishes |
 | P2 | Single entry point: `cmw jobs watch` opens `NodesApp` including the local queue; node tabs; consolidate `JobsTable` and `NodesTable` | P1 |
 | P3a | Cancellation modes and 10 s hard grace; D18 verify-only INCAR and NPAR rejection in the VASP port (separate repository PR based on `51d8209`); D30 explicit `CMW_MANAGED_PYTHON` launch path; D31 newly qualified immutable successor snapshot and profile pins | P2; qualify the changed runner before production deployment |
 | P3b | Binary transfer endpoint replacing SFTP; restart-artifact submission; forced-command gate; D23 | P3a; gate after the transfer endpoint |

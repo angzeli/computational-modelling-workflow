@@ -32,7 +32,8 @@ from cmw.progress.formatting import progress_text
 from cmw.progress.models import HistoryPage, ProgressSnapshot
 from .codec import decode_typed, encode_typed
 from .connections import observed_machine_usage
-from .contracts import Reachability, NodeEvent, NodeState, transition, estimate_clock_skew
+from .contracts import (Reachability, NodeEvent, NodeState, transition, estimate_clock_skew,
+                        POLL_INTERVAL_SECONDS, STALE_AFTER_SECONDS)
 from .protocol import NodeError
 from .transport_events import classify_failure, compatible_capabilities, FailureKind
 from .portal_views import FetchDialog, NodeControlConfirm, NodeCopyPreview, NodeFiles
@@ -96,7 +97,7 @@ class NodeLane:
         age = self.age(now)
         return (self.error is None and not self.handshake_required and self.status_confirmed and self.refusal is None
                 and self.reachability.state == NodeState.REACHABLE
-                and age is not None and 0 <= age <= 10)
+                and age is not None and 0 <= age <= STALE_AFTER_SECONDS)
 
 
 class NodesApp(NodeCatalogue, NavigationApp):
@@ -249,7 +250,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
             # after selected reads so both remain serviced by the bounded lane.
             if not lane.busy and now >= lane.next_poll:
                 self.queue(owner, 'capabilities' if lane.handshake_required else 'status', automatic=True)
-                lane.next_poll = now + 2
+                lane.next_poll = now + POLL_INTERVAL_SECONDS
             if lane.pending and not lane.busy:
                 if lane.handshake_required:
                     handshake = next((item for item in lane.pending if item[0] == 'capabilities'), None)
@@ -306,7 +307,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
             FailureKind.INCOMPATIBLE} else lane.refusal
         lane.handshake_required = lane.reconnect_required = True
         lane.status_confirmed = False
-        lane.next_poll = self.clock() + (30 if lane.refusal is not None else 5)
+        lane.next_poll = self.clock() + (30 if lane.refusal is not None else POLL_INTERVAL_SECONDS)
         abandoned = tuple(lane.pending)
         lane.pending.clear()
         self.invalidate_session(owner)
