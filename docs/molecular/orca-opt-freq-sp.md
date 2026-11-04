@@ -36,10 +36,8 @@ reuse decision that can already be established safely.
 
 ## JSON configuration
 
-JSON was chosen because the package supports Python 3.10 and keeps a
-dependency-free runtime; standard-library TOML parsing is only available from
-Python 3.11. The configuration schema is deliberately smaller than an ORCA
-input language:
+JSON remains the configuration format and is parsed with the standard library.
+The configuration schema is deliberately smaller than an ORCA input language:
 
 ```json
 {

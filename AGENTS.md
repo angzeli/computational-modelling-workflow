@@ -179,6 +179,10 @@ Do not include long command transcripts, repeated status summaries, or forensic 
 
 ## 12. Continuous integration
 
+The minimum Python version is 3.11. Keep the qualification matrix limited to
+Python 3.11 on Ubuntu 24.04 x64 and Python 3.14 on macOS 15 Apple Silicon;
+Python 3.12–3.13 are not qualified. Do not add Python 3.10 compatibility shims.
+
 Keep CI lean and proportional to project risk. Prioritize meaningful
 correctness checks, fast feedback, and minimal maintenance. Do not introduce
 additional workflows, extensive matrices, or expensive validation without a

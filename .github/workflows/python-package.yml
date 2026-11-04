@@ -1,19 +1,23 @@
 name: CI
 
-# PRs get the Linux/Python 3.10 lower-bound suite plus the core wheel install.
+# PRs get the Linux/Python 3.11 lower-bound suite plus the core wheel install.
 # Main pushes and manual runs add macOS/Python 3.14; a manual run also checks
 # every installed-artifact mode (core, jobs, sdist, editable).
 on:
   pull_request:
+    paths-ignore:
+      - 'docs/website/**'
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/website/**'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -24,8 +28,6 @@ jobs:
     name: Lint and publication hygiene
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    outputs:
-      code: ${{ steps.scope.outputs.code }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -33,33 +35,19 @@ jobs:
           fetch-depth: 2
       - name: Lint (syntax errors and undefined names only)
         run: pipx run --spec ruff==0.17.3 ruff check --select E9,F63,F7,F82 --output-format github .
-      # Scans every tracked file, docs included, so it also runs for docs-only changes.
+      # Scans every tracked file; non-website documentation still runs this workflow.
       - name: Tracked-source publication hygiene
         run: python3 tests/distribution_hygiene.py --source-root .
-      # Only docs/ and top-level Markdown other than README.md (package metadata) are docs-only.
-      - name: Detect docs-only pull requests
-        id: scope
-        run: |
-          code=true
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            changed=$(git diff --name-only HEAD^1 HEAD)
-            if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qvE '^docs/|^[^/]+\.md$' \
-                && ! printf '%s\n' "$changed" | grep -qx README.md; then
-              code=false
-            fi
-          fi
-          printf 'code=%s\n' "$code" >> "$GITHUB_OUTPUT"
 
   tests:
     name: Tests / ${{ matrix.os }} / Python ${{ matrix.python }}
     needs: checks
-    if: needs.checks.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(github.event_name == 'pull_request'
-          && '[{"os":"ubuntu-24.04","python":"3.10"}]'
-          || '[{"os":"ubuntu-24.04","python":"3.10"},{"os":"macos-15","python":"3.14"}]') }}
+          && '[{"os":"ubuntu-24.04","python":"3.11"}]'
+          || '[{"os":"ubuntu-24.04","python":"3.11"},{"os":"macos-15","python":"3.14"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -86,13 +74,12 @@ jobs:
   artifacts:
     name: Installed artifacts / ${{ matrix.os }} / ${{ github.event_name == 'workflow_dispatch' && 'all modes' || 'core wheel' }}
     needs: checks
-    if: needs.checks.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(github.event_name == 'pull_request'
-          && '[{"os":"ubuntu-24.04","python":"3.10"}]'
-          || '[{"os":"ubuntu-24.04","python":"3.10"},{"os":"macos-15","python":"3.14"}]') }}
+          && '[{"os":"ubuntu-24.04","python":"3.11"}]'
+          || '[{"os":"ubuntu-24.04","python":"3.11"},{"os":"macos-15","python":"3.14"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:

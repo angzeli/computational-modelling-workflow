@@ -79,7 +79,7 @@ root=Path(sys.argv[1]); seq=0; sentinel=17391
         if threads:
             code += "threading.Thread(target=lambda: [(sum(range(1000)),time.sleep(.01)) for _ in range(2500)],daemon=True).start()\n"
         if tree:
-            code += "child=subprocess.Popen([sys.executable,'-c',\"import time; [time.sleep(.03) for _ in range(1500)]\"],preexec_fn=os.setpgrp)\n"
+            code += "child=subprocess.Popen([sys.executable,'-c',\"import time; [time.sleep(.03) for _ in range(1500)]\"],process_group=0)\n"
         code += '''while not (root/'finish').exists():
  seq+=1
  temporary=root/'counter.tmp'; temporary.write_text(json.dumps({'pid':os.getpid(),'seq':seq,'sentinel':sentinel})); temporary.replace(root/'counter.json')

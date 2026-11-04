@@ -7,14 +7,17 @@ primaries never overlap. External programs started outside Jobs remain outside
 CMW execution ownership. This is a local POSIX feature. macOS Apple Silicon
 remains the primary acceptance platform: local checks cover macOS 26.3 with
 Python 3.14.3, and hosted CI covers macOS 15 arm64 with Python 3.14. Linux CI
-covers Ubuntu 24.04 x64 with Python 3.10. Both hosted lanes test the full synthetic
-suite, wheel/sdist builds, four fresh installation modes, Sequential and Bounded
-Sharing lifecycles, cleanup, and console initialization. This establishes the
+covers Ubuntu 24.04 x64 with Python 3.11. Ubuntu runs on pull requests; main pushes
+and manual runs also cover macOS. Website-only changes skip Python CI. Both
+hosted lanes test the full synthetic suite, wheel/sdist builds, fresh core-wheel
+installation, Sequential and Bounded Sharing lifecycles, cleanup, and console
+initialization. Manual runs add fresh Jobs-wheel, sdist and editable installation
+checks. This establishes the
 tested synthetic contracts, without validating real scientific engines or all
 Linux environments. Intel macOS and other OS/architecture combinations remain
 untested; Windows Jobs execution is unsupported.
 
-Python 3.10 or newer is declared; Python 3.11–3.13 have no campaign evidence.
+Python 3.11 or newer is required; Python 3.12–3.13 are not qualified.
 The wheel includes Python runtime assets, including the Jobs payload helper.
 Scientific shell workflows also require `scripts/` from a checkout or extracted
 sdist and separately installed engines. This remains `0.1.0` / Pre-Alpha; use an

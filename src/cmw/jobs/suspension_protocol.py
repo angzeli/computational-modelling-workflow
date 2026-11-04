@@ -559,9 +559,8 @@ def controlled_driver(command, *, backend, execution_budget=None, hard_timeout=N
     try:
         for signum in (signal.SIGTERM, signal.SIGINT):
             prior[signum] = signal.signal(signum, lambda *_: None)
-        # This coordinator is single-threaded; setpgrp preserves the owned SID on
-        # Python 3.10, without preexec work beyond the async-signal-safe syscall.
-        child = subprocess.Popen(command, preexec_fn=os.setpgrp, env=child_environment)
+        # Give the child its own process group within the existing owned session.
+        child = subprocess.Popen(command, process_group=0, env=child_environment)
         control.register(child.pid, strategy=strategy or ('openmpi' if mpi_launcher else 'direct-tree'))
         terminating = False
         while True:
