@@ -73,8 +73,8 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install test dependencies
         run: python -m pip install -e '.[jobs]'
-      # Full deterministic offline suite (synthetic engines only), in concurrent
-      # unittest processes with isolated state. Native engine qualification is separate.
+      # Full deterministic offline suite (synthetic engines only): one unittest
+      # process per module, one per CPU, isolated state. Native engine qualification is separate.
       - name: Offline suite
         run: PYTHON_BIN="$(command -v python)" bash scripts/ci/run_tests.sh "$RUNNER_TEMP/cmw-tests"
 
