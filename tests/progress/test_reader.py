@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 import tempfile
@@ -240,7 +241,7 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(reader.poll().state.health, 'SOURCE_UNRESOLVED')
         volume = RegularFileReader(SourceDescriptor('native', '/Volumes/cmw-missing-test-volume/native.out'))
         self.addCleanup(volume.close)
-        with patch('cmw.progress.reader.os.stat', side_effect=FileNotFoundError('unmounted')):
+        with patch('cmw.progress.reader.os.stat', side_effect=FileNotFoundError(errno.ENOENT, 'unmounted')):
             self.assertEqual(volume.poll().state.health, 'VOLUME_UNAVAILABLE')
 
 
