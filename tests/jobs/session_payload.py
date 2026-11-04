@@ -30,14 +30,14 @@ def main():
         return
 
     signal.signal(signal.SIGTERM, lambda signum, frame: None)
-    # This fixture coordinator is single-threaded; use the Python 3.10 POSIX API.
+    # Keep both children in one subgroup of the coordinator's existing session.
     leader = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.readline()'],
-                              stdin=subprocess.PIPE, preexec_fn=os.setpgrp)
+                              stdin=subprocess.PIPE, process_group=0)
     leader_owner = identity(leader.pid)
     survivor = None
     try:
         survivor = subprocess.Popen([sys.executable, '-m', __spec__.name, 'survivor', directory, mode],
-                                    preexec_fn=lambda: os.setpgid(0, leader.pid))
+                                    process_group=leader.pid)
         deadline = time.monotonic()+5
         while not (root/'survivor-ready.json').exists():
             if release.exists() or time.monotonic() >= deadline:

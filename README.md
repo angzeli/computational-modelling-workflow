@@ -221,13 +221,15 @@ python3 -m unittest discover -s tests
 
 ## Tested support
 
-Python 3.10 or newer is declared. The [Python/package CI](.github/workflows/python-package.yml)
-checks Python 3.10 on Ubuntu 24.04 x64 for every pull request and adds Python 3.14 on
-macOS 15 Apple Silicon for pushes to `main` and manual runs. Each run builds the
+Python 3.11 or newer is required. The qualification matrix is Python 3.11 on
+Ubuntu 24.04 x64 and Python 3.14 on macOS 15 Apple Silicon; Python 3.12–3.13
+are not qualified. The [Python/package CI](.github/workflows/python-package.yml)
+checks Ubuntu on pull requests and adds macOS for pushes to `main` and manual
+runs; website-only changes skip this workflow. Each run builds the
 wheel/sdist, installs the core wheel fresh and runs synthetic POSIX lifecycle tests;
 manual runs also check fresh Jobs, sdist and editable installations. Local acceptance also covers Python 3.14.3 on macOS 26.3
-Apple Silicon. Python 3.11–3.13 and other OS/architecture combinations
-have not been qualified in this campaign. macOS Apple Silicon remains the primary
+Apple Silicon. Other OS/architecture combinations have not been qualified in
+this campaign. macOS Apple Silicon remains the primary
 Jobs acceptance platform; Linux evidence covers these synthetic checks. Windows
 Jobs execution is unsupported. These checks do not validate real scientific engines.
 

@@ -85,8 +85,8 @@ forwarding route for active parallel modules, and verifies computational members
 are OS-stopped. Required MPI controls may remain runnable. The runner keeps
 waiting for true process termination. Stop observations cannot trigger copy-back,
 finalization, scratch cleanup or the next workflow stage. A newly enrolled driver
-runs in a separate group in the existing owned session, preserving Python 3.10
-compatibility. Escaping-session and unobservable/dynamic unsupported domains fail
+runs in a separate group in the existing owned session using Python 3.11's
+`process_group` argument. Escaping-session and unobservable/dynamic unsupported domains fail
 closed; process-tree sampling is not an atomic kernel freeze.
 
 The supported ORCA runner has **no configured execution timeout** and acknowledges
