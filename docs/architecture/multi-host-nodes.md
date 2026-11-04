@@ -471,7 +471,7 @@ Memory telemetry remained fresh. Six of nine warm CPU observations reported
 `warming-up`: the existing sampler requires successive samples no more than
 `MAX_AGE = 5.0` s apart, so a 5 s poll interval plus scheduling/verification jitter
 can invalidate its CPU baseline. The proposed P1 resolution in §5 separates
-node-side telemetry sampling from status polling; changing the portal interval
+node-side telemetry sampling from status polling (implemented as described in §5 item 5); changing the portal interval
 alone would degrade CPU display.
 No thermal provider was configured, so thermal collection cost was not measured.
 
@@ -703,15 +703,18 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    arbitrary stderr substrings as sufficient authority. Pure `None` initial
    state, handshake-only recovery and fresh `<= 15 s` are executable Phase 0
    interpretations; review their UI wording without weakening mutation guards.
-5. **D11 telemetry-expiry conflict (P1):** in the §3.5 measurement, six of nine
-   warm CPU observations reported `warming-up`: the existing `MAX_AGE = 5.0` s
-   baseline cutoff conflicts with 5 s polling plus scheduling/verification
-   jitter. Proposed Phase 1 resolution: sample telemetry on the node at its own
-   cadence, as the thermal provider already does, and have `status` return the
-   latest sample with its age. Status polling then neither drives sampling nor
-   determines whether the CPU baseline expires. Retain explicit stale and
-   unavailable evidence when the node sampler stops or samples age out; choose
-   and test the node sampling cadence and aging policy in P1.
+5. **D11 telemetry-expiry conflict resolved in P1 code, deployment pending:**
+   the Phase 0 measurement found six of nine warm CPU observations warming up
+   because 5 s polling plus jitter exceeded the existing 5 s baseline cutoff.
+   Endpoint-owned CPU/memory sampling now starts every 2 s, leaving margin below
+   that cutoff. Status reads the latest sample and its age without sampling.
+   A slow cycle skips missed starts; it never overlaps or catches up in bursts.
+   Samples are stale after 5 s, unavailable after 15 s, and immediately stale
+   after sampler failure/stop. Restart is cold and waits for old collectors to
+   finish. Node monotonic age prevents clock steps from reviving evidence.
+   Current attempt/owner and external membership must still match the sample;
+   polling cannot count one sample multiple times as sustained sharing evidence.
+   Thermal sampling retains its independent existing cadence and aging policy.
 6. **D12 factoring resolved in P1 code, deployment pending:** status uses one
    full verification and complete request-boundary evidence for eligible
    schema-3 enrollments (§3.5). Replacement, membership, metadata/ACL/xattr,

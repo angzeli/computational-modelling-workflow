@@ -235,13 +235,15 @@ class LocalBackend:
         if self._activity_projector is None:
             from cmw.jobs.activity import Observer, project
             from cmw.jobs.telemetry import Sampler
+            from .telemetry import NodeTelemetry
             from .thermal import configured_provider
             with self._sampler_lock:
                 if self._closed:
                     raise BackendError('CLOSED', 'Observation session has closed')
                 if self._activity_observer is None:
                     self._activity_observer = Observer()
-                    self._sampler = Sampler(thermal=configured_provider(self.config_root))
+                    self._sampler = NodeTelemetry(self.store,
+                        sampler_factory=lambda: Sampler(thermal=configured_provider(self.config_root)))
             state = project(self.store, observer=self._activity_observer, sampler=self._sampler)
         else:
             state = self._activity_projector(self.store)

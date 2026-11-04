@@ -248,6 +248,16 @@ runner-profile dependencies are unchanged. An older peer with no thermal record
 or an unsupported provider remains operational under its existing readiness rules.
 The additive status record does not relax scientific-model decoding.
 
+CPU/memory sampling belongs to the endpoint, independent of status requests.
+The endpoint starts a bounded sampler when status is first requested, then samples
+at 2 s intervals. Status returns the latest sample with its age; it still reads
+current queue/external activity for admission. Samples older than 5 s are stale;
+after 15 s their numeric usage is unavailable. Stopping or failing the sampler
+marks evidence stale immediately; reopening starts with cold CPU baselines.
+Slow samples do not overlap or create catch-up bursts. Cached samples retain
+attempt/owner and external-membership bindings; repeated status polls do not
+manufacture sustained sharing evidence. Temperature keeps its own existing policy.
+
 Each node retains independent CPU/RAM/temperature observations, connection state
 and receipt age. At compact widths the portal gives concise node summaries and
 the selected node's full shared line:
