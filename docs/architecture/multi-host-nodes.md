@@ -599,11 +599,20 @@ runner is refused for this new contract. Exact flags/capability spelling are a
 draft interface, not instructions to patch the port here. Current preparation
 and runner migration requirements remain in §5.
 
-**D30 interpreter pin:** P1 adds the runner's explicit Python interpreter and
-its identity to the runner profile through a compatible profile-schema
-migration. P3a makes CMW set `CMW_MANAGED_PYTHON` explicitly from that pin at
-launch. The runner must not select Python from inherited environment or PATH;
-the launch contract must refuse missing or mismatched interpreter evidence.
+**D30 interpreter pin — P1 data implemented, not deployed:** an enrollment
+profile can explicitly opt into `schema: 2` and
+`runner_interpreter: /absolute/path`. Enrollment records the resolved executable
+identity, SHA-256 and complete file/security evidence. Changed evidence refuses
+that profile's readiness. Nodes containing these profiles use configuration
+schema 2; existing unversioned profiles and schema-1 configurations remain valid
+and report **unpinned**. Capabilities preserve the legacy `profiles` projection
+and add `runner_profiles` schema 2 interpreter metadata. Submission bindings
+still hash the complete actual profile. No existing enrollment is migrated.
+
+This records an interpreter without proving the runner uses it. P3a makes CMW
+set `CMW_MANAGED_PYTHON` explicitly from that pin at launch. The runner must not
+select Python from inherited environment or PATH; that future launch contract
+must refuse missing or mismatched interpreter evidence.
 
 **D31 runner deployment:** commit `51d8209` is the canonical VASP port baseline,
 eligible for production only after qualification. P1 deploys it from a clean
@@ -743,8 +752,8 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    interface, shared integer-equivalent-NCORE or no-integer-equivalent rejection
    diagnostic, staged-input identity and provenance/finalization, and the
    existing variant/restart restrictions. D30/D31 fix the interpreter and runner
-   deployment policy; their versioned profile-data and launch integration still
-   require implementation. The separate port PR owns D18 enforcement based on
+   deployment policy. Versioned interpreter profile data is implemented in P1;
+   launch integration, qualified snapshots and deployment remain pending. The separate port PR owns D18 enforcement based on
    `51d8209`; P0 changes neither repository's runtime path.
 9. **D20/D22 capability data and rollout:** current host evidence supplies platform
     UUID, not the new physical-core/tier/policy object, and node submission fixes

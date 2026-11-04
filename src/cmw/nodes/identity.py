@@ -19,12 +19,15 @@ from cmw.periodic.vasp.result_runner import MAX_MPI_RANKS
 from .storage import identify_storage, check_storage, validate_storage
 from .runtime_observation import (RuntimeRefusal, RuntimeVerifier, file_epoch, inventory,
                                   observation, validate_observation, RuntimeCollection)
+from .runner_profiles import (interpreter_observation, pin_interpreter, profile_version,
+                              validate_interpreter)
 
 
 MAX_CONFIG_BYTES = 1024 * 1024
 _ALIAS = re.compile(r'[A-Za-z][A-Za-z0-9_-]{0,47}\Z')
 _CONFIG_FIELDS = {'schema', 'node_id', 'host_id', 'host', 'runtime', 'queues', 'storages', 'profiles'}
-_PROFILE_FIELDS = {'engine', 'runner', 'max_cpus', 'max_ranks', 'dependencies', 'runtime', 'binary_manifests'}
+_PROFILE_FIELDS = {'engine', 'runner', 'max_cpus', 'max_ranks', 'dependencies', 'runtime',
+                   'binary_manifests', 'schema', 'runner_interpreter'}
 MAX_PROFILE_FILE_BYTES = 2 * 1024**3
 
 
@@ -287,6 +290,9 @@ def _runtime_spec(engine, value):
 
 def _profile(spec, runtime):
     _object(spec, _PROFILE_FIELDS, {'engine', 'runner', 'max_cpus'}, 'runner profile')
+    version = profile_version(spec)
+    interpreter = ({'schema': 2, 'runner_interpreter': pin_interpreter(spec.get('runner_interpreter'))}
+                   if version == 2 else {})
     if not isinstance(spec['engine'], str) or spec['engine'] not in {'Command', 'VASP', 'ORCA', 'Multiwfn'}:
         raise ValueError('Profile engine must be Command, VASP, ORCA or Multiwfn')
     cpus = spec['max_cpus']
@@ -338,7 +344,7 @@ def _profile(spec, runtime):
         runtime_record['runtime'] = engine_runtime
     elif 'runtime' in spec:
         raise ValueError('Command/VASP profiles cannot carry a molecular runtime')
-    return {**runtime_record, 'engine': spec['engine'], 'runner': spec['runner'], 'max_cpus': cpus, 'max_ranks': ranks,
+    return {**runtime_record, **interpreter, 'engine': spec['engine'], 'runner': spec['runner'], 'max_cpus': cpus, 'max_ranks': ranks,
             'runner_identity': runner, 'dependencies': [_file_identity(path) for path in dependencies],
             'runtime_fingerprint': runtime['fingerprint'],
             'qualification': {'implementation': 'configured', 'synthetic_tested': False,
@@ -413,7 +419,7 @@ def _validate_config(value):
         validate_observation(value['runtime_observation'])
         if value['runtime_observation']['package_sha256'] != value['runtime']['package_sha256']:
             raise ValueError('Original runtime observation contradicts enrolled digest')
-    if type(value['schema']) is not int or value['schema'] != 1:
+    if type(value['schema']) is not int or value['schema'] not in {1, 2}:
         raise ValueError('Unsupported node configuration schema')
     _uuid(value['node_id'], 'Node identity')
     host = _host(value['host'])
@@ -441,6 +447,11 @@ def _validate_config(value):
     for profile in _aliases(value['profiles'], 'Profiles').values():
         fields = {'engine', 'runner', 'max_cpus', 'max_ranks', 'runner_identity',
                   'dependencies', 'runtime_fingerprint', 'qualification'}
+        if profile_version(profile) == 2:
+            if value['schema'] != 2:
+                raise ValueError('Runner profile schema 2 requires node configuration schema 2')
+            fields |= {'schema', 'runner_interpreter'}
+            validate_interpreter(profile.get('runner_interpreter'))
         if isinstance(profile, dict) and isinstance(profile.get('engine'), str) and profile['engine'] in {'ORCA', 'Multiwfn'}:
             fields |= {'runtime'}
             _runtime_spec(profile['engine'], profile.get('runtime'))
@@ -520,7 +531,8 @@ def enroll(config_root, spec, *, host_provider=None, runtime_provider=None,
     for (alias, _), state in zip(queues.items(), states):
         record = store_type(state).enroll_queue(node_id, host_id)
         queue_records[alias] = {**record, 'state': str(state)}
-    value = _validate_config({'schema': 1, 'node_id': node_id, 'host_id': host_id, 'host': host,
+    schema = 2 if any(profile_version(profile) == 2 for profile in profiles.values()) else 1
+    value = _validate_config({'schema': schema, 'node_id': node_id, 'host_id': host_id, 'host': host,
                               'runtime': runtime, 'queues': queue_records, 'storages': storages,
                               'profiles': profiles, **({'runtime_observation': original} if original is not None else {})})
     content = canonical_json_bytes(value)
@@ -610,7 +622,10 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
             result['storage_ready'] = False
             result['errors'].append(f'{alias}: {observed.get("error", "Storage unavailable")}')
     for alias, profile in profiles.items():
+        interpreter = interpreter_observation(profile, verify=True)
         try:
+            if interpreter['status'] == 'mismatch':
+                raise ValueError(interpreter['error'])
             if profile['engine'] == 'VASP':
                 from cmw.periodic.vasp.runner_compatibility import toolchain_sources
                 pinned = {item['path'] for item in profile['dependencies']}
@@ -621,10 +636,10 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
                     raise ValueError('Pinned runner/dependency identity changed')
             if not os.access(profile['runner'], os.R_OK if profile['engine'] == 'Multiwfn' else os.X_OK):
                 raise ValueError('Pinned runner is no longer executable')
-            result['profiles'][alias] = {'ready': True, 'error': None}
+            result['profiles'][alias] = {'ready': True, 'error': None, 'runner_interpreter': interpreter}
         except (OSError, ValueError, KeyError) as exc:
             result['profiles_ready'] = False
-            result['profiles'][alias] = {'ready': False, 'error': str(exc)}
+            result['profiles'][alias] = {'ready': False, 'error': str(exc), 'runner_interpreter': interpreter}
             result['errors'].append(f'{alias}: {exc}')
     result['identity_ready'] = not result['identity_errors']
     result['runtime_ready'] = not result['runtime_errors']

@@ -485,8 +485,10 @@ class LocalBackend:
                     raise BackendError('INVALID_TARGET', 'This operation does not accept an attempt target')
                 if operation == 'capabilities':
                     _params(params)
+                    from .runner_profiles import profile_capabilities
                     result = {'queue': deepcopy(self.queue), 'readiness': deepcopy(self.readiness),
-                              'profiles': deepcopy(self.config.get('profiles', {})), 'operations': sorted(OPERATIONS),
+                              **profile_capabilities(self.config.get('profiles', {}), self.readiness.get('profiles')),
+                              'operations': sorted(OPERATIONS),
                               'molecular_submission': {'schema': 1, 'engines': ['ORCA', 'Multiwfn'], 'target_local_artifacts': 1},
                               'convergence_study': {'schema': 1, 'model': 'StudyResult', 'engine': 'VASP', 'max_cases': 64},
                               'successor_planner': {'schema': 1, 'model': 'SuccessorResult', 'geometry_only': True},

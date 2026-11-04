@@ -512,3 +512,19 @@ refresh barriers that abandon detached predecessors. The prospective visual
 inventory is `tests.campaign.visual_contract_v2.plan()`: 24 core and eight modal
 settled views plus transition/failure evidence. Its machine header is explicitly
 synthetic; historical missing frames and failed gates remain unchanged.
+
+## Runner interpreter profile records
+
+New enrollment specs may explicitly set a profile's `schema` to `2` and
+`runner_interpreter` to an absolute executable path. The stored pin includes
+resolved path, file identity, SHA-256 and complete security evidence; a changed
+pin refuses that profile's readiness. Such configurations use node schema 2.
+Existing schema-1 configurations and unversioned profiles stay valid and report
+**unpinned**. There is no automatic migration or rejection for a missing legacy
+pin. `nodes check` exposes pin readiness; capabilities retain the old `profiles`
+shape and add versioned `runner_profiles` interpreter metadata. A capability's
+`pinned` label describes the record; selected-profile readiness verifies it.
+
+This change adds data and observation only. Runner argv, environment and launch
+selection remain unchanged. P3a will set `CMW_MANAGED_PYTHON` explicitly from the
+profile pin; this Phase 1 record alone does not prove launch use.
