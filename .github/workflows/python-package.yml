@@ -73,6 +73,11 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install test dependencies
         run: python -m pip install -e '.[jobs]'
+      # Thousands of test subprocesses import cmw; without cached bytecode each
+      # recompiles it (~0.18 s). Compile once; PYTHONDONTWRITEBYTECODE still stops
+      # writes during tests, and runtime inventories ignore __pycache__.
+      - name: Precompile bytecode
+        run: python -m compileall -q src tests
       # Full deterministic offline suite (synthetic engines only): one unittest
       # process per module, one per CPU, isolated state. Native engine qualification is separate.
       - name: Offline suite
