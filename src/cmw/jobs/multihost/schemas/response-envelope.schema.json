@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmw.invalid/schemas/jobs/multihost/response-envelope.schema.json",
+  "title": "Multi-host response envelope",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)(?![\\s\\S])"
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]{1,32}(?![\\s\\S])"
+    },
+    "command": {
+      "type": "string",
+      "enum": [
+        "hello",
+        "snapshot",
+        "receive",
+        "submit",
+        "cancel",
+        "tail"
+      ]
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "result": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/error"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "protocol_version",
+    "node_id",
+    "command",
+    "ok",
+    "result",
+    "error"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "type": "object"
+          },
+          "error": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "result": {
+            "type": "null"
+          },
+          "error": {
+            "$ref": "#/$defs/error"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "command": {
+            "const": "hello"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "$ref": "hello.schema.json"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "invalid_request",
+            "protocol_incompatible",
+            "capability_unsupported",
+            "not_found",
+            "conflict",
+            "validation_failed",
+            "internal_error"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+        },
+        "details": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "details"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "description": "Typed parsing additionally requires successful hello node_id and protocol_version to equal the enclosing values."
+}

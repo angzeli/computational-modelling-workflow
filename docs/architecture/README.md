@@ -3,6 +3,11 @@
 For current task routing, use the root [capability map](../../CAPABILITY_MAP.md).
 The target architecture below also includes explicitly future work.
 
+The [multi-host Jobs design](multi-host-jobs.md) adds Phase 0 schemas, typed
+models, pure decisions and a fake transport. These contracts are not wired into
+any CLI command; the existing [node implementation](../cmw-dual-node.md) remains
+unchanged.
+
 This document describes the architecture the repository implements
 progressively. The first reusable molecular foundation now exists; other
 branches in the diagrams remain targets rather than implementation claims.

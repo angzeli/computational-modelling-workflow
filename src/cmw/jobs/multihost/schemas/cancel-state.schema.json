@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmw.invalid/schemas/jobs/multihost/cancel-state.schema.json",
+  "title": "Cancellation state",
+  "type": "object",
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": [
+        "graceful",
+        "soft",
+        "hard"
+      ]
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "requested",
+        "in_progress",
+        "completed",
+        "failed"
+      ]
+    },
+    "history": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/event"
+      },
+      "minItems": 1,
+      "maxItems": 3
+    }
+  },
+  "required": [
+    "mode",
+    "state",
+    "history"
+  ],
+  "additionalProperties": false,
+  "description": "The inner cancel object in snapshot/cancel results. No-cancellation representation is outside this schema.",
+  "$defs": {
+    "event": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "graceful",
+            "soft",
+            "hard"
+          ]
+        },
+        "requested_utc": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z(?![\\s\\S])"
+        },
+        "by_node_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]{1,32}(?![\\s\\S])"
+        }
+      },
+      "required": [
+        "mode",
+        "requested_utc",
+        "by_node_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "mode": {
+          "const": "graceful"
+        },
+        "history": {
+          "minItems": 1,
+          "maxItems": 1,
+          "prefixItems": [
+            {
+              "properties": {
+                "mode": {
+                  "const": "graceful"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "mode": {
+          "const": "soft"
+        },
+        "history": {
+          "minItems": 1,
+          "maxItems": 1,
+          "prefixItems": [
+            {
+              "properties": {
+                "mode": {
+                  "const": "soft"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "mode": {
+          "const": "hard"
+        },
+        "history": {
+          "minItems": 1,
+          "maxItems": 1,
+          "prefixItems": [
+            {
+              "properties": {
+                "mode": {
+                  "const": "hard"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "mode": {
+          "const": "soft"
+        },
+        "history": {
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "properties": {
+                "mode": {
+                  "const": "graceful"
+                }
+              }
+            },
+            {
+              "properties": {
+                "mode": {
+                  "const": "soft"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "mode": {
+          "const": "hard"
+        },
+        "history": {
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "properties": {
+                "mode": {
+                  "const": "graceful"
+                }
+              }
+            },
+            {
+              "properties": {
+                "mode": {
+                  "const": "hard"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "mode": {
+          "const": "hard"
+        },
+        "history": {
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "properties": {
+                "mode": {
+                  "const": "soft"
+                }
+              }
+            },
+            {
+              "properties": {
+                "mode": {
+                  "const": "hard"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "mode": {
+          "const": "hard"
+        },
+        "history": {
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {
+              "properties": {
+                "mode": {
+                  "const": "graceful"
+                }
+              }
+            },
+            {
+              "properties": {
+                "mode": {
+                  "const": "soft"
+                }
+              }
+            },
+            {
+              "properties": {
+                "mode": {
+                  "const": "hard"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

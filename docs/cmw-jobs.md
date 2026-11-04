@@ -1,5 +1,10 @@
 # CMW Jobs: local execution and bounded sharing
 
+The [multi-host Jobs design](architecture/multi-host-jobs.md) provides Phase 0
+contracts only. Its schemas, pure logic and fake transport are not wired into
+any CLI command and do not change the behavior described here or in the
+[existing node guide](cmw-dual-node.md).
+
 CMW Jobs runs already-prepared, trusted foreground commands in an explicit order.
 Sequential mode is the default: exactly one managed execution may own the slot.
 Explicit Bounded Sharing permits one primary plus at most one managed auxiliary;

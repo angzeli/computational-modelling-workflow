@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmw.invalid/schemas/jobs/multihost/manifest.schema.json",
+  "title": "Four-file VASP bundle manifest",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)(?![\\s\\S])"
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?![\\s\\S])"
+    },
+    "source_node_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]{1,32}(?![\\s\\S])"
+    },
+    "created_utc": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z(?![\\s\\S])"
+    },
+    "engine": {
+      "const": "vasp"
+    },
+    "executable": {
+      "type": "string",
+      "enum": [
+        "vasp_std",
+        "vasp_gam",
+        "vasp_ncl"
+      ]
+    },
+    "build": {
+      "$ref": "#/$defs/build_selection"
+    },
+    "execution": {
+      "$ref": "#/$defs/execution"
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/file"
+      },
+      "minItems": 4,
+      "maxItems": 4,
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "inputs/INCAR"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "inputs/KPOINTS"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "inputs/POSCAR"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "inputs/POTCAR"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    }
+  },
+  "required": [
+    "schema_version",
+    "request_id",
+    "source_node_id",
+    "created_utc",
+    "engine",
+    "executable",
+    "build",
+    "execution",
+    "files",
+    "provenance"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "file": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "enum": [
+            "inputs/INCAR",
+            "inputs/KPOINTS",
+            "inputs/POSCAR",
+            "inputs/POTCAR"
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+        }
+      },
+      "required": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "build_selection": {
+      "type": "object",
+      "properties": {
+        "build_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "allow_experimental": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "build_id",
+        "allow_experimental"
+      ],
+      "additionalProperties": false
+    },
+    "execution": {
+      "type": "object",
+      "properties": {
+        "mpi_ranks": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "omp_threads": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "mpi_ranks",
+        "omp_threads"
+      ],
+      "additionalProperties": false
+    },
+    "potcar_identity": {
+      "type": "object",
+      "properties": {
+        "element": {
+          "type": "string",
+          "pattern": "^[A-Z][a-z]?(?![\\s\\S])"
+        },
+        "variant": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+        },
+        "titel": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+        }
+      },
+      "required": [
+        "element",
+        "variant",
+        "titel",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "preparation_record_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+        },
+        "potcar_identity": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/potcar_identity"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "preparation_record_sha256",
+        "potcar_identity"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

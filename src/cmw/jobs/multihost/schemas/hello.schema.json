@@ -1,0 +1,218 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmw.invalid/schemas/jobs/multihost/hello.schema.json",
+  "title": "Multi-host hello result and capabilities",
+  "type": "object",
+  "properties": {
+    "node_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]{1,32}(?![\\s\\S])"
+    },
+    "protocol_version": {
+      "type": "string",
+      "pattern": "^1\\.(0|[1-9][0-9]*)(?![\\s\\S])"
+    },
+    "cmw_version": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+    },
+    "cmw_commit": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+    },
+    "node_time_utc": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z(?![\\s\\S])"
+    },
+    "hardware": {
+      "$ref": "#/$defs/hardware"
+    },
+    "capabilities": {
+      "$ref": "#/$defs/capabilities"
+    }
+  },
+  "required": [
+    "node_id",
+    "protocol_version",
+    "cmw_version",
+    "cmw_commit",
+    "node_time_utc",
+    "hardware",
+    "capabilities"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "build": {
+      "type": "object",
+      "properties": {
+        "build_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+        },
+        "executables": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+          },
+          "uniqueItems": true
+        },
+        "experimental": {
+          "type": "boolean"
+        },
+        "default": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "build_id",
+        "version",
+        "executables",
+        "experimental",
+        "default"
+      ],
+      "additionalProperties": false
+    },
+    "engine": {
+      "type": "object",
+      "properties": {
+        "builds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/build"
+          }
+        }
+      },
+      "required": [
+        "builds"
+      ],
+      "additionalProperties": false,
+      "description": "The typed model additionally rejects repeated build_id values, including entries with differing metadata."
+    },
+    "receive": {
+      "type": "object",
+      "properties": {
+        "max_bundle_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "max_bundle_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "hardware": {
+      "type": "object",
+      "properties": {
+        "physical_cores": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "core_tiers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/core_tier"
+          }
+        },
+        "recommended_max_parallelism": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "physical_cores",
+        "core_tiers",
+        "recommended_max_parallelism"
+      ],
+      "additionalProperties": false,
+      "description": "Native tier names and counts are facts; recommended_max_parallelism is explicit node policy or null. No tier-name interpretation or topology inference."
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "submit": {
+          "type": "boolean"
+        },
+        "receive": {
+          "$ref": "#/$defs/receive"
+        },
+        "cancel_modes": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+          },
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "graceful",
+                "soft",
+                "hard"
+              ]
+            },
+            "uniqueItems": true
+          }
+        },
+        "engines": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/engine"
+          }
+        }
+      },
+      "required": [],
+      "additionalProperties": true,
+      "description": "Omitted names are unsupported. Unknown capability names are preserved as inert JSON data, never enabled automatically."
+    },
+    "core_tier": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f]+(?![\\s\\S])"
+        },
+        "physical_cores": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "level",
+        "name",
+        "physical_cores"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
