@@ -1,6 +1,7 @@
 """Bounded observations supplement runtime trust; they never replace enrollment."""
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import os
 from pathlib import Path
@@ -262,7 +263,19 @@ class RuntimeCollection:
         return epoch
 
 
-def inventory(root, *, collection=None, final=False):
+def _directory_epoch(path, info, security, epochs):
+    """Request-local directory epochs supplement the persisted security record."""
+    from .native_security import object_epoch
+    after = path.lstat()
+    if object_epoch(info) != object_epoch(after):
+        raise RuntimeRefusal('directory_changed', phase='directory-boundary', path=str(path),
+                             before=object_epoch(info), after=object_epoch(after))
+    if not security[-1]:
+        raise RuntimeRefusal('security_metadata_incomplete', phase='directory-boundary', path=str(path))
+    epochs[str(path)] = object_epoch(after)
+
+
+def inventory(root, *, collection=None, final=False, directory_epochs=None):
     root = Path(root)
     info = root.lstat()
     if root != root.resolve(strict=True) or not stat.S_ISDIR(info.st_mode):
@@ -270,6 +283,8 @@ def inventory(root, *, collection=None, final=False):
     # Directory modification times change for excluded bytecode; object and security do not.
     security = _security(root, info)
     root_epoch = (info.st_dev, info.st_ino, *security[:4], *security[-2:])
+    if directory_epochs is not None:
+        _directory_epoch(root, info, security, directory_epochs)
     entries = []
     for path in root.rglob('*'):
         if collection is not None:
@@ -287,6 +302,8 @@ def inventory(root, *, collection=None, final=False):
                 raise RuntimeRefusal('path_replacement', phase='inventory', path=str(path))
             security = _security(path, info)
             directories[str(path.relative_to(root))] = (info.st_dev, info.st_ino, *security[:4], *security[-2:])
+            if directory_epochs is not None:
+                _directory_epoch(path, info, security, directory_epochs)
     paths = sorted(path for path in entries
                    if '__pycache__' not in path.parts and path.suffix not in {'.pyc', '.pyo'}
                    and path.name != '.DS_Store' and (path.is_file() or path.is_symlink()))
@@ -304,6 +321,12 @@ def inventory(root, *, collection=None, final=False):
             raise RuntimeRefusal('member_size_bound', phase='inventory', path=str(path))
         epoch.append((str(path.relative_to(root)), observed))
     return root_epoch, tuple(epoch), directories
+
+
+def complete_security(observed):
+    return (observed['root_epoch'][-1] and observed['executable_epoch'][-1]
+            and all(value[-1] for value in observed['members'].values())
+            and all(value[-1] for value in observed['directories'].values()))
 
 
 def observation(root, root_epoch, epoch, directories, digest, member_hashes):
@@ -352,6 +375,29 @@ def validate_observation(value):
             or any(c not in '0123456789abcdef' for c in value['package_sha256'])):
         raise ValueError('Malformed original runtime root/interpreter')
     return value
+
+
+def _validate_boundary_evidence(record, observed, directories):
+    """Validate the entire private token before any provider indexes into it."""
+    from .identity import _validate_runtime
+    _validate_runtime(record)
+    validate_observation(observed)
+    if (observed['schema'] != 3 or record['package_sha256'] != observed['package_sha256']
+            or record['package_origin'] != observed['root']
+            or not Path(record['executable']).is_absolute()
+            or record['fingerprint'] != stable_hash({key: value for key, value in record.items()
+                if key not in {'package_origin', 'executable', 'fingerprint'}})):
+        raise ValueError('Incomplete request runtime identity')
+    root = Path(observed['root'])
+    expected = {str(root): observed['root_epoch'],
+                **{str(root / name): epoch for name, epoch in observed['directories'].items()}}
+    if type(directories) is not dict or set(directories) != set(expected):
+        raise ValueError('Incomplete request directory evidence')
+    for name, epoch in directories.items():
+        if (type(epoch) is not tuple or len(epoch) != 10
+                or any(type(item) is not int or item < 0 for item in epoch)
+                or [*epoch[:5], epoch[9]] != expected[name][:6]):
+            raise ValueError('Malformed request directory epoch')
 
 
 def _source_imports_coherent(observed, *, diagnostics=None):
@@ -430,6 +476,68 @@ class RuntimeVerifier:
             self.last_evidence = exc.evidence
             self.tainted = True
             raise
+
+    def verify_request(self, provider, boundary_provider, request, *, response=False):
+        """Use one full status scan, never reuse trust across requests or mutations."""
+        def incomplete():
+            raise RuntimeRefusal('incomplete_request_boundary', phase='request-boundary')
+        if type(request) is not dict:
+            return self.verify(incomplete)
+        if response:
+            mode = request.pop('mode', None)
+            if mode == 'full' and not request:
+                return self.verify(provider)
+            if mode != 'boundary' or set(request) != {'snapshot'}:
+                return self.verify(incomplete)
+            snapshot = request.pop('snapshot')
+            return self.verify(lambda: self._response_boundary(boundary_provider, snapshot))
+        # Older enrollment evidence keeps its exact full-verification policy.
+        eligible = (not response and self.original is not None
+                    and self.original['schema'] == 3 and complete_security(self.original))
+        if not eligible:
+            request['mode'] = 'full'
+            return self.verify(provider)
+        captured = {}
+        record = self.verify(lambda: provider(request_boundary=captured))
+        if set(captured) != {'observation', 'directory_epochs'}:
+            # A provider that did not collect the complete request token cannot
+            # silently turn a status read into an unverified cached response.
+            return self.verify(incomplete)
+        request.update(mode='boundary', snapshot={'record': deepcopy(record), **deepcopy(captured)})
+        return record
+
+    def _response_boundary(self, provider, snapshot):
+        try:
+            if type(snapshot) is not dict or set(snapshot) != {'record', 'observation', 'directory_epochs'}:
+                raise ValueError('Malformed request snapshot')
+            _validate_boundary_evidence(snapshot['record'], snapshot['observation'], snapshot['directory_epochs'])
+            if not complete_security(snapshot['observation']):
+                raise ValueError('Incomplete request security evidence')
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeRefusal('incomplete_request_boundary', phase='request-boundary') from exc
+        before = snapshot['observation']
+        observed = None
+        try:
+            record, observed, directories = provider(snapshot)
+            _validate_boundary_evidence(record, observed, directories)
+        except RuntimeRefusal:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeRefusal('incomplete_observation', phase='response-boundary', after=observed) from exc
+        if not complete_security(observed):
+            raise RuntimeRefusal('security_metadata_incomplete', phase='response-boundary', after=observed)
+        if before != observed or snapshot['directory_epochs'] != directories:
+            category = _differences(before, observed)
+            raise RuntimeRefusal(category or 'request_epoch_changed', phase='response-boundary',
+                                 before=before, after=observed)
+        if snapshot['record'] != record:
+            raise RuntimeRefusal('interpreter_or_dependency_changed', phase='response-boundary',
+                                 before=snapshot['record'], after=record)
+        # The isolated endpoint must not have loaded a new CMW module from a
+        # different origin while the request body ran.
+        if self.isolated and not _source_imports_coherent(observed):
+            raise RuntimeRefusal('fresh_isolated_observer_required', phase='loaded-code', after=observed)
+        return record, observed
 
     def _verify(self, provider):
         record, observed = provider()

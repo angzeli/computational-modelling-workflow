@@ -377,16 +377,15 @@ journal events by comparing wall clocks from different nodes.
 
 ### 3.5 Cheap status and local measurement: D12
 
-`LocalBackend.call` currently runs `_check` before and after dispatch.
-`check_node` obtains hardware evidence and calls `RuntimeVerifier.verify` on each
-check. `RuntimeVerifier` retains a trusted baseline and sticky refusal, but its
+`LocalBackend.call` runs `_check` before and after dispatch. The Phase 0 baseline
+obtains hardware evidence and calls `RuntimeVerifier.verify` on each check. `RuntimeVerifier` retains a trusted baseline and sticky refusal, but its
 provider still performs `runtime_observed` and the complete bounded package
 content verification every time. Thus retaining a verifier instance does not
 avoid two full content scans per successful status call. `runtime_observed`
 already performs initial/final inventory and security checks around each scan.
 The status body separately uses queue reads, external activity and telemetry.
 
-**Draft P1 design:** create one request-scoped verified runtime observation for
+**Implemented in P1 code (not deployed):** create one request-scoped verified runtime observation for
 `status`, including its existing bounded content scan, interpreter/dependency
 identity, complete member/directory/security evidence and loaded-code coherence
 checks. Keep owner/configuration/queue/boot checks at both request boundaries.
@@ -405,11 +404,14 @@ rules, schema-3 security evidence, source-import coherence, capability checking
 and `RUNTIME_MISMATCH` recovery semantics. Mutation operations retain their
 stronger pre/post verification and `OUTCOME_UNKNOWN` handling until a separately
 qualified change. Tests must exercise mid-request replacement/security changes
-and lost outcomes before enabling the optimization. If equivalent trust cannot
-be established for a platform or evidence version, withhold that P1 rollout or
-fail closed; continuing the old double-hash path is not completion of D12. Do
-not silently weaken trust to meet a latency target. Exact dependency/epoch
-factoring remains an implementation question.
+and lost outcomes. The optimized path requires complete schema-3 security
+evidence. Missing original evidence, schema-1/2 and incomplete legacy security
+evidence retain the old full pre/post path; D12 optimization is not claimed
+for those enrollments. Member security and full directory object epochs are
+compared exactly at the boundary, including ctime and membership changes. The
+interpreter and declared dependency-version identity domain remains unchanged;
+this does not introduce dependency-content pins. Incomplete or lost request
+evidence also taints the verifier. No TTL, root-mtime or hardware cache is used.
 
 Do not cache host identity merely because an alias matches. An immutable
 session-attested hardware identity may reduce repeated `ioreg` cost only if the
@@ -710,12 +712,13 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    determines whether the CPU baseline expires. Retain explicit stale and
    unavailable evidence when the node sampler stops or samples age out; choose
    and test the node sampling cadence and aging policy in P1.
-6. **D12 trust-preserving factoring (P1):** the baseline performs two complete
-   runtime scans. Validate that one scan plus complete response-boundary evidence
-   preserves replacement/security/loaded-code refusal and legacy behavior on
-   supported platforms. Set performance goals from the recorded measurement;
-   do not replace full evidence with a TTL or root-mtime cache. Any hardware
-   evidence caching requires its own explicit identity/boot rationale.
+6. **D12 factoring resolved in P1 code, deployment pending:** status uses one
+   full verification and complete request-boundary evidence for eligible
+   schema-3 enrollments (§3.5). Replacement, membership, metadata/ACL/xattr,
+   interpreter/dependency and lost-evidence refusals are sticky; mutation
+   pre/post checks and legacy full-scan fallback are retained. No hardware
+   identity caching was added. Qualification and the same-sandbox measurements
+   below delimit the optimization; unsupported legacy evidence is not optimized.
 7. **D13–D15 runtime migration (P3a):** the existing worker turns any
    `cancel_requested` into hard termination after 2 s. New graceful/soft requests
    therefore cannot be wired by setting only that flag. Define mode record

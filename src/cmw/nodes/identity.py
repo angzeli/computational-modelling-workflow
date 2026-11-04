@@ -99,7 +99,7 @@ def _package_digest(root, epoch, collection):
     return digest.hexdigest()
 
 
-def runtime_observed(*, diagnostics=None):
+def runtime_observed(*, diagnostics=None, request_boundary=None):
     """Policy-3 bounded sequential member verification, never replacement trust."""
     import cmw
     source = Path(cmw.__file__).absolute()
@@ -108,7 +108,7 @@ def runtime_observed(*, diagnostics=None):
     root = source.parent
     collection = RuntimeCollection(root, diagnostics)
     try:
-        return _collect_runtime(root, collection)
+        return _collect_runtime(root, collection, request_boundary=request_boundary)
     except RuntimeRefusal as exc:
         exc.evidence.update(policy=3, generation=collection.generation,
                             bytes_read=collection.bytes_read,
@@ -124,26 +124,43 @@ def runtime_observed(*, diagnostics=None):
         raise refused from exc
 
 
-def _collect_runtime(root, collection):
-    import cmw
+def _collect_runtime(root, collection, *, request_boundary=None):
     executable = Path(sys.executable).resolve(strict=True)
     executable_before = file_epoch(executable)
-    first = inventory(root, collection=collection)
+    first_directories = {} if request_boundary is not None else None
+    after_directories = {} if request_boundary is not None else None
+    first = inventory(root, collection=collection, directory_epochs=first_directories)
     collection.generation = 'content'
     package_digest = _package_digest(root, first[1], collection)
     collection.generation = 'final-inventory'
-    after = inventory(root, collection=collection, final=True)
+    after = inventory(root, collection=collection, final=True, directory_epochs=after_directories)
     if first[0] != after[0]:
         collection.refuse('root_replacement', root, first[0], after[0])
     if first[2] != after[2]:
         collection.refuse('directory_identity_or_security_changed', root, first[2], after[2])
     if dict(first[1]).keys() != dict(after[1]).keys():
         collection.refuse('membership_changed', root)
+    if first_directories != after_directories:
+        collection.refuse('directory_changed', root, first_directories, after_directories)
     executable_after = file_epoch(executable)
     if executable_before != executable_after:
         collection.refuse('interpreter_changed', executable, executable_before, executable_after)
     collection.check()
     root_epoch, epoch, directories = after
+    record = _runtime_record(root, package_digest)
+    observed = observation(root, root_epoch, epoch, directories, package_digest, dict(collection.hashes))
+    if observed['executable_epoch'] != list(executable_before):
+        collection.refuse('interpreter_changed', executable, executable_before, observed['executable_epoch'])
+    collection.check()
+    collection.evidence['status'] = 'COMPLETE'
+    if request_boundary is not None:
+        request_boundary.update(observation=observed, directory_epochs=after_directories)
+    return record, observed
+
+
+def _runtime_record(root, package_digest):
+    """Re-observe the existing interpreter/version/dependency identity domain."""
+    import cmw
     dependencies = {}
     for name in ('ase', 'gemmi', 'numpy', 'PyYAML', 'psutil', 'textual', 'rich'):
         try:
@@ -161,12 +178,48 @@ def _collect_runtime(root, collection):
     # another node's filesystem/process authority.
     record['fingerprint'] = stable_hash({key: value for key, value in record.items()
                                       if key not in {'package_origin', 'executable'}})
-    observed = observation(root, root_epoch, epoch, directories, package_digest, dict(collection.hashes))
-    if observed['executable_epoch'] != list(executable_before):
-        collection.refuse('interpreter_changed', executable, executable_before, observed['executable_epoch'])
-    collection.check()
-    collection.evidence['status'] = 'COMPLETE'
-    return record, observed
+    return record
+
+
+def runtime_boundary_observed(snapshot):
+    """Re-observe every authority/epoch without a second package-content read.
+
+    The digest is the request's already verified digest, not a cached trust
+    decision: RuntimeVerifier accepts it only with exact complete epoch equality.
+    """
+    import cmw
+    source = Path(cmw.__file__).absolute()
+    root = source.parent
+    collection = RuntimeCollection(root)
+    collection.generation = 'response-boundary'
+    try:
+        if source.is_symlink() or root != root.resolve(strict=True):
+            collection.refuse('path_replacement', source)
+        executable = Path(sys.executable).resolve(strict=True)
+        executable_before = file_epoch(executable)
+        record_before = _runtime_record(root, snapshot['record']['package_sha256'])
+        directory_epochs = {}
+        root_epoch, epoch, directories = inventory(root, collection=collection,
+                                                   directory_epochs=directory_epochs)
+        observed = observation(root, root_epoch, epoch, directories,
+            snapshot['observation']['package_sha256'], dict(snapshot['observation']['member_sha256']))
+        if observed['executable_epoch'] != list(executable_before):
+            collection.refuse('interpreter_changed', executable, executable_before, observed['executable_epoch'])
+        record = _runtime_record(root, snapshot['record']['package_sha256'])
+        if record_before != record:
+            collection.refuse('interpreter_or_dependency_changed', root, record_before, record)
+        from .native_security import object_epoch
+        for name, before in directory_epochs.items():
+            after = object_epoch(Path(name).lstat())
+            if before != after:
+                collection.refuse('directory_changed', name, before, after)
+        collection.check()
+        return record, observed, directory_epochs
+    except RuntimeRefusal:
+        raise
+    except OSError as exc:
+        raise RuntimeRefusal('runtime_member_unavailable', phase='response-boundary',
+            path=exc.filename, errno=exc.errno, security_state='incomplete') from exc
 
 
 def runtime_identity():
@@ -488,7 +541,8 @@ def enroll(config_root, spec, *, host_provider=None, runtime_provider=None,
 
 def check_node(config, *, host_provider=None, runtime_provider=None,
                storage_provider=None, store_factory=None, operation=None, queue_alias=None,
-               profile_aliases=None, storage_aliases=None, runtime_verifier=None):
+               profile_aliases=None, storage_aliases=None, runtime_verifier=None,
+               runtime_request=None, runtime_response=False):
     """Observe readiness; missing storage does not erase independent queue evidence."""
     from cmw.jobs.store import Store
     _validate_config(config)
@@ -515,7 +569,15 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
         result['identity_errors'].append(str(exc))
     try:
         verifier = runtime_verifier or RuntimeVerifier(config['runtime'], config.get('runtime_observation'))
-        result['runtime'] = verifier.verify(runtime_observed) if runtime_provider is None else runtime_provider()
+        if runtime_provider is not None:
+            result['runtime'] = runtime_provider()
+        elif runtime_request is not None:
+            if operation != 'status':
+                raise ValueError('Request-local runtime verification is restricted to status')
+            result['runtime'] = verifier.verify_request(runtime_observed, runtime_boundary_observed,
+                runtime_request, response=runtime_response)
+        else:
+            result['runtime'] = verifier.verify(runtime_observed)
         if result['runtime']['fingerprint'] != config['runtime']['fingerprint']:
             raise ValueError('Actual CMW runtime differs from the enrolled fingerprint')
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:

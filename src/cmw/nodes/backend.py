@@ -122,6 +122,7 @@ class LocalBackend:
         self._lock = threading.Lock()
         self._pinned = None
         self._runtime_verifier = None
+        self._runtime_request = None
         self._sessions = OrderedDict()
         self._validations = OrderedDict()
         self._generation = 0
@@ -141,7 +142,8 @@ class LocalBackend:
             if self._runtime_verifier is None:
                 self._runtime_verifier = RuntimeVerifier(config['runtime'], config.get('runtime_observation'))
             readiness = self._check_identity(config, operation=operation or 'capabilities',
-                queue_alias=self.queue_alias, runtime_verifier=self._runtime_verifier)
+                queue_alias=self.queue_alias, runtime_verifier=self._runtime_verifier,
+                runtime_request=self._runtime_request, runtime_response=phase == 'after')
         else:
             readiness = self._check_identity(config)
         if not readiness.get('identity_ready', False):
@@ -415,6 +417,7 @@ class LocalBackend:
             mutation = is_mutation(operation, params)
             durable_id = (params.get('request_id') if operation in {'transfer.begin', 'transfer.publish'}
                           else request_id if operation == 'submit' else None)
+            self._runtime_request = {} if operation == 'status' else None
             self._check(operation, phase="before", request_id=durable_id)
             if mutation:
                 identifier(request_id, 'request ID')
@@ -510,6 +513,7 @@ class LocalBackend:
                     'host': deepcopy(self.readiness.get('host', self.config['host'])), 'result': result}
             return json.loads(json.dumps(envelope, ensure_ascii=True, allow_nan=False))
         finally:
+            self._runtime_request = None
             self._lock.release()
 
     def close(self):

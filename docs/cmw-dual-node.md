@@ -455,6 +455,15 @@ Schema 1/2 enrollments retain exact-match behavior only and are never silently
 upgraded; metadata revalidation requires separately authorized enrollment. Semantic
 content fingerprints and original request digests retain their existing domains.
 
+Status now performs one full runtime verification per request when complete
+schema-3 original security evidence is available, then compares every member,
+directory, security attribute and interpreter/dependency identity at the response
+boundary. It does not reread package contents at that boundary. Missing, changed
+or incomplete evidence causes sticky `RUNTIME_MISMATCH`; no cross-request TTL or
+hardware cache grants trust. Legacy evidence retains full verification at both
+boundaries, as do all mutations. Owner/configuration/queue/boot checks still run
+at both boundaries. This is code capability, not an enrollment migration.
+
 Owner-side code derives operation dependencies, never a client skip list.
 Selected reads check current host/runtime/queue before and after each call. Files
 checks implicated storage roots; transfer/fetch retain their exact volume and
