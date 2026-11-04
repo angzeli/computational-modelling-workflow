@@ -43,7 +43,7 @@ require their named phases.
 ## 2. Decisions
 
 The following table records the task's normative decisions, including the
-follow-up decisions for D16 and D29.
+follow-up decisions for D16, D18, D19 and D29.
 
 | ID | Decision |
 |---|---|
@@ -64,8 +64,8 @@ follow-up decisions for D16 and D29.
 | D15 | Keep the existing terminal state spelling `Cancelled`. |
 | D16 | `--mode` is required with no default. |
 | D17 | Parallelisation is decided by the author. INCAR is executed byte-for-byte unchanged. MPI ranks and threads are author-supplied. |
-| D18 | The VASP runner must verify, not rewrite, NCORE/KPAR/NPAR: runner-profile values must equal the INCAR's effective values or submission fails. This change lives in the VASP port repository, not here. |
-| D19 | Plan checks: absent KPAR/NCORE take VASP defaults of 1; NPAR overrides NCORE; ranks × threads above physical cores is an error; above `recommended_max_parallelism` is a warning (skipped when null); an incomplete plan blocks submission. |
+| D18 | The VASP runner must verify, not rewrite, NCORE/KPAR: runner-profile values must equal the INCAR's effective values or submission fails. It rejects any INCAR containing NPAR for local and remote submissions, with the same equivalent-NCORE diagnostic as D19. This change lives in the VASP port repository, not here. |
+| D19 | Plan checks: absent KPAR/NCORE take VASP defaults of 1; any INCAR containing NPAR is rejected for all submissions, local and remote. The error reports equivalent `NCORE = mpi_ranks / (KPAR × NPAR)` when that is an integer, and states that no integer equivalent exists otherwise. Ranks × threads above physical cores is an error; above `recommended_max_parallelism` is a warning (skipped when null); an incomplete plan blocks submission. |
 | D20 | Native core tiers are recorded verbatim and uninterpreted; `recommended_max_parallelism` is node policy, nullable. |
 | D21 | POTCAR is prepared on the authoring node and transferred; use the existing POTCAR identity set (no raw TITEL line). |
 | D22 | Capabilities advertise VASP build information; submission names the executable variant; experimental builds require explicit selection. |
@@ -535,12 +535,19 @@ warnings or partial fields as permission.
 
 A successfully parsed INCAR without KPAR or NCORE uses default 1. An unreadable,
 unparsed, invalid or unsupported INCAR is incomplete and cannot use defaults.
-Explicit NPAR takes precedence over NCORE, including a malformed NPAR value;
-there is no fallback to a conflicting NCORE. Positive integer ranks/threads are
-author inputs, not guessed from hardware. KPAR must divide ranks (error).
-Nondivisibility of the effective NCORE or NPAR split within a KPAR group is a
-warning retained from the reference pure plan; exact runner acceptance is still
-the D18 gate. Missing species evidence makes the plan incomplete; a different
+Any INCAR containing NPAR is rejected for local and remote submissions, even
+when NCORE is also present. For positive integer ranks, KPAR and NPAR, the error
+reports the equivalent `NCORE = mpi_ranks / (KPAR × NPAR)` if division is exact;
+otherwise it states that no integer equivalent exists. Absent KPAR uses its
+default of 1 after successful parsing. Missing, invalid or unparsed operands
+make the equivalent indeterminate and must be identified rather than replaced
+with invented values. The diagnostic is guidance for the author; it neither
+permits an NPAR submission nor rewrites INCAR.
+
+Positive integer ranks/threads are author inputs, not guessed from hardware.
+KPAR must divide ranks (error). Nondivisibility of the NCORE split within a KPAR
+group is a warning retained from the reference pure plan; exact runner acceptance
+is still the D18 gate. Missing species evidence makes the plan incomplete; a different
 POSCAR/POTCAR species order is an error. Missing ranks, threads or hardware also
 blocks a complete plan; malformed explicit values are errors rather than defaults.
 
@@ -557,16 +564,17 @@ introduced in P0. Future collection and capability advertisement remain separate
 from this supplied-data model.
 
 **D18 interface requirement on the separate VASP port PR:** the runner advertises
-verify-only parallelization support, accepts author ranks/threads and an expected
-effective KPAR plus the effective NCORE-or-NPAR selection, and compares those
-values with the exact staged INCAR before launch. Absent-tag defaults and NPAR
-precedence match D19. Any mismatch fails submission/preflight; it must not
+verify-only parallelization support, accepts author ranks/threads and expected
+effective KPAR and NCORE values, and compares those values with the exact staged
+INCAR before launch. For all local and remote submissions, it rejects NPAR with
+the same equivalent-NCORE calculation and diagnostic as D19. Absent-tag defaults
+match D19. Any mismatch fails submission/preflight; it must not
 rewrite, remove or append INCAR tags. Preserve byte-for-byte author INCAR through
 staging and execution, with the existing stable byte identity checks. The
 CMW-side profile must select a qualified port interface; an older rewriting
 runner is refused for this new contract. Exact flags/capability spelling are a
-draft interface, not instructions to patch the port here. NCORE equality when
-NPAR makes it ineffective and current preparation incompatibilities remain in §5.
+draft interface, not instructions to patch the port here. Current preparation
+and runner migration requirements remain in §5.
 
 D21 retains the current ordered dataset identity set and whole-file digest.
 Prepare POTCAR on the authoring node, transfer only with explicit authorization,
@@ -684,12 +692,12 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    rewrites parallelization. In this repository,
    [`preparation.py`](../../src/cmw/periodic/vasp/preparation.py) rejects NPAR and
    permits only NCORE/KPAR in its runtime overlay, although the generic parser
-   recognizes NPAR. A correct pure NPAR plan does not make that preparation route
-   supported. Coordinate a compatible author-input preparation/port interface
-   and its provenance/finalization rules without silently editing inputs. Specify
-   how a runner profile expresses NCORE when NPAR overrides it: no invented
-   scientific NCORE is selected here. The separate port PR owns verify-only
-   launch behavior; P0 changes neither repository's runtime path.
+   recognizes NPAR. D19 now rejects NPAR in every plan; no NPAR precedence or
+   runner-profile representation remains to be decided. Coordinate a compatible
+   author-input preparation/port interface and its provenance/finalization rules
+   without silently editing inputs, including the shared equivalent-NCORE
+   rejection diagnostic. The separate port PR owns verify-only launch behavior
+   and D18 enforcement; P0 changes neither repository's runtime path.
 9. **D20/D22 capability data and rollout:** current host evidence supplies platform
     UUID, not the new physical-core/tier/policy object, and node submission fixes
     `std`. Define hardware discovery, incomplete evidence reporting, build

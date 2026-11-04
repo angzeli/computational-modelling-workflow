@@ -56,19 +56,67 @@ class VaspPlanContractTests(unittest.TestCase):
             missing.require_submission()
         self.assertEqual(caught.exception.code, 'INVALID_SUBMISSION')
 
-    def test_npar_precedence_and_effective_split_warning(self):
-        for ncore in ('3', '0', '-1'):
-            with self.subTest(ncore=ncore):
-                plan = self.plan(f'KPAR=2; NPAR=4; NCORE={ncore}')
-                self.assertTrue(plan.permitted)
-                self.assertFalse(plan.findings)
-                self.assertEqual((plan.split_tag, plan.split_value), ('NPAR', 4))
-        for text, code in (('KPAR=2; NPAR=3; NCORE=2', 'NPAR_INCOMPATIBLE'),
-                           ('KPAR=2; NCORE=3', 'NCORE_INCOMPATIBLE')):
-            plan = self.plan(text)
-            self.assertTrue(plan.permitted)
-            self.assertEqual([(item.code, item.severity) for item in plan.findings], [(code, 'WARNING')])
-            plan.require_submission()
+    def test_npar_is_always_rejected_with_integer_ncore_guidance(self):
+        for text, equivalent in (('NPAR=4', 4), ('KPAR=2; NPAR=4', 2),
+                                  ('KPAR=2; NPAR=8', 1), ('npar=4; kpar=2', 2),
+                                  ('KPAR=2; NPAR=4; NCORE=2', 2),
+                                  ('KPAR=2; NPAR=4; NCORE=3', 2),
+                                  ('KPAR=2; NPAR=4; NCORE=0', 2)):
+            with self.subTest(text=text):
+                plan = self.plan(text)
+                self.assertTrue(plan.complete)
+                self.assertFalse(plan.permitted)
+                self.assertEqual((plan.split_tag, plan.split_value), (None, None))
+                finding, = plan.findings
+                self.assertEqual((finding.code, finding.severity), ('NPAR_REJECTED', 'ERROR'))
+                self.assertIn('all local and remote submissions', finding.message)
+                self.assertIn(f'Equivalent NCORE = {equivalent}', finding.message)
+                with self.assertRaises(NodeError) as caught:
+                    plan.require_submission()
+                self.assertEqual(caught.exception.code, 'INVALID_SUBMISSION')
+                self.assertIn(finding.message, str(caught.exception))
+
+    def test_npar_rejection_reports_no_integer_equivalent(self):
+        for text in ('KPAR=2; NPAR=3', 'KPAR=3; NPAR=2', 'KPAR=2; NPAR=32'):
+            with self.subTest(text=text):
+                plan = self.plan(text)
+                self.assertFalse(plan.permitted)
+                finding = next(item for item in plan.findings if item.code == 'NPAR_REJECTED')
+                self.assertIn('No integer equivalent NCORE exists', finding.message)
+                self.assertNotIn('NPAR_INCOMPATIBLE', [item.code for item in plan.findings])
+                with self.assertRaisesRegex(NodeError, 'No integer equivalent NCORE exists'):
+                    plan.require_submission()
+
+    def test_npar_guidance_uses_exact_integer_arithmetic(self):
+        ranks = 2**53 + 1
+        plan = self.plan('NPAR=3', mpi_ranks=ranks, hardware=Hardware(ranks, (), None))
+        self.assertIn('Equivalent NCORE = 3002399751580331', plan.findings[0].message)
+        self.assertFalse(plan.permitted)
+
+    def test_npar_invalid_or_missing_operands_do_not_invent_equivalent(self):
+        for text, changes in (('NPAR=4', {'mpi_ranks': None}),
+                              ('NPAR=4', {'mpi_ranks': True}),
+                              ('KPAR=0; NPAR=4', {}), ('KPAR=bad; NPAR=4', {}),
+                              ('NPAR=0', {}), ('NPAR=-1', {}), ('NPAR=bad', {}),
+                              ('NPAR=1.5', {}), ('NPAR=False', {}),
+                              ('NPAR=2; NPAR=4', {})):
+            with self.subTest(text=text, changes=changes):
+                plan = self.plan(text, **changes)
+                self.assertFalse(plan.permitted)
+                finding = next(item for item in plan.findings if item.code == 'NPAR_REJECTED')
+                self.assertIn('Equivalent NCORE cannot be determined', finding.message)
+                with self.assertRaisesRegex(NodeError, 'NPAR is rejected'):
+                    plan.require_submission()
+
+    def test_ncore_split_warning_is_retained_without_npar(self):
+        plan = self.plan('KPAR=2; NCORE=3')
+        self.assertTrue(plan.permitted)
+        self.assertEqual([(item.code, item.severity) for item in plan.findings],
+                         [('NCORE_INCOMPATIBLE', 'WARNING')])
+        plan.require_submission()
+
+    def test_commented_npar_is_not_a_setting(self):
+        self.assertTrue(self.plan('# NPAR=4\nNCORE=2 ! NPAR=4').permitted)
 
     def test_kpar_must_divide_ranks(self):
         for value in (3, 32):
@@ -87,7 +135,8 @@ class VaspPlanContractTests(unittest.TestCase):
         parsed['settings']['NPAR'] = None
         plan = plan_vasp(parsed, poscar_species=['H'], potcar_species=['H'], mpi_ranks=16,
                          threads_per_rank=1, hardware=hardware())
-        self.assertIn('INVALID_NPAR', [item.code for item in plan.findings])
+        self.assertIn('NPAR_REJECTED', [item.code for item in plan.findings])
+        self.assertIn('cannot be determined', plan.findings[-1].message)
 
     def test_invalid_and_unsupported_parse_results_are_incomplete(self):
         for text in ('KPAR=2; KPAR=4', 'KPAR = bad', 'KPAR=2 \\'):
@@ -139,12 +188,14 @@ class VaspPlanContractTests(unittest.TestCase):
         self.assertFalse(self.plan(hardware=None).complete)
 
     def test_pure_plan_preserves_input_parser_and_hardware_records(self):
-        parsed = parse_incar('KPAR=2; NCORE=4')
-        target = hardware().to_dict()
-        before = copy.deepcopy((parsed, target))
-        plan_vasp(parsed, poscar_species=['H'], potcar_species=['H'], mpi_ranks=16,
-                  threads_per_rank=1, hardware=target)
-        self.assertEqual((parsed, target), before)
+        for text in ('KPAR=2; NCORE=4', 'KPAR=2; NPAR=4; NCORE=3'):
+            with self.subTest(text=text):
+                parsed = parse_incar(text)
+                target = hardware().to_dict()
+                before = copy.deepcopy((parsed, target))
+                plan_vasp(parsed, poscar_species=['H'], potcar_species=['H'], mpi_ranks=16,
+                          threads_per_rank=1, hardware=target)
+                self.assertEqual((parsed, target), before)
 
     def test_malformed_parser_record_is_not_absent_tags(self):
         for parsed in ({}, {'settings': {}, 'status': 'valid'},

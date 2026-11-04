@@ -101,7 +101,11 @@ class VaspPlan:
 
     def require_submission(self) -> None:
         if not self.permitted:
-            raise NodeError('INVALID_SUBMISSION', 'Submission requires a complete plan without validation errors')
+            message = 'Submission requires a complete plan without validation errors'
+            errors = [item.message for item in self.findings if item.severity == 'ERROR']
+            if errors:
+                message += ': ' + '; '.join(errors)
+            raise NodeError('INVALID_SUBMISSION', message)
 
 
 def _species(value, name):
@@ -120,7 +124,7 @@ def plan_vasp(parsed_incar: dict | None, *, poscar_species: Sequence[str] | None
 
     None or an unsupported/invalid parser result is unavailable INCAR evidence.
     Only a successfully parsed document may supply absent-tag defaults. NPAR
-    takes precedence over NCORE, including an explicit malformed NPAR value.
+    is rejected for every submission; its NCORE equivalent is diagnostic only.
     This plan checks declarations, not actual runtime inputs or content hashes.
     """
     findings, unassessed = [], []
@@ -145,6 +149,7 @@ def plan_vasp(parsed_incar: dict | None, *, poscar_species: Sequence[str] | None
             if hardware.recommended_max_parallelism is not None and demand > hardware.recommended_max_parallelism:
                 issue('RECOMMENDED_PARALLELISM_EXCEEDED', 'WARNING', 'Rank/thread product exceeds target policy recommendation')
     settings = None
+    has_npar = False
     if parsed_incar is not None:
         bounded_value(parsed_incar)
         if (type(parsed_incar) is not dict or type(parsed_incar.get('settings')) is not dict
@@ -154,6 +159,9 @@ def plan_vasp(parsed_incar: dict | None, *, poscar_species: Sequence[str] | None
                        for item in parsed_incar['findings'])
                 or any(not key or key != key.upper() for key in parsed_incar['settings'])):
             raise NodeError('INVALID_PARAMS', 'Expected the existing INCAR parser result')
+        has_npar = ('NPAR' in parsed_incar['settings']
+                    or any(type(item.get('evidence')) is dict and item['evidence'].get('tag') == 'NPAR'
+                           for item in parsed_incar['findings']))
         failures = {item['severity'] for item in parsed_incar['findings']} & {'error', 'unsupported'}
         if parsed_incar['status'] == 'valid' and not failures:
             settings = parsed_incar['settings']
@@ -164,13 +172,15 @@ def plan_vasp(parsed_incar: dict | None, *, poscar_species: Sequence[str] | None
         unassessed.append('INCAR')
     else:
         kpar = settings.get('KPAR', 1)
-        split_tag = 'NPAR' if 'NPAR' in settings else 'NCORE'
-        split = settings.get(split_tag, 1)
         valid_kpar = type(kpar) is int and kpar > 0
-        valid_split = type(split) is int and split > 0
-        for name, valid in (('KPAR', valid_kpar), (split_tag, valid_split)):
-            if not valid:
-                issue('INVALID_' + name, 'ERROR', f'Effective {name} must be a positive integer')
+        valid_split = False
+        if not valid_kpar:
+            issue('INVALID_KPAR', 'ERROR', 'Effective KPAR must be a positive integer')
+        if not has_npar:
+            split_tag, split = 'NCORE', settings.get('NCORE', 1)
+            valid_split = type(split) is int and split > 0
+            if not valid_split:
+                issue('INVALID_NCORE', 'ERROR', 'Effective NCORE must be a positive integer')
         if type(mpi_ranks) is int and mpi_ranks > 0 and valid_kpar:
             if mpi_ranks % kpar:
                 issue('KPAR_INCOMPATIBLE', 'ERROR', 'KPAR must divide MPI ranks')
@@ -180,6 +190,20 @@ def plan_vasp(parsed_incar: dict | None, *, poscar_species: Sequence[str] | None
             kpar = None
         if not valid_split:
             split = None
+    if has_npar:
+        message = 'NPAR is rejected for all local and remote submissions. '
+        npar = settings.get('NPAR') if settings is not None else None
+        if all(type(value) is int and value > 0 for value in (mpi_ranks, kpar, npar)):
+            equivalent, remainder = divmod(mpi_ranks, kpar * npar)
+            if remainder:
+                message += (f'No integer equivalent NCORE exists: '
+                            f'{mpi_ranks} / ({kpar} * {npar}) is not an integer.')
+            else:
+                message += f'Equivalent NCORE = {equivalent} ({mpi_ranks} / ({kpar} * {npar})).'
+        else:
+            message += ('Equivalent NCORE cannot be determined without positive integer MPI ranks, '
+                        'KPAR and NPAR from supported parsed evidence.')
+        issue('NPAR_REJECTED', 'ERROR', message)
     poscar = _species(poscar_species, 'POSCAR')
     potcar = _species(potcar_species, 'POTCAR')
     if poscar is None or potcar is None:
