@@ -33,8 +33,9 @@ run_module() {
 export -f run_module
 export source_root work_root python_exe
 
-# Largest modules first, so a slow one does not start last and set the tail.
-find "$source_root/tests" -name 'test_*.py' -type f -exec ls -1S {} + |
+# Path order interleaves CPU-heavy and wait-heavy modules; largest-first
+# measured slower on CI because the CPU-heavy ones collided.
+find "$source_root/tests" -name 'test_*.py' -type f | LC_ALL=C sort |
   xargs -P "$parallel" -I{} bash -c 'run_module "$1"' _ {}
 
 status=0
