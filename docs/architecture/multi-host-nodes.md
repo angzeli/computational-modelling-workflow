@@ -498,6 +498,50 @@ queue data, contact the Mini, use production/research queue state, launch an
 engine, use SSH/network, or enable a provider. Only read-only timing wrappers
 and the measurement output outside those roots were created.
 
+#### P1 same-sandbox comparison (2026-11-04)
+
+The earlier Phase 0 numbers above came from a different node/configuration and
+are not the before column here. This comparison uses a new sandbox node
+`0907320f42f5444daa3f4e0321012e3c`, queue
+`de412adb61304cc6ae22ab5b54cb1390`, and one shared sandbox storage. Its only job
+remained Hold and was never released. Both runs observed external activity as
+**BUSY on all ten calls**, as expected from the existing calculation. No production
+queue or calculation directory was read or changed, and the Mini was not contacted.
+
+Baseline code is `aa95e88` in a detached worktree; candidate code is `4c98a45`.
+Each uses its own editable environment installed from its own worktree, Python
+3.14.6, isolated imports, bytecode writes disabled and verified process priority
+19. Instrument the actual `endpoint.serve` with ten in-memory protocol-1 status
+frames, 5 s start-to-start, reporting the first separately and nine warm calls.
+Wall time is monotonic; total CPU is observer-process plus reaped-child CPU.
+Runtime stage CPU is calling-thread CPU, avoiding attribution of background
+sampler work to verification. Full-session CPU includes sampling between calls.
+Instrumentation overhead and concurrent external load remain in these results.
+
+| Measurement | Baseline | P1 candidate |
+| --- | ---: | ---: |
+| First status wall / total CPU (s) | 0.616 / 0.580 | 0.437 / 0.410 |
+| Warm median wall (s) | 0.551 | 0.359 |
+| Warm wall minimum–maximum (s) | 0.534–0.581 | 0.341–0.427 |
+| Warm median observer / child CPU (s) | 0.512 / 0.035 | 0.323 / 0.036 |
+| Warm median total CPU (s) | 0.547 | 0.360 |
+| Median runtime verification wall / CPU share | 83.9% / 83.9% | 75.0% / 75.0% |
+| Full content scans / boundary comparisons per status | 2 / 0 | 1 / 1 |
+| Whole-session wall / total CPU (s) | 45.562 / 5.531 | 45.369 / 4.423 |
+| Warm CPU quality: fresh / warming-up | 4 / 5 | 9 / 0 |
+
+The candidate reduces median status wall time by 34.7% and median CPU by 34.2%.
+Full-session CPU falls by 20.0% even including independent sampling; the cadence
+therefore does not merely move the measured request work off the request clock.
+Candidate warm samples are 0.77–1.95 s old; its first sample is explicitly
+unavailable. No hardware-identity caching was introduced. These are bounded
+sandbox observations under current load, not a production or remote latency SLA.
+Raw measurements remain in the task worktree at
+`.venv/logs/status-before-priority19.json` and
+`.venv/logs/status-after-priority19.json`; the instrument is
+`.venv/measure_status.py`. An earlier trial whose priority was blocked by the
+tool sandbox is excluded from this comparison.
+
 ### 3.6 Cancellation: D13–D16
 
 [`contracts.py`](../../src/cmw/nodes/contracts.py) adds pure `CancelMode`,
