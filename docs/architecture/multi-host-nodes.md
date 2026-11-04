@@ -42,7 +42,8 @@ require their named phases.
 
 ## 2. Decisions
 
-The following table and open items are reproduced verbatim from the task.
+The following table records the task's normative decisions, including the
+follow-up decisions for D16 and D29.
 
 | ID | Decision |
 |---|---|
@@ -61,6 +62,7 @@ The following table and open items are reproduced verbatim from the task.
 | D13 | Cancel modes: `graceful` (STOPCAR `LSTOP = .TRUE.`, after the current ionic step), `soft` (STOPCAR `LABORT = .TRUE.`, after the current electronic step), `hard` (immediate). Escalation only `graceful → soft → hard`; repeating the same mode is a no-op; downgrades are rejected; `graceful` has no timeout. ORCA supports only `hard`. A cancelled job is never a completed result. |
 | D14 | Hard cancel waits 10 s between SIGTERM and SIGKILL (existing: 2 s). |
 | D15 | Keep the existing terminal state spelling `Cancelled`. |
+| D16 | `--mode` is required with no default. |
 | D17 | Parallelisation is decided by the author. INCAR is executed byte-for-byte unchanged. MPI ranks and threads are author-supplied. |
 | D18 | The VASP runner must verify, not rewrite, NCORE/KPAR/NPAR: runner-profile values must equal the INCAR's effective values or submission fails. This change lives in the VASP port repository, not here. |
 | D19 | Plan checks: absent KPAR/NCORE take VASP defaults of 1; NPAR overrides NCORE; ranks × threads above physical cores is an error; above `recommended_max_parallelism` is a warning (skipped when null); an incomplete plan blocks submission. |
@@ -70,8 +72,7 @@ The following table and open items are reproduced verbatim from the task.
 | D23 | The generic `Command` profile accepts only locally originated submissions. Remote submissions may use only typed profiles. New software gets a new typed profile. |
 | D25 | Clock skew: amber at ≥ 5 s, red at ≥ 60 s; no logic depends on clocks agreeing. |
 | D26 | A node-wide permanent journal with node identity and durable per-node sequence numbers (Phase 4). |
-
-Still open (record in the document, do not decide): D16 (`--mode` required with no default), D29 (laptop battery and `caffeinate` policy).
+| D29 | On battery, `mbp_m3max` accepts submissions into Hold but refuses release and dispatch. While jobs run, the controller holds a `caffeinate` assertion against idle sleep. This cannot prevent lid-close sleep on battery. |
 
 ## 3. Deltas
 
@@ -446,8 +447,9 @@ this was observation only and did not contact or control a scientific engine.
 Memory telemetry remained fresh. Six of nine warm CPU observations reported
 `warming-up`: the existing sampler requires successive samples no more than
 `MAX_AGE = 5.0` s apart, so a 5 s poll interval plus scheduling/verification jitter
-can invalidate its CPU baseline. P1 must coordinate D11 cadence with sampling
-and aging policy; changing the portal interval alone would degrade CPU display.
+can invalidate its CPU baseline. The proposed P1 resolution in §5 separates
+node-side telemetry sampling from status polling; changing the portal interval
+alone would degrade CPU display.
 No thermal provider was configured, so thermal collection cost was not measured.
 
 Configuration and queue filesystem metadata (identity, mode, size and mtime)
@@ -456,13 +458,13 @@ queue data, contact the Mini, use production/research queue state, launch an
 engine, use SSH/network, or enable a provider. Only read-only timing wrappers
 and the measurement output outside those roots were created.
 
-### 3.6 Cancellation: D13–D15, with D16 still open
+### 3.6 Cancellation: D13–D16
 
 [`contracts.py`](../../src/cmw/nodes/contracts.py) adds pure `CancelMode`,
 `available_cancel_modes` and `decide_cancel`. VASP permits `graceful`, `soft`,
 `hard`; ORCA permits `hard` only. Other engines have no new mode contract until
-specified. The function requires an explicit argument; this does **not** decide
-whether the future CLI requires `--mode` or has a default (D16).
+specified. The function requires an explicit argument. Under D16, the future
+CLI requires `--mode` with no default; Phase 0 does not change the existing CLI.
 
 | Current mode | Request graceful | Request soft | Request hard |
 | --- | --- | --- | --- |
@@ -598,8 +600,13 @@ Jobs/Nodes table widgets. Preserve shared scientific views and owner-qualified
 selection/confirmation rather than building a third portal. P5 reuses fetch
 receipts for explicit fetch-and-open and replaces hand-written selection JSON
 with file-selection UI; P6 polishes that UI. Remote source paths remain remote
-until a verified local replica exists. D29 battery/`caffeinate` policy is still
-open and must not be inferred from the monitoring or cancellation design.
+until a verified local replica exists.
+
+D29 permits `mbp_m3max` to accept submissions into Hold on battery, but refuses
+release and dispatch while on battery. While jobs run, the controller holds a
+`caffeinate` assertion against idle sleep. This cannot prevent lid-close sleep
+on battery. This is a future runtime policy; Phase 0 adds no power checks or
+sleep assertions.
 
 ## 4. Phase plan
 
@@ -620,18 +627,14 @@ open and must not be inferred from the monitoring or cancellation design.
 These are recorded for the responsible phase. They do not authorize changing
 normative decisions or wiring Phase 0 contracts into runtime entry points.
 
-1. **D16 remains open:** whether `--mode` is required with no default. Pure
-   functions take explicit modes; no CLI default or migration is selected here.
-2. **D29 remains open:** laptop battery and `caffeinate` policy. No power-based
-   admission, termination, sleep prevention or automatic pause is specified.
-3. **D01–D03 enrollment migration (P1):** current aliases can appear in connection,
+1. **D01–D03 enrollment migration (P1):** current aliases can appear in connection,
    storage and submission records, while UUIDs are durable. Determine the exact
    atomic rename/reference-compatibility procedure from real enrolled records;
    do not reenroll the Mini queue or discard its receipts. Confirm its existing
    storage UUID/path and preservation inventory, and independently qualify the
    newly enrolled MacBook and both registry directions. No such inspection or
    change is part of P0's disposable-node measurement.
-4. **D05/D06/D07 transfer rollout (P3b):** finalize binary framing, bounded chunk
+2. **D05/D06/D07 transfer rollout (P3b):** finalize binary framing, bounded chunk
    descriptor exchange, capability/record versions, token/session binding,
    reservation recovery, CAS reference/retention policy and QoS implementation.
    Decide how in-flight schema-1 SFTP upload/fetch records resume when the forced
@@ -639,28 +642,34 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    whether restart artifacts count toward the 128 input-file limit, and whether
    archive-only fetch keeps its current fixed limits. The restart size exception
    itself is decided and must not inherit the old 2/4 GiB caps.
-5. **D08 flow sequencing (P3b):** the existing registration path requires published
+3. **D08 flow sequencing (P3b):** the existing registration path requires published
    inputs. D08 explicitly bars release until every restart artifact is verified,
    but does not say whether Hold may be registered while restart transfer is
    pending. The proposed simpler all-transfers-before-Hold flow is a draft;
    choose the intended sequencing before designing its states/receipts. Both
    release and launch must enforce the final artifact barrier in either case.
-6. **D10/D11 event integration (P1):** current SSH failures do not fully distinguish
+4. **D10/D11 event integration (P1):** current SSH failures do not fully distinguish
    authentication from transport disconnection. Specify trustworthy classification
    and retry policy, including host-key/readiness refusals, without relying on
-   arbitrary stderr substrings as sufficient authority. The measured existing
-   5 s telemetry baseline cutoff also conflicts with a 5 s poll plus jitter;
-   coordinate sampler cadence/aging so the new interval does not repeatedly
-   produce warming-up CPU evidence. Pure `None` initial
+   arbitrary stderr substrings as sufficient authority. Pure `None` initial
    state, handshake-only recovery and fresh `<= 15 s` are executable Phase 0
    interpretations; review their UI wording without weakening mutation guards.
-7. **D12 trust-preserving factoring (P1):** the baseline performs two complete
+5. **D11 telemetry-expiry conflict (P1):** in the §3.5 measurement, six of nine
+   warm CPU observations reported `warming-up`: the existing `MAX_AGE = 5.0` s
+   baseline cutoff conflicts with 5 s polling plus scheduling/verification
+   jitter. Proposed Phase 1 resolution: sample telemetry on the node at its own
+   cadence, as the thermal provider already does, and have `status` return the
+   latest sample with its age. Status polling then neither drives sampling nor
+   determines whether the CPU baseline expires. Retain explicit stale and
+   unavailable evidence when the node sampler stops or samples age out; choose
+   and test the node sampling cadence and aging policy in P1.
+6. **D12 trust-preserving factoring (P1):** the baseline performs two complete
    runtime scans. Validate that one scan plus complete response-boundary evidence
    preserves replacement/security/loaded-code refusal and legacy behavior on
    supported platforms. Set performance goals from the recorded measurement;
    do not replace full evidence with a TTL or root-mtime cache. Any hardware
    evidence caching requires its own explicit identity/boot rationale.
-8. **D13–D15 runtime migration (P3a):** the existing worker turns any
+7. **D13–D15 runtime migration (P3a):** the existing worker turns any
    `cancel_requested` into hard termination after 2 s. New graceful/soft requests
    therefore cannot be wired by setting only that flag. Define mode record
    compatibility and atomic history/STOPCAR ownership, pending-job cancellation,
@@ -670,7 +679,7 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    meaning is assigned to Multiwfn or generic Command. The pure availability
    function returns no newly specified modes for those engines; it does not
    remove their existing runtime cancellation capability.
-9. **D17–D19 preparation and runner conflict (P3a):** current node VASP argv sends
+8. **D17–D19 preparation and runner conflict (P3a):** current node VASP argv sends
    `--ncore`/`--kpar`, fixes `std` and `restart none`, and the current port route
    rewrites parallelization. In this repository,
    [`preparation.py`](../../src/cmw/periodic/vasp/preparation.py) rejects NPAR and
@@ -681,18 +690,18 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    how a runner profile expresses NCORE when NPAR overrides it: no invented
    scientific NCORE is selected here. The separate port PR owns verify-only
    launch behavior; P0 changes neither repository's runtime path.
-10. **D20/D22 capability data and rollout:** current host evidence supplies platform
+9. **D20/D22 capability data and rollout:** current host evidence supplies platform
     UUID, not the new physical-core/tier/policy object, and node submission fixes
     `std`. Define hardware discovery, incomplete evidence reporting, build
     provenance fields and explicit experimental opt-in in negotiated versions.
     Tier names stay native/uninterpreted; policy stays nullable. The exact phase
     for endpoint advertisement must precede consumers that require these facts.
-11. **D23 remote-origin boundary (P3b):** generic Command is currently accepted
+10. **D23 remote-origin boundary (P3b):** generic Command is currently accepted
     remotely. The endpoint must receive trusted origin independently of client
     JSON and enforce the typed-profile rule across all remote registration
     routes, while retaining access to old records and existing typed jobs.
     Decide capability rollout/refusal for older endpoints before enabling the
     new policy; the gate alone cannot provide complete enforcement.
-12. **D26 journal (P4):** decide durable append/receipt atomicity, sequence recovery,
+11. **D26 journal (P4):** decide durable append/receipt atomicity, sequence recovery,
     migration/linkage to queue history, retention and export. The decision calls
     for permanent node-local history, not cross-node total time ordering.
