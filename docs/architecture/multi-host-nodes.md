@@ -42,13 +42,13 @@ require their named phases.
 
 ## 2. Decisions
 
-The following table records the task's normative decisions, including the
-follow-up decisions for D16, D18, D19 and D29.
+The following table records the task's normative decisions and their follow-up
+updates.
 
 | ID | Decision |
 |---|---|
 | D01 | Keep existing node, queue and storage UUIDs as durable identities. Aliases become `mbp_m3max` and `mm_m5pro`. |
-| D02 | Each machine has exactly one node enrollment, one queue (alias `main`) and one storage (alias `scratch`, outside TCC-protected folders). Each machine has one default registry at `~/.config/cmw/nodes/connections.json` listing every node, including itself. |
+| D02 | Each machine's production configuration has exactly one node enrollment, one queue (alias `main`) and one storage (alias `scratch`, outside TCC-protected folders). Each machine has one default production registry at `~/.config/cmw/nodes/connections.json` listing every node, including itself. |
 | D03 | Mini reuses node `702779636fc14335bcf71c1395549f43` and queue `2b975d09e4104933b7c1c146538fbc6b`, which hold research jobs that must be preserved; only aliases change. MacBook is enrolled fresh as `mbp_m3max`. Test enrollments are archived after confirming they hold nothing to keep. |
 | D04 | Keep the existing integer protocol plus `capabilities`. No MAJOR.MINOR scheme. |
 | D05 | Keep the persistent SSH endpoint stream and host-key pinning; add a forced-command gate that dispatches by whitelist to the endpoint or to the binary transfer endpoint. It ships only after D06. |
@@ -73,19 +73,24 @@ follow-up decisions for D16, D18, D19 and D29.
 | D25 | Clock skew: amber at ≥ 5 s, red at ≥ 60 s; no logic depends on clocks agreeing. |
 | D26 | A node-wide permanent journal with node identity and durable per-node sequence numbers (Phase 4). |
 | D29 | On battery, `mbp_m3max` accepts submissions into Hold but refuses release and dispatch. While jobs run, the controller holds a `caffeinate` assertion against idle sleep. This cannot prevent lid-close sleep on battery. |
+| D30 | The runner's Python interpreter is pinned by the runner profile; CMW sets `CMW_MANAGED_PYTHON` explicitly at launch. No reliance on inherited environment or PATH. P1 adds profile data; P3a implements the launch path. |
+| D31 | The canonical VASP port runner is commit `51d8209`, used in production only after qualification. Runners are deployed only from clean commits as immutable snapshots under `~/.local/share`, each with a source-commit record and a SHA-256 manifest of its binaries; profiles pin them. The D18 change is based on `51d8209` and deployed as a new snapshot. P1 owns the cutover; P3a owns D18. |
+| D32 | Benchmarks and experiments never use a production queue; they use a separate sandbox namespace. Each node has exactly one production configuration. Effective immediately. |
+| D33 | The Mini is consolidated in a single cutover after its current research job finishes; no new Mini submissions until then. P1 owns the cutover. |
 
 ## 3. Deltas
 
-Except for the explicitly identified pure Phase 0 APIs, everything in this
-section is a **future specification**, not implemented behaviour. D01–D29 above
-are normative. New operation names, capability keys, wire layouts and additional
+The pure Phase 0 APIs are implemented; D32's operating rule and D33's Mini
+submission freeze apply immediately. Other changes in this section are a
+**future specification**, not implemented behaviour. The decisions in §2 are
+normative. New operation names, capability keys, wire layouts and additional
 record fields below are **draft specification choices** where the decisions did
 not prescribe them; they require implementation review, versioned negotiation
 and tests before use. Existing strict schema-1 readers must never receive extra
 fields they cannot accept. Missing future capabilities fail closed for the new
 feature and preserve existing supported operations.
 
-### 3.1 Enrollment, aliases and protocol: D01–D05
+### 3.1 Enrollment, aliases and protocol: D01–D05, D32–D33
 
 Preserve node/queue/storage UUIDs, immutable job and attempt IDs, owner bindings,
 request receipts and existing state roots. Adopt node display aliases
@@ -102,6 +107,22 @@ not invented here. Alias migration must keep UUID-bound selections valid, update
 references atomically or refuse, and leave a recovery record. Fresh MacBook
 production enrollment and any archival of disposable enrollments are separate
 P1 operations after preservation checks. P0 changes none of these files.
+
+D32 applies to every agent now: each node has exactly one production
+configuration in the canonical layout described here and in D02. Do not create
+new production enrollments, configurations, registries, runtimes or runner
+deployments outside that layout. Benchmarks and experiments use a separate
+sandbox namespace, including their configuration and execution state, and never
+target a production queue. Sandbox records do not become additional production
+configurations or replace production registry entries.
+
+Under D33, no new Mini submissions are allowed until its current research job
+finishes. P1 then consolidates the Mini in one cutover, preserving the enrolled
+node, queue, storage identities and research records above. The cutover includes
+the qualified canonical runner snapshot and profile pins from D30/D31; it is
+not a sequence of competing production enrollments or deployments. This
+specification does not establish that the research job has finished or that the
+cutover is authorized to run now.
 
 Retain protocol integer 1, JSON-lines control framing, the response/error shape,
 capability negotiation, observer sessions and host-key pinning. Feature versions
@@ -576,6 +597,23 @@ runner is refused for this new contract. Exact flags/capability spelling are a
 draft interface, not instructions to patch the port here. Current preparation
 and runner migration requirements remain in §5.
 
+**D30 interpreter pin:** P1 adds the runner's explicit Python interpreter and
+its identity to the runner profile through a compatible profile-schema
+migration. P3a makes CMW set `CMW_MANAGED_PYTHON` explicitly from that pin at
+launch. The runner must not select Python from inherited environment or PATH;
+the launch contract must refuse missing or mismatched interpreter evidence.
+
+**D31 runner deployment:** commit `51d8209` is the canonical VASP port baseline,
+eligible for production only after qualification. P1 deploys it from a clean
+commit as an immutable snapshot under `~/.local/share`, retaining its
+source-commit record and a SHA-256 manifest of its binaries. Profiles pin the
+snapshot and its evidence. This decision is not a claim that qualification is
+already complete. P3a bases the D18 verify-only/NPAR-rejection change on
+`51d8209`, qualifies it, and deploys it as a new immutable snapshot with new
+profile pins; it must not modify the prior snapshot in place. Benchmark and
+experimental qualification runs obey D32's separate sandbox namespace and
+never use a production queue. The Mini's production cutover waits for D33.
+
 D21 retains the current ordered dataset identity set and whole-file digest.
 Prepare POTCAR on the authoring node, transfer only with explicit authorization,
 and verify identical bytes and species evidence on the target. The target does
@@ -620,11 +658,12 @@ sleep assertions.
 
 | Phase | Content | Prerequisite |
 |---|---|---|
+| Immediate operating rules | D32: one production configuration per node; sandbox namespaces for benchmarks/experiments, never production queues. D33: no new Mini submissions until its current research job finishes. | Effective now; no deployment implied |
 | P0 | This delta specification; ported pure logic; local status-cost measurement | — |
 | 3.11 PR | Minimum Python 3.11; CI adjustment | P0 merged |
-| P1 | Cheap status; 3-failure rule and 5 s polling; default registry and aliases; production enrollment of both machines in both directions; thermal configuration | 3.11 PR merged |
+| P1 | Cheap status; 3-failure rule and 5 s polling; default registry and aliases; canonical production configuration of both machines in both directions; thermal configuration; D30 interpreter profile pins; D31 qualified `51d8209` immutable snapshot cutover; D33 single Mini consolidation | 3.11 PR merged; runner qualification before production use; Mini cutover only after its current research job finishes |
 | P2 | Single entry point: `cmw jobs watch` opens `NodesApp` including the local queue; node tabs; consolidate `JobsTable` and `NodesTable` | P1 |
-| P3a | Cancellation modes and 10 s hard grace; VASP port runner verify-only INCAR (separate repository PR) | P2 |
+| P3a | Cancellation modes and 10 s hard grace; D18 verify-only INCAR and NPAR rejection in the VASP port (separate repository PR based on `51d8209`); D30 explicit `CMW_MANAGED_PYTHON` launch path; D31 newly qualified immutable successor snapshot and profile pins | P2; qualify the changed runner before production deployment |
 | P3b | Binary transfer endpoint replacing SFTP; restart-artifact submission; forced-command gate; D23 | P3a; gate after the transfer endpoint |
 | P4 | Node-wide permanent journal | P3b |
 | P5 | File UX: fetch-and-open, selection without hand-written JSON | P3b |
@@ -687,17 +726,20 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    meaning is assigned to Multiwfn or generic Command. The pure availability
    function returns no newly specified modes for those engines; it does not
    remove their existing runtime cancellation capability.
-8. **D17–D19 preparation and runner conflict (P3a):** current node VASP argv sends
+8. **D17–D19 runner migration (P3a):** current node VASP argv sends
    `--ncore`/`--kpar`, fixes `std` and `restart none`, and the current port route
    rewrites parallelization. In this repository,
    [`preparation.py`](../../src/cmw/periodic/vasp/preparation.py) rejects NPAR and
    permits only NCORE/KPAR in its runtime overlay, although the generic parser
-   recognizes NPAR. D19 now rejects NPAR in every plan; no NPAR precedence or
-   runner-profile representation remains to be decided. Coordinate a compatible
-   author-input preparation/port interface and its provenance/finalization rules
-   without silently editing inputs, including the shared equivalent-NCORE
-   rejection diagnostic. The separate port PR owns verify-only launch behavior
-   and D18 enforcement; P0 changes neither repository's runtime path.
+   recognizes NPAR. The CMW preparation route and D19 plan rule now agree:
+   NPAR is rejected for local and remote submissions. That rejection policy is
+   resolved. Remaining work is the compatible verify-only runner/profile
+   interface, shared integer-equivalent-NCORE or no-integer-equivalent rejection
+   diagnostic, staged-input identity and provenance/finalization, and the
+   existing variant/restart restrictions. D30/D31 fix the interpreter and runner
+   deployment policy; their versioned profile-data and launch integration still
+   require implementation. The separate port PR owns D18 enforcement based on
+   `51d8209`; P0 changes neither repository's runtime path.
 9. **D20/D22 capability data and rollout:** current host evidence supplies platform
     UUID, not the new physical-core/tier/policy object, and node submission fixes
     `std`. Define hardware discovery, incomplete evidence reporting, build

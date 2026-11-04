@@ -30,6 +30,15 @@ inspect and report drift. Read only relevant guidance and reuse established
 context until requirements/code change; no full census for a typo or reread
 before every command. Update the map with any actual capability boundary change.
 
+## Production and sandbox boundary (mandatory; D32)
+
+Each node has exactly one production configuration. All agents must follow the
+canonical layout in [the multi-host nodes specification](docs/architecture/multi-host-nodes.md).
+Do not create a new production enrollment, configuration, registry, runtime or
+runner deployment outside that layout. Benchmarks and experiments must use a
+separate sandbox namespace for their configuration and execution state and
+must never target a production queue. This rule is effective immediately.
+
 ## 1. Scope and planning
 
 - Identify the goal, constraints, likely affected files, and observable completion condition before editing.
