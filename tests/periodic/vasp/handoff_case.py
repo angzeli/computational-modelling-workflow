@@ -21,7 +21,12 @@ def wait_for_fixture_sources(paths, *, quiet_seconds=.25, timeout=3):
     Desktop files can acquire metadata shortly after creation. This test-only
     wait precedes binding; it never retries a refused finalization or relaxes
     the production byte/inode/ctime verification contract.
+
+    Long windows exist for macOS desktop metadata agents; other POSIX hosts have
+    no such asynchronous writer, so they keep only the short default window.
     """
+    if sys.platform != 'darwin':
+        quiet_seconds = min(quiet_seconds, .25)
     paths = tuple(paths)
 
     def snapshot():

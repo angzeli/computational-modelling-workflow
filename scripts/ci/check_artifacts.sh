@@ -32,7 +32,8 @@ cp "$source_root/tests/progress/orca_fixtures.py" "$check_root/driver/tests/prog
 case "${CMW_ARTIFACT_MODES:-all}" in
   all) artifact_modes=(core jobs sdist editable);;
   readiness) artifact_modes=(core jobs);;
-  *) printf 'CMW_ARTIFACT_MODES must be all or readiness\n' >&2; exit 64;;
+  core) artifact_modes=(core);;
+  *) printf 'CMW_ARTIFACT_MODES must be all, readiness or core\n' >&2; exit 64;;
 esac
 for kind in "${artifact_modes[@]}"; do
   env_root="$check_root/env-$kind"
