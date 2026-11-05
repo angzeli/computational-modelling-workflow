@@ -8,7 +8,7 @@ from textual.widgets import Button, DataTable, Input, Static
 
 from cmw.jobs.copy_ui import CopyPreview
 from cmw.jobs.snapshot import render_snapshot
-from cmw.jobs.tui import literal
+from cmw.jobs.tui import Prompt, literal
 
 
 def origin_text(snapshot):
@@ -58,11 +58,14 @@ class FetchDialog(ModalScreen):
                 yield Button('Fetch', id='fetch-confirm', variant='primary')
                 yield Button('Back', id='fetch-back')
 
+    def node_commands_changed(self, allowed):
+        self.query_one('#fetch-confirm', Button).disabled = self.busy or not allowed
+
     def on_button_pressed(self, event):
         event.stop()
         if event.button.id == 'fetch-back':
             self.dismiss(None)
-        elif event.button.id == 'fetch-confirm' and not self.busy:
+        elif event.button.id == 'fetch-confirm' and not self.busy and self.app.view_commands_allowed(self):
             self.app.start_fetch(self, self.query_one('#fetch-spec', Input).value,
                                  self.query_one('#fetch-destination', Input).value)
 
@@ -125,6 +128,11 @@ class NodeFiles(ModalScreen):
         event.stop()
         self.render_location()
 
+    def node_commands_changed(self, allowed):
+        self.query_one('#node-files-fetch', Button).disabled = not allowed
+        if self.local:
+            self.query_one('#node-files-open', Button).disabled = not allowed
+
     def on_button_pressed(self, event):
         event.stop()
         item = self.selected_location()
@@ -132,7 +140,7 @@ class NodeFiles(ModalScreen):
             self.dismiss(None)
         elif event.button.id == 'node-files-copy' and item:
             self.app.request_copy(self.label + '\n' + (item.get('node_path') or item.get('declared_path') or ''), view=self)
-        elif event.button.id == 'node-files-fetch':
+        elif event.button.id == 'node-files-fetch' and self.app.view_commands_allowed(self):
             self.app.push_screen(FetchDialog(self.owner, self.target, self.label))
         elif event.button.id == 'node-files-open':
             if self.local and item:
@@ -170,11 +178,33 @@ class NodeControlConfirm(ModalScreen):
                 yield Button('Check result', id='node-control-check', disabled=True)
                 yield Button('Back', id='node-control-back')
 
+    def node_commands_changed(self, allowed):
+        self.query_one('#node-control-confirm', Button).disabled = self.busy or not allowed
+        self.query_one('#node-control-check', Button).disabled = not self.request_id or not allowed
+
     def on_button_pressed(self, event):
         event.stop()
         if event.button.id == 'node-control-back':
             self.dismiss(None)
+        elif not self.app.view_commands_allowed(self):
+            return
         elif event.button.id == 'node-control-check' and self.request_id:
             self.app.check_control_result(self.owner, self.request_id, self)
         elif event.button.id == 'node-control-confirm' and not self.busy:
             self.app.start_control(self, self.query_one('#node-control-reason', Input).value)
+
+
+class NodeOrderPrompt(Prompt):
+    def node_commands_changed(self, allowed):
+        self.query_one('#apply', Button).disabled = not allowed
+        self.query_one('#answer', Input).disabled = not allowed
+
+    def on_input_submitted(self, event):
+        event.prevent_default()
+        if self.app.view_commands_allowed(self):
+            super().on_input_submitted(event)
+
+    def on_button_pressed(self, event):
+        event.prevent_default()
+        if event.button.id == 'back' or self.app.view_commands_allowed(self):
+            super().on_button_pressed(event)

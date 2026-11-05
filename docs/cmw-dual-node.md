@@ -216,8 +216,13 @@ cmw jobs --nodes-config FRONTEND_CONFIG --node mini --queue research watch
 Use `--node` and `--queue` for another enrolled named queue. It grants no
 cross-node control authority. The compact portal preserves the existing
 Scientific formatter and adds node identity to rows and selection. Each node
-refreshes independently; cached disconnected rows say Last reported and retain
-receipt-age qualifications. CPU, RAM, guards and external observations remain
+refreshes independently. Its first connection failure marks retained observations
+**Last reported** throughout the portal, including open and covered dialogs.
+The timestamp records when the portal received the displayed data. Its age uses
+the portal's monotonic clock. Owner commands are disabled while their source
+view is stale. Recovery requires a compatible handshake, fresh status and a new
+observation for that view. Reopen a frozen report or single-use confirmation
+to obtain a new observation. CPU, RAM, guards and external observations remain
 per-node. History and Sources use the selected endpoint, while Copy uses the
 frontend clipboard. Closing the portal closes observers only.
 

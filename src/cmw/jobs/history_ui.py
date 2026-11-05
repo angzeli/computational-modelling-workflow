@@ -103,6 +103,7 @@ class ProgressHistory(ModalScreen):
         self.columns = ()
         self.closed = False
         self.boundaries = ()
+        self.commands_allowed = True
 
     def compose(self):
         with Vertical():
@@ -129,8 +130,16 @@ class ProgressHistory(ModalScreen):
         if self.context is not None and self.app.progress_service is not None:
             self.app.progress_service.release_history(self.context)
 
+    def node_commands_changed(self, allowed):
+        self.commands_allowed = allowed
+
+    def check_action(self, action, parameters):
+        if action in {'drill', 'parent', 'previous', 'next', 'stage', 'segment'} and not self.commands_allowed:
+            return False
+        return super().check_action(action, parameters)
+
     def request(self):
-        if self.expired or self.closed:
+        if self.expired or self.closed or (self.page is not None and not self.commands_allowed):
             return
         self.request_generation += 1
         self.app.collect_progress()
@@ -227,6 +236,8 @@ class ProgressHistory(ModalScreen):
         self.action_drill()
 
     def action_drill(self):
+        if not self.commands_allowed:
+            return
         entry = self.selected_entry()
         if entry is None:
             return

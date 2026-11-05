@@ -50,6 +50,7 @@ class Sources(ModalScreen):
         self.configuring = False
         self.details = False
         self.plans = ()
+        self.commands_allowed = True
 
     def compose(self):
         with Vertical():
@@ -95,8 +96,12 @@ class Sources(ModalScreen):
         self.query_one('#sources-validation', Static).update('Selected attempt or declarations changed. Reopen Sources for the current job.')
         self.update_controls()
 
+    def node_commands_changed(self, allowed):
+        self.commands_allowed = allowed
+        self.update_controls()
+
     def request(self, kind, payload=None):
-        if self.closed or self.expired or self.busy:
+        if self.closed or self.expired or self.busy or (kind != 'inspect' and not self.commands_allowed):
             return
         self.request_generation += 1
         self.busy = True
@@ -217,18 +222,18 @@ class Sources(ModalScreen):
         for name in ('details', 'edit', 'clear'):
             button = self.query_one('#sources-' + name, Button)
             button.display = ready and (name == 'details' or not self.configuring)
-            button.disabled = self.busy
+            button.disabled = self.busy or (name == 'clear' and not self.commands_allowed)
         self.query_one('#sources-edit', Button).display = ready and not self.configuring and bool(self.plans)
         self.query_one('#sources-clear', Button).display = (ready and not self.configuring
                                                           and self.app.session_source_for(self.selection) is not None)
         for name in ('validate', 'use'):
             button = self.query_one('#sources-' + name, Button)
             button.display = ready and self.configuring
-            button.disabled = self.busy or self.expired
+            button.disabled = self.busy or self.expired or not self.commands_allowed
         valid = self.validation is not None and not self.validation.errors
         confirm = self.query_one('#sources-confirm', Checkbox)
         confirm.display = self.configuring and valid and self.validation.conflict
-        self.query_one('#sources-use', Button).disabled = (self.busy or not valid
+        self.query_one('#sources-use', Button).disabled = (self.busy or not self.commands_allowed or not valid
             or self.validated_fields != self.field_values()
             or bool(self.validation.conflict and not confirm.value)) if self.configuring and ready else True
 

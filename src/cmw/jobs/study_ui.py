@@ -28,9 +28,10 @@ class StudyScreen(ModalScreen):
     StudyScreen Button { width: 1fr; }
     '''
 
-    def __init__(self, label, request):
+    def __init__(self, label, request, owner=None):
         super().__init__()
         self.label, self.request, self.record = label, request, None
+        self.owner = owner
 
     def compose(self):
         with Vertical():
@@ -42,7 +43,7 @@ class StudyScreen(ModalScreen):
                 yield Button('Back', id='study-back')
 
     def on_mount(self):
-        def accepted(record, error):
+        def accepted(record, error, receipt=None):
             if not self.is_mounted:
                 return
             if error is not None:
@@ -50,6 +51,8 @@ class StudyScreen(ModalScreen):
                 self.query_one('#study-body', Static).update('No fresh series evidence. No comparison or convergence verdict is available.')
                 return
             self.record = record
+            if self.owner is not None and receipt is not None:
+                self.app.view_received(self, self.owner, receipt)
             self.query_one('#study-body', Static).update(study_text(record))
             self.query_one('#study-status', Static).update('Recorded study bindings only; use explicit study compare for fresh scientific qualification.')
         self.request(accepted)

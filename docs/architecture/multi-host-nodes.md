@@ -380,7 +380,11 @@ P1 status polling is now 5 s. The Phase 0 interpretation of “about 15 s” kee
 the existing inclusive freshness convention: age `<= 15 s` is fresh, `> 15 s`
 is stale, no receipt is unavailable. Age is measured solely with the portal's
 monotonic clock; no negative/future local age is accepted. Retained rows are
-labelled as last reported when stale or disconnected. Freshness does not override
+labelled as last reported when stale or disconnected. The first failure also
+qualifies every open view displaying that owner's data with its own receipt
+time and monotonic age. After a compatible handshake and new status, each view
+requires a new observation of its displayed data before its commands are
+available again. Frozen reports keep their original receipt. Freshness does not override
 endpoint, ownership, revision or readiness checks for actions.
 
 Skew is display-only: estimate `node_observed_at - (portal_sent +
