@@ -65,7 +65,7 @@ multiwfn_jobs_event() {
 multiwfn_runtime_launch() {
   local alias_root alias_path child_pid="" source_alias="" source_name="" source_path="" status=0
   local previous_exit previous_int previous_term interrupted=0 interrupt_signal="" probe
-  local child_query_failed=0 job_snapshot
+  local child_query_failed=0 query_number=0 job_snapshot
   if [[ -z "$MULTIWFN_RUN_SETTINGS_DIRECTORY" || ! -s "$MULTIWFN_RUN_SETTINGS_PATH" ]]; then
     printf 'Multiwfn run-local settings were not prepared\n' >&2
     return 64
@@ -85,18 +85,29 @@ multiwfn_runtime_launch() {
     return 75
   fi
   multiwfn_child_active() {
-    local owned
+    local owned child_status=1 end_marker
     [[ -n "$child_pid" ]] || return 1
+    # Once ownership is uncertain, preserve the aliases without signalling or
+    # waiting on the child, even if a later job query might succeed.
+    ((child_query_failed == 0)) || return 0
+    query_number=$((query_number + 1))
+    end_marker="CMW-JOBS-END:$query_number:$RANDOM:$RANDOM"
     # Stay in the owning shell: a signal during command-substitution parsing
     # can abort even a simple trap before its handler executes on Bash 5.2.
-    if ! { jobs -pr && jobs -ps; } > "$job_snapshot"; then
-      child_query_failed=1
-      return 0
+    if [[ -f "$job_snapshot" ]] &&
+      { jobs -pr && jobs -ps && printf '%s\n' "$end_marker"; } > "$job_snapshot"; then
+      while IFS= read -r owned; do
+        case "$owned" in
+          "$end_marker") return "$child_status" ;;
+          "$child_pid") child_status=0 ;;
+          ''|*[!0-9]*) break ;;
+        esac
+      done < "$job_snapshot"
     fi
-    while IFS= read -r owned; do
-      [[ "$owned" != "$child_pid" ]] || return 0
-    done < "$job_snapshot" || { child_query_failed=1; return 0; }
-    return 1
+    # EOF or a read error before this query's marker cannot establish even
+    # positive membership: the running and stopped lists must both be complete.
+    child_query_failed=1
+    return 0
   }
   cleanup_multiwfn_alias() {
     if multiwfn_child_active; then return 0; fi

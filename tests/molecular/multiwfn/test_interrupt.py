@@ -23,6 +23,54 @@ from tests.jobs.test_jobs import wait_for
 ROOT = Path(__file__).resolve().parents[3]
 SHELL = ROOT/'scripts/multiwfn/multiwfn_runtime.sh'
 
+# Save a genuine end marker for replay. Corrupt exactly one later query so
+# retrying could see a good snapshot even though this ownership check failed.
+SNAPSHOT_FAULT_HOOK = r'''
+test_query_start=0
+test_previous_marker=''
+test_inject=0
+test_injected=0
+jobs() {
+    if [[ $1 == -pr ]]; then test_query_start=1; fi
+    builtin jobs "$@"
+}
+pause_until_signal_sent() {
+    local probe
+    : > "$CMW_TEST_ROOT/query-entered"
+    for probe in {1..250}; do
+        [[ ! -f $CMW_TEST_ROOT/query-release && ! -f $CMW_TEST_ROOT/release ]] || break
+        sleep 0.02
+    done
+    [[ -f $CMW_TEST_ROOT/query-release ]]
+}
+read() {
+    if [[ ${FUNCNAME[1]:-} != multiwfn_child_active ]]; then builtin read "$@"; return; fi
+    if ((test_query_start)); then
+        test_query_start=0
+        test_inject=0
+        if ((test_injected == 0)) && [[ -n $test_previous_marker && -f $CMW_TEST_ROOT/ready.json ]]; then
+            test_injected=1
+            test_inject=1
+            case "$CMW_TEST_SNAPSHOT_FAULT" in
+                empty) : > "$alias_root/jobs.snapshot"; pause_until_signal_sent || return 2 ;;
+                truncate) printf '%s\n' "$child_pid" > "$alias_root/jobs.snapshot" ;;
+                replay) printf '%s\n%s\n' "$child_pid" "$test_previous_marker" > "$alias_root/jobs.snapshot" ;;
+            esac
+        fi
+    fi
+    if ((test_inject)) && [[ $CMW_TEST_SNAPSHOT_FAULT == read-error && -f $CMW_TEST_ROOT/query-entered ]]; then
+        : > "$CMW_TEST_ROOT/read-error-injected"
+        return 2
+    fi
+    builtin read "$@" || return $?
+    if [[ $owned == CMW-JOBS-END:* && -z $test_previous_marker ]]; then test_previous_marker=$owned; fi
+    if ((test_inject)) && [[ $owned == "$child_pid" && ! -f $CMW_TEST_ROOT/query-entered ]]; then
+        pause_until_signal_sent || return 2
+    fi
+    return 0
+}
+'''
+
 
 def interrupt_owner_observation(owner):
     if owner is None:
@@ -85,7 +133,9 @@ def capture_interrupt_failure(root, *, test_id, failure, started, parent, parent
 
 class InterruptTests(unittest.TestCase):
     def exercise(self, signum=signal.SIGTERM, *, queued=False, unresolved=False, early_interrupt=False,
-                 inherited_int=False, interrupt_query=None, query_failure=False, check_snapshot_mode=False):
+                 inherited_int=False, interrupt_query=None, query_failure=False, check_snapshot_mode=False,
+                 snapshot_fault=None):
+        refused_query = query_failure or snapshot_fault is not None
         with tempfile.TemporaryDirectory(prefix='cmw-interrupt-') as directory, install():
             root = Path(directory)
             attempt = root/'attempt'
@@ -162,6 +212,9 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                 env['CMW_TEST_INTERRUPT_QUERY'] = interrupt_query
             if query_failure:
                 env['CMW_TEST_QUERY_FAILURE'] = '1'
+            if snapshot_fault:
+                env['CMW_TEST_SNAPSHOT_FAULT'] = snapshot_fault
+                command[2] = SNAPSHOT_FAULT_HOOK + command[2]
             sentinel = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(35)'])
             sentinel_owner = identity(sentinel.pid)
             parent = None
@@ -213,12 +266,12 @@ os.execv(sys.argv[1],sys.argv[1:])
                 if queued:
                     store.change(job['id'], 'cancel', confirm=True)
                 elif not early_interrupt and not query_failure:
-                    if interrupt_query:
+                    if interrupt_query or snapshot_fault:
                         wait_for((root/'query-entered').exists, timeout=5)
                     parent.send_signal(signum)
-                    if interrupt_query:
+                    if interrupt_query or snapshot_fault:
                         (root/'query-release').touch()
-                if not query_failure:
+                if not refused_query:
                     wait_for((root/'signal-seen').exists, timeout=2)
                     self.assertEqual(json.loads((root/'signal-seen').read_text()), signum)
                 if interrupt_query:
@@ -233,28 +286,30 @@ os.execv(sys.argv[1],sys.argv[1:])
                     self.assertEqual(store.snapshot()['jobs'][0]['status'], 'Cancelling')
                     wait_for(lambda: store.snapshot()['jobs'][0]['status'] == 'Cancelled', timeout=8)
                 else:
-                    if not query_failure:
+                    if not refused_query:
                         self.assertIsNone(parent.poll())
                     # Hosted polling reached KILL at 7 s and kept draining after 10 s.
                     # Both waits expire before the fake child's 25 s safety lifetime.
                     parent.wait(timeout=15 if unresolved else 10)
                     stderr = (root/'wrapper.stderr').read_text()
-                    if unresolved or query_failure:
+                    if unresolved or refused_query:
                         self.assertEqual(parent.returncode, 75, stderr)
                         self.assertIn('termination unresolved; aliases retained', stderr)
                         self.assertTrue(all(Path(p).exists() for p in ready['aliases']))
                     else:
                         self.assertEqual(parent.returncode, 128+signum, stderr)
                         self.assertTrue(all(not Path(p).exists() for p in ready['aliases']))
-                self.assertEqual(owner_alive(child), unresolved or query_failure)
+                self.assertEqual(owner_alive(child), unresolved or refused_query)
                 if check_snapshot_mode:
                     snapshot = Path(ready['aliases'][0]).parent/'jobs.snapshot'
                     self.assertEqual(stat.S_IMODE(snapshot.stat().st_mode), 0o600)
                     for observation in ('child.umask', 'after.umask'):
                         self.assertEqual(int((root/observation).read_text().strip(), 8), 0o022, observation)
-                if query_failure:
+                if refused_query:
                     self.assertFalse((root/'signal-seen').exists(),
                                      'Unverified job-table observation must not authorize a signal')
+                if snapshot_fault == 'read-error':
+                    self.assertTrue((root/'read-error-injected').exists())
                 self.assertFalse((root/'alias-lost-while-live').exists())
                 self.assertEqual(identity(sentinel.pid), sentinel_owner)
                 self.assertIsNone(sentinel.poll())
@@ -304,6 +359,18 @@ os.execv(sys.argv[1],sys.argv[1:])
 
     def test_job_snapshot_is_private_without_changing_caller_or_child_umask(self):
         self.exercise(query_failure=True, check_snapshot_mode=True)
+
+    def test_read_error_after_child_pid_retains_aliases_without_forwarding(self):
+        self.exercise(snapshot_fault='read-error')
+
+    def test_truncated_snapshot_after_child_pid_retains_aliases_without_forwarding(self):
+        self.exercise(snapshot_fault='truncate')
+
+    def test_empty_snapshot_does_not_establish_child_absence(self):
+        self.exercise(snapshot_fault='empty')
+
+    def test_replayed_snapshot_end_marker_retains_aliases_without_forwarding(self):
+        self.exercise(snapshot_fault='replay')
 
     def test_jobs_wrapped_child_ends_before_terminal_state(self):
         self.exercise(queued=True)
