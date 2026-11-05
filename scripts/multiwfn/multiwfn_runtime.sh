@@ -2,6 +2,10 @@
 
 # Shell-owned Multiwfn launch adapter. Python resolves semantics and provenance;
 # this helper owns environment, short-path alias, stdin, and child execution.
+# The first caught INT or TERM selects the signal forwarded to an active, verified
+# child and the wrapper's interrupt status (130 for INT, 143 for TERM). Later
+# signals do not override that choice, trigger another forward, or shorten the
+# grace period. If termination cannot be verified, return 75 and retain the aliases.
 
 MULTIWFN_RUNTIME_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 MULTIWFN_RUNTIME_ROOT=$(cd "$MULTIWFN_RUNTIME_DIR/../.." && pwd -P)
