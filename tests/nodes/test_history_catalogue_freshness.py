@@ -39,9 +39,9 @@ class RetainedViewsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.app.lanes['TEST'].fresh(self.app.clock()))
 
     def assert_retained(self, screen):
-        banner = screen.query_one('.node-receipt-banner')
-        self.assertTrue(banner.display)
-        self.assertIn('last reported', str(banner.render()).lower())
+        frame = screen.query_one('.node-view-frame')
+        self.assertTrue(frame.border_title)
+        self.assertIn('last reported', frame.border_title.lower())
         self.assertFalse(self.app.view_commands_allowed(screen))
 
     async def test_history_and_nested_entry_keep_their_original_page_receipt(self):
@@ -104,7 +104,7 @@ class RetainedViewsTests(unittest.IsolatedAsyncioTestCase):
             self.assert_retained(view)
             app.tick()
             await self.until(pilot, lambda: app.view_commands_allowed(view))
-            self.assertFalse(view.query_one('.node-receipt-banner').display)
+            self.assertFalse(view.query_one('.node-view-frame').border_title)
             self.assertTrue(all(not job.get('_catalogue_stale') for _, job in app.rows.values()))
 
     async def test_search_commands_can_still_target_the_healthy_owner(self):

@@ -175,7 +175,10 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
                              NodeState.REACHABLE if count < 3 else NodeState.UNREACHABLE)
             self.assertFalse(lane.fresh(app.clock()))
             state = 'Disconnected' if count < 3 else 'Unreachable'
-            self.assertIn(f'{owner} {state} 0s', str(app.query_one('#node-summary', Static).render()))
+            summary = str(app.query_one('#node-summary', Static).render())
+            owner_line = next(line for line in summary.splitlines() if line.startswith(owner + ':'))
+            for token in ('Last reported', '0s ago', state):
+                self.assertIn(token, owner_line)
             connection = f'connection lost ({count}/3)' if count < 3 else 'node unreachable'
             self.assertIn(connection, app.connection_text(owner))
             if retained is not None:
@@ -267,7 +270,7 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
             wall[0] += 3600
             self.assert_disconnected_then_unreachable(app, 'MINI', 'Synthetic SSH unavailable')
             summary = app.query_one('#node-summary', Static)
-            self.assertIn('MINI Unreachable 0s · Last reported · received 00:00:00 UTC · 0s ago', str(summary.render()))
+            self.assertIn('MINI: Last reported · received 00:00:00 UTC · 0s ago · Unreachable', str(summary.render()))
             self.assertTrue(app.lanes['MBP'].fresh(app.clock()))
             self.assertIn('Last reported', str(app.query_one('#progress', Static).render()))
             self.assertFalse(app.check_action('cancel', ()))
@@ -277,7 +280,7 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(snap['machine_usage']['thermal']['quality'], 'unavailable')
             self.assertEqual(snap['machine_usage']['thermal']['source'], 'macmon')
             self.assertIsNotNone(snap['progress'])
-            self.assertIn('Last reported Run', str(app.query_one('#selected', Static).render()))
+            self.assertRegex(str(app.query_one('#selected', Static).render()), r'Run — [^\n]+\nMINI: Last reported')
             app.lanes['MINI'].next_poll = 0
             await self.until(pilot, lambda: app.lanes['MINI'].fresh(app.clock()))
             self.assertNotIn('Last reported', str(summary.render()))
@@ -346,7 +349,7 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(app.lanes['MINI'].error)
                 self.assertFalse(app.lanes['MINI'].fresh(app.clock()))
                 self.assertIn('avg 63°C~ RAM', machine_text(app.machine_usage('MINI')))
-                self.assertIn('Last reported Run', str(app.query_one('#selected', Static).render()))
+                self.assertRegex(str(app.query_one('#selected', Static).render()), r'Run — [^\n]+\nMINI: Last reported')
                 copied = app.capture_copy_snapshot().to_dict()
                 self.assertEqual(copied['machine_usage']['thermal']['quality'], 'stale')
                 self.assertEqual(copied['machine_usage']['thermal']['sample_timestamp'], 100.)

@@ -300,10 +300,10 @@ class ReviewUiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(app.view_commands_allowed(view))
                 self.assertTrue(view.query_one('#review-inspect', Button).disabled)
                 self.assertTrue(view.query_one('#review-cancel', Button).disabled)
-                banner = view.query_one('.node-receipt-banner', Static)
-                self.assertTrue(banner.display)
-                self.assertIn('last reported', str(banner.render()).lower())
-                self.assertIn('22:13:20 UTC · 0s ago', str(banner.render()))
+                frame = view.query_one('.node-view-frame')
+                self.assertTrue(frame.border_title)
+                self.assertIn('last reported', frame.border_title.lower())
+                self.assertIn('22:13:20 UTC · 0s ago', frame.border_title)
                 self.assertEqual(now[0], before)
                 for name in ('inspect', 'cancel_review'):
                     self.assertFalse(view.check_action(name, ()))
@@ -323,11 +323,11 @@ class ReviewUiTests(unittest.IsolatedAsyncioTestCase):
                 await self.until(pilot, lambda: lane.fresh(now[0]))
                 recovery.assert_called_once_with()
                 self.assertEqual(view.record, retained)
-                self.assertTrue(view.query_one('.node-receipt-banner', Static).display)
+                self.assertTrue(view.query_one('.node-view-frame').border_title)
                 self.assertFalse(app.view_commands_allowed(view))
             view.refresh_node_observation()
             await self.until(pilot, lambda: not view.busy and app.view_commands_allowed(view))
-            self.assertFalse(view.query_one('.node-receipt-banner', Static).display)
+            self.assertFalse(view.query_one('.node-view-frame').border_title)
             self.assertEqual(view.record.status, 'CACHED' if complete else 'PENDING')
             self.assertEqual([name for name, _ in backend.review_service.calls if name in {'start', 'cancel'}], ['start'])
 
@@ -346,13 +346,13 @@ class ReviewUiTests(unittest.IsolatedAsyncioTestCase):
             lane = app.lanes['MINI']
             await self.until(pilot, lambda: not lane.busy and not lane.pending)
             app.accept('MINI', ('status', {}, None, None), None, NodeError('DISCONNECTED', 'background read lost'))
-            banner = copy.query_one('.node-receipt-banner', Static)
-            self.assertTrue(banner.display)
+            frame = copy.query_one('.node-view-frame')
+            self.assertTrue(frame.border_title)
             self.assertEqual(copy.node_view_receipts, parent.node_view_receipts)
             now[0] = lane.next_poll
             app.tick()
             await self.until(pilot, lambda: app.view_commands_allowed(parent))
-            self.assertTrue(banner.display)
+            self.assertTrue(frame.border_title)
             self.assertFalse(app.view_commands_allowed(copy))
 
     async def test_background_failure_before_pending_review_poll(self):

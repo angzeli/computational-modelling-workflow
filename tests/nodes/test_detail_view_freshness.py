@@ -7,7 +7,7 @@ from cmw.nodes.protocol import NodeError
 from tests.jobs.test_doctor_ui import DoctorBackend
 
 try:
-    from textual.widgets import Static, TextArea
+    from textual.widgets import TextArea
     from cmw.doctor.presentation import DoctorReport
     from cmw.nodes.portal import NodesApp
 except ImportError:
@@ -44,10 +44,10 @@ class FrozenNodeViewTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(app.view_commands_allowed(view))
                 now[0] += 3
                 app.accept('OWNER', ('status', {}, None, None), None, NodeError('DISCONNECTED', 'stream lost'))
-                banner = view.query_one('.node-receipt-banner', Static)
-                self.assertTrue(banner.display)
-                self.assertIn('last reported', str(banner.render()).lower())
-                self.assertIn('22:13:20 UTC · 3s ago', str(banner.render()))
+                frame = view.query_one('.node-view-frame')
+                self.assertTrue(frame.border_title)
+                self.assertIn('last reported', frame.border_title.lower())
+                self.assertIn('22:13:20 UTC · 3s ago', frame.border_title)
                 self.assertEqual(view.query_one(TextArea).text, retained)
                 if action == 'details':
                     self.assertFalse(view.check_action('doctor', ()))
@@ -57,7 +57,7 @@ class FrozenNodeViewTests(unittest.IsolatedAsyncioTestCase):
                 now[0] = lane.next_poll
                 app.tick()
                 await self.until(lambda: lane.fresh(now[0]))
-                self.assertTrue(banner.display, 'A new status cannot refresh the frozen display')
+                self.assertTrue(frame.border_title, 'A new status cannot refresh the frozen display')
                 self.assertEqual(view.query_one(TextArea).text, retained)
                 if action == 'copy_snapshot':
                     target = backend.jobs[0]['target']
@@ -68,7 +68,7 @@ class FrozenNodeViewTests(unittest.IsolatedAsyncioTestCase):
                         and receipt.generation == app.view_receipt('OWNER', 'status').generation
                         for op in ('progress', 'observe')))
                     await pilot.click('#copy-refresh')
-                    self.assertFalse(banner.display)
+                    self.assertFalse(frame.border_title)
                     self.assertTrue(app.view_commands_allowed(view))
 
     async def test_details_disables_doctor_until_reopened(self):

@@ -28,14 +28,14 @@ class FileControlViewFreshnessTests(unittest.IsolatedAsyncioTestCase):
             app.select(row_key(backend.jobs[0]['target']))
             getattr(app, 'action_' + action)()
             await self.until(pilot, lambda: isinstance(app.screen, screen_type)
-                             and app.screen.is_mounted and bool(app.screen.query('.node-receipt-banner')))
+                             and app.screen.is_mounted and bool(app.screen.query('.node-view-frame')))
             self.assertTrue(app.view_commands_allowed(app.screen))
             yield app, pilot, now
 
     def assert_retained(self, app, view):
-        banner = view.query_one('.node-receipt-banner')
-        self.assertTrue(banner.display)
-        self.assertIn('last reported', str(banner.render()).lower())
+        frame = view.query_one('.node-view-frame')
+        self.assertTrue(frame.border_title)
+        self.assertIn('last reported', frame.border_title.lower())
         self.assertFalse(app.view_commands_allowed(view))
 
     def disconnect(self, app):
@@ -67,7 +67,7 @@ class FileControlViewFreshnessTests(unittest.IsolatedAsyncioTestCase):
             files = app.screen
             await pilot.click('#node-files-fetch')
             await self.until(pilot, lambda: isinstance(app.screen, FetchDialog) and app.screen.is_mounted
-                             and bool(app.screen.query('.node-receipt-banner')))
+                             and bool(app.screen.query('.node-view-frame')))
             # Failure on the independent transfer connection reaches every owner view.
             app.finish_fetch(app.screen, 'fetch acknowledgment lost', NodeError('DISCONNECTED', 'acknowledgment lost'))
             self.assert_retained(app, app.screen)

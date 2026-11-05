@@ -352,7 +352,7 @@ class PortalTests(unittest.IsolatedAsyncioTestCase):
             app.lanes['MINI'].next_poll = 0
             await self.until(pilot, lambda: app.lanes['MINI'].error is not None)
             selected = str(app.query_one('#selected', Static).render())
-            self.assertIn('Last reported Run — connection lost (1/3)', selected)
+            self.assertIn('Run — connection lost (1/3)\nMINI: Last reported', selected)
             self.assertIn('791%~', selected)
             self.assertTrue(all(len(line) <= 70 for line in selected.splitlines()), selected)
             before = len(backends['MINI'].calls)

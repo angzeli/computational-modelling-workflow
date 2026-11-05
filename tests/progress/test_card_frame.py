@@ -5,6 +5,7 @@ import unittest
 from cmw.jobs.snapshot import capture_snapshot, render_snapshot
 from cmw.progress.formatting import cell_width, progress_text
 from cmw.progress.models import CardCell, CardGroup, Criterion, Metric, MetricSeries, ProgressEvent, ProgressSnapshot, RunContext
+from cmw.progress.receipt import ReceiptCaption
 from cmw.progress.vasp_card import vasp_card_groups
 from tests.progress.test_scientific_card import example
 
@@ -188,6 +189,63 @@ class CardFrameTests(unittest.TestCase):
         fallback = self.render(example(), max_lines=5)
         self.assertFalse(any(char in fallback for char in BOX))
         self.assertIn('3.1087e+00 eV @SCF8', fallback)
+
+    def assert_required_frame(self, lines, width):
+        self.assertTrue(lines[0].startswith('┌─') and lines[0].endswith('┐'), lines)
+        self.assertTrue(lines[-1].startswith('└') and lines[-1].endswith('┘'), lines)
+        self.assertTrue(all((line[0], line[-1]) in {('│', '│'), ('├', '┤')} for line in lines[1:-1]), lines)
+        self.assertEqual({cell_width(line) for line in lines}, {width})
+
+    def test_oversize_grid_qualifies_footer_without_displacing_metrics(self):
+        rows = tuple((CardCell(kind='text', text=f'Evaluation {number}'),) for number in range(7))
+        snapshot = replace(example(), card_groups=(CardGroup('OBSERVED', rows),))
+        caption = ReceiptCaption('MINI', '12:04:18 UTC', '5s ago')
+        fresh = progress_text(snapshot, width=70, require_frame=True, max_lines=8, now=112).splitlines()
+        retained = progress_text(snapshot, width=70, require_frame=True, max_lines=8, now=112,
+                                 receipt_caption=caption).splitlines()
+        for lines in (fresh, retained):
+            self.assert_required_frame(lines, 70)
+            self.assertEqual(len(lines), 8)
+            for number, line in enumerate(lines[:-1]):
+                self.assertIn(f'Evaluation {number}', line)
+        self.assertIn('Last reported', retained[-1])
+        self.assertEqual(fresh[:-1], retained[:-1])
+
+    def test_long_scientific_title_fits_same_frame_after_disconnect(self):
+        from cmw.progress.models import SettingObservation
+        snapshot = example()
+        metric = replace(snapshot.metrics[0].latest, qualification='current-input-derived', relation='UNCERTAIN')
+        snapshot = replace(snapshot, metrics=(MetricSeries(metric), *snapshot.metrics[1:]), read_health='ERROR',
+                           events=(ProgressEvent('warning', 'native-fatal', None, 1),),
+                           settings=(SettingObservation('EDIFF', 1e-5, 'INCAR', qualification='provisional',
+                                                        discrepancy=True),))
+        caption = ReceiptCaption('MINI', '12:04:18 UTC', '5s ago')
+        fresh = progress_text(snapshot, width=70, max_lines=8, now=112, require_frame=True).splitlines()
+        retained = progress_text(snapshot, width=70, max_lines=8, now=112, require_frame=True,
+                                 receipt_caption=caption).splitlines()
+        self.assertIn('SCIENTIFIC', fresh[0])
+        self.assertIn('Last reported', retained[0])
+        self.assertEqual(retained[1:], fresh[1:])
+        for lines in (fresh, retained):
+            self.assert_required_frame(lines, 70)
+            self.assertEqual(len(lines), 8)
+
+    def test_required_frame_without_adapter_grid_uses_existing_content_rows(self):
+        generic = replace(example(), card_groups=())
+        unresolved = replace(generic, status='SOURCE_UNRESOLVED', metrics=(), messages=('Inputs pending',))
+        unavailable = replace(generic, status='ADAPTER_UNAVAILABLE')
+        for snapshot in (generic, unresolved, unavailable):
+            with self.subTest(status=snapshot.status):
+                fresh = progress_text(snapshot, width=70, now=112, max_lines=8, require_frame=True).splitlines()
+                retained = progress_text(snapshot, width=70, now=112, max_lines=8, require_frame=True,
+                                         receipt_caption=ReceiptCaption('MINI', None, None)).splitlines()
+                self.assert_required_frame(fresh, 70)
+                self.assert_required_frame(retained, 70)
+                self.assertIn('receipt unknown', retained[0])
+                self.assertEqual(retained[1:], fresh[1:])
+                if snapshot is unavailable:
+                    self.assertEqual(len(fresh), 3)
+                    self.assertIn('Progress adapter unavailable', fresh[0])
 
     def test_compact_conflict_and_long_notice_keep_frame_and_qualifications(self):
         from cmw.progress.models import SettingObservation
