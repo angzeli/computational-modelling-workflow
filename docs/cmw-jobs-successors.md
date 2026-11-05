@@ -103,6 +103,25 @@ again. A subsequent launch still requires separate release/dispatch consent and
 rechecks original-location, inputs, runtime and working-directory identity through
 the existing admission path. No catalogue relation or scientific PASS is invented.
 
+### Disk full creating the first successor record
+
+If `materialize-next` reports `ENOSPC` while first creating
+`successor.json`, check the approved locations. For VASP, the input directory
+can already contain INCAR, POSCAR, KPOINTS and POTCAR, Scratch can contain a
+complete `preparation.json`, and the wrapper working directory can exist and
+be empty. Registration requires the separate `successor.json`. When it is
+absent, a retry at those locations refuses with `Refusing existing destination`
+and preserves the files.
+
+Restore sufficient space and retain the first publication for inspection. Copy
+the original successor specification to a new path and choose unused
+`adapter.output`, `adapter.record_directory` and `runtime.run_directory`
+locations. Run `plan-next` against the same parent and attempt, review the
+new locations and digest, then run `materialize-next` with that digest.
+Use the new record for any subsequent held registration. If the original
+`successor.json` exists and says `PENDING_VERIFICATION`, follow the
+same-destination retry procedure above instead.
+
 ## Caller-owned schema 1
 
 Required top-level fields, with no additional fields:
