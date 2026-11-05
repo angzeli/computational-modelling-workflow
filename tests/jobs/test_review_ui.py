@@ -210,7 +210,8 @@ class ReviewUiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_remote_result_copy_and_details_agree_and_disconnect_stays_pending(self):
         backend = ReviewBackend()
-        app = NodesApp({'MINI':backend})
+        now = [100.]
+        app = NodesApp({'MINI':backend}, clock=lambda: now[0])
         async with app.run_test(size=(100,30)) as pilot:
             await self.until(pilot,lambda:bool(app.rows))
             await pilot.press('r')
@@ -225,7 +226,15 @@ class ReviewUiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('cached observation retained',str(view.query_one('#review-status',Static).render()))
             backend.fail = False
             backend.review_service.complete = True
+            lane = app.lanes['MINI']
+            self.assertTrue(lane.handshake_required)
+            # Reach the configured reconnect deadline without a wall-time sleep.
+            now[0] = lane.next_poll
+            app.tick()
+            await self.until(pilot,lambda:lane.fresh(now[0]))
+            self.assertEqual(view.record,pending)
             view.unavailable = False
+            view.poll()
             await self.until(pilot,lambda:view.record.status=='COMPLETE' and not view.busy)
             await pilot.press('escape','enter')
             self.assertIsInstance(app.screen,FrozenText)
