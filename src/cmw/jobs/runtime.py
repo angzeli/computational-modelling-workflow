@@ -31,9 +31,12 @@ def reap_detached():
     _CHILDREN[:] = [process for process in _CHILDREN if process.poll() is None]
 
 
-def runtime_environment():
+def runtime_environment(overrides=None):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(str(Path(p).resolve()) for p in sys.path if p))
+    if overrides:
+        env.update(overrides)
+    # A job can launch another CMW helper before its package initializer runs.
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
@@ -319,8 +322,7 @@ def worker(store, job_id, claim):
             job["worker_protocol"] = 3
             store.save(con, job)
         receipt = attempt / "payload-exit.json"
-        env = runtime_environment()
-        env.update(job["env"])
+        env = runtime_environment(job["env"])
         env.pop('CMW_SUSPENSION_CONTEXT', None)
         # Payloads may bind their own evidence to this exact attempt.
         env['CMW_JOBS_ATTEMPT_ID'] = job['attempt_id']

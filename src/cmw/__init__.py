@@ -1,1 +1,1 @@
-"""Package shell for reusable computational modelling workflow infrastructure."""
+__import__("sys").dont_write_bytecode = True

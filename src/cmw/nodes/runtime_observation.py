@@ -596,7 +596,10 @@ class RuntimeVerifier:
             import psutil
             process_started_ns = int(psutil.Process().create_time() * 1e9)
         self.process_started_ns = process_started_ns
-        self.isolated = bool(sys.flags.isolated and sys.dont_write_bytecode) if isolated is None else isolated
+        if isolated is None:
+            # Importing CMW disables future writes. Recovery also needs -B at startup.
+            isolated = bool(sys.flags.isolated and sys.flags.dont_write_bytecode)
+        self.isolated = isolated
 
     def verify(self, provider):
         if self.tainted:
