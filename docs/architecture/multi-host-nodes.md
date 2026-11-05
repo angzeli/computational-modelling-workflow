@@ -515,7 +515,7 @@ queue data, contact the Mini, use production/research queue state, launch an
 engine, use SSH/network, or enable a provider. Only read-only timing wrappers
 and the measurement output outside those roots were created.
 
-#### P1 same-sandbox comparison (2026-11-04)
+#### P1 same-sandbox source-only comparison before correction (2026-11-04)
 
 The earlier Phase 0 numbers above came from a different node/configuration and
 are not the before column here. This comparison uses a new sandbox node
@@ -558,6 +558,48 @@ Raw measurements remain in the task worktree at
 `.venv/logs/status-after-priority19.json`; the instrument is
 `.venv/measure_status.py`. An earlier trial whose priority was blocked by the
 tool sandbox is excluded from this comparison.
+
+#### Corrected source-only and precompiled comparison (2026-11-05)
+
+Repeat the same method and sandbox above with baseline `aa95e88` and corrected
+candidate `6427fd1`. Each source-only environment remains installed from its own
+worktree, with no CMW bytecode. Each precompiled environment instead contains an
+actual wheel built from the respective worktree, with CMW bytecode compiled
+before enrollment and endpoint imports. All use the same locked dependencies,
+Python 3.14.6, `-I -B` and verified priority 19. The compiled candidate also passed
+all four installed-wheel bytecode tests (eight full/cheap scenarios).
+
+These final four runs were serial, with no local tests or builds running alongside
+them. All 40 responses were BUSY and recorded the identical eight external engine
+PIDs. The synthetic sandbox job remained Hold. The process scan was the sandbox's
+existing read-only observation; no production queue or calculation directory was
+opened, and the Mini was not contacted. Sampling between calls is included in
+whole-session CPU; runtime shares use the same calling-thread attribution above.
+
+| Measurement | Source baseline | Source candidate | Compiled baseline | Compiled candidate |
+| --- | ---: | ---: | ---: | ---: |
+| First status wall / total CPU (s) | 0.570 / 0.541 | 0.457 / 0.430 | 0.693 / 0.645 | 0.880 / 0.823 |
+| Warm median wall (s) | 0.527 | 0.367 | 0.635 | 0.774 |
+| Warm wall minimum–maximum (s) | 0.523–0.541 | 0.360–0.403 | 0.592–0.720 | 0.769–1.103 |
+| Warm median observer / child CPU (s) | 0.492 / 0.035 | 0.332 / 0.035 | 0.601 / 0.034 | 0.737 / 0.035 |
+| Warm median total CPU (s) | 0.527 | 0.366 | 0.634 | 0.770 |
+| Median runtime verification wall / CPU share | 83.0% / 83.1% | 75.3% / 74.9% | 86.0% / 85.9% | 86.8% / 85.9% |
+| Full content scans / boundary comparisons per status | 2 / 0 | 1 / 1 | 2 / 0 | 1 / 1 |
+| Whole-session wall / total CPU (s) | 45.539 / 5.307 | 45.395 / 4.592 | 45.646 / 6.404 | 45.781 / 8.677 |
+| Warm CPU quality: fresh / warming-up | 2 / 7 | 9 / 0 | 6 / 3 | 9 / 0 |
+
+Source-only warm wall and CPU fall by 30.4%. The precompiled candidate instead
+increases warm wall by 21.9% and CPU by 21.5%: its complete private request evidence
+now covers bytecode that the old verifier excluded. This is a measured cost of
+the requested stability guarantee; no compiled-installation latency improvement
+is claimed and no fallback or trust relaxation was applied. Neither comparison
+is a production/remote latency SLA. Phase 0's different-node measurements and the
+earlier candidate's source-only results remain historical evidence above.
+
+Raw data are `.venv/logs/status-{source,precompiled}-{baseline,candidate}-final.json`
+in the task worktree, summarized in `status-final-summary.json`, using
+`.venv/measure_status.py`. Preliminary runs without recorded external member IDs
+are excluded from this final matched table.
 
 ### 3.6 Cancellation: D13–D16
 
