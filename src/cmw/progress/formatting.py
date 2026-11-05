@@ -392,12 +392,12 @@ def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, 
     unresolved = snapshot.status in {'SOURCE_UNRESOLVED', 'SOURCE_CONFLICT'}
     if not detailed:
         limit = max_lines or (3 if width < 54 else 6 if compact else 11)
-        if snapshot.card_groups:
+        if unresolved and not snapshot.metrics and not snapshot.card_groups:
+            lines = _unresolved_card(snapshot, width=content_width, max_lines=limit, receipt_caption=receipt_caption)
+        elif snapshot.card_groups:
             from .card import card_text
             return card_text(snapshot, width=width, now=now, max_lines=limit, framed=framed or require_frame,
                              require_frame=require_frame, receipt_caption=receipt_caption)
-        if unresolved and not snapshot.metrics:
-            lines = _unresolved_card(snapshot, width=content_width, max_lines=limit, receipt_caption=receipt_caption)
         else:
             lines = _card_text(snapshot, compact=compact, width=content_width, now=now, max_lines=limit,
                                receipt_caption=receipt_caption)
