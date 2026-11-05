@@ -1,4 +1,4 @@
-"""Unwired Phase 0 decisions for the existing node protocol (D10–D13, D25).
+"""Pure node decisions: P1 observation wiring; cancellation remains unwired.
 
 No function here polls, signals, writes STOPCAR or changes a node/Jobs record.
 """

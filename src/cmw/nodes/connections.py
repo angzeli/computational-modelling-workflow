@@ -11,6 +11,7 @@ import stat
 
 from .protocol import NodeError, identifier, validate_envelope
 from .transport import SSHTransport, ssh_command
+from .transport_events import compatible_capabilities
 
 
 def observed_machine_usage(envelope, received_at, now, *, connected=True, transport_age=0.):
@@ -206,6 +207,8 @@ class ConnectedBackend:
             value = self.backend.call(operation, params, target, request_id=request_id)
         try:
             validate_envelope(value, operation)
+            if operation == 'capabilities':
+                compatible_capabilities(value)
             if operation in {'review.preview', 'review.start', 'review.poll', 'review.cancel'} and target is not None:
                 record = value['result']['review']['value']
                 if any(record.get(key) != expected for key, expected in target.items()):
@@ -239,6 +242,14 @@ class ConnectedBackend:
             raise NodeError('RUNTIME_MISMATCH', 'Pinned endpoint runtime differs; inspect compatibility before any runtime switch')
         self.last_envelope = value
         return value
+
+    def reconnect(self):
+        """Fresh observer/handshake only; never retain or replay an operation."""
+        self.close()
+        self.last_envelope = None
+        if self.backend is not None:
+            from .backend import LocalBackend
+            self.backend = LocalBackend(self.connection['config_root'], self.queue, defer_check=True)
 
     def close(self):
         if self.transport:

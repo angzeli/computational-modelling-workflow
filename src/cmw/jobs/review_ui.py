@@ -37,6 +37,7 @@ class ReviewScreen(ModalScreen):
         self.label, self.request, self.record = label, request, cached
         self.busy = False
         self.unavailable = False
+        self.commands_allowed = True
 
     def compose(self):
         with Vertical():
@@ -62,10 +63,21 @@ class ReviewScreen(ModalScreen):
     def on_mount(self):
         self.render_record()
         self.query_one('#review-scroll').focus()
-        self.send('review.preview', {})
+        self.refresh_node_observation()
         self.set_interval(.5, self.poll)
 
+    def refresh_node_observation(self):
+        # Re-read current owner metadata, including after a session loses its handle.
+        self.send('review.preview', {})
+
+    def node_commands_changed(self, allowed):
+        self.commands_allowed = allowed
+        if self.is_mounted:
+            self.render_record()
+
     def check_action(self, action, parameters):
+        if action in {'inspect', 'cancel_review'} and not self.commands_allowed:
+            return False
         if isinstance(self.focused, Input) and action in {'inspect','cancel_review','copy_review'}:
             return False
         return True
@@ -74,12 +86,12 @@ class ReviewScreen(ModalScreen):
         text = ('\n'.join(f'{domain.name.replace("_", " ").upper()}: {domain.status}' for domain in self.record.domains)
                 + '\n\n' + review_text(self.record)) if self.record is not None else 'No cached review. Owner metadata is being requested.'
         self.query_one('#review-body', Static).update(safe_snapshot_text(text))
-        self.query_one('#review-inspect', Button).disabled = self.busy or bool(self.record and self.record.status == 'PENDING' and not self.unavailable)
-        self.query_one('#review-cancel', Button).disabled = self.busy or not bool(self.record and self.record.review_id and self.record.status == 'PENDING')
+        self.query_one('#review-inspect', Button).disabled = not self.commands_allowed or self.busy or bool(self.record and self.record.status == 'PENDING' and not self.unavailable)
+        self.query_one('#review-cancel', Button).disabled = not self.commands_allowed or self.busy or not bool(self.record and self.record.review_id and self.record.status == 'PENDING')
         self.query_one('#review-copy', Button).disabled = self.record is None
 
     def send(self, operation, params):
-        if self.busy:
+        if self.busy or (not self.commands_allowed and operation != 'review.preview'):
             return
         self.busy = True
         self.render_record()
@@ -103,7 +115,7 @@ class ReviewScreen(ModalScreen):
             self.send('review.poll', {'review_id':self.record.review_id})
 
     def action_inspect(self):
-        if self.busy or self.record and self.record.status == 'PENDING' and not self.unavailable:
+        if not self.commands_allowed or self.busy or self.record and self.record.status == 'PENDING' and not self.unavailable:
             return
         try:
             settings = {'max_bytes':int(self.query_one('#review-bytes', Input).value),

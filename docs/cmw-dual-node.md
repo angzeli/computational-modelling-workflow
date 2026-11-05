@@ -216,10 +216,27 @@ cmw jobs --nodes-config FRONTEND_CONFIG --node mini --queue research watch
 Use `--node` and `--queue` for another enrolled named queue. It grants no
 cross-node control authority. The compact portal preserves the existing
 Scientific formatter and adds node identity to rows and selection. Each node
-refreshes independently; cached disconnected rows say Last reported and retain
-receipt-age qualifications. CPU, RAM, guards and external observations remain
+refreshes independently. Its first connection failure marks retained observations
+**Last reported** throughout the portal, including open and covered dialogs.
+The timestamp records when the portal received the displayed data. Its age uses
+the portal's monotonic clock. Owner commands are disabled while their source
+view is stale. Recovery requires a compatible handshake, fresh status and a new
+observation for that view. Reopen a frozen report or single-use confirmation
+to obtain a new observation. CPU, RAM, guards and external observations remain
 per-node. History and Sources use the selected endpoint, while Copy uses the
 frontend clipboard. Closing the portal closes observers only.
+
+The smallest supported portal is **77 columns by 24 rows**. A retained
+observation shows **Last reported** in the existing frame or status line. A
+record without a receipt shows **Last reported · receipt unknown** and cannot
+authorize a command. The full caption includes the node alias, UTC receipt time
+and monotonic age. At 77 columns ordinary aliases such as `mbp_m3max` fit with
+all three. With less room, the formatter shortens the descriptive title first,
+then drops the timestamp, then the age, and finally shortens the alias. The
+full marker fits at the supported minimum. A caption temporarily narrower
+than 13 cells uses `~` for last reported. The frame reserves the same number of
+job-table rows in all receipt states. In a multi-owner search each affected owner has its own receipt
+in the coverage summary.
 
 Optional CPU average temperature uses the same node-local Jobs provider and
 `machine_usage.thermal` contract. Each endpoint explicitly reads only
@@ -243,10 +260,20 @@ including local endpoint connections. The frontend's optional user settings file
 is not an endpoint configuration. The SSH bootstrap neither forwards these values
 nor requires an interactive shell startup file. The future mini must opt in using
 its own private file, provider installation and qualification; the MacBook's
-provider path cannot authorize it. Enrollment, SSH/Tailscale configuration and
+provider path cannot authorize it. Enrollment, SSH configuration and
 runner-profile dependencies are unchanged. An older peer with no thermal record
 or an unsupported provider remains operational under its existing readiness rules.
 The additive status record does not relax scientific-model decoding.
+
+CPU/memory sampling belongs to the endpoint, independent of status requests.
+The endpoint starts a bounded sampler when status is first requested, then samples
+at 2 s intervals. Status returns the latest sample with its age; it still reads
+current queue/external activity for admission. Samples older than 5 s are stale;
+after 15 s their numeric usage is unavailable. Stopping or failing the sampler
+marks evidence stale immediately; reopening starts with cold CPU baselines.
+Slow samples do not overlap or create catch-up bursts. Cached samples retain
+attempt/owner and external-membership bindings; repeated status polls do not
+manufacture sustained sharing evidence. Temperature keeps its own existing policy.
 
 Each node retains independent CPU/RAM/temperature observations, connection state
 and receipt age. At compact widths the portal gives concise node summaries and
@@ -455,6 +482,26 @@ Schema 1/2 enrollments retain exact-match behavior only and are never silently
 upgraded; metadata revalidation requires separately authorized enrollment. Semantic
 content fingerprints and original request digests retain their existing domains.
 
+Status now performs one full runtime verification per request when complete
+schema-3 original security evidence is available, then compares every member,
+directory, security attribute and interpreter/dependency identity at the response
+boundary. It does not reread package contents at that boundary. Missing, changed
+or incomplete evidence causes sticky `RUNTIME_MISMATCH`; no cross-request TTL or
+hardware cache grants trust. Legacy evidence retains full verification at both
+boundaries, as do all mutations. Owner/configuration/queue/boot checks still run
+at both boundaries. This is code capability, not an enrollment migration.
+
+Pre-existing compiled bytecode is accepted on an exact enrolled source match,
+as before. Both status collectors inventory the same cache files and directories
+alongside source members. A full request scan reads cache content into private
+evidence; the response compares membership, object epochs and security metadata
+without another content read. Any cache change refuses the response. `-B`
+prevents endpoint writes but still permits existing bytecode reads. This is a
+request-stability guarantee, not a new enrollment pin for bytecode; semantic
+fingerprints and the stricter source-only rule for metadata recovery are unchanged.
+For a sticky cache-only refusal, preserve the named paths and follow the
+[bytecode cache recovery walkthrough](runtime-observation-policy.md#bytecode-cache-recovery).
+
 Owner-side code derives operation dependencies, never a client skip list.
 Selected reads check current host/runtime/queue before and after each call. Files
 checks implicated storage roots; transfer/fetch retain their exact volume and
@@ -493,3 +540,52 @@ refresh barriers that abandon detached predecessors. The prospective visual
 inventory is `tests.campaign.visual_contract_v2.plan()`: 24 core and eight modal
 settled views plus transition/failure evidence. Its machine header is explicitly
 synthetic; historical missing frames and failed gates remain unchanged.
+
+## Runner interpreter profile records
+
+New enrollment specs may explicitly set a profile's `schema` to `2` and
+`runner_interpreter` to an absolute executable path. The stored pin includes
+resolved path, file identity, SHA-256 and complete security evidence; a changed
+pin refuses that profile's readiness. Such configurations use node schema 2.
+Existing schema-1 configurations and unversioned profiles stay valid and report
+**unpinned**. There is no automatic migration or rejection for a missing legacy
+pin. `nodes check` exposes pin readiness; capabilities retain the old `profiles`
+shape and add versioned `runner_profiles` interpreter metadata. A capability's
+`pinned` label describes the record; selected-profile readiness verifies it.
+
+This change adds data and observation only. Runner argv, environment and launch
+selection remain unchanged. P3a will set `CMW_MANAGED_PYTHON` explicitly from the
+profile pin; this Phase 1 record alone does not prove launch use.
+
+## Portal reachability and recovery
+
+Status polling is every 5 s. A receipt remains fresh through 15 s inclusive,
+measured only by the portal monotonic clock; older or future receipts cannot
+authorize controls. Stale/disconnected rows are labelled last reported. Unknown
+Jobs states keep their existing display and refusal semantics.
+
+Each selected node has its own reachability state. Connection loss disables
+controls immediately and qualifies retained rows as last reported. The first two
+transport failures preserve the prior state; the third marks UNREACHABLE.
+Authentication failure and incompatible capabilities are immediate states;
+host-key, runtime, identity or readiness refusal immediately disables controls.
+An unreachable/changed address is a transport failure; a presented key differing
+from the pinned key is a security refusal, never an automatic pin update.
+
+Recovery uses a new compatible capabilities handshake and fresh status. A reply
+from before a newer refusal cannot restore controls. Unsent requests are abandoned;
+mutations never replay. Unknown mutation outcomes are queried by their original
+request ID on a separate verified connection. Transport failures retry after 5 s;
+explicit refusals retry only a read-only handshake after 30 s. Authentication
+classification requires complete local OpenSSH negotiation records, a verified
+pin and exit status; arbitrary stderr text or exit 255 alone is insufficient.
+
+The selected node displays signed clock skew and round-trip uncertainty. Absolute
+skew of at least 5 s is amber and at least 60 s is red; a backwards frontend
+wall-clock interval is unassessed. Skew is display-only and never grants freshness
+or alters ordering, deadlines, endpoint checks or control authority.
+
+The current MacBook-to-Mini route is direct SSH through `cmw-mini` to a literal
+routable IPv6 address; there is no Tailscale. This code change does not configure
+that route. Address stability, routable-SSH security and alias-based host-key
+pinning need the pre-P3b review recorded in the architecture specification.

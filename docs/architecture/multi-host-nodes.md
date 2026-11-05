@@ -1,11 +1,13 @@
 # Multi-host CMW nodes: delta specification
 
-Status: **Phase 0 contracts; runtime changes are future work.** This specification
-extends the existing `cmw nodes` implementation. It introduces no second jobs
-protocol, scheduler, manifest, provenance format, transport, or portal. The pure
-APIs described below are not imported by a CLI, endpoint operation, or portal.
+Status: **Phase 0 contracts with Phase 1 observation code implemented; not
+deployed.** This specification extends the existing `cmw nodes` implementation.
+It introduces no second jobs protocol, scheduler, manifest, provenance format,
+transport or portal. P1 wires reachability/clock decisions, cheap status and
+independent telemetry, and records interpreter pins; cancellation/plan contracts
+and the deployment cutover remain separate work.
 
-The inspected baseline is cached `origin/main` commit `1563c2f`, which includes
+The historical Phase 0 inspected baseline was cached `origin/main` commit `1563c2f`, which includes
 PR #3 and the existing nodes implementation. The local `main` reference was
 older and lacked `src/cmw/nodes`. The earlier `phase0-multi-host-contracts`
 commit `4c9f9b9` and its uncommitted follow-up were reference material only; that
@@ -13,9 +15,14 @@ branch was neither merged, rebased nor removed. Existing architecture documents
 remain in place. [The implemented nodes contract](../cmw-dual-node.md) and
 [Jobs contract](../cmw-jobs.md) describe current supported behaviour.
 
+The production nodes currently connect by direct SSH: the MacBook uses the
+`cmw-mini` alias for a literal routable IPv6 address. There is no Tailscale or
+tailnet. This task does not contact the Mini or change SSH configuration.
+
 ## 1. Baseline
 
-This section records code behaviour, not physical two-machine qualification.
+This section records the Phase 0 baseline behaviour, not the P1 implementation
+or physical two-machine qualification.
 The proposed aliases do not establish that either production enrollment or a
 reverse connection has been configured or tested.
 
@@ -74,7 +81,7 @@ updates.
 | D26 | A node-wide permanent journal with node identity and durable per-node sequence numbers (Phase 4). |
 | D29 | On battery, `mbp_m3max` accepts submissions into Hold but refuses release and dispatch. While jobs run, the controller holds a `caffeinate` assertion against idle sleep. This cannot prevent lid-close sleep on battery. |
 | D30 | The runner's Python interpreter is pinned by the runner profile; CMW sets `CMW_MANAGED_PYTHON` explicitly at launch. No reliance on inherited environment or PATH. P1 adds profile data; P3a implements the launch path. |
-| D31 | The canonical VASP port runner is commit `51d8209`, used in production only after qualification. Runners are deployed only from clean commits as immutable snapshots under `~/.local/share`, each with a source-commit record and a SHA-256 manifest of its binaries; profiles pin them. The D18 change is based on `51d8209` and deployed as a new snapshot. P1 owns the cutover; P3a owns D18. |
+| D31 | The canonical VASP port runner is commit `51d8209`, used in production only after qualification. Runners are deployed only from clean commits as immutable snapshots under `~/.local/share`, each with a source-commit record and a SHA-256 manifest of its binaries; profiles pin them. Registered endpoint executables use an `-I -B` wrapper. Make runtime snapshots read-only after deployment and qualification, before enrollment. The D18 change is based on `51d8209` and deployed as a new snapshot. P1 owns the cutover; P3a owns D18. |
 | D32 | Benchmarks and experiments never use a production queue; they use a separate sandbox namespace. Each node has exactly one production configuration. Effective immediately. |
 | D33 | The Mini is consolidated in a single cutover after its current research job finishes; no new Mini submissions until then. P1 owns the cutover. |
 
@@ -350,20 +357,37 @@ that establishes or restores `REACHABLE`.
 | Incompatible handshake | Immediately `INCOMPATIBLE`; reset transport-failure count; retain last observation as historical. |
 
 Every prior state, including the unconfirmed state, follows this table. A
-transport classification adapter must distinguish authentication, incompatible
-capabilities, host identity refusal and outcome-unknown mutations; the current
-SSH transport does not expose all of those as separate events yet. Host-key or
-runtime mismatch is never three tolerable failures before mutation refusal.
-Explicit security/readiness refusals disable controls immediately even while
-reachability counts are below three. Recovery never silently replays a mutation.
-Retry cadence/automatic authentication retry policy remains an integration
-question, independent of this pure transition function.
+transport classification adapter now distinguishes authentication, incompatible
+capabilities, host identity/readiness refusal and unknown mutation outcomes.
+`ProcessTransport` uses complete OpenSSH pre-authentication records plus verified
+pinned host key and SSH exit 255 to identify exhausted authentication. Exit 255
+or arbitrary stderr substrings alone remain transport failures. Presented key
+mismatch is an immediate security refusal, including pipe-close races; an
+unreachable or changed IPv6 address is a counted transport failure. Pins are
+never updated automatically. Structured endpoint error codes retain authority.
 
-P1 status polling becomes 5 s. The Phase 0 interpretation of “about 15 s” keeps
+The portal now wires these events into the table above. A first disconnect
+retains the last state/rows but immediately disables controls; the third counts
+as UNREACHABLE. Security/readiness refusal disables controls immediately, without
+waiting for three failures. Recovery opens a fresh observer and requires a
+compatible handshake followed by status. A response predating a newer refusal
+cannot clear it. Unsent work is abandoned, and mutations are never replayed.
+Unknown control outcomes retain their original request ID for independent lookup.
+Transport retry is every 5 s; explicit auth/security/readiness/incompatibility
+refusals retry a read-only handshake after 30 s, never a mutation or pin change.
+
+P1 status polling is now 5 s. The Phase 0 interpretation of “about 15 s” keeps
 the existing inclusive freshness convention: age `<= 15 s` is fresh, `> 15 s`
 is stale, no receipt is unavailable. Age is measured solely with the portal's
 monotonic clock; no negative/future local age is accepted. Retained rows are
-labelled as last reported when stale or disconnected. Freshness does not override
+labelled as last reported when stale or disconnected. The first failure also
+qualifies every open view displaying that owner's data with its own receipt
+time and monotonic age. After a compatible handshake and new status, each view
+requires a new observation of its displayed data before its commands are
+available again. Frozen reports keep their original receipt.
+The portal's 77×24 minimum layout reserves space for “Last reported” in the
+frame. A missing receipt is explicitly unknown. Title text, receipt time, age
+and then the node alias give up space in that order. Freshness does not override
 endpoint, ownership, revision or readiness checks for actions.
 
 Skew is display-only: estimate `node_observed_at - (portal_sent +
@@ -377,16 +401,15 @@ journal events by comparing wall clocks from different nodes.
 
 ### 3.5 Cheap status and local measurement: D12
 
-`LocalBackend.call` currently runs `_check` before and after dispatch.
-`check_node` obtains hardware evidence and calls `RuntimeVerifier.verify` on each
-check. `RuntimeVerifier` retains a trusted baseline and sticky refusal, but its
+`LocalBackend.call` runs `_check` before and after dispatch. The Phase 0 baseline
+obtains hardware evidence and calls `RuntimeVerifier.verify` on each check. `RuntimeVerifier` retains a trusted baseline and sticky refusal, but its
 provider still performs `runtime_observed` and the complete bounded package
 content verification every time. Thus retaining a verifier instance does not
 avoid two full content scans per successful status call. `runtime_observed`
 already performs initial/final inventory and security checks around each scan.
 The status body separately uses queue reads, external activity and telemetry.
 
-**Draft P1 design:** create one request-scoped verified runtime observation for
+**Implemented in P1 code (not deployed):** create one request-scoped verified runtime observation for
 `status`, including its existing bounded content scan, interpreter/dependency
 identity, complete member/directory/security evidence and loaded-code coherence
 checks. Keep owner/configuration/queue/boot checks at both request boundaries.
@@ -405,11 +428,31 @@ rules, schema-3 security evidence, source-import coherence, capability checking
 and `RUNTIME_MISMATCH` recovery semantics. Mutation operations retain their
 stronger pre/post verification and `OUTCOME_UNKNOWN` handling until a separately
 qualified change. Tests must exercise mid-request replacement/security changes
-and lost outcomes before enabling the optimization. If equivalent trust cannot
-be established for a platform or evidence version, withhold that P1 rollout or
-fail closed; continuing the old double-hash path is not completion of D12. Do
-not silently weaken trust to meet a latency target. Exact dependency/epoch
-factoring remains an implementation question.
+and lost outcomes. The optimized path requires complete schema-3 security
+evidence. Missing original evidence, schema-1/2 and incomplete legacy security
+evidence retain the old full pre/post path; D12 optimization is not claimed
+for those enrollments. Member security and full directory object epochs are
+compared exactly at the boundary, including ctime and membership changes. The
+interpreter and declared dependency-version identity domain remains unchanged;
+this does not introduce dependency-content pins. Incomplete or lost request
+evidence also taints the verifier. No TTL, root-mtime or hardware cache is used.
+
+The full request collector and response collector use the same bounded,
+no-follow inventory and member classification. Existing installed bytecode
+(`__pycache__`, `.pyc`, `.pyo`) and other excluded artifacts such as `.DS_Store`
+remain outside the enrolled semantic source fingerprint. They are nevertheless
+read once into private request evidence, including hashes, object epochs and
+security metadata; every directory is also captured. The response compares the
+same evidence without rereading content. Unchanged precompiled installations
+pass; cache content, membership, replacement or metadata changes refuse, even
+when source hashes are unchanged. D31 requires registered executables to launch
+with `-I -B`. Python may still load existing bytecode. This proves request-local stability,
+not bytecode authenticity since enrollment: the existing enrollment hash domain
+does not pin bytecode. The source-only import predicate remains required for
+UF_TRACKED metadata recovery; ordinary exact-match status uses the same captured
+source/cache-origin predicate at both boundaries. Installed-wheel acceptance
+compares cheap and repeated-full outcomes for unchanged, modified, added and
+deleted bytecode, including sticky refusal after restoration.
 
 Do not cache host identity merely because an alias matches. An immutable
 session-attested hardware identity may reduce repeated `ioreg` cost only if the
@@ -469,7 +512,7 @@ Memory telemetry remained fresh. Six of nine warm CPU observations reported
 `warming-up`: the existing sampler requires successive samples no more than
 `MAX_AGE = 5.0` s apart, so a 5 s poll interval plus scheduling/verification jitter
 can invalidate its CPU baseline. The proposed P1 resolution in §5 separates
-node-side telemetry sampling from status polling; changing the portal interval
+node-side telemetry sampling from status polling (implemented as described in §5 item 5); changing the portal interval
 alone would degrade CPU display.
 No thermal provider was configured, so thermal collection cost was not measured.
 
@@ -478,6 +521,137 @@ matched before and after. The measurement did not alter enrollment, registry or
 queue data, contact the Mini, use production/research queue state, launch an
 engine, use SSH/network, or enable a provider. Only read-only timing wrappers
 and the measurement output outside those roots were created.
+
+#### P1 same-sandbox source-only comparison before correction (2026-11-04)
+
+The earlier Phase 0 numbers above came from a different node/configuration and
+are not the before column here. This comparison uses a new sandbox node
+`0907320f42f5444daa3f4e0321012e3c`, queue
+`de412adb61304cc6ae22ab5b54cb1390`, and one shared sandbox storage. Its only job
+remained Hold and was never released. Both runs observed external activity as
+**BUSY on all ten calls**, as expected from the existing calculation. No production
+queue or calculation directory was read or changed, and the Mini was not contacted.
+
+Baseline code is `aa95e88` in a detached worktree; candidate code is `4c98a45`.
+Each uses its own editable environment installed from its own worktree, Python
+3.14.6, isolated imports, bytecode writes disabled and verified process priority
+19. Instrument the actual `endpoint.serve` with ten in-memory protocol-1 status
+frames, 5 s start-to-start, reporting the first separately and nine warm calls.
+Wall time is monotonic; total CPU is observer-process plus reaped-child CPU.
+Runtime stage CPU is calling-thread CPU, avoiding attribution of background
+sampler work to verification. Full-session CPU includes sampling between calls.
+Instrumentation overhead and concurrent external load remain in these results.
+
+| Measurement | Baseline | P1 candidate |
+| --- | ---: | ---: |
+| First status wall / total CPU (s) | 0.616 / 0.580 | 0.437 / 0.410 |
+| Warm median wall (s) | 0.551 | 0.359 |
+| Warm wall minimum–maximum (s) | 0.534–0.581 | 0.341–0.427 |
+| Warm median observer / child CPU (s) | 0.512 / 0.035 | 0.323 / 0.036 |
+| Warm median total CPU (s) | 0.547 | 0.360 |
+| Median runtime verification wall / CPU share | 83.9% / 83.9% | 75.0% / 75.0% |
+| Full content scans / boundary comparisons per status | 2 / 0 | 1 / 1 |
+| Whole-session wall / total CPU (s) | 45.562 / 5.531 | 45.369 / 4.423 |
+| Warm CPU quality: fresh / warming-up | 4 / 5 | 9 / 0 |
+
+The candidate reduces median status wall time by 34.7% and median CPU by 34.2%.
+Full-session CPU falls by 20.0% even including independent sampling; the cadence
+therefore does not merely move the measured request work off the request clock.
+Candidate warm samples are 0.77–1.95 s old; its first sample is explicitly
+unavailable. No hardware-identity caching was introduced. These are bounded
+sandbox observations under current load, not a production or remote latency SLA.
+Raw measurements remain in the task worktree at
+`.venv/logs/status-before-priority19.json` and
+`.venv/logs/status-after-priority19.json`; the instrument is
+`.venv/measure_status.py`. An earlier trial whose priority was blocked by the
+tool sandbox is excluded from this comparison.
+
+#### Corrected source-only and precompiled comparison (2026-11-05)
+
+Repeat the same method and sandbox above with baseline `aa95e88` and corrected
+candidate `6427fd1`. Each source-only environment remains installed from its own
+worktree, with no CMW bytecode. Each precompiled environment instead contains an
+actual wheel built from the respective worktree, with CMW bytecode compiled
+before enrollment and endpoint imports. All use the same locked dependencies,
+Python 3.14.6, `-I -B` and verified priority 19. The compiled candidate also passed
+all four installed-wheel bytecode tests (eight full/cheap scenarios).
+
+These final four runs were serial, with no local tests or builds running alongside
+them. All 40 responses were BUSY and recorded the identical eight external engine
+PIDs. The synthetic sandbox job remained Hold. The process scan was the sandbox's
+existing read-only observation; no production queue or calculation directory was
+opened, and the Mini was not contacted. Sampling between calls is included in
+whole-session CPU; runtime shares use the same calling-thread attribution above.
+
+| Measurement | Source baseline | Source candidate | Compiled baseline | Compiled candidate |
+| --- | ---: | ---: | ---: | ---: |
+| First status wall / total CPU (s) | 0.570 / 0.541 | 0.457 / 0.430 | 0.693 / 0.645 | 0.880 / 0.823 |
+| Warm median wall (s) | 0.527 | 0.367 | 0.635 | 0.774 |
+| Warm wall minimum–maximum (s) | 0.523–0.541 | 0.360–0.403 | 0.592–0.720 | 0.769–1.103 |
+| Warm median observer / child CPU (s) | 0.492 / 0.035 | 0.332 / 0.035 | 0.601 / 0.034 | 0.737 / 0.035 |
+| Warm median total CPU (s) | 0.527 | 0.366 | 0.634 | 0.770 |
+| Median runtime verification wall / CPU share | 83.0% / 83.1% | 75.3% / 74.9% | 86.0% / 85.9% | 86.8% / 85.9% |
+| Full content scans / boundary comparisons per status | 2 / 0 | 1 / 1 | 2 / 0 | 1 / 1 |
+| Whole-session wall / total CPU (s) | 45.539 / 5.307 | 45.395 / 4.592 | 45.646 / 6.404 | 45.781 / 8.677 |
+| Warm CPU quality: fresh / warming-up | 2 / 7 | 9 / 0 | 6 / 3 | 9 / 0 |
+
+Source-only warm wall and CPU fall by 30.4%. The precompiled candidate instead
+increases warm wall by 21.9% and CPU by 21.5%: its complete private request evidence
+now covers bytecode that the old verifier excluded. This is a measured cost of
+the requested stability guarantee; no compiled-installation latency improvement
+is claimed and no fallback or trust relaxation was applied. Neither comparison
+is a production/remote latency SLA. Phase 0's different-node measurements and the
+earlier candidate's source-only results remain historical evidence above.
+
+Raw data are `.venv/logs/status-{source,precompiled}-{baseline,candidate}-final.json`
+in the task worktree, summarized in `status-final-summary.json`, using
+`.venv/measure_status.py`. Preliminary runs without recorded external member IDs
+are excluded from this final matched table.
+
+#### Status cost after binding Darwin security functions once (2026-11-05)
+
+Four serial runs on the MacBook used the §3.5 method above. The baseline was
+`aa95e88`; the candidate includes the stock-launch, diagnosis and native
+binding changes in this PR. Source-only editable installations had zero CMW
+cache files. The baseline and candidate wheels had all 232 and 236 modules
+precompiled, respectively. Each endpoint used its own installation, Python
+3.14.6, `-I -B` and verified priority 19. All 40 status frames reported BUSY
+with the same eight external engine PIDs and the same sandbox node, queue and
+storage identities. Phase 0 measured a different node.
+
+| Measurement | Source baseline | Source candidate | Compiled baseline | Compiled candidate |
+| --- | ---: | ---: | ---: | ---: |
+| First status wall / total CPU (s) | 1.363 / 0.892 | 0.540 / 0.437 | 0.766 / 0.711 | 0.679 / 0.626 |
+| Warm median wall (s) | 0.572 | 0.264 | 0.695 | 0.527 |
+| Warm wall minimum–maximum (s) | 0.553–1.047 | 0.250–0.735 | 0.656–0.873 | 0.501–0.565 |
+| Warm median observer / child CPU (s) | 0.526 / 0.039 | 0.220 / 0.043 | 0.648 / 0.036 | 0.482 / 0.037 |
+| Warm median total CPU (s) | 0.566 | 0.261 | 0.687 | 0.521 |
+| Median runtime verification wall / CPU share | 85.4% / 85.5% | 58.1% / 58.6% | 87.6% / 87.6% | 78.9% / 77.9% |
+| Whole-session wall / total CPU (s) | 45.603 / 6.249 | 45.323 / 3.859 | 45.782 / 7.086 | 45.510 / 6.108 |
+| Full scans / boundary comparisons per status | 2 / 0 | 1 / 1 | 2 / 0 | 1 / 1 |
+| Warm telemetry fresh / warming-up | 4 / 5 | 9 / 0 | 5 / 4 | 9 / 0 |
+
+Against the matched baseline, warm median total CPU fell by
+53.8% on the source installation and 24.1% on the precompiled
+installation. Darwin binds the nine libc functions once at module import.
+Each probe still opens its descriptor, allocates a fresh ACL record and checks
+the object epoch, ACL and xattrs. Within one file observation, callbacks reuse
+the relative filename. Both request boundaries collect fresh evidence.
+These timings measure the combined PR changes.
+
+**Mini polling estimate.** If the Mini uses the same CPU seconds per request as
+this MacBook, one client polling every five seconds uses 0.261 / 5 =
+0.052 of one core for source, or 0.521 / 5 = 0.104 for a
+precompiled wheel (5.2% or 10.4% of one core). Across 18 logical CPUs that
+is 0.29% or 0.58% of nominal capacity. This extrapolation covers status
+requests only. The whole-session row includes the independent sampler and
+startup. SSH, additional requests and the Mini's own hardware require a
+separate measurement.
+
+Raw frames are in the task worktree under `.venv/logs/`, named
+`status-{source,precompiled}-baseline-binding.json` and
+`status-{source,precompiled}-candidate-binding-qualified.json`. Earlier candidate
+runs preceding the final startup-authority and Doctor changes are excluded.
 
 ### 3.6 Cancellation: D13–D16
 
@@ -597,17 +771,31 @@ runner is refused for this new contract. Exact flags/capability spelling are a
 draft interface, not instructions to patch the port here. Current preparation
 and runner migration requirements remain in §5.
 
-**D30 interpreter pin:** P1 adds the runner's explicit Python interpreter and
-its identity to the runner profile through a compatible profile-schema
-migration. P3a makes CMW set `CMW_MANAGED_PYTHON` explicitly from that pin at
-launch. The runner must not select Python from inherited environment or PATH;
-the launch contract must refuse missing or mismatched interpreter evidence.
+**D30 interpreter pin — P1 data implemented, not deployed:** an enrollment
+profile can explicitly opt into `schema: 2` and
+`runner_interpreter: /absolute/path`. Enrollment records the resolved executable
+identity, SHA-256 and complete file/security evidence. Changed evidence refuses
+that profile's readiness. Nodes containing these profiles use configuration
+schema 2; existing unversioned profiles and schema-1 configurations remain valid
+and report **unpinned**. Capabilities preserve the legacy `profiles` projection
+and add `runner_profiles` schema 2 interpreter metadata. Submission bindings
+still hash the complete actual profile. No existing enrollment is migrated.
+
+This records an interpreter without proving the runner uses it. P3a makes CMW
+set `CMW_MANAGED_PYTHON` explicitly from that pin at launch. The runner must not
+select Python from inherited environment or PATH; that future launch contract
+must refuse missing or mismatched interpreter evidence.
 
 **D31 runner deployment:** commit `51d8209` is the canonical VASP port baseline,
 eligible for production only after qualification. P1 deploys it from a clean
 commit as an immutable snapshot under `~/.local/share`, retaining its
 source-commit record and a SHA-256 manifest of its binaries. Profiles pin the
-snapshot and its evidence. This decision is not a claim that qualification is
+snapshot and its evidence. Registered endpoint executables must launch the pinned
+Python through an `-I -B` wrapper. After deployment and qualification, make the
+runtime snapshot read-only, including its source directories and all compiled
+caches, before recording its enrolled security evidence. This also protects it
+from unrelated Python processes, explicit compilation and installation tools.
+This decision is not a claim that qualification is
 already complete. P3a bases the D18 verify-only/NPAR-rejection change on
 `51d8209`, qualifies it, and deploys it as a new immutable snapshot with new
 profile pins; it must not modify the prior snapshot in place. Benchmark and
@@ -661,7 +849,7 @@ sleep assertions.
 | Immediate operating rules | D32: one production configuration per node; sandbox namespaces for benchmarks/experiments, never production queues. D33: no new Mini submissions until its current research job finishes. | Effective now; no deployment implied |
 | P0 | This delta specification; ported pure logic; local status-cost measurement | — |
 | 3.11 PR | Minimum Python 3.11; CI adjustment | P0 merged |
-| P1 | Cheap status; 3-failure rule and 5 s polling; default registry and aliases; canonical production configuration of both machines in both directions; thermal configuration; D30 interpreter profile pins; D31 qualified `51d8209` immutable snapshot cutover; D33 single Mini consolidation | 3.11 PR merged; runner qualification before production use; Mini cutover only after its current research job finishes |
+| P1 | **Code implemented, not deployed:** cheap status, independent telemetry, 3-failure rule, 5 s polling/15 s freshness and D30 profile data. **Cutover pending:** default registry and aliases; canonical production configuration of both machines in both directions; thermal configuration; D30 interpreter profile pins; D31 qualified `51d8209` immutable snapshot cutover; D33 single Mini consolidation | 3.11 PR merged; runner qualification before production use; Mini cutover only after its current research job finishes |
 | P2 | Single entry point: `cmw jobs watch` opens `NodesApp` including the local queue; node tabs; consolidate `JobsTable` and `NodesTable` | P1 |
 | P3a | Cancellation modes and 10 s hard grace; D18 verify-only INCAR and NPAR rejection in the VASP port (separate repository PR based on `51d8209`); D30 explicit `CMW_MANAGED_PYTHON` launch path; D31 newly qualified immutable successor snapshot and profile pins | P2; qualify the changed runner before production deployment |
 | P3b | Binary transfer endpoint replacing SFTP; restart-artifact submission; forced-command gate; D23 | P3a; gate after the transfer endpoint |
@@ -695,27 +883,32 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    pending. The proposed simpler all-transfers-before-Hold flow is a draft;
    choose the intended sequencing before designing its states/receipts. Both
    release and launch must enforce the final artifact barrier in either case.
-4. **D10/D11 event integration (P1):** current SSH failures do not fully distinguish
-   authentication from transport disconnection. Specify trustworthy classification
-   and retry policy, including host-key/readiness refusals, without relying on
-   arbitrary stderr substrings as sufficient authority. Pure `None` initial
-   state, handshake-only recovery and fresh `<= 15 s` are executable Phase 0
-   interpretations; review their UI wording without weakening mutation guards.
-5. **D11 telemetry-expiry conflict (P1):** in the §3.5 measurement, six of nine
-   warm CPU observations reported `warming-up`: the existing `MAX_AGE = 5.0` s
-   baseline cutoff conflicts with 5 s polling plus scheduling/verification
-   jitter. Proposed Phase 1 resolution: sample telemetry on the node at its own
-   cadence, as the thermal provider already does, and have `status` return the
-   latest sample with its age. Status polling then neither drives sampling nor
-   determines whether the CPU baseline expires. Retain explicit stale and
-   unavailable evidence when the node sampler stops or samples age out; choose
-   and test the node sampling cadence and aging policy in P1.
-6. **D12 trust-preserving factoring (P1):** the baseline performs two complete
-   runtime scans. Validate that one scan plus complete response-boundary evidence
-   preserves replacement/security/loaded-code refusal and legacy behavior on
-   supported platforms. Set performance goals from the recorded measurement;
-   do not replace full evidence with a TTL or root-mtime cache. Any hardware
-   evidence caching requires its own explicit identity/boot rationale.
+4. **D10/D25 event integration resolved in P1 code, deployment pending:**
+   structured transport events and portal state now follow §3.4, including
+   immediate security/readiness refusal, three counted transport failures,
+   handshake-only recovery, no mutation replay and display-only skew. SSH
+   authentication requires complete pre-authentication evidence and exit status;
+   ambiguous failures remain transport failures. Retry policy is specified in
+   §3.4. No live SSH qualification was performed for this code task.
+5. **D11 telemetry-expiry conflict resolved in P1 code, deployment pending:**
+   the Phase 0 measurement found six of nine warm CPU observations warming up
+   because 5 s polling plus jitter exceeded the existing 5 s baseline cutoff.
+   Endpoint-owned CPU/memory sampling now starts every 2 s, leaving margin below
+   that cutoff. Status reads the latest sample and its age without sampling.
+   A slow cycle skips missed starts; it never overlaps or catches up in bursts.
+   Samples are stale after 5 s, unavailable after 15 s, and immediately stale
+   after sampler failure/stop. Restart is cold and waits for old collectors to
+   finish. Node monotonic age prevents clock steps from reviving evidence.
+   Current attempt/owner and external membership must still match the sample;
+   polling cannot count one sample multiple times as sustained sharing evidence.
+   Thermal sampling retains its independent existing cadence and aging policy.
+6. **D12 factoring resolved in P1 code, deployment pending:** status uses one
+   full verification and complete request-boundary evidence for eligible
+   schema-3 enrollments (§3.5). Replacement, membership, metadata/ACL/xattr,
+   interpreter/dependency and lost-evidence refusals are sticky; mutation
+   pre/post checks and legacy full-scan fallback are retained. No hardware
+   identity caching was added. Qualification and the same-sandbox measurements
+   below delimit the optimization; unsupported legacy evidence is not optimized.
 7. **D13–D15 runtime migration (P3a):** the existing worker turns any
    `cancel_requested` into hard termination after 2 s. New graceful/soft requests
    therefore cannot be wired by setting only that flag. Define mode record
@@ -737,8 +930,8 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    interface, shared integer-equivalent-NCORE or no-integer-equivalent rejection
    diagnostic, staged-input identity and provenance/finalization, and the
    existing variant/restart restrictions. D30/D31 fix the interpreter and runner
-   deployment policy; their versioned profile-data and launch integration still
-   require implementation. The separate port PR owns D18 enforcement based on
+   deployment policy. Versioned interpreter profile data is implemented in P1;
+   launch integration, qualified snapshots and deployment remain pending. The separate port PR owns D18 enforcement based on
    `51d8209`; P0 changes neither repository's runtime path.
 9. **D20/D22 capability data and rollout:** current host evidence supplies platform
     UUID, not the new physical-core/tier/policy object, and node submission fixes
@@ -755,3 +948,11 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
 11. **D26 journal (P4):** decide durable append/receipt atomicity, sequence recovery,
     migration/linkage to queue history, retention and export. The decision calls
     for permanent node-local history, not cross-node total time ordering.
+
+12. **P3b transfer throughput:** throughput between these nodes is unmeasured.
+    No local synthetic or localhost throughput establishes their direct-SSH
+    transfer performance; qualify it separately before selecting transfer tuning.
+13. **Direct routable IPv6 SSH security (before P3b):** review the security
+    implications of exposing SSH on the routable IPv6 address, address stability
+    and host-key pinning by alias. An address change does not authorize a key
+    change, and no automatic pin update is permitted. No tailnet is assumed.

@@ -122,6 +122,7 @@ class LocalBackend:
         self._lock = threading.Lock()
         self._pinned = None
         self._runtime_verifier = None
+        self._runtime_request = None
         self._sessions = OrderedDict()
         self._validations = OrderedDict()
         self._generation = 0
@@ -141,7 +142,8 @@ class LocalBackend:
             if self._runtime_verifier is None:
                 self._runtime_verifier = RuntimeVerifier(config['runtime'], config.get('runtime_observation'))
             readiness = self._check_identity(config, operation=operation or 'capabilities',
-                queue_alias=self.queue_alias, runtime_verifier=self._runtime_verifier)
+                queue_alias=self.queue_alias, runtime_verifier=self._runtime_verifier,
+                runtime_request=self._runtime_request, runtime_response=phase == 'after')
         else:
             readiness = self._check_identity(config)
         if not readiness.get('identity_ready', False):
@@ -233,13 +235,15 @@ class LocalBackend:
         if self._activity_projector is None:
             from cmw.jobs.activity import Observer, project
             from cmw.jobs.telemetry import Sampler
+            from .telemetry import NodeTelemetry
             from .thermal import configured_provider
             with self._sampler_lock:
                 if self._closed:
                     raise BackendError('CLOSED', 'Observation session has closed')
                 if self._activity_observer is None:
                     self._activity_observer = Observer()
-                    self._sampler = Sampler(thermal=configured_provider(self.config_root))
+                    self._sampler = NodeTelemetry(self.store,
+                        sampler_factory=lambda: Sampler(thermal=configured_provider(self.config_root)))
             state = project(self.store, observer=self._activity_observer, sampler=self._sampler)
         else:
             state = self._activity_projector(self.store)
@@ -415,6 +419,7 @@ class LocalBackend:
             mutation = is_mutation(operation, params)
             durable_id = (params.get('request_id') if operation in {'transfer.begin', 'transfer.publish'}
                           else request_id if operation == 'submit' else None)
+            self._runtime_request = {} if operation == 'status' else None
             self._check(operation, phase="before", request_id=durable_id)
             if mutation:
                 identifier(request_id, 'request ID')
@@ -480,8 +485,10 @@ class LocalBackend:
                     raise BackendError('INVALID_TARGET', 'This operation does not accept an attempt target')
                 if operation == 'capabilities':
                     _params(params)
+                    from .runner_profiles import profile_capabilities
                     result = {'queue': deepcopy(self.queue), 'readiness': deepcopy(self.readiness),
-                              'profiles': deepcopy(self.config.get('profiles', {})), 'operations': sorted(OPERATIONS),
+                              **profile_capabilities(self.config.get('profiles', {}), self.readiness.get('profiles')),
+                              'operations': sorted(OPERATIONS),
                               'molecular_submission': {'schema': 1, 'engines': ['ORCA', 'Multiwfn'], 'target_local_artifacts': 1},
                               'convergence_study': {'schema': 1, 'model': 'StudyResult', 'engine': 'VASP', 'max_cases': 64},
                               'successor_planner': {'schema': 1, 'model': 'SuccessorResult', 'geometry_only': True},
@@ -510,6 +517,7 @@ class LocalBackend:
                     'host': deepcopy(self.readiness.get('host', self.config['host'])), 'result': result}
             return json.loads(json.dumps(envelope, ensure_ascii=True, allow_nan=False))
         finally:
+            self._runtime_request = None
             self._lock.release()
 
     def close(self):

@@ -25,14 +25,14 @@ dependencies = ["ase>=3.23", "gemmi>=0.7.5,<0.8", "numpy>=1.23", "PyYAML>=6.0", 
 [project.optional-dependencies]
 jobs = ["textual>=1.0,<7"]
 
-[project.scripts]
-cmw = "cmw.cli:main"
-
 [project.urls]
 Repository = "https://github.com/angzeli/computational-modelling-workflow"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cmw"]
+
+[tool.hatch.build.targets.wheel.shared-scripts]
+"scripts/cmw" = "cmw"
 
 [tool.hatch.build.targets.wheel.force-include]
 "scripts/runtime_python.sh" = "cmw/_runner_assets/scripts/runtime_python.sh"

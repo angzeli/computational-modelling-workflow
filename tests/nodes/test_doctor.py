@@ -105,6 +105,27 @@ class DoctorBackendTests(unittest.TestCase):
         self.addCleanup(result.close)
         return result
 
+    def test_registration_pairs_fixed_path_with_observed_owner_launch_flags(self):
+        registered = '/owner/qualified/cmw'
+        remote = self.connected(entry_change={'transport': 'ssh', 'executable': registered,
+                                             'ssh_alias': 'fixture', 'ssh_host_key': 'SHA256:' + 'a' * 43})
+        def observed(**kwargs):
+            report = self.report(**kwargs)
+            report['runtime']['bytecode_policy'] = {'isolated': 1, 'startup_dont_write_bytecode': 1,
+                    'dont_write_bytecode': True,
+                    'launch_flags': ['-B', '-I'] if kwargs.get('state') else [],
+                    'owner_cache_access': 'READ_ONLY'}
+            return report
+        self.local_report.side_effect = observed
+        report = inspect_connected(remote)
+        self.assertEqual(report['caller_runtime']['bytecode_policy']['launch_flags'], [])
+        self.assertEqual(report['registered_executable'],
+                         {'transport': 'ssh', 'path': registered, 'launch_flags': ['-B', '-I']})
+        with patch.object(remote, 'call', side_effect=NodeError('DISCONNECTED', 'No reply')):
+            report = inspect_connected(remote)
+        self.assertIsNone(report['registered_executable']['launch_flags'])
+        self.assertEqual(report['registered_executable']['path'], registered)
+
     def test_schema_advertisement_and_exact_target_roundtrip_without_queue_write(self):
         job = self.job()
         before = self.store.path.read_bytes()

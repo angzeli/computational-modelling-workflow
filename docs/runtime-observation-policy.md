@@ -64,6 +64,65 @@ confirms the UF_TRACKED definition. Public primary reference:
 [Apple XNU stat.h](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/stat.h).
 No online retrieval or OS-actor attribution is claimed.
 
+## Import policy on writable installations
+
+The installed `cmw` launcher disables bytecode writes before importing the
+package. Managed controllers, workers and payloads inherit a reserved
+`PYTHONDONTWRITEBYTECODE=1` even if a job supplies another value. The receipt
+helper also starts with `-B`. CMW's ORCA and Multiwfn runner scripts set the
+no-write environment before starting their Python helpers.
+
+Importing `cmw` as a library sets `sys.dont_write_bytecode = True` for
+subsequent imports throughout that interpreter. Enrollment is recorded outside
+the package and the same installation can serve multiple callers, so the policy
+applies unconditionally. Python can still read existing caches. A third-party
+interpreter that directly imports a cold package (including bare
+`python -m cmw.cli`) can cache the package initializer before it executes.
+This also applies to standalone source helpers that invoke bare `python -m`,
+such as `xyz_to_poscar.sh` and generated HOF scripts run outside managed Jobs.
+Use `-B` or set `PYTHONDONTWRITEBYTECODE=1` before launching them.
+
+Independent processes, programs that reset the flag, explicit `compileall`
+and package installers can still write to a writable installation. D31 therefore
+requires a qualified read-only snapshot and a registered `-I -B` wrapper.
+
+## Bytecode cache recovery
+
+A status refusal with `bytecode_cache_changed` means the two boundaries differed
+only in the named cache files and associated directory entries. The message
+lists additions, removals and modifications. The node returns up to 2,048
+characters of refusal text before the operation context. A long list of paths
+can therefore be truncated in the remote message. The verifier keeps the full
+path lists in its in-process diagnostic evidence. A modification can be an
+object or metadata change. The verifier cannot identify the writer. Mixed changes,
+incomplete security evidence and changes to non-bytecode files retain their
+ordinary refusal reasons.
+
+1. Record the original error, its operation and phase, cache paths, node, queue
+   and any request ID. A refused status supplies no fresh jobs or telemetry.
+   The observer stays tainted even if the previous files reappear.
+2. On the owner, establish the cause against the qualified snapshot, including
+   the exact interpreter, installed artifact, cache files and manifest where
+   available. Existing bytecode can execute even under `-B`; the enrollment
+   source hash alone cannot establish its provenance. If the change is
+   unexplained, keep the endpoint out of service. Preserve evidence and running
+   jobs. Leave a qualified replacement snapshot and any new pins to a separately
+   authorized deployment.
+3. Once the original installation and its authority are independently verified,
+   stop the writer and check the registered executable's `-I -B` wrapper and the
+   snapshot's read-only permissions. Close the tainted observer connection. For
+   an embedded local backend, quit and reopen its portal or CLI. For an SSH
+   endpoint, open a new verified endpoint session. Restarting the jobs
+   controller leaves the observer's sticky refusal in place.
+4. From the fresh observer, request capabilities, then read-only status for
+   the same node and queue. A continuing refusal requires investigation of
+   the reported evidence. A mutation whose response was lost must be looked
+   up using the original request ID before taking any further action.
+
+Doctor reports startup isolation and bytecode flags, the effective bytecode
+setting, explicit launch switches and owner cache access. These are warnings for the operator. The verifier makes
+its own complete observations before returning a response.
+
 ## Gate 1 focused independent review
 
 Expectations below are handwritten; tests do not use the projection as their oracle.

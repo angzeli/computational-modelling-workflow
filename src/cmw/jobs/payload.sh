@@ -24,7 +24,7 @@ while kill -0 "$payload_pid" 2>/dev/null; do
     wait "$payload_pid"
     code=$?
 done
-/usr/bin/env -u PYTHONHOME PYTHONPATH="$cmw_import_path" "$python_bin" -m cmw.jobs.runtime receipt "$receipt" "$code" || exit 125
+/usr/bin/env -u PYTHONHOME PYTHONPATH="$cmw_import_path" "$python_bin" -B -m cmw.jobs.runtime receipt "$receipt" "$code" || exit 125
 # Remain the live group leader until the guardian has drained descendants.
 while ! IFS= read -r instruction; do
     # A dead guardian is not permission to release this ownership anchor.

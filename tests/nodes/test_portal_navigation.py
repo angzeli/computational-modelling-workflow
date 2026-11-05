@@ -371,7 +371,7 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press('escape')
             await self.returned(app, pilot)
             self.assert_same_view(before, app)
-            self.assertIn('node unreachable', str(app.query_one('#selected', Static).render()))
+            self.assertIn('connection lost (1/3)', str(app.query_one('#selected', Static).render()))
             await pilot.press('ctrl+home')
             await self.until(pilot, lambda: app.selected()[0] == 'MBP', 'new deliberate local-node selection')
             selected = deepcopy(app.selected()[1]['target'])

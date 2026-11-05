@@ -27,17 +27,17 @@ from cmw.jobs.review_ui import ReviewScreen
 from cmw.jobs.catalogue_ui import NodeCatalogue
 from cmw.jobs.review_models import ReviewRecord, cached_review, review_text
 from cmw.jobs.suspension_presentation import effective_status
-from cmw.jobs.tui import JobsApp, Prompt, ScientificProgress, detail, literal, table_name
-from cmw.progress.formatting import progress_text
+from cmw.jobs.tui import JobsApp, ScientificProgress, detail, literal, table_name
+from cmw.progress.formatting import compact_frame, fit_text, progress_text
 from cmw.progress.models import HistoryPage, ProgressSnapshot
 from .codec import decode_typed, encode_typed
 from .connections import observed_machine_usage
+from .contracts import (Reachability, NodeEvent, NodeState, transition, estimate_clock_skew,
+                        POLL_INTERVAL_SECONDS, STALE_AFTER_SECONDS)
+from .view_freshness import NodeViews, ViewReceipt
 from .protocol import NodeError
-from .portal_views import FetchDialog, NodeControlConfirm, NodeCopyPreview, NodeFiles
-
-
-_TRANSPORT_ERRORS = {'DISCONNECTED', 'UNREACHABLE', 'OUTCOME_UNKNOWN', 'ENDPOINT_CHANGED', 'INVALID_RESPONSE',
-                     'SSH_IDENTITY_CHANGED', 'SSH_IDENTITY_UNVERIFIED', 'RUNTIME_MISMATCH', 'CLOSED'}
+from .transport_events import classify_failure, compatible_capabilities, FailureKind
+from .portal_views import NodeControlConfirm, NodeCopyPreview, NodeFiles, NodeOrderPrompt
 
 
 def target_key(target):
@@ -75,9 +75,18 @@ class NodeLane:
     status_envelope: dict | None = None
     received: float | None = None
     request_started: float | None = None
+    request_wall_started: float | None = None
     status_transport_age: float = 0.
     error: str | None = None
-    failures: int = 0
+    reachability: Reachability = field(default_factory=Reachability)
+    handshake_required: bool = True
+    status_confirmed: bool = False
+    reconnect_required: bool = False
+    refusal_generation: int = 0
+    observation_generation: int = 0
+    receipts: dict = field(default_factory=dict)
+    refusal: FailureKind | None = None
+    clock_skew: object | None = None
     next_poll: float = 0
     next_progress: float = 0
     session: str | None = None
@@ -85,23 +94,29 @@ class NodeLane:
     cache: dict = field(default_factory=dict)
 
     def age(self, now):
-        return None if self.received is None else max(0., now - self.received)
+        return None if self.received is None else now - self.received
 
     def fresh(self, now):
         age = self.age(now)
-        return self.error is None and age is not None and age <= 10
+        receipt = self.receipts.get('status')
+        return (receipt is not None and receipt.generation == self.observation_generation
+                and self.error is None and not self.handshake_required and self.status_confirmed and self.refusal is None
+                and self.reachability.state == NodeState.REACHABLE
+                and age is not None and 0 <= age <= STALE_AFTER_SECONDS)
 
 
-class NodesApp(NodeCatalogue, NavigationApp):
+class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
     TITLE = 'CMW / JOBS'
     CSS = JobsApp.CSS + '''
-    #node-summary { height: auto; max-height: 2; padding: 0 1; color: #b7d8dd; }
-    #table { min-height: 4; margin: 0 1; }
-    #selected { margin: 0 1; max-height: 3; }
-    #execution { max-height: 1; }
-    #progress { max-height: 8; }
+    .node-view-frame { border: solid $accent; border-title-color: $warning; border-subtitle-color: $warning; }
+    #portal-frame { border: solid #5c8996; border-title-align: left; border-subtitle-align: left; }
+    #node-summary { height: auto; max-height: 2; padding: 0; color: #b7d8dd; }
+    #table { min-height: 4; margin: 0; }
+    #selected { margin: 0; max-height: 3; }
+    #execution { margin: 0; max-height: 1; }
+    #progress { margin: 0; max-height: 8; }
     #message { max-height: 2; }
-    #shortcuts { max-height: 2; }
+    #shortcuts { height: 1; padding: 0; }
     '''
     BINDINGS = [Binding('enter', 'details', 'Details'), Binding('f', 'files', 'Files'),
         Binding('g', 'history', 'Progress'), Binding('s', 'sources', 'Sources'),
@@ -112,7 +127,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
         Binding('q', 'quit', 'Detach', priority=True), Binding('ctrl+c', 'detach', 'Detach', priority=True)]
 
     def __init__(self, backends, *, backend_factory=None, request_root=None,
-                 clock=None, clipboard_backend=None):
+                 clock=None, wall_clock=None, clipboard_backend=None):
         super().__init__()
         if not backends or len(backends) > 8:
             raise ValueError('Select one to eight explicitly enrolled nodes')
@@ -123,6 +138,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
         self.backend_factory = backend_factory
         self.request_root = request_root
         self.clock = clock or time.monotonic
+        self.wall_clock = wall_clock or time.time
         self.clipboard_backend = clipboard_backend
         self.selected_key = None
         self.rows = {}
@@ -143,21 +159,21 @@ class NodesApp(NodeCatalogue, NavigationApp):
         self.init_catalogue()
 
     def compose(self):
-        yield Static('CMW / JOBS                                    ALL NODES', id='heading', markup=False)
-        yield Static('Connecting to explicitly enrolled nodes…', id='node-summary', markup=False)
-        yield NodesTable(id='table', cursor_type='row', zebra_stripes=True)
-        yield SelectableStatic(id='selected', markup=False)
-        yield Static(id='execution', markup=False)
-        yield ScientificProgress(id='progress', markup=False)
-        yield Static('/ Search · T Catalogue · Q / Ctrl-C detaches; execution continues.', id='message', markup=False)
-        with Vertical(id='command-bar'):
-            yield Static(self.shortcut_text('Suspend'), id='shortcuts', markup=False)
+        with Vertical(id='portal-frame') as frame:
+            frame.border_title = 'CMW / JOBS · ALL NODES'
+            frame.border_subtitle = 'Enter Details · F Files · G Progress · S Sources · Y Copy · L Logs'
+            yield Static('Connecting to explicitly enrolled nodes…', id='node-summary', markup=False)
+            yield NodesTable(id='table', cursor_type='row', zebra_stripes=True)
+            yield SelectableStatic(id='selected', markup=False)
+            yield Static(id='execution', markup=False)
+            yield ScientificProgress(id='progress', markup=False)
+            yield Static('/ Search · T Catalogue · Q / Ctrl-C detaches; execution continues.', id='message', markup=False)
+            with Vertical(id='command-bar'):
+                yield Static(self.shortcut_text('Suspend'), id='shortcuts', markup=False)
 
     def shortcut_text(self, action):
         controls = f'P Dispatch · H Hold · O Order · X Cancel · U {action} · B Queue · R Review · Q Detach'
-        if len(controls) > self.size.width - 2:
-            controls = controls.replace(' · ', '·')
-        return 'Enter Details · F Files · G Progress · S Sources · Y Copy · L Logs\n' + controls
+        return controls if len(controls) <= self.size.width - 2 else controls.replace(' · ', '·')
 
     def on_mount(self):
         self.query_one(DataTable).focus()
@@ -183,6 +199,9 @@ class NodesApp(NodeCatalogue, NavigationApp):
     def check_action(self, action, parameters):
         if self.screen is not self.screen_stack[0]:
             return False
+        if action in {'files', 'logs', 'dispatch', 'hold', 'order', 'cancel', 'suspension'}:
+            selected = self.selected()
+            return bool(selected and self.lanes[selected[0]].fresh(self.clock()))
         return True
 
     def navigation_context(self, screen):
@@ -229,6 +248,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
             return
         now = self.clock()
         for owner, lane in self.lanes.items():
+            self.expire_receipts(lane, now)
             selected = self.selected()
             if (selected and selected[0] == owner and lane.fresh(now)
                     and now >= lane.next_progress
@@ -240,16 +260,28 @@ class NodesApp(NodeCatalogue, NavigationApp):
             # A slow status reply must not monopolize every idle tick. Queue it
             # after selected reads so both remain serviced by the bounded lane.
             if not lane.busy and now >= lane.next_poll:
-                self.queue(owner, 'status', automatic=True)
-                lane.next_poll = now + 2
+                self.queue(owner, 'capabilities' if lane.handshake_required else 'status', automatic=True)
+                lane.next_poll = now + POLL_INTERVAL_SECONDS
             if lane.pending and not lane.busy:
-                request = lane.pending.popleft()
+                if lane.handshake_required or not lane.status_confirmed:
+                    required = 'capabilities' if lane.handshake_required else 'status'
+                    first = next((item for item in lane.pending if item[0] == required), None)
+                    if first is None:
+                        continue
+                    lane.pending.remove(first)
+                    lane.pending.appendleft(first)
+                request = (*lane.pending.popleft(), lane.refusal_generation)
                 lane.busy = True
                 lane.active_request = request
                 lane.request_started = now
+                lane.request_wall_started = self.wall_clock()
                 def collect(owner=owner, lane=lane, request=request):
                     operation, params, target, callback = request[:4]
                     try:
+                        if operation == 'capabilities' and lane.reconnect_required:
+                            reconnect = getattr(lane.backend, 'reconnect', lane.backend.close)
+                            reconnect()
+                            lane.reconnect_required = False
                         result, error = lane.backend.call(operation, params, target), None
                     except Exception as exc:
                         result, error = None, exc
@@ -261,9 +293,14 @@ class NodesApp(NodeCatalogue, NavigationApp):
                 self.run_worker(collect, thread=True, group='node-' + owner, exit_on_error=False)
         self.render_state()
 
+    def expire_receipts(self, lane, now):
+        receipt = lane.receipts.get('status')
+        if (receipt is not None and receipt.generation == lane.observation_generation
+                and now - receipt.monotonic > STALE_AFTER_SECONDS):
+            lane.observation_generation += 1
+
     def invalidate_session(self, owner):
         if self.catalogue_query is not None:
-            self.catalogue_pages.pop(owner,None)
             self.catalogue_errors[owner] = 'Owner disconnected or session changed; apply search again'
         lane = self.lanes[owner]
         prefix = (lane.backend.node_id, lane.backend.queue_id)
@@ -273,29 +310,57 @@ class NodesApp(NodeCatalogue, NavigationApp):
             if view is not None and view.selection[:2] == prefix and view.is_mounted:
                 view.invalidate()
 
+    def refuse_lane(self, owner, error, operation):
+        lane = self.lanes[owner]
+        failure = classify_failure(error, operation=operation)
+        if not failure.controls_refused:
+            return failure
+        lane.error = str(error)
+        lane.refusal_generation += 1
+        lane.observation_generation += 1
+        if failure.event is not None:
+            lane.reachability = transition(lane.reachability, failure.event)
+        lane.refusal = failure.kind if failure.kind in {
+            FailureKind.SECURITY, FailureKind.READINESS, FailureKind.AUTHENTICATION,
+            FailureKind.INCOMPATIBLE} else lane.refusal
+        lane.handshake_required = lane.reconnect_required = True
+        lane.status_confirmed = False
+        lane.next_poll = self.clock() + (30 if lane.refusal is not None else POLL_INTERVAL_SECONDS)
+        abandoned = tuple(lane.pending)
+        lane.pending.clear()
+        self.invalidate_session(owner)
+        self.render_state()
+        for queued_operation, _, queued_target, queued_callback in (item[:4] for item in abandoned):
+            if queued_target is not None:
+                cache = lane.cache.setdefault(target_key(queued_target), {})
+                cache[queued_operation + '.error'] = str(error)
+            if queued_callback is not None:
+                queued_callback(None, NodeError(getattr(error, 'code', 'DISCONNECTED'),
+                    'Queued request was not sent because the owner connection changed: ' + str(error)))
+        return failure
+
     def accept(self, owner, request, envelope, error):
         lane = self.lanes[owner]
         lane.busy = False
         lane.active_request = None
         operation, params, target, callback = request[:4]
         now = self.clock()
+        self.expire_receipts(lane, now)
+        if len(request) > 5 and request[5] != lane.refusal_generation:
+            # A separate control worker can refuse identity while this read is
+            # in flight. Its older handshake must not clear the newer refusal.
+            if callback is not None:
+                callback(None, NodeError('HANDSHAKE_REQUIRED',
+                    'Reply predates a newer owner refusal; fresh handshake required'))
+            self.render_state()
+            return
+        if error is None and operation == 'capabilities':
+            try:
+                compatible_capabilities(envelope)
+            except NodeError as exc:
+                error, envelope = exc, None
         if error is not None:
-            if getattr(error, 'code', 'UNREACHABLE') in _TRANSPORT_ERRORS:
-                lane.error = str(error)
-                lane.failures += 1
-                lane.next_poll = now + min(30, 2 ** min(5, lane.failures))
-                abandoned = tuple(lane.pending)
-                lane.pending.clear()
-                self.invalidate_session(owner)
-                # These requests were never sent; complete their waiting views
-                # without replaying operations after a transport/identity change.
-                for queued_operation, _, queued_target, queued_callback in (item[:4] for item in abandoned):
-                    if queued_target is not None:
-                        cache = lane.cache.setdefault(target_key(queued_target), {})
-                        cache[queued_operation + '.error'] = str(error)
-                    if queued_callback is not None:
-                        queued_callback(None, NodeError(getattr(error, 'code', 'DISCONNECTED'),
-                            'Queued request was not sent because the owner connection changed: ' + str(error)))
+            self.refuse_lane(owner, error, operation)
             if target is not None:
                 cache = lane.cache.setdefault(target_key(target), {})
                 cache[operation + '.error'] = str(error)
@@ -305,6 +370,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
                 return
             changed = lane.session is not None and (envelope['session_id'] != lane.session or envelope['clock_id'] != lane.clock_id)
             if changed:
+                lane.observation_generation += 1
                 self.invalidate_session(owner)
                 # Cached scientific values remain qualified earlier evidence;
                 # source cursors and user selections never migrate sessions.
@@ -313,18 +379,45 @@ class NodesApp(NodeCatalogue, NavigationApp):
                     cached['progress.error'] = 'Endpoint session changed; earlier cached scientific evidence.'
                     cached['observe.error'] = 'Endpoint session changed; earlier cached worker evidence.'
             lane.session, lane.clock_id = envelope['session_id'], envelope['clock_id']
-            lane.error, lane.failures = None, 0
-            if operation == 'status':
+            if operation == 'capabilities':
+                lane.reachability = transition(lane.reachability, NodeEvent.HANDSHAKE_SUCCESS, received_at=now)
+                lane.error = lane.refusal = None
+                lane.handshake_required = False
+                lane.status_confirmed = False
+                lane.next_poll = 0
+            elif changed or lane.handshake_required:
+                # An old in-flight reply cannot clear a refusal or establish a
+                # new endpoint session's authority without capabilities.
+                error = NodeError('HANDSHAKE_REQUIRED',
+                    'Fresh compatible capabilities required after connection change')
+                self.refuse_lane(owner, error, operation)
+            else:
+                lane.reachability = transition(lane.reachability, NodeEvent.SUCCESS, received_at=now)
+            try:
+                lane.clock_skew = estimate_clock_skew(lane.request_wall_started,
+                    self.wall_clock(), envelope['observed_at'])
+            except (NodeError, KeyError):
+                lane.clock_skew = None
+            # A read can finish after status expires. A later status must not
+            # qualify that earlier payload, even if its endpoint session matches.
+            generation = lane.observation_generation if operation == 'status' or lane.fresh(now) else -1
+            receipt = ViewReceipt(now, self.wall_clock(), generation)
+            if error is None and operation == 'status':
+                lane.receipts['status'] = receipt
                 lane.state = envelope['result']['state']
+                lane.status_confirmed = error is None and not lane.handshake_required
                 lane.status_envelope, lane.received = envelope, now
                 lane.status_transport_age = max(0., now - lane.request_started) if lane.request_started is not None else 0.
                 for request_id, pending in tuple(self.unknown_controls.items()):
                     if pending[0] == owner:
                         self.check_control_result(owner, request_id, pending[1])
-            elif target is not None:
+            elif error is None and target is None:
+                lane.receipts[operation] = receipt
+            elif error is None:
                 key = target_key(target)
                 cache = lane.cache.setdefault(key, {})
                 cache[operation] = (envelope, now)
+                cache[operation + '.receipt'] = receipt
                 cache.pop(operation + '.error', None)
                 while len(lane.cache) > 4:
                     oldest = next(iter(lane.cache))
@@ -334,6 +427,11 @@ class NodesApp(NodeCatalogue, NavigationApp):
         if callback is not None:
             callback(envelope, error)
         self.render_state()
+        if operation == 'capabilities' and error is None:
+            self.tick()
+        elif operation == 'status' and lane.fresh(now):
+            self.refresh_recovered_views(owner)
+            self.refresh_catalogue_owner(owner)
 
     def selected(self):
         selected = self.rows.get(self.selected_key)
@@ -345,15 +443,22 @@ class NodesApp(NodeCatalogue, NavigationApp):
     def connection_text(self, owner):
         lane = self.lanes[owner]
         age = lane.age(self.clock())
-        if lane.error:
+        if lane.refusal is not None:
+            state = lane.refusal.value + ' refused'
+        elif lane.reachability.state == NodeState.UNREACHABLE:
             state = 'node unreachable'
+        elif lane.error:
+            state = f'connection lost ({lane.reachability.consecutive_failures}/3)'
         elif age is None:
             state = 'connecting'
         elif not lane.fresh(self.clock()):
             state = 'stale transport'
         else:
             state = 'Online'
-        return state + (' · received —' if age is None else f' · received {age:.0f}s ago')
+        skew = lane.clock_skew
+        clock = (' · clock skew unassessed' if skew is None else
+                 f' · clock {skew.seconds:+.1f}s ±{skew.uncertainty_seconds:.1f}s ({skew.level.value.lower()})')
+        return state + (' · received —' if age is None else f' · received {age:.0f}s ago') + clock
 
     def machine_usage(self, owner):
         lane = self.lanes[owner]
@@ -363,6 +468,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
     def render_state(self):
         if not self.is_mounted or not list(self.query('#node-summary')):
             return
+        self.sync_node_views()
         origin = self.screen_stack[0]
         table = origin.query_one('#table', DataTable)
         # Keyboard movement precedes its queued highlight. Preserve that current
@@ -385,6 +491,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
     def _render_state(self):
         now = self.clock()
         summaries = []
+        retained = {}
         rows = {}
         for owner, lane in self.lanes.items():
             state = lane.state or {}
@@ -392,7 +499,9 @@ class NodesApp(NodeCatalogue, NavigationApp):
             counts = (lane.status_envelope or {}).get('result',{}).get('status_counts',{})
             count = counts.get('Run',sum(job.get('status') == 'Run' for job in state.get('jobs', ())))
             unknown = counts.get('Unknown',sum(job.get('status') == 'Unknown' for job in state.get('jobs', ())))
-            condition = 'Online' if lane.fresh(now) else 'Unreachable' if lane.error else 'Connecting' if lane.received is None else 'Stale'
+            condition = ('Online' if lane.fresh(now) else lane.refusal.value if lane.refusal is not None
+                         else 'Unreachable' if lane.reachability.state == NodeState.UNREACHABLE
+                         else 'Disconnected' if lane.error else 'Connecting' if lane.received is None else 'Stale')
             control = 'ctrl on' if controller.get('online') else 'ctrl off'
             age = lane.age(now)
             received = '—' if age is None else f'{age:.0f}s'
@@ -406,14 +515,22 @@ class NodesApp(NodeCatalogue, NavigationApp):
             machine = machine_text(self.machine_usage(owner)).removeprefix('Machine: ')
             if self.size.width >= 100:
                 status += f' · {control}'
-            summaries.append(status + ('\nMachine: ' if len(self.lanes) == 1 else ' · ') + machine)
+            width = max(1, self.size.width - 2)
+            if not lane.fresh(now) and lane.state is not None:
+                caption = self.receipt_caption(owner, self.view_receipt(owner, 'status'))
+                retained[owner] = caption
+                status = caption.format(f'{condition} · {count_scope} {count}', width)
+            summary = status + ('\nMachine: ' if len(self.lanes) == 1 else ' · ') + machine
+            summaries.append('\n'.join(fit_text(line, width) for line in summary.splitlines()))
             for job in state.get('jobs', ()):
                 target = job.get('target')
                 if target and (target['node_id'], target['queue_id']) == (lane.backend.node_id, lane.backend.queue_id):
                     rows[row_key(target)] = (owner, job)
         rows = self.catalogue_rows(rows)
         self.rows = rows
-        self.query_one('#node-summary', Static).update(literal('\n'.join(summaries)))
+        summary = self.query_one('#node-summary', Static)
+        summary.styles.max_height = max(2, len(self.lanes))
+        summary.update(literal('\n'.join(summaries)))
         table = self.query_one('#table', DataTable)
         widths = [('node', 'NODE', 7), ('id', 'JOB ID', 8), ('files', 'FILES', 5),
                   ('name', 'NAME', max(12, self.size.width - 56)), ('status', 'STATUS', 12), ('elapsed', 'ELAPSED', 10)]
@@ -432,7 +549,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
         for key, (owner, job) in rows.items():
             lane = self.lanes[owner]
             status = effective_status(job)
-            if not lane.fresh(now):
+            if not lane.fresh(now) or job.get('_catalogue_stale'):
                 status = 'Last ' + status
             values = (owner, job['display_id'], '[F]', job.get('name', ''), status, elapsed(job.get('elapsed')))
             for (column, _, width), value in zip(widths, values):
@@ -443,32 +560,52 @@ class NodesApp(NodeCatalogue, NavigationApp):
             with table.prevent(DataTable.RowHighlighted):
                 table.move_cursor(row=keys.index(self.selected_key), animate=False, scroll=False)
         selected = self.selected()
+        frame = self.query_one('#portal-frame')
+        owner = selected[0] if selected else next(iter(self.lanes))
+        title = 'CMW / JOBS · ALL NODES'
+        if self.catalogue_query is not None:
+            for label in self.catalogue_pages:
+                if self.catalogue_page_stale(label):
+                    retained[label] = self.receipt_caption(label, self.catalogue_receipts.get(label))
+        if retained:
+            caption = retained.get(owner) or next(iter(retained.values()))
+            title = caption.format(title, self.size.width - 6)
+        frame.border_title = literal(title)
         table.set_class(selected is None, 'navigation-unavailable')
         if selected:
             owner, job = selected
             lane = self.lanes[owner]
             status = effective_status(job)
-            if not lane.fresh(now):
-                status = 'Last reported ' + status + ' — ' + ('node unreachable' if lane.error else 'transport stale')
+
             usage = (lane.state or {}).get('job_usage', {}).get(job['attempt_id'], job.get('usage'))
             usage = deepcopy(usage or {})
             if usage.get('age_seconds') is not None:
                 usage['age_seconds'] += lane.age(now) or 0
             if not lane.fresh(now):
                 usage['stale'] = True
-            connection = (self.connection_text(owner) + ' · ' + status if lane.fresh(now) else
-                          status + f' · received {lane.age(now):.0f}s ago')
-            text = ('SELECTED · ' + self.label(owner, job) + '\n' +
-                    connection + '\n' +
+            identity = 'SELECTED · ' + self.label(owner, job)
+            if lane.fresh(now):
+                connection = self.connection_text(owner) + ' · ' + status
+            else:
+                reason = self.connection_text(owner).split(' · received')[0]
+                identity += f' · {status} — {reason}'
+                connection = self.receipt_caption(owner, self.view_receipt(owner, 'status')).format(
+                    '', max(1, self.size.width - 5))
+            text = (identity + '\n' + connection + '\n' +
                     usage_summary(usage, width=max(20, self.size.width - 7)))
             self.query_one('#selected', Static).update(literal(text))
             cache = lane.cache.get(target_key(job['target']), {})
             observed = cache.get('observe')
             execution = observed[0]['result']['execution'] if observed else None
             suffix = execution.get('summary') or execution.get('observed_execution') if execution else 'worker evidence unavailable'
-            self.query_one('#execution', Static).update(literal(f'Execution: reported by {owner} · ' + suffix + (' (cached)' if not lane.fresh(now) or cache.get('observe.error') else '')))
+            execution_text = f'Execution: reported by {owner} · {suffix}'
+            if observed and (not self.receipt_current(owner, cache.get('observe.receipt')) or cache.get('observe.error')):
+                execution_text = self.receipt_caption(owner, cache.get('observe.receipt')).format(
+                    f'Execution: {suffix}', max(1, self.size.width - 5))
+            self.query_one('#execution', Static).update(literal(execution_text))
             action = 'Continue' if effective_status(job) == 'Suspended' else 'Suspend'
-            self.query_one('#shortcuts', Static).update(self.shortcut_text(action))
+            self.query_one('#shortcuts', Static).update(self.shortcut_text(action) if lane.fresh(now) else
+                'Owner commands disabled until fresh status · B Queue · R Review · Q Detach')
             self.render_progress(owner, job, cache)
         else:
             self.query_one('#selected', Static).update('Selected attempt is no longer in the current node snapshot.' if self.selected_key else 'No managed jobs reported. Select an enrolled node through the CLI to submit.')
@@ -531,23 +668,28 @@ class NodesApp(NodeCatalogue, NavigationApp):
     def render_progress(self, owner, job, cache):
         widget = self.query_one('#progress', Static)
         widget.display = True
+        width = max(20, self.size.width - 7)
         snapshot = self.selected_snapshot(owner, job)
         if snapshot is None:
-            self.card_height, self.viewport = 2, tuple(self.size)
-            widget.update(literal('Scientific: ' + cache.get('progress.error', 'awaiting bounded observation…')))
-            widget.styles.max_height = 2
+            self.card_height, self.viewport = 3, tuple(self.size)
+            message = 'Scientific: ' + cache.get('progress.error', 'awaiting bounded observation…')
+            widget.update(literal(compact_frame([message], width)))
+            widget.styles.max_height = 3
             return
         entry, received = cache['progress']
         # Both timestamps in the formatter originate on the same endpoint clock.
         # Only elapsed transport age comes from this frontend monotonic clock.
         age = max(0., self.clock() - received)
         endpoint_now = entry['observed_at'] + age
-        width = max(20, self.size.width - 7)
         budget = min(8, max(3, self.size.height - 15))
         if cache.get('progress.error'):
             self.message('Scientific read unavailable; earlier cached evidence. ' + cache['progress.error'])
+        receipt = cache.get('progress.receipt')
+        caption = (self.receipt_caption(owner, receipt)
+                   if not self.receipt_current(owner, receipt) or cache.get('progress.error') else None)
         text = progress_text(snapshot, compact=self.size.width < 110 or self.size.height < 36,
-                             width=width, now=endpoint_now, max_lines=budget, framed=True)
+                             width=width, now=endpoint_now, max_lines=budget, require_frame=True,
+                             receipt_caption=caption)
         rendered = literal(text)
         for index, char in enumerate(rendered.plain):
             if char in '─│┌┐└┘├┤┴':
@@ -564,17 +706,23 @@ class NodesApp(NodeCatalogue, NavigationApp):
         target = job['target']
         view = self.history_view
         if view is not None and not view.closed and not view.expired and view.selection == target_key(target):
+            if self.lanes[owner].state is not None and not self.lanes[owner].fresh(self.clock()):
+                return
             generation = view.request_generation
             def history_result(envelope, error):
-                if error or view.closed or view.expired or view.selection != target_key(target):
+                if error or view.closed or view.expired or generation != view.request_generation or view.selection != target_key(target):
                     return
                 result = envelope['result']
                 page = decode_typed(result['page'], HistoryPage)
                 if result.get('snapshot') is not None:
-                    self.lanes[owner].cache.setdefault(target_key(target), {})['progress'] = (
-                        {**envelope, 'result': {'snapshot': result['snapshot']}}, self.clock())
+                    decode_typed(result['snapshot'], ProgressSnapshot)
+                    cache = self.lanes[owner].cache.setdefault(target_key(target), {})
+                    cache['progress'] = ({**envelope, 'result': {'snapshot': result['snapshot']}}, self.clock())
+                    cache['progress.receipt'] = self.view_receipt(owner, 'history', target)
+                    cache.pop('progress.error', None)
                 view.bind_context((owner, deepcopy(target)))
                 view.accept_page((owner, deepcopy(target)), page, generation)
+                self.view_received(view, owner, self.view_receipt(owner, 'history', target))
             self.queue(owner, 'history', view.parameters(), target, history_result, automatic=automatic)
         else:
             self.queue(owner, 'progress', target=target, automatic=True)
@@ -584,13 +732,15 @@ class NodesApp(NodeCatalogue, NavigationApp):
         lane = self.lanes[owner]
         lane.pending = deque(request for request in lane.pending
             if not (request[4] and request[0] == 'history' and request[2] == target))
-        self.queue(owner, 'history.release', target=target)
+        if not lane.handshake_required or lane.error is None:
+            self.queue(owner, 'history.release', target=target)
 
     def action_history(self):
         selected = self.selected()
         if selected:
             owner, job = selected
-            self.push_screen(ProgressHistory(target_key(job['target']), self.label(owner, job)))
+            view = ProgressHistory(target_key(job['target']), self.label(owner, job))
+            self.push_screen(self.bind_node_view(view, owner))
 
     def session_source_for(self, selection):
         return self.session_sources.get(selection)
@@ -601,6 +751,9 @@ class NodesApp(NodeCatalogue, NavigationApp):
             view.invalidate()
             return
         owner, job = selected
+        if not self.lanes[owner].fresh(self.clock()) or (kind != 'inspect' and not self.view_commands_allowed(view)):
+            self.call_later(view.accept_result, kind, None, 'Owner unavailable; reopen Sources after a fresh status.', view.request_generation)
+            return
         target, generation = job['target'], view.request_generation
         params = {}
         if kind == 'validate':
@@ -617,6 +770,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
             self.sources_request = None
             if view.closed or view.expired or generation != view.request_generation:
                 return
+            receipt = self.view_receipt(owner, 'sources.' + kind, target) if error is None else None
             result = None
             if error is None:
                 data = envelope['result']
@@ -630,10 +784,18 @@ class NodesApp(NodeCatalogue, NavigationApp):
                     self.session_sources[view.selection] = result
                     self.lanes[owner].cache.pop(view.selection, None)
                     self.lanes[owner].next_progress = 0
-            self.call_later(view.accept_result, kind, result, str(error) if error else None, generation)
+            async def deliver():
+                if view.closed or view.expired or generation != view.request_generation:
+                    return
+                await view.accept_result(kind, result, str(error) if error else None, generation)
+                if error is None and not view.closed and not view.expired and generation == view.request_generation:
+                    self.view_received(view, owner, receipt)
+            self.call_later(deliver)
         self.queue(owner, 'sources.' + kind, params, target, accept)
 
     def clear_session_source(self, view):
+        if not self.view_commands_allowed(view):
+            return
         selected = self.selected()
         if selected is None or target_key(selected[1]['target']) != view.selection:
             view.invalidate()
@@ -654,12 +816,19 @@ class NodesApp(NodeCatalogue, NavigationApp):
         selected = self.selected()
         if selected:
             owner, job = selected
-            self.push_screen(Sources(target_key(job['target']), self.label(owner, job)))
+            if not self.lanes[owner].fresh(self.clock()):
+                self.message('Sources unavailable until a fresh owner status arrives.')
+                return
+            view = Sources(target_key(job['target']), self.label(owner, job))
+            self.push_screen(self.bind_node_view(view, owner))
 
     def selected_request(self, operation, params, callback):
         selected = self.selected()
         if selected:
             owner, job = selected
+            if not self.lanes[owner].fresh(self.clock()):
+                self.message('Owner commands disabled until fresh status. Nothing was queued.')
+                return
             key, generation = self.selected_key, self.selection_generation
             def accepted(envelope, error):
                 if key != self.selected_key or generation != self.selection_generation:
@@ -671,14 +840,20 @@ class NodesApp(NodeCatalogue, NavigationApp):
             self.queue(owner, operation, params, job['target'], accepted)
 
     def action_files(self):
-        self.selected_request('locations', {}, lambda owner, job, result: self.push_screen(
-            NodeFiles(owner, job['target'], self.label(owner, job), result,
-                      local=self.lanes[owner].backend.connection['transport'] == 'local')))
+        def show(owner, job, result):
+            view = NodeFiles(owner, job['target'], self.label(owner, job), result,
+                            local=self.lanes[owner].backend.connection['transport'] == 'local')
+            self.push_screen(self.bind_node_view(view, owner,
+                received=self.view_receipt(owner, 'locations', job['target'])))
+        self.selected_request('locations', {}, show)
 
     def action_logs(self):
-        self.selected_request('logs', {'stream': 'stdout', 'bytes': 16384},
-            lambda owner, job, result: self.push_screen(FrozenText(self.label(owner, job) + '\n' +
-                str(result.get('node_path', '')) + '\n\n' + result['text'], 'BOUNDED STDOUT · execution node')))
+        def show(owner, job, result):
+            view = FrozenText(self.label(owner, job) + '\n' + str(result.get('node_path', ''))
+                              + '\n\n' + result['text'], 'BOUNDED STDOUT · execution node')
+            self.push_screen(self.bind_node_view(view, owner,
+                received=self.view_receipt(owner, 'logs', job['target'])))
+        self.selected_request('logs', {'stream': 'stdout', 'bytes': 16384}, show)
 
     def selected_review(self, owner, job):
         cache = self.lanes[owner].cache.get(target_key(job['target']), {})
@@ -700,6 +875,13 @@ class NodesApp(NodeCatalogue, NavigationApp):
         owner, job = selected
         target = deepcopy(job['target'])
         def request(operation, params, callback):
+            if not self.lanes[owner].fresh(self.clock()):
+                callback(None, NodeError('STALE', 'Owner status is not fresh; awaiting compatible handshake and status'))
+                return
+            if operation in {'review.start', 'review.cancel'} and not self.view_commands_allowed(view):
+                callback(None, NodeError('STALE', 'Review commands require a new observation for this attempt'))
+                return
+
             def accepted(envelope, error):
                 record = None
                 if error is None:
@@ -707,13 +889,30 @@ class NodesApp(NodeCatalogue, NavigationApp):
                         record = decode_typed(envelope['result']['review'], ReviewRecord)
                         if (record.node_id,record.queue_id,record.job_id,record.attempt_id) != target_key(target):
                             raise NodeError('WRONG_TARGET','Review belongs to another selected attempt')
-                        self.lanes[owner].cache.setdefault(target_key(target), {})['review'] = (envelope,self.clock())
+                        cache = self.lanes[owner].cache[target_key(target)]
+                        cache['review'] = cache[operation]
+                        receipt = cache['review.receipt'] = self.view_receipt(owner, operation, target)
+                        self.view_received(view, owner, receipt)
                     except (ValueError,TypeError,KeyError) as exc:
                         error = exc
                 callback(record,error)
             if not self.queue(owner, operation, params, target, accepted):
                 callback(None,NodeError('BUSY','Owner observation queue is full or closed'))
-        self.push_screen(ReviewScreen(self.label(owner,job), request, cached=self.selected_review(owner,job)))
+        view = ReviewScreen(self.label(owner, job), request, cached=self.selected_review(owner, job))
+        self.push_screen(self.bind_node_view(view, owner, received=self.view_receipt(owner, 'review', target)))
+
+    def snapshot_receipt(self, owner, job, components):
+        # A composite still contains last-reported data if any displayed component does.
+        target = job['target']
+        receipts = [self.view_receipt(owner, 'status')]
+        cache = self.lanes[owner].cache.get(target_key(target), {})
+        shown = cache.get('show')
+        if shown and shown[0]['result'].get('job') is job:
+            receipts.append(self.view_receipt(owner, 'show', target))
+        receipts.extend(self.view_receipt(owner, name, target) for name in components if name in cache)
+        if None in receipts:
+            return None
+        return min(receipts, key=lambda receipt: (receipt.generation, receipt.monotonic))
 
     def action_details(self):
         selected = self.selected()
@@ -736,8 +935,13 @@ class NodesApp(NodeCatalogue, NavigationApp):
                 text += '\n\n' + review_text(review)
             from cmw.doctor.presentation import DoctorDetails
             target = deepcopy(job['target'])
-            self.push_screen(DoctorDetails(text, 'JOB DETAILS · cached node report', target_key(target),
-                lambda: self.open_doctor(owner, target, self.label(owner, job))))
+            def inspect():
+                if self.view_commands_allowed(view):
+                    self.open_doctor(owner, target, self.label(owner, job))
+
+            view = DoctorDetails(text, 'JOB DETAILS · cached node report', target_key(target), inspect)
+            receipt = self.snapshot_receipt(owner, job, ('progress', 'review'))
+            self.push_screen(self.bind_node_view(view, owner, received=receipt))
 
     def open_doctor(self, owner, target, label):
         from cmw.doctor.presentation import DoctorReport
@@ -747,7 +951,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
         started = self.clock()
         view = DoctorReport(target_key(captured_target), label,
                             context='Cached status at request: ' + self.connection_text(owner))
-        self.push_screen(view)
+        self.push_screen(self.bind_node_view(view, owner, received=self.view_receipt(owner, 'status')))
 
         def inspected(envelope, error):
             if view not in self.screen_stack:
@@ -760,14 +964,15 @@ class NodesApp(NodeCatalogue, NavigationApp):
                 return
             captured_envelope = deepcopy(envelope)
             request_seconds = max(0., self.clock() - started)
-            received_at = time.time()
+            receipt = self.view_receipt(owner, 'doctor.inspect', captured_target)
+            received_at = receipt.wall
 
             def compose():
                 from cmw.doctor.nodes import compose_report
                 return compose_report(backend, captured_envelope, target=captured_target,
                                       request_seconds=request_seconds, received_at=received_at)
 
-            view.load(compose)
+            view.load(compose, on_displayed=lambda: self.view_received(view, owner, receipt))
 
         # This bounded operation rejects old endpoints explicitly. A broad
         # capabilities probe also hashes unrelated runner profiles and storages.
@@ -782,7 +987,8 @@ class NodesApp(NodeCatalogue, NavigationApp):
             state = self.lanes[owner].state or {}
             text = self.label(owner, job) + '\n' + self.connection_text(owner) + '\n' + machine_detail(self.machine_usage(owner))
             text += '\n\n' + json.dumps({key: state.get(key) for key in ('controller', 'admission', 'external_activity', 'scheduler')}, indent=2)
-            self.push_screen(FrozenText(text, 'NODE-LOCAL SCHEDULING · no cross-node resource pool'))
+            view = FrozenText(text, 'NODE-LOCAL SCHEDULING · no cross-node resource pool')
+            self.push_screen(self.bind_node_view(view, owner, received=self.view_receipt(owner, 'status')))
 
     def capture_copy_snapshot(self, identity=None):
         selected = self.selected()
@@ -819,7 +1025,20 @@ class NodesApp(NodeCatalogue, NavigationApp):
     def action_copy_snapshot(self):
         snapshot = self.capture_copy_snapshot()
         if snapshot:
-            self.push_screen(NodeCopyPreview(snapshot, target_key(self.selected()[1]['target']), self.capture_copy_snapshot))
+            owner, job = self.selected()
+            target = job['target']
+            components = ('observe', 'progress', 'review')
+
+            def refresh(identity):
+                captured = self.capture_copy_snapshot(identity)
+                if captured is not None:
+                    receipt = self.snapshot_receipt(owner, self.selected()[1], components)
+                    self.view_received(view, owner, receipt)
+                return captured
+
+            view = NodeCopyPreview(snapshot, target_key(target), refresh)
+            self.push_screen(self.bind_node_view(view, owner,
+                received=self.snapshot_receipt(owner, job, components)))
 
     def request_copy(self, text, *, view=None):
         if self.copy_busy:
@@ -877,6 +1096,8 @@ class NodesApp(NodeCatalogue, NavigationApp):
         return ConnectedBackend(old.alias, deepcopy(old.connection), old.queue)
 
     def start_fetch(self, view, specification_path, destination):
+        if view.busy or not self.view_commands_allowed(view):
+            return
         if not Path(specification_path).is_absolute() or not Path(destination).is_absolute():
             view.query_one('#fetch-status', Static).update('Enter absolute local paths for the explicit specification and new destination.')
             return
@@ -885,35 +1106,44 @@ class NodesApp(NodeCatalogue, NavigationApp):
         view.query_one('#fetch-confirm').disabled = True
         view.query_one('#fetch-status', Static).update('Fetching selected artifacts; monitoring continues independently…')
         def fetching():
-            backend = None
+            backend = error = None
             try:
                 from .cli import _read_spec
                 from .client import fetch
                 specification = _read_spec(specification_path)
                 backend = self.new_backend(view.owner)
                 result = fetch(backend, view.target, specification, Path(destination), root=self.request_root, request_id=request_id)
+                ack_error = result.get('result', {}).get('acknowledgment_error')
+                if ack_error:
+                    error = NodeError(ack_error['code'], ack_error['message'])
                 text = 'Replica fetched. ' + json.dumps(result, ensure_ascii=True)[:3000]
             except Exception as exc:
+                if backend is not None and isinstance(exc, NodeError):
+                    error = exc
                 text = 'Fetch request ' + request_id + ' not completed: ' + str(exc)
             finally:
                 if backend is not None:
                     backend.close()
             if not self.closed:
-                self.call_from_thread(self.finish_fetch, view, text)
+                self.call_from_thread(self.finish_fetch, view, text, error)
         self.run_worker(fetching, thread=True, group='fetch', exit_on_error=False)
 
-    def finish_fetch(self, view, text):
+    def finish_fetch(self, view, text, error=None):
         view.busy = False
+        if error is not None:
+            self.refuse_lane(view.owner, error, 'fetch.prepare')
         if view.is_mounted:
-            view.query_one('#fetch-confirm').disabled = False
+            view.node_commands_changed(self.view_commands_allowed(view))
             view.query_one('#fetch-status', Static).update(literal(text))
         else:
             self.message(text)
 
     def open_local_location(self, view, location):
-        if self.lanes[view.owner].backend.connection['transport'] != 'local':
+        if not self.view_commands_allowed(view) or self.lanes[view.owner].backend.connection['transport'] != 'local':
             return
         def accepted(envelope, error):
+            if not view.is_mounted or not self.view_commands_allowed(view):
+                return
             if error:
                 view.query_one('#node-files-status', Static).update(str(error))
                 return
@@ -950,14 +1180,15 @@ class NodesApp(NodeCatalogue, NavigationApp):
             elif not envelope['result'].get('ready'):
                 self.message('Control refused: ' + '; '.join(envelope['result'].get('reasons', ())))
             else:
-                self.push_screen(NodeControlConfirm(owner, job['target'], self.label(owner, job), envelope['result']))
+                view = NodeControlConfirm(owner, job['target'], self.label(owner, job), envelope['result'])
+                self.push_screen(self.bind_node_view(view, owner, received=self.view_receipt(owner, 'control.preview', target)))
         self.queue(owner, 'control.preview', params, target, accepted)
 
     def start_control(self, view, reason):
-        if view.owner in self.operation_busy:
+        if view.busy or view.owner in self.operation_busy:
             return
         lane = self.lanes[view.owner]
-        if not lane.fresh(self.clock()) or lane.backend.connection.get('read_only'):
+        if not lane.fresh(self.clock()) or not self.view_commands_allowed(view) or lane.backend.connection.get('read_only'):
             view.query_one('#node-control-status', Static).update('Node unavailable or read only. Nothing was queued; reopen the preview after reconnect.')
             return
         self.operation_busy.add(view.owner)
@@ -969,26 +1200,32 @@ class NodesApp(NodeCatalogue, NavigationApp):
         def controlling():
             backend = None
             unknown = False
+            error = None
             try:
                 from .client import apply_control
                 backend = self.new_backend(view.owner)
                 result = apply_control(backend, deepcopy(view.preview), root=self.request_root, confirm=True, reason=reason, request_id=request_id)
                 text = json.dumps(result, ensure_ascii=True)[:3000]
             except Exception as exc:
-                unknown = getattr(exc, 'code', None) in _TRANSPORT_ERRORS
+                error = exc
+                unknown = classify_failure(exc, operation='control').outcome_unknown
                 text = 'Request ' + request_id + ': ' + str(exc) + ' · Query this original ID; no automatic replay.'
             finally:
                 if backend is not None:
                     backend.close()
             if not self.closed:
-                self.call_from_thread(self.finish_control, view, text, unknown)
+                self.call_from_thread(self.finish_control, view, text, unknown, error)
         self.run_worker(controlling, thread=True, group='control-' + view.owner, exit_on_error=False)
 
-    def finish_control(self, view, text, unknown=False):
+    def finish_control(self, view, text, unknown=False, error=None):
         if unknown:
             self.unknown_controls[view.request_id] = (view.owner, view)
         self.operation_busy.discard(view.owner)
         self.lanes[view.owner].next_poll = 0
+        if error is not None:
+            self.refuse_lane(view.owner, error, 'control')
+        if unknown:
+            self.check_control_result(view.owner, view.request_id, view)
         if view.is_mounted:
             view.query_one('#node-control-status', Static).update(literal(text))
         self.message(text)
@@ -999,7 +1236,7 @@ class NodesApp(NodeCatalogue, NavigationApp):
             return
         self.lookup_busy.add(request_id)
         def checking():
-            backend, known = None, False
+            backend, known, error = None, False, None
             try:
                 backend = self.new_backend(owner)
                 value = backend.call('request', {'request_id': request_id})['result']['request']
@@ -1007,16 +1244,19 @@ class NodesApp(NodeCatalogue, NavigationApp):
                 text = ('Request ' + request_id + ': ' + json.dumps(value, ensure_ascii=True)[:2500]
                         if value is not None else 'Request ' + request_id + ': no durable outcome recorded. No replay; review state before a fresh explicit action.')
             except Exception as exc:
+                error = exc
                 text = 'Request ' + request_id + ': outcome still unknown — ' + str(exc)
             finally:
                 if backend is not None:
                     backend.close()
             if not self.closed:
-                self.call_from_thread(self.accept_control_lookup, request_id, view, text, known)
+                self.call_from_thread(self.accept_control_lookup, owner, request_id, view, text, known, error)
         self.run_worker(checking, thread=True, group='request-' + request_id, exit_on_error=False)
 
-    def accept_control_lookup(self, request_id, view, text, known):
+    def accept_control_lookup(self, owner, request_id, view, text, known, error):
         self.lookup_busy.discard(request_id)
+        if error is not None:
+            self.refuse_lane(owner, error, 'request')
         if known:
             self.unknown_controls.pop(request_id, None)
         if view is not None and view.is_mounted:
@@ -1047,13 +1287,20 @@ class NodesApp(NodeCatalogue, NavigationApp):
         selected = self.selected()
         if selected is None:
             return
+        owner, _ = selected
+        lane = self.lanes[owner]
+        if not lane.fresh(self.clock()) or lane.backend.connection.get('read_only'):
+            self.message('Order unavailable until the node is fresh and writable.')
+            return
         identity = self.selected_key
+        receipt = self.view_receipt(owner, 'status')
         def ordered(value):
-            if value and self.selected_key == identity:
+            if value and self.selected_key == identity and self.receipt_current(owner, receipt):
                 try:
                     position = int(value)
                 except ValueError:
                     self.message('Order must be an integer.')
                     return
                 self.preview_control('move', position=position)
-        self.push_screen(Prompt('New queue position (held head still blocks following jobs):', order=True), ordered)
+        view = NodeOrderPrompt('New queue position (held head still blocks following jobs):', order=True)
+        self.push_screen(self.bind_node_view(view, owner, received=receipt), ordered)

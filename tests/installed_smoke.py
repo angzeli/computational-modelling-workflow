@@ -668,6 +668,12 @@ def main():
     assert (importlib.util.find_spec('rich') is not None) == (args.kind != 'core')
     setup = (settle_installed_runtime(args.output/'runtime-setup.json')
              if os.environ.get('CMW_ARTIFACT_QUIET') == '1' else None)
+    from tests.nodes.bytecode_acceptance import installed_bytecode_surface
+    stock = None
+    if args.kind == 'core':
+        from tests.nodes.stock_bytecode_acceptance import installed_stock_surface
+        stock = installed_stock_surface(args.output/'stock-bytecode.json')
+    bytecode = installed_bytecode_surface(args.output/'runtime-bytecode.json', kind=args.kind)
     lazy_probe = """import importlib.abc, sys
 class NoConsole(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
@@ -713,6 +719,7 @@ print('Lazy non-ORCA core observation: PASS')
     progress = progress_surface(args.output/'progress', console=args.kind != 'core')
     report = {'kind': args.kind, 'python': sys.version, 'package_origin': str(origin),
               'cli_json_asset_optional_boundary': 'PASS', 'runtime_setup': setup,
+              'runtime_bytecode_boundary': bytecode, 'stock_bytecode': stock,
               'tui': 'not installed (expected)' if args.kind == 'core' else 'PASS',
               'progress_locations_history': progress,
               'node_workflow': node_surface(args.output/'node-workflow'),

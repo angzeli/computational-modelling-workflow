@@ -259,6 +259,14 @@ def _validate_doctor_report(report):
             or report['scope'] not in {'local', 'job', 'node'}
             or report['scientific_policy'] != 'NOT_ASSESSED'):
         raise NodeError('INVALID_RESPONSE', 'Doctor report lacks its scope or policy qualification')
+    if 'bytecode_policy' in report['runtime']:
+        policy = report['runtime']['bytecode_policy']
+        if (not isinstance(policy, dict) or type(policy.get('isolated')) is not int
+                or policy['isolated'] not in (0, 1) or type(policy.get('startup_dont_write_bytecode')) is not int
+                or policy['startup_dont_write_bytecode'] not in (0, 1) or type(policy.get('dont_write_bytecode')) is not bool
+                or policy.get('launch_flags') not in ([], ['-B'], ['-I'], ['-B', '-I'])
+                or policy.get('owner_cache_access') not in ('UNKNOWN', 'WRITABLE', 'READ_ONLY')):
+            raise NodeError('INVALID_RESPONSE', 'Malformed observer bytecode policy')
     worker = report['worker']
     if (not isinstance(worker, dict) or not {'status', 'runtime'} <= set(worker)
             or not isinstance(worker['status'], str) or worker['status'] not in {'UNKNOWN', 'RECORDED'}

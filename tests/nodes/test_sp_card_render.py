@@ -1,4 +1,5 @@
 """Actual local/federated layouts for pending and recovered static observations."""
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
 import json
@@ -10,6 +11,7 @@ from unittest.mock import patch
 from cmw.jobs.snapshot import render_snapshot
 from cmw.jobs.store import Store
 from cmw.nodes.codec import decode_typed
+from cmw.nodes.protocol import NodeError
 from cmw.progress.formatting import cell_width, progress_text
 from cmw.progress.models import ProgressSnapshot
 from cmw.progress.vasp_card import vasp_card_groups
@@ -120,6 +122,16 @@ async def local_views(root, output=None):
     return records
 
 
+@asynccontextmanager
+async def manual_portal(app, backend, size):
+    # Exercise normal receipt/identity handling; the test controls every response.
+    with patch.object(app, 'tick'):
+        async with app.run_test(size=size) as pilot:
+            for op in ('capabilities', 'status'):
+                app.accept('MINI', (op, {}, None, None), backend.call(op), None)
+            yield pilot
+
+
 async def remote_views(output=None):
     backend = FakeBackend('MINI', remote=True)
     backend.context = replace(backend.context, declarations=backend.context.sources)
@@ -128,11 +140,7 @@ async def remote_views(output=None):
         job['reason'] = None
     app = NodesApp({'MINI': backend}, clock=lambda: 112.)
     records = []
-    async with app.run_test(size=SIZES[0]) as pilot:
-        for _ in range(100):
-            if app.rows:
-                break
-            await pilot.pause(.02)
+    async with manual_portal(app, backend, SIZES[0]) as pilot:
         assert app.rows
         job = backend.jobs[0]
         app.select(row_key(job['target']))
@@ -142,7 +150,7 @@ async def remote_views(output=None):
             envelope = backend.call('progress', target=job['target'])
             decoded = decode_typed(envelope['result']['snapshot'], ProgressSnapshot)
             assert decoded == snapshot
-            lane.cache.setdefault(target_key(job['target']), {})['progress'] = (envelope, 112.)
+            app.accept('MINI', ('progress', {}, job['target'], None), envelope, None)
             for size in SIZES:
                 await pilot.resize_terminal(*size)
                 app.render_state()
@@ -181,6 +189,57 @@ class StaticCardRenderTests(unittest.IsolatedAsyncioTestCase):
     async def test_static_states_keep_federated_frame_and_codec(self):
         records = await remote_views()
         self.assertEqual(len(records), 20)
+
+    async def test_real_progress_receipt_and_disconnect_preserve_frame_and_job_rows(self):
+        for width in (77, 80, 120):
+            now = [112.]
+            backend = FakeBackend('MINI', remote=True)
+            app = NodesApp({'MINI': backend}, clock=lambda: now[0], wall_clock=lambda: 1700000000.)
+            async with manual_portal(app, backend, (width, 24)) as pilot:
+                target = backend.jobs[0]['target']
+                app.select(row_key(target))
+                backend.snapshot = static_states(backend.context)['scf']
+                def deliver_progress():
+                    envelope = backend.call('progress', target=target)
+                    app.accept('MINI', ('progress', {}, target, None), envelope, None)
+                deliver_progress()
+                rows = None
+                for state in ('fresh', 'stale', 'missing receipt', 'disconnected'):
+                    with self.subTest(width=width, state=state):
+                        if state == 'stale':
+                            now[0] += 16
+                        elif state == 'missing receipt':
+                            app.accept('MINI', ('status', {}, None, None), backend.call('status'), None)
+                            deliver_progress()
+                            del app.lanes['MINI'].cache[target_key(target)]['progress.receipt']
+                        elif state == 'disconnected':
+                            deliver_progress()
+                            app.accept('MINI', ('status', {}, None, None), None,
+                                       NodeError('DISCONNECTED', 'synthetic stream closed'))
+                        app.render_state()
+                        await pilot.pause()
+                        widget = app.query_one('#progress', Static)
+                        lines = str(widget.render()).splitlines()
+                        self.assertTrue(lines[0].startswith('┌─') and lines[0].endswith('┐'), lines)
+                        self.assertTrue(lines[-1].startswith('└') and lines[-1].endswith('┘'), lines)
+                        self.assertTrue(all((line[0], line[-1]) in {('│', '│'), ('├', '┤')}
+                                            for line in lines[1:-1]), lines)
+                        self.assertTrue(all(cell_width(line) == cell_width(lines[0]) <= width for line in lines))
+                        self.assertIn('SCF', str(widget.render()))
+                        title = lines[0].casefold()
+                        if state == 'fresh':
+                            self.assertNotIn('last reported', title)
+                            self.assertNotIn('receipt unknown', title)
+                        elif state == 'missing receipt':
+                            self.assertIn('receipt unknown', title)
+                        else:
+                            self.assertIn('last reported', title)
+                        table = app.query_one('#table', DataTable)
+                        visible = table.size.height - table.header_height
+                        if rows is None:
+                            rows = visible
+                            self.assertGreaterEqual(rows, 3)
+                        self.assertEqual(visible, rows)
 
 
 class StaticCardEndpointTests(unittest.TestCase):

@@ -84,6 +84,21 @@ class PortalFilesTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(app.selected_key, row_key(b['target']))
 
+    async def test_click_disconnected_rows_files_does_not_queue_a_request(self):
+        from cmw.nodes.protocol import NodeError
+        backend = AttemptFilesBackend('mini', remote=True)
+        app = NodesApp({'mini': backend}, clock=lambda: 10.)
+        async with app.run_test(size=(170, 45)) as pilot:
+            await self.ready(app, pilot, backend)
+            app.refuse_lane('mini', NodeError('DISCONNECTED', 'stream closed'), 'status')
+            await pilot.pause()  # Lay out the changed status line before resolving the cell's coordinates.
+            table = app.query_one('#table', DataTable)
+            column = next(i for i, item in enumerate(table.ordered_columns) if item.key.value == 'files')
+            region = table._get_cell_region(Coordinate(0, column))
+            await pilot.click('#table', offset=(region.x + 1, region.y))
+            self.assertFalse(any(request[0] == 'locations' for request in app.lanes['mini'].pending))
+            self.assertIn('Nothing was queued', str(app.query_one('#message', Static).render()))
+
     async def test_delayed_files_response_cannot_follow_changed_selection(self):
         backend = AttemptFilesBackend('mini', remote=True)
         gate = backend.blocks['locations'] = threading.Event()

@@ -1,0 +1,10 @@
+#!python
+"""Installed launcher. Guard the package initializer before the first import."""
+import sys
+
+sys.dont_write_bytecode = True
+
+from cmw.cli import main
+
+if __name__ == "__main__":
+    sys.exit(main())

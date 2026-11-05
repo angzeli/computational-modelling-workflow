@@ -16,14 +16,24 @@ class DoctorDetails(FrozenText):
     def __init__(self, text, title, selection, doctor):
         super().__init__(text, title)
         self.selection, self.open_doctor = selection, doctor
+        self.commands_allowed = True
 
     def on_mount(self):
         super().on_mount()
         self.query_one('#copy-status', Static).update(
             'D: Doctor · Select text, then Ctrl-C. No selection: back. Esc: back.')
 
+    def node_commands_changed(self, allowed):
+        self.commands_allowed = allowed
+
+    def check_action(self, action, parameters):
+        if action == 'doctor':
+            return self.commands_allowed
+        return super().check_action(action, parameters)
+
     def action_doctor(self):
-        self.open_doctor()
+        if self.commands_allowed:
+            self.open_doctor()
 
 
 class DoctorReport(FrozenText):
@@ -31,6 +41,7 @@ class DoctorReport(FrozenText):
 
     def __init__(self, selection, label, *, loader=None, context=''):
         self.selection, self.label, self.context = selection, label, context
+        self.on_report_displayed = None
         self.loader = loader
         self.report = None
         self.pending = True
@@ -48,9 +59,11 @@ class DoctorReport(FrozenText):
         if self.loader is not None:
             self.call_after_refresh(self.load, self.loader)
 
-    def load(self, loader):
+    def load(self, loader, *, on_displayed=None):
         if self.started:
             return
+        if on_displayed is not None:
+            self.on_report_displayed = on_displayed
         if not self.is_mounted:
             self.loader = loader  # A fast endpoint reply can precede Mount.
             return
@@ -81,6 +94,9 @@ class DoctorReport(FrozenText):
         self.report = report
         body = ('Doctor unavailable: ' + error) if error else text
         self.query_one(TextArea).load_text(safe_snapshot_text(self.header() + '\n\n' + body))
+
+        if report is not None and self.on_report_displayed is not None:
+            self.on_report_displayed()
 
     def unavailable(self, reason):
         self.accept(None, None, str(reason))

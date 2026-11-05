@@ -10,6 +10,8 @@ import threading
 import time
 
 from .protocol import MAX_FRAME, is_mutation, NodeError, decode, encode, request, response
+from .contracts import NodeEvent
+from .transport_events import TransportFailure
 
 MAX_STDERR = 64 * 1024
 
@@ -49,6 +51,8 @@ class ProcessTransport:
         self._verified_key = host_key is None
         self._stderr_line = bytearray()
         self._verified_channel = False
+        self._auth_exhausted = False
+        self._authenticated = False
 
     def _start(self):
         if self.process is not None:
@@ -68,12 +72,39 @@ class ProcessTransport:
         while b'\n' in self._stderr_line:
             line, _, rest = self._stderr_line.partition(b'\n')
             self._stderr_line[:] = rest
-            if b'Server host key:' in line:
-                match = re.search(rb'Server host key: \S+ (SHA256:[A-Za-z0-9+/]+)', line)
-                if match and self.host_key:
-                    if match.group(1).decode() != self.host_key:
-                        raise NodeError('SSH_IDENTITY_CHANGED', 'SSH host key differs from enrolled transport identity')
-                    self._verified_key = True
+            # Only OpenSSH's complete pre-authentication records contribute
+            # evidence. Remote endpoint stderr must not impersonate negotiation.
+            if self._authenticated or self._verified_channel:
+                continue
+            line = line.rstrip(b'\r')
+            match = re.fullmatch(rb'debug1: Server host key: \S+ (SHA256:[A-Za-z0-9+/]{43})', line)
+            if match and self.host_key:
+                if match.group(1).decode() != self.host_key:
+                    raise NodeError('SSH_IDENTITY_CHANGED', 'SSH host key differs from enrolled transport identity')
+                self._verified_key = True
+            elif line == b'debug1: No more authentication methods to try.':
+                self._auth_exhausted = True
+            elif re.fullmatch(rb'Authenticated to .+ using "[A-Za-z0-9_-]+"\.', line):
+                self._authenticated = True
+
+    def _closed_error(self, mutation):
+        # EOF and stderr may become readable together. A confirmed SSH exit,
+        # pinned key and terminal negotiation stage are required for AUTH_FAILED;
+        # exit 255 or a permission-denied substring alone is ambiguous.
+        try:
+            self._diagnostic(os.read(self.process.stderr.fileno(), MAX_STDERR))
+        except (BlockingIOError, OSError):
+            pass
+        try:
+            status = self.process.wait(timeout=.2)
+        except subprocess.TimeoutExpired:
+            status = None
+        if (self.host_key and status == 255 and self._verified_key
+                and self._auth_exhausted and not self._authenticated):
+            return TransportFailure('AUTH_FAILED', 'Pinned SSH peer refused all configured authentication methods',
+                                    event=NodeEvent.AUTH_FAILURE, exit_status=status)
+        return TransportFailure('OUTCOME_UNKNOWN' if mutation else 'DISCONNECTED',
+            'Endpoint closed before a complete response', exit_status=status)
 
     def exchange(self, operation, params=None, target=None, *, request_id=None):
         message = request(operation, params, target, request_id)
@@ -112,8 +143,9 @@ class ProcessTransport:
                         return result
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise NodeError('OUTCOME_UNKNOWN' if mutation else 'UNREACHABLE',
-                                        'Endpoint request timed out; query the original request ID before any retry')
+                        raise TransportFailure('OUTCOME_UNKNOWN' if mutation else 'UNREACHABLE',
+                            'Endpoint request timed out; query the original request ID before any retry',
+                            event=NodeEvent.TIMEOUT)
                     for key, _ in selector.select(remaining):
                         if key.data == 'in':
                             sent += os.write(key.fd, packet[sent:])
@@ -124,8 +156,7 @@ class ProcessTransport:
                             if not data:
                                 selector.unregister(key.fileobj)
                                 if key.data == 'out':
-                                    raise NodeError('OUTCOME_UNKNOWN' if mutation else 'DISCONNECTED',
-                                                    'Endpoint closed before a complete response')
+                                    raise self._closed_error(mutation)
                             elif key.data == 'err':
                                 self._diagnostic(data)
                             else:
@@ -133,10 +164,18 @@ class ProcessTransport:
                                 if len(self._buffer) > MAX_FRAME:
                                     raise NodeError('INVALID_RESPONSE', 'Endpoint response exceeds frame bound')
         except OSError as exc:
-            self.close()
+            # A closed SSH pipe can race the selector's stderr event. Preserve
+            # an explicit key/auth refusal before reducing this to disconnection.
+            try:
+                if self.process is not None:
+                    failure = self._closed_error(mutation)
+                    if failure.code == 'AUTH_FAILED':
+                        raise failure from exc
+            finally:
+                self.close()
             if mutation:
-                raise NodeError('OUTCOME_UNKNOWN', 'Transport failed; query the original request ID before retrying') from exc
-            raise NodeError('UNREACHABLE', str(exc)) from exc
+                raise TransportFailure('OUTCOME_UNKNOWN', 'Transport failed; query the original request ID before retrying') from exc
+            raise TransportFailure('UNREACHABLE', str(exc)) from exc
         except NodeError:
             self.close()
             raise
@@ -149,6 +188,8 @@ class ProcessTransport:
         self._stderr_line.clear()
         self._verified_key = self.host_key is None
         self._verified_channel = False
+        self._auth_exhausted = False
+        self._authenticated = False
         if process is None:
             return
         for handle in (process.stdin, process.stdout, process.stderr):

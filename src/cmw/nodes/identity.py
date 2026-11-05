@@ -19,12 +19,15 @@ from cmw.periodic.vasp.result_runner import MAX_MPI_RANKS
 from .storage import identify_storage, check_storage, validate_storage
 from .runtime_observation import (RuntimeRefusal, RuntimeVerifier, file_epoch, inventory,
                                   observation, validate_observation, RuntimeCollection)
+from .runner_profiles import (interpreter_observation, pin_interpreter, profile_version,
+                              validate_interpreter)
 
 
 MAX_CONFIG_BYTES = 1024 * 1024
 _ALIAS = re.compile(r'[A-Za-z][A-Za-z0-9_-]{0,47}\Z')
 _CONFIG_FIELDS = {'schema', 'node_id', 'host_id', 'host', 'runtime', 'queues', 'storages', 'profiles'}
-_PROFILE_FIELDS = {'engine', 'runner', 'max_cpus', 'max_ranks', 'dependencies', 'runtime', 'binary_manifests'}
+_PROFILE_FIELDS = {'engine', 'runner', 'max_cpus', 'max_ranks', 'dependencies', 'runtime',
+                   'binary_manifests', 'schema', 'runner_interpreter'}
 MAX_PROFILE_FILE_BYTES = 2 * 1024**3
 
 
@@ -99,7 +102,7 @@ def _package_digest(root, epoch, collection):
     return digest.hexdigest()
 
 
-def runtime_observed(*, diagnostics=None):
+def runtime_observed(*, diagnostics=None, request_boundary=None):
     """Policy-3 bounded sequential member verification, never replacement trust."""
     import cmw
     source = Path(cmw.__file__).absolute()
@@ -108,7 +111,7 @@ def runtime_observed(*, diagnostics=None):
     root = source.parent
     collection = RuntimeCollection(root, diagnostics)
     try:
-        return _collect_runtime(root, collection)
+        return _collect_runtime(root, collection, request_boundary=request_boundary)
     except RuntimeRefusal as exc:
         exc.evidence.update(policy=3, generation=collection.generation,
                             bytes_read=collection.bytes_read,
@@ -124,26 +127,70 @@ def runtime_observed(*, diagnostics=None):
         raise refused from exc
 
 
-def _collect_runtime(root, collection):
-    import cmw
+def _collect_runtime(root, collection, *, request_boundary=None):
     executable = Path(sys.executable).resolve(strict=True)
     executable_before = file_epoch(executable)
-    first = inventory(root, collection=collection)
+    first_directories = {} if request_boundary is not None else None
+    after_directories = {} if request_boundary is not None else None
+    first_auxiliary = {} if request_boundary is not None else None
+    after_auxiliary = {} if request_boundary is not None else None
+    first = inventory(root, collection=collection, directory_epochs=first_directories,
+                      auxiliary=first_auxiliary)
     collection.generation = 'content'
     package_digest = _package_digest(root, first[1], collection)
+    if first_auxiliary is not None:
+        for name in first_auxiliary['members']:
+            collection.read(root / name)
     collection.generation = 'final-inventory'
-    after = inventory(root, collection=collection, final=True)
+    after = inventory(root, collection=collection, final=True, directory_epochs=after_directories,
+                      auxiliary=after_auxiliary)
     if first[0] != after[0]:
         collection.refuse('root_replacement', root, first[0], after[0])
     if first[2] != after[2]:
         collection.refuse('directory_identity_or_security_changed', root, first[2], after[2])
     if dict(first[1]).keys() != dict(after[1]).keys():
         collection.refuse('membership_changed', root)
+    if first_directories != after_directories:
+        collection.refuse('directory_changed', root, first_directories, after_directories)
+    if first_auxiliary != after_auxiliary:
+        collection.refuse('auxiliary_changed', root, first_auxiliary, after_auxiliary)
     executable_after = file_epoch(executable)
     if executable_before != executable_after:
         collection.refuse('interpreter_changed', executable, executable_before, executable_after)
     collection.check()
     root_epoch, epoch, directories = after
+    record = _runtime_record(root, package_digest)
+    # Auxiliary cache/artifact bytes are request evidence, never an enrollment
+    # hash-domain or schema change.
+    observed = observation(root, root_epoch, epoch, directories, package_digest,
+                           {name: collection.hashes[name] for name, _ in epoch})
+    if observed['executable_epoch'] != list(executable_before):
+        collection.refuse('interpreter_changed', executable, executable_before, observed['executable_epoch'])
+    collection.check()
+    collection.evidence['status'] = 'COMPLETE'
+    if request_boundary is not None:
+        from .runtime_observation import _request_imports_coherent
+        after_auxiliary['member_sha256'] = {name: collection.hashes[name]
+                                            for name in after_auxiliary['members']}
+        if not _request_imports_coherent(observed, after_auxiliary):
+            collection.refuse('fresh_isolated_observer_required', root, phase='loaded-code')
+        _check_request_directories(collection, after_directories)
+        request_boundary.update(observation=observed, directory_epochs=after_directories,
+                                auxiliary=after_auxiliary)
+    return record, observed
+
+
+def _check_request_directories(collection, directories):
+    from .native_security import object_epoch
+    for name, before in directories.items():
+        after = object_epoch(Path(name).lstat())
+        if before != after:
+            collection.refuse('directory_changed', name, before, after)
+
+
+def _runtime_record(root, package_digest):
+    """Re-observe the existing interpreter/version/dependency identity domain."""
+    import cmw
     dependencies = {}
     for name in ('ase', 'gemmi', 'numpy', 'PyYAML', 'psutil', 'textual', 'rich'):
         try:
@@ -161,12 +208,49 @@ def _collect_runtime(root, collection):
     # another node's filesystem/process authority.
     record['fingerprint'] = stable_hash({key: value for key, value in record.items()
                                       if key not in {'package_origin', 'executable'}})
-    observed = observation(root, root_epoch, epoch, directories, package_digest, dict(collection.hashes))
-    if observed['executable_epoch'] != list(executable_before):
-        collection.refuse('interpreter_changed', executable, executable_before, observed['executable_epoch'])
-    collection.check()
-    collection.evidence['status'] = 'COMPLETE'
-    return record, observed
+    return record
+
+
+def runtime_boundary_observed(snapshot):
+    """Re-observe every authority/epoch without a second package-content read.
+
+    The digest is the request's already verified digest, not a cached trust
+    decision: RuntimeVerifier accepts it only with exact complete epoch equality.
+    """
+    import cmw
+    source = Path(cmw.__file__).absolute()
+    root = source.parent
+    collection = RuntimeCollection(root)
+    collection.generation = 'response-boundary'
+    try:
+        if source.is_symlink() or root != root.resolve(strict=True):
+            collection.refuse('path_replacement', source)
+        executable = Path(sys.executable).resolve(strict=True)
+        executable_before = file_epoch(executable)
+        record_before = _runtime_record(root, snapshot['record']['package_sha256'])
+        directory_epochs = {}
+        auxiliary = {}
+        root_epoch, epoch, directories = inventory(root, collection=collection,
+                                                   directory_epochs=directory_epochs, auxiliary=auxiliary)
+        previous_auxiliary = snapshot['auxiliary']
+        # Membership is compared before hash completeness by the shared request
+        # verifier; new files have no reused content proof and are refused there.
+        auxiliary['member_sha256'] = dict(previous_auxiliary['member_sha256'])
+        observed = observation(root, root_epoch, epoch, directories,
+            snapshot['observation']['package_sha256'], dict(snapshot['observation']['member_sha256']))
+        if observed['executable_epoch'] != list(executable_before):
+            collection.refuse('interpreter_changed', executable, executable_before, observed['executable_epoch'])
+        record = _runtime_record(root, snapshot['record']['package_sha256'])
+        if record_before != record:
+            collection.refuse('interpreter_or_dependency_changed', root, record_before, record)
+        _check_request_directories(collection, directory_epochs)
+        collection.check()
+        return record, observed, directory_epochs, auxiliary
+    except RuntimeRefusal:
+        raise
+    except OSError as exc:
+        raise RuntimeRefusal('runtime_member_unavailable', phase='response-boundary',
+            path=exc.filename, errno=exc.errno, security_state='incomplete') from exc
 
 
 def runtime_identity():
@@ -234,6 +318,9 @@ def _runtime_spec(engine, value):
 
 def _profile(spec, runtime):
     _object(spec, _PROFILE_FIELDS, {'engine', 'runner', 'max_cpus'}, 'runner profile')
+    version = profile_version(spec)
+    interpreter = ({'schema': 2, 'runner_interpreter': pin_interpreter(spec.get('runner_interpreter'))}
+                   if version == 2 else {})
     if not isinstance(spec['engine'], str) or spec['engine'] not in {'Command', 'VASP', 'ORCA', 'Multiwfn'}:
         raise ValueError('Profile engine must be Command, VASP, ORCA or Multiwfn')
     cpus = spec['max_cpus']
@@ -285,7 +372,7 @@ def _profile(spec, runtime):
         runtime_record['runtime'] = engine_runtime
     elif 'runtime' in spec:
         raise ValueError('Command/VASP profiles cannot carry a molecular runtime')
-    return {**runtime_record, 'engine': spec['engine'], 'runner': spec['runner'], 'max_cpus': cpus, 'max_ranks': ranks,
+    return {**runtime_record, **interpreter, 'engine': spec['engine'], 'runner': spec['runner'], 'max_cpus': cpus, 'max_ranks': ranks,
             'runner_identity': runner, 'dependencies': [_file_identity(path) for path in dependencies],
             'runtime_fingerprint': runtime['fingerprint'],
             'qualification': {'implementation': 'configured', 'synthetic_tested': False,
@@ -360,7 +447,7 @@ def _validate_config(value):
         validate_observation(value['runtime_observation'])
         if value['runtime_observation']['package_sha256'] != value['runtime']['package_sha256']:
             raise ValueError('Original runtime observation contradicts enrolled digest')
-    if type(value['schema']) is not int or value['schema'] != 1:
+    if type(value['schema']) is not int or value['schema'] not in {1, 2}:
         raise ValueError('Unsupported node configuration schema')
     _uuid(value['node_id'], 'Node identity')
     host = _host(value['host'])
@@ -388,6 +475,11 @@ def _validate_config(value):
     for profile in _aliases(value['profiles'], 'Profiles').values():
         fields = {'engine', 'runner', 'max_cpus', 'max_ranks', 'runner_identity',
                   'dependencies', 'runtime_fingerprint', 'qualification'}
+        if profile_version(profile) == 2:
+            if value['schema'] != 2:
+                raise ValueError('Runner profile schema 2 requires node configuration schema 2')
+            fields |= {'schema', 'runner_interpreter'}
+            validate_interpreter(profile.get('runner_interpreter'))
         if isinstance(profile, dict) and isinstance(profile.get('engine'), str) and profile['engine'] in {'ORCA', 'Multiwfn'}:
             fields |= {'runtime'}
             _runtime_spec(profile['engine'], profile.get('runtime'))
@@ -467,7 +559,8 @@ def enroll(config_root, spec, *, host_provider=None, runtime_provider=None,
     for (alias, _), state in zip(queues.items(), states):
         record = store_type(state).enroll_queue(node_id, host_id)
         queue_records[alias] = {**record, 'state': str(state)}
-    value = _validate_config({'schema': 1, 'node_id': node_id, 'host_id': host_id, 'host': host,
+    schema = 2 if any(profile_version(profile) == 2 for profile in profiles.values()) else 1
+    value = _validate_config({'schema': schema, 'node_id': node_id, 'host_id': host_id, 'host': host,
                               'runtime': runtime, 'queues': queue_records, 'storages': storages,
                               'profiles': profiles, **({'runtime_observation': original} if original is not None else {})})
     content = canonical_json_bytes(value)
@@ -488,7 +581,8 @@ def enroll(config_root, spec, *, host_provider=None, runtime_provider=None,
 
 def check_node(config, *, host_provider=None, runtime_provider=None,
                storage_provider=None, store_factory=None, operation=None, queue_alias=None,
-               profile_aliases=None, storage_aliases=None, runtime_verifier=None):
+               profile_aliases=None, storage_aliases=None, runtime_verifier=None,
+               runtime_request=None, runtime_response=False):
     """Observe readiness; missing storage does not erase independent queue evidence."""
     from cmw.jobs.store import Store
     _validate_config(config)
@@ -515,7 +609,15 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
         result['identity_errors'].append(str(exc))
     try:
         verifier = runtime_verifier or RuntimeVerifier(config['runtime'], config.get('runtime_observation'))
-        result['runtime'] = verifier.verify(runtime_observed) if runtime_provider is None else runtime_provider()
+        if runtime_provider is not None:
+            result['runtime'] = runtime_provider()
+        elif runtime_request is not None:
+            if operation != 'status':
+                raise ValueError('Request-local runtime verification is restricted to status')
+            result['runtime'] = verifier.verify_request(runtime_observed, runtime_boundary_observed,
+                runtime_request, response=runtime_response)
+        else:
+            result['runtime'] = verifier.verify(runtime_observed)
         if result['runtime']['fingerprint'] != config['runtime']['fingerprint']:
             raise ValueError('Actual CMW runtime differs from the enrolled fingerprint')
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
@@ -548,7 +650,10 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
             result['storage_ready'] = False
             result['errors'].append(f'{alias}: {observed.get("error", "Storage unavailable")}')
     for alias, profile in profiles.items():
+        interpreter = interpreter_observation(profile, verify=True)
         try:
+            if interpreter['status'] == 'mismatch':
+                raise ValueError(interpreter['error'])
             if profile['engine'] == 'VASP':
                 from cmw.periodic.vasp.runner_compatibility import toolchain_sources
                 pinned = {item['path'] for item in profile['dependencies']}
@@ -559,10 +664,10 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
                     raise ValueError('Pinned runner/dependency identity changed')
             if not os.access(profile['runner'], os.R_OK if profile['engine'] == 'Multiwfn' else os.X_OK):
                 raise ValueError('Pinned runner is no longer executable')
-            result['profiles'][alias] = {'ready': True, 'error': None}
+            result['profiles'][alias] = {'ready': True, 'error': None, 'runner_interpreter': interpreter}
         except (OSError, ValueError, KeyError) as exc:
             result['profiles_ready'] = False
-            result['profiles'][alias] = {'ready': False, 'error': str(exc)}
+            result['profiles'][alias] = {'ready': False, 'error': str(exc), 'runner_interpreter': interpreter}
             result['errors'].append(f'{alias}: {exc}')
     result['identity_ready'] = not result['identity_errors']
     result['runtime_ready'] = not result['runtime_errors']

@@ -50,12 +50,13 @@ class CollectionEvidenceTests(unittest.TestCase):
 
     def test_material_change_then_restore_is_terminal_at_observed_boundary(self):
         real=obs.RuntimeCollection.object;seen=[]
-        def observe(collection,path,value,phase):
+        def observe(collection,name,value,phase):
+            path=collection.root/name
             if path==self.member and phase=='content-open' and not seen:
                 seen.append(True);bad=list(value);bad[2]^=0o020
-                try:real(collection,path,tuple(bad),phase)
+                try:real(collection,name,tuple(bad),phase)
                 finally:os.chmod(path,path.stat().st_mode)  # restoration cannot erase recorded refusal
-            return real(collection,path,value,phase)
+            return real(collection,name,value,phase)
         evidence=[]
         with patch.object(obs.RuntimeCollection,'object',observe):
             with self.assertRaises(obs.RuntimeRefusal) as caught:identity.runtime_observed(diagnostics=evidence)
@@ -106,11 +107,12 @@ class CollectionEvidenceTests(unittest.TestCase):
 
     def test_content_enclosing_transition_forces_one_member_reread(self):
         real=obs.RuntimeCollection.object;events=[]
-        def observe(collection,path,value,phase):
+        def observe(collection,name,value,phase):
+            path=collection.root/name
             if path==self.member and phase=='content-after' and not events:
                 os.chflags(path,path.stat().st_flags^0x40);events.append(True)
                 value=__import__('cmw.nodes.native_security',fromlist=['object_epoch']).object_epoch(path.stat())
-            return real(collection,path,value,phase)
+            return real(collection,name,value,phase)
         evidence=[]
         with patch.object(obs.RuntimeCollection,'object',observe):
             record,_=identity.runtime_observed(diagnostics=evidence)
@@ -120,11 +122,12 @@ class CollectionEvidenceTests(unittest.TestCase):
     def test_observed_owner_and_xattr_changes_cannot_hide_behind_tracked(self):
         real=obs.RuntimeCollection.object
         for field,delta in [(3,1),(2,0o020),(9,0x42)]:
-            def observe(collection,path,value,phase):
+            def observe(collection,name,value,phase):
+                path=collection.root/name
                 if path==self.member and phase=='content-open':
                     bad=list(value);bad[field]^=delta;bad[9]^=0x40
-                    return real(collection,path,tuple(bad),phase)
-                return real(collection,path,value,phase)
+                    return real(collection,name,tuple(bad),phase)
+                return real(collection,name,value,phase)
             with self.subTest(field=field),patch.object(obs.RuntimeCollection,'object',observe):
                 with self.assertRaises(obs.RuntimeRefusal):identity.runtime_observed()
         real_security=obs._extended_security;reads=0

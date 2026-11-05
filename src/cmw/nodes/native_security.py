@@ -35,11 +35,13 @@ def object_epoch(info):
             getattr(info, 'st_flags', 0))
 
 
-def _api():
+def _bind_api():
     if sys.platform != 'darwin' or platform.machine() not in {'arm64', 'x86_64'}:
-        raise SecurityReadError('filesec', errno.ENOTSUP, 'unsupported')
+        return None
     libc = C.CDLL(None, use_errno=True)
     signatures = {
+        'flistxattr': ([C.c_int, C.c_void_p, C.c_size_t, C.c_int], C.c_ssize_t),
+        'fgetxattr': ([C.c_int, C.c_char_p, C.c_void_p, C.c_size_t, C.c_uint32, C.c_int], C.c_ssize_t),
         'filesec_init': ([], C.c_void_p),
         'filesec_free': ([C.c_void_p], None),
         'fstatx_np': ([C.c_int, C.POINTER(_Stat64), C.c_void_p], C.c_int),
@@ -52,9 +54,19 @@ def _api():
         for name, (args, result) in signatures.items():
             fn = getattr(libc, name)
             fn.argtypes, fn.restype = args, result
-    except AttributeError as exc:
-        raise SecurityReadError('filesec', errno.ENOTSUP, 'unsupported') from exc
+    except AttributeError:
+        return None
     return libc
+
+
+# The import lock serializes binding. Descriptors and their evidence stay local to each read.
+_LIBC = _bind_api()
+
+
+def _api():
+    if _LIBC is None:
+        raise SecurityReadError('Darwin security API', errno.ENOTSUP, 'unsupported')
+    return _LIBC
 
 
 def _failed(api):
