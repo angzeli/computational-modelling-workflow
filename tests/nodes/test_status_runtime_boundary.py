@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -36,6 +37,10 @@ class StatusRuntimeBoundaryTests(unittest.TestCase):
         coherent = patch.object(runtime, '_source_imports_coherent', return_value=True)
         coherent.start()
         self.addCleanup(coherent.stop)
+        self.request_import_check = runtime._request_imports_coherent
+        request_coherent = patch.object(runtime, '_request_imports_coherent', return_value=True)
+        self.request_coherent = request_coherent.start()
+        self.addCleanup(request_coherent.stop)
         self.record, self.observed = identity.runtime_observed()
         self.verifier = runtime.RuntimeVerifier(self.record, self.observed, isolated=True)
         self.request = {}
@@ -164,9 +169,9 @@ class StatusRuntimeBoundaryTests(unittest.TestCase):
     def test_partial_inventory_refuses(self):
         self.begin()
         def partial(snapshot):
-            record, observed, directories = identity.runtime_boundary_observed(snapshot)
+            record, observed, directories, auxiliary = identity.runtime_boundary_observed(snapshot)
             observed['directories'] = {}
-            return record, observed, directories
+            return record, observed, directories, auxiliary
         with self.assertRaises(runtime.RuntimeRefusal):
             self.finish(partial)
         self.assertTrue(self.verifier.tainted)
@@ -184,6 +189,7 @@ class StatusRuntimeBoundaryTests(unittest.TestCase):
         paths = ([(key,) for key in complete['snapshot']]
                  + [('record', key) for key in self.record]
                  + [('observation', key) for key in self.observed]
+                 + [('auxiliary', key) for key in complete['snapshot']['auxiliary']]
                  + [('record', 'dependencies', 'psutil'),
                     ('observation', 'member_sha256', '__init__.py'),
                     ('directory_epochs', str(self.package)),
@@ -208,6 +214,8 @@ class StatusRuntimeBoundaryTests(unittest.TestCase):
         self.begin()
         complete = deepcopy(self.request)
         cases = [(('record',), None), (('observation',), []), (('directory_epochs',), []),
+                 (('auxiliary',), None), (('auxiliary', 'members'), []),
+                 (('auxiliary', 'directories'), []), (('auxiliary', 'member_sha256'), []),
                  (('record', 'dependencies'), []), (('record', 'package_sha256'), None),
                  (('observation', 'members'), None), (('observation', 'executable_epoch'), []),
                  (('observation', 'root_epoch'), [*self.observed['root_epoch'][:-1], False]),
@@ -230,10 +238,11 @@ class StatusRuntimeBoundaryTests(unittest.TestCase):
     def test_malformed_response_evidence_is_sticky(self):
         self.begin()
         complete = deepcopy(self.request)
-        record, observed, directories = identity.runtime_boundary_observed(complete['snapshot'])
-        cases = [None, (record, observed), (None, observed, directories),
-                 (record, None, directories), (record, observed, None),
-                 (record, {key: value for key, value in observed.items() if key != 'members'}, directories)]
+        record, observed, directories, auxiliary = identity.runtime_boundary_observed(complete['snapshot'])
+        cases = [None, (record, observed), (None, observed, directories, auxiliary),
+                 (record, None, directories, auxiliary), (record, observed, None, auxiliary),
+                 (record, observed, directories, None),
+                 (record, {key: value for key, value in observed.items() if key != 'members'}, directories, auxiliary)]
         for result in cases:
             with self.subTest(result=result):
                 self.verifier = runtime.RuntimeVerifier(self.record, self.observed, isolated=True)
@@ -244,9 +253,200 @@ class StatusRuntimeBoundaryTests(unittest.TestCase):
 
     def test_new_incoherent_import_refuses(self):
         self.begin()
-        with patch.object(runtime, '_source_imports_coherent', return_value=False):
+        with patch.object(runtime, '_request_imports_coherent', return_value=False):
             with self.assertRaisesRegex(runtime.RuntimeRefusal, 'fresh_isolated_observer_required'):
                 self.finish()
+
+    def test_incoherent_import_at_full_capture_refuses(self):
+        with patch.object(runtime, '_request_imports_coherent', return_value=False):
+            with self.assertRaisesRegex(runtime.RuntimeRefusal, 'fresh_isolated_observer_required'):
+                self.begin()
+        self.assertTrue(self.verifier.tainted)
+
+    def cache(self):
+        directory = self.package / '__pycache__'
+        directory.mkdir()
+        path = directory / '__init__.cpython-311.pyc'
+        path.write_bytes(b'synthetic cache evidence, never executed')
+        return path
+
+    def test_preexisting_auxiliary_members_preserve_semantic_identity_and_are_read_once(self):
+        cache = self.cache()
+        artifact = self.package / '.DS_Store'
+        artifact.write_bytes(b'synthetic metadata')
+        with patch.object(runtime.RuntimeCollection, 'read', autospec=True,
+                          side_effect=runtime.RuntimeCollection.read) as read:
+            self.assertEqual(self.begin(), self.record)
+            snapshot = self.request['snapshot']
+            self.assertEqual(snapshot['observation'], self.observed)
+            self.assertEqual(set(snapshot['auxiliary']['members']),
+                             {str(cache.relative_to(self.package)), '.DS_Store'})
+            self.assertEqual(sum(call.args[1] == cache for call in read.call_args_list), 1)
+            self.assertEqual(sum(call.args[1] == artifact for call in read.call_args_list), 1)
+            calls = read.call_count
+            self.assertEqual(self.finish(), self.record)
+            self.assertEqual(read.call_count, calls)
+
+    def test_auxiliary_content_change_with_restored_mtime_refuses(self):
+        cache = self.cache()
+        def change():
+            before = cache.stat()
+            cache.write_bytes(b'x' * before.st_size)
+            os.utime(cache, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.refuse(change)
+
+    def test_auxiliary_same_bytes_replacement_refuses(self):
+        cache = self.cache()
+        def change():
+            replacement = self.root / 'replacement.pyc'
+            replacement.write_bytes(cache.read_bytes())
+            replacement.replace(cache)
+        self.refuse(change)
+
+    def test_auxiliary_addition_refuses(self):
+        cache = self.cache()
+        self.refuse(lambda: (cache.parent / 'added.pyc').write_bytes(b'synthetic cache'))
+
+    def test_auxiliary_deletion_refuses(self):
+        cache = self.cache()
+        self.refuse(cache.unlink)
+
+    def test_auxiliary_transient_add_delete_refuses(self):
+        cache = self.cache()
+        def transient():
+            added = cache.parent / 'transient.pyc'
+            added.write_bytes(b'synthetic cache')
+            added.unlink()
+        self.refuse(transient)
+
+    def test_auxiliary_empty_directory_addition_refuses(self):
+        cache = self.cache()
+        self.refuse(lambda: (cache.parent / 'empty').mkdir())
+
+    def test_auxiliary_directory_mode_change_refuses(self):
+        cache = self.cache()
+        self.refuse(lambda: cache.parent.chmod(cache.parent.stat().st_mode ^ 0o020))
+
+    def test_auxiliary_file_mode_change_refuses(self):
+        cache = self.cache()
+        self.refuse(lambda: cache.chmod(cache.stat().st_mode ^ 0o020))
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'Darwin UF_TRACKED')
+    def test_auxiliary_flag_change_is_not_metadata_recovery(self):
+        cache = self.cache()
+        self.refuse(lambda: os.chflags(cache, cache.stat().st_flags ^ runtime.UF_TRACKED))
+
+    def test_auxiliary_acl_and_xattr_changes_refuse(self):
+        cache = self.cache()
+        native = runtime._extended_security
+        for field in ('__cmw_acl__', 'user.synthetic-xattr'):
+            with self.subTest(field=field):
+                self.verifier = runtime.RuntimeVerifier(self.record, self.observed, isolated=True)
+                self.request = {}
+                self.begin()
+                def changed(path, **options):
+                    result = native(path, **options)
+                    if path == cache:
+                        result[field] = '0' * 64
+                    return result
+                with patch.object(runtime, '_extended_security', side_effect=changed):
+                    with self.assertRaises(runtime.RuntimeRefusal):
+                        self.finish()
+                self.assertTrue(self.verifier.tainted)
+
+    def test_auxiliary_symlink_directory_refuses_without_reading_target(self):
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'unread.pyc').write_bytes(b'not part of the runtime')
+        (self.package / '__pycache__').symlink_to(outside, target_is_directory=True)
+        with patch.object(runtime.RuntimeCollection, 'read', side_effect=AssertionError('content read')):
+            with self.assertRaises(runtime.RuntimeRefusal):
+                self.begin()
+        self.assertTrue(self.verifier.tainted)
+
+    def test_auxiliary_symlink_member_refuses_without_reading_target(self):
+        cache = self.cache()
+        cache.unlink()
+        cache.symlink_to(self.member)
+        with patch.object(runtime.RuntimeCollection, 'read', side_effect=AssertionError('content read')):
+            with self.assertRaises(runtime.RuntimeRefusal):
+                self.begin()
+        self.assertTrue(self.verifier.tainted)
+
+    def test_incomplete_auxiliary_directory_walk_refuses(self):
+        cache = self.cache()
+        native = os.fwalk
+        def partial(*args, **kwargs):
+            for item in native(*args, **kwargs):
+                if Path(item[0]) != cache.parent:
+                    yield item
+        with patch.object(os, 'fwalk', side_effect=partial):
+            with self.assertRaisesRegex(runtime.RuntimeRefusal, 'incomplete_directory_inventory'):
+                self.begin()
+        self.assertTrue(self.verifier.tainted)
+
+    def test_lost_auxiliary_evidence_refuses_before_provider_access(self):
+        cache = self.cache()
+        self.begin()
+        complete = deepcopy(self.request)
+        name = str(cache.relative_to(self.package))
+        for path in [('auxiliary', 'members', name), ('auxiliary', 'member_sha256', name),
+                     ('auxiliary', 'directories', '__pycache__'),
+                     ('directory_epochs', str(cache.parent))]:
+            with self.subTest(path=path):
+                self.verifier = runtime.RuntimeVerifier(self.record, self.observed, isolated=True)
+                self.request = deepcopy(complete)
+                parent = self.request['snapshot']
+                for key in path[:-1]:
+                    parent = parent[key]
+                del parent[path[-1]]
+                with patch.object(identity, 'runtime_boundary_observed') as provider:
+                    with self.assertRaisesRegex(runtime.RuntimeRefusal, 'incomplete_request_boundary'):
+                        self.finish(provider)
+                    provider.assert_not_called()
+                self.assertTrue(self.verifier.tainted)
+
+    def test_request_import_predicate_accepts_tracked_source_and_preexisting_bytecode(self):
+        cache = self.cache()
+        self.begin()
+        observed = self.request['snapshot']['observation']
+        auxiliary = self.request['snapshot']['auxiliary']
+        for filename, cached in [(self.member, cache), (cache, cache),
+                                 (self.second, self.directory / '__pycache__' / 'other.cpython-311.pyc')]:
+            with self.subTest(filename=filename), patch.object(sys, 'modules', {
+                    'cmw': SimpleNamespace(__file__=str(filename), __cached__=str(cached))}):
+                self.assertTrue(self.request_import_check(observed, auxiliary))
+
+    def test_request_import_predicate_refuses_outside_and_uninventoried_origins(self):
+        cache = self.cache()
+        self.begin()
+        observed = self.request['snapshot']['observation']
+        auxiliary = self.request['snapshot']['auxiliary']
+        for filename, cached in [(self.root / 'outside.py', None),
+                                 (self.package / 'unobserved.py', None),
+                                 (self.member, self.root / 'outside.pyc'),
+                                 (self.member, cache.parent)]:
+            with self.subTest(filename=filename, cached=cached), patch.object(sys, 'modules', {
+                    'cmw': SimpleNamespace(__file__=str(filename), __cached__=None if cached is None else str(cached))}):
+                self.assertFalse(self.request_import_check(observed, auxiliary))
+
+    def test_malformed_auxiliary_evidence_is_sticky(self):
+        cache = self.cache()
+        self.begin()
+        complete = deepcopy(self.request)
+        name = str(cache.relative_to(self.package))
+        cases = [('member_sha256', name, 'not-a-digest'), ('members', name, [0]),
+                 ('directories', '__pycache__', None)]
+        for kind, name, value in cases:
+            with self.subTest(kind=kind):
+                self.verifier = runtime.RuntimeVerifier(self.record, self.observed, isolated=True)
+                self.request = deepcopy(complete)
+                self.request['snapshot']['auxiliary'][kind][name] = value
+                with patch.object(identity, 'runtime_boundary_observed') as provider:
+                    with self.assertRaisesRegex(runtime.RuntimeRefusal, 'incomplete_request_boundary'):
+                        self.finish(provider)
+                    provider.assert_not_called()
+                self.assertTrue(self.verifier.tainted)
 
     def test_legacy_enrollments_keep_two_full_scans(self):
         for schema in (1, 2):

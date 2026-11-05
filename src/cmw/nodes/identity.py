@@ -132,11 +132,18 @@ def _collect_runtime(root, collection, *, request_boundary=None):
     executable_before = file_epoch(executable)
     first_directories = {} if request_boundary is not None else None
     after_directories = {} if request_boundary is not None else None
-    first = inventory(root, collection=collection, directory_epochs=first_directories)
+    first_auxiliary = {} if request_boundary is not None else None
+    after_auxiliary = {} if request_boundary is not None else None
+    first = inventory(root, collection=collection, directory_epochs=first_directories,
+                      auxiliary=first_auxiliary)
     collection.generation = 'content'
     package_digest = _package_digest(root, first[1], collection)
+    if first_auxiliary is not None:
+        for name in first_auxiliary['members']:
+            collection.read(root / name)
     collection.generation = 'final-inventory'
-    after = inventory(root, collection=collection, final=True, directory_epochs=after_directories)
+    after = inventory(root, collection=collection, final=True, directory_epochs=after_directories,
+                      auxiliary=after_auxiliary)
     if first[0] != after[0]:
         collection.refuse('root_replacement', root, first[0], after[0])
     if first[2] != after[2]:
@@ -145,20 +152,40 @@ def _collect_runtime(root, collection, *, request_boundary=None):
         collection.refuse('membership_changed', root)
     if first_directories != after_directories:
         collection.refuse('directory_changed', root, first_directories, after_directories)
+    if first_auxiliary != after_auxiliary:
+        collection.refuse('auxiliary_changed', root, first_auxiliary, after_auxiliary)
     executable_after = file_epoch(executable)
     if executable_before != executable_after:
         collection.refuse('interpreter_changed', executable, executable_before, executable_after)
     collection.check()
     root_epoch, epoch, directories = after
     record = _runtime_record(root, package_digest)
-    observed = observation(root, root_epoch, epoch, directories, package_digest, dict(collection.hashes))
+    # Auxiliary cache/artifact bytes are request evidence, never an enrollment
+    # hash-domain or schema change.
+    observed = observation(root, root_epoch, epoch, directories, package_digest,
+                           {name: collection.hashes[name] for name, _ in epoch})
     if observed['executable_epoch'] != list(executable_before):
         collection.refuse('interpreter_changed', executable, executable_before, observed['executable_epoch'])
     collection.check()
     collection.evidence['status'] = 'COMPLETE'
     if request_boundary is not None:
-        request_boundary.update(observation=observed, directory_epochs=after_directories)
+        from .runtime_observation import _request_imports_coherent
+        after_auxiliary['member_sha256'] = {name: collection.hashes[name]
+                                            for name in after_auxiliary['members']}
+        if not _request_imports_coherent(observed, after_auxiliary):
+            collection.refuse('fresh_isolated_observer_required', root, phase='loaded-code')
+        _check_request_directories(collection, after_directories)
+        request_boundary.update(observation=observed, directory_epochs=after_directories,
+                                auxiliary=after_auxiliary)
     return record, observed
+
+
+def _check_request_directories(collection, directories):
+    from .native_security import object_epoch
+    for name, before in directories.items():
+        after = object_epoch(Path(name).lstat())
+        if before != after:
+            collection.refuse('directory_changed', name, before, after)
 
 
 def _runtime_record(root, package_digest):
@@ -202,8 +229,13 @@ def runtime_boundary_observed(snapshot):
         executable_before = file_epoch(executable)
         record_before = _runtime_record(root, snapshot['record']['package_sha256'])
         directory_epochs = {}
+        auxiliary = {}
         root_epoch, epoch, directories = inventory(root, collection=collection,
-                                                   directory_epochs=directory_epochs)
+                                                   directory_epochs=directory_epochs, auxiliary=auxiliary)
+        previous_auxiliary = snapshot['auxiliary']
+        # Membership is compared before hash completeness by the shared request
+        # verifier; new files have no reused content proof and are refused there.
+        auxiliary['member_sha256'] = dict(previous_auxiliary['member_sha256'])
         observed = observation(root, root_epoch, epoch, directories,
             snapshot['observation']['package_sha256'], dict(snapshot['observation']['member_sha256']))
         if observed['executable_epoch'] != list(executable_before):
@@ -211,13 +243,9 @@ def runtime_boundary_observed(snapshot):
         record = _runtime_record(root, snapshot['record']['package_sha256'])
         if record_before != record:
             collection.refuse('interpreter_or_dependency_changed', root, record_before, record)
-        from .native_security import object_epoch
-        for name, before in directory_epochs.items():
-            after = object_epoch(Path(name).lstat())
-            if before != after:
-                collection.refuse('directory_changed', name, before, after)
+        _check_request_directories(collection, directory_epochs)
         collection.check()
-        return record, observed, directory_epochs
+        return record, observed, directory_epochs, auxiliary
     except RuntimeRefusal:
         raise
     except OSError as exc:

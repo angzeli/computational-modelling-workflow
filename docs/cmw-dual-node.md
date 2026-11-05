@@ -474,6 +474,15 @@ hardware cache grants trust. Legacy evidence retains full verification at both
 boundaries, as do all mutations. Owner/configuration/queue/boot checks still run
 at both boundaries. This is code capability, not an enrollment migration.
 
+Pre-existing compiled bytecode is accepted on an exact enrolled source match,
+as before. Both status collectors inventory the same cache files and directories
+alongside source members. A full request scan reads cache content into private
+evidence; the response compares membership, object epochs and security metadata
+without another content read. Any cache change refuses the response. `-B`
+prevents endpoint writes but still permits existing bytecode reads. This is a
+request-stability guarantee, not a new enrollment pin for bytecode; semantic
+fingerprints and the stricter source-only rule for metadata recovery are unchanged.
+
 Owner-side code derives operation dependencies, never a client skip list.
 Selected reads check current host/runtime/queue before and after each call. Files
 checks implicated storage roots; transfer/fetch retain their exact volume and

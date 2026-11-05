@@ -168,6 +168,7 @@ class RuntimeCollection:
         self.deadline = time.monotonic() + MAX_OBSERVATION_SECONDS
         self.objects, self.epochs, self.hashes, self.read_epochs = {}, {}, {}, {}
         self.transitions, self.reads = {}, {}
+        self.strict_members = set()
         self.bytes_read = 0
         self.generation = 'initial-inventory'
         self.evidence = {'policy': 3, 'status': 'PENDING', 'transitions': [],
@@ -195,6 +196,8 @@ class RuntimeCollection:
         name = str(path.relative_to(self.root))
         previous = self.objects.get(name)
         if previous is not None and previous != value:
+            if name in self.strict_members:
+                self.refuse('auxiliary_changed', name, previous, value, phase=phase)
             eligible = (sys.platform == 'darwin' and stat.S_ISREG(previous[2])
                 and stat.S_ISREG(value[2]) and previous[:8] == value[:8]
                 and previous[9] ^ value[9] == UF_TRACKED)
@@ -217,6 +220,8 @@ class RuntimeCollection:
             self.refuse('security_metadata_incomplete', name, after=epoch)
         before = self.epochs.get(name)
         if before is not None:
+            if name in self.strict_members and before != epoch:
+                self.refuse('auxiliary_changed', name, before, epoch)
             category = _member_difference(before, epoch)
             if category:
                 self.refuse(category, name, before, epoch)
@@ -275,7 +280,36 @@ def _directory_epoch(path, info, security, epochs):
     epochs[str(path)] = object_epoch(after)
 
 
-def inventory(root, *, collection=None, final=False, directory_epochs=None):
+def _auxiliary_member(path):
+    return ('__pycache__' in path.parts or path.suffix in {'.pyc', '.pyo'}
+            or path.name == '.DS_Store')
+
+
+def _request_entries(root, collection):
+    """Bounded traversal of every entry, without following cache symlinks."""
+    from .native_security import object_epoch
+    entries, walked = [], {}
+    def failed(error):
+        raise error
+    for parent, directories, files, descriptor in os.fwalk(root, follow_symlinks=False, onerror=failed):
+        parent = Path(parent)
+        if collection is not None:
+            collection.check()
+        if object_epoch(parent.lstat()) != object_epoch(os.fstat(descriptor)):
+            raise RuntimeRefusal('directory_changed', phase='inventory', path=str(parent))
+        walked[str(parent)] = object_epoch(os.fstat(descriptor))
+        for name in directories + files:
+            path = parent / name
+            info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                raise RuntimeRefusal('nonregular_member', phase='inventory', path=str(path))
+            entries.append(path)
+            if len(entries) > 8192:
+                raise RuntimeRefusal('membership_bound', phase='inventory', path=str(root))
+    return sorted(entries), walked
+
+
+def inventory(root, *, collection=None, final=False, directory_epochs=None, auxiliary=None):
     root = Path(root)
     info = root.lstat()
     if root != root.resolve(strict=True) or not stat.S_ISDIR(info.st_mode):
@@ -285,41 +319,67 @@ def inventory(root, *, collection=None, final=False, directory_epochs=None):
     root_epoch = (info.st_dev, info.st_ino, *security[:4], *security[-2:])
     if directory_epochs is not None:
         _directory_epoch(root, info, security, directory_epochs)
-    entries = []
-    for path in root.rglob('*'):
-        if collection is not None:
-            collection.check()
-        if '__pycache__' not in path.parts:
-            entries.append(path)
-            if len(entries) > 8192:
-                raise RuntimeRefusal('membership_bound', phase='inventory', path=str(root))
-    entries.sort()
+    if auxiliary is not None:
+        entries, walked = _request_entries(root, collection)
+        auxiliary.update(members={}, directories={})
+        entry_types = {}
+        for path in entries:
+            info = path.lstat()
+            if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                raise RuntimeRefusal('nonregular_member', phase='inventory', path=str(path))
+            entry_types[path] = stat.S_IFMT(info.st_mode)
+        if {str(root)} | {str(path) for path in entries if entry_types[path] == stat.S_IFDIR} != set(walked):
+            raise RuntimeRefusal('incomplete_directory_inventory', phase='inventory', path=str(root))
+    else:
+        entries = []
+        for path in root.rglob('*'):
+            if collection is not None:
+                collection.check()
+            if '__pycache__' not in path.parts:
+                entries.append(path)
+                if len(entries) > 8192:
+                    raise RuntimeRefusal('membership_bound', phase='inventory', path=str(root))
+        entries.sort()
     directories = {}
     for path in entries:
-        if path.is_dir():
+        if (entry_types[path] == stat.S_IFDIR if auxiliary is not None else path.is_dir()):
             info = path.lstat()
             if not stat.S_ISDIR(info.st_mode):
                 raise RuntimeRefusal('path_replacement', phase='inventory', path=str(path))
             security = _security(path, info)
-            directories[str(path.relative_to(root))] = (info.st_dev, info.st_ino, *security[:4], *security[-2:])
+            name = str(path.relative_to(root))
+            value = (info.st_dev, info.st_ino, *security[:4], *security[-2:])
+            if auxiliary is not None and '__pycache__' in path.parts:
+                auxiliary['directories'][name] = list(value)
+            else:
+                directories[name] = value
             if directory_epochs is not None:
                 _directory_epoch(path, info, security, directory_epochs)
-    paths = sorted(path for path in entries
-                   if '__pycache__' not in path.parts and path.suffix not in {'.pyc', '.pyo'}
-                   and path.name != '.DS_Store' and (path.is_file() or path.is_symlink()))
-    if not paths or len(paths) > 4096:
+    paths = sorted(path for path in entries if
+                   (entry_types[path] == stat.S_IFREG if auxiliary is not None else
+                    not _auxiliary_member(path) and (path.is_file() or path.is_symlink())))
+    semantic_count = sum(not _auxiliary_member(path) for path in paths)
+    if not semantic_count or semantic_count > 4096 or len(paths) > 8192:
         raise RuntimeRefusal('membership_bound', phase='inventory', path=str(root))
     epoch, total = [], 0
     for path in paths:
         if any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
             raise RuntimeRefusal('path_replacement', phase='inventory', path=str(path))
+        is_auxiliary = _auxiliary_member(path)
+        if is_auxiliary and collection is not None:
+            collection.strict_members.add(str(path.relative_to(root)))
         observed = file_epoch(path, collection=collection)
         if final and collection is not None:
             observed = collection.final_member(path, observed)
         total += observed[2]
         if observed[2] > 16 * 1024**2 or total > 128 * 1024**2:
             raise RuntimeRefusal('member_size_bound', phase='inventory', path=str(path))
-        epoch.append((str(path.relative_to(root)), observed))
+        if is_auxiliary:
+            auxiliary['members'][str(path.relative_to(root))] = list(observed)
+        else:
+            epoch.append((str(path.relative_to(root)), observed))
+    if auxiliary is not None and directory_epochs is not None and directory_epochs != walked:
+        raise RuntimeRefusal('directory_changed', phase='inventory', path=str(root))
     return root_epoch, tuple(epoch), directories
 
 
@@ -377,11 +437,46 @@ def validate_observation(value):
     return value
 
 
-def _validate_boundary_evidence(record, observed, directories):
+def _validate_auxiliary(observed, auxiliary):
+    if (type(auxiliary) is not dict or set(auxiliary) != {'members', 'directories', 'member_sha256'}
+            or any(type(auxiliary[key]) is not dict or len(auxiliary[key]) > 8192 for key in auxiliary)
+            or set(auxiliary['member_sha256']) != set(auxiliary['members'])):
+        raise ValueError('Incomplete request auxiliary evidence')
+    root = Path(observed['root'])
+    semantic = set(observed['members']) | set(observed['directories'])
+    if (set(auxiliary['members']) & set(auxiliary['directories'])
+            or semantic & (set(auxiliary['members']) | set(auxiliary['directories']))
+            or len(semantic) + len(auxiliary['members']) + len(auxiliary['directories']) > 8192):
+        raise ValueError('Overlapping request member classifications')
+    directory_names = set(observed['directories']) | set(auxiliary['directories'])
+    for kind, length in (('members', 12), ('directories', 8)):
+        for name, epoch in auxiliary[kind].items():
+            if type(name) is not str:
+                raise ValueError('Malformed auxiliary path')
+            path = Path(name)
+            if (not name or name == '.' or path.is_absolute() or '..' in path.parts or str(path) != name
+                    or not _valid_epoch(epoch, length)
+                    or not (stat.S_ISREG(epoch[5]) if kind == 'members' else stat.S_ISDIR(epoch[2]))
+                    or not (_auxiliary_member(root / path) if kind == 'members' else
+                            '__pycache__' in (root / path).parts)):
+                raise ValueError('Malformed auxiliary path or epoch')
+            if any(str(parent) not in directory_names for parent in path.parents if parent != Path('.')):
+                raise ValueError('Incomplete auxiliary parent evidence')
+    for digest in auxiliary['member_sha256'].values():
+        if type(digest) is not str or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+            raise ValueError('Malformed auxiliary content evidence')
+
+
+def _complete_auxiliary(auxiliary):
+    return all(epoch[-1] for kind in ('members', 'directories') for epoch in auxiliary[kind].values())
+
+
+def _validate_boundary_evidence(record, observed, directories, auxiliary):
     """Validate the entire private token before any provider indexes into it."""
     from .identity import _validate_runtime
     _validate_runtime(record)
     validate_observation(observed)
+    _validate_auxiliary(observed, auxiliary)
     if (observed['schema'] != 3 or record['package_sha256'] != observed['package_sha256']
             or record['package_origin'] != observed['root']
             or not Path(record['executable']).is_absolute()
@@ -390,7 +485,8 @@ def _validate_boundary_evidence(record, observed, directories):
         raise ValueError('Incomplete request runtime identity')
     root = Path(observed['root'])
     expected = {str(root): observed['root_epoch'],
-                **{str(root / name): epoch for name, epoch in observed['directories'].items()}}
+                **{str(root / name): epoch for name, epoch in observed['directories'].items()},
+                **{str(root / name): epoch for name, epoch in auxiliary['directories'].items()}}
     if type(directories) is not dict or set(directories) != set(expected):
         raise ValueError('Incomplete request directory evidence')
     for name, epoch in directories.items():
@@ -398,6 +494,44 @@ def _validate_boundary_evidence(record, observed, directories):
                 or any(type(item) is not int or item < 0 for item in epoch)
                 or [*epoch[:5], epoch[9]] != expected[name][:6]):
             raise ValueError('Malformed request directory epoch')
+
+
+def _request_imports_coherent(observed, auxiliary, *, diagnostics=None):
+    """Origins must belong to this request's inventory, including existing cache.
+
+    This is not the source-only predicate for metadata recovery. Bytecode was
+    accepted by the full verifier before this request; its private evidence now
+    proves it stayed unchanged without altering the enrolled source hash domain.
+    """
+    root = Path(observed['root'])
+    members = set(observed['members']) | set(auxiliary['members'])
+    for name, module in tuple(sys.modules.items()):
+        if name != 'cmw' and not name.startswith('cmw.'):
+            continue
+        filename = getattr(module, '__file__', None)
+        if filename is None:
+            continue
+        try:
+            path = Path(filename)
+            valid = path.is_absolute() and path.is_relative_to(root) and str(path.relative_to(root)) in members
+            cached = getattr(module, '__cached__', None)
+            if cached is not None:
+                cache_path = Path(cached)
+                # A nonexistent ordinary cache locator is harmless under -B;
+                # any present cache is covered by the complete shared inventory.
+                valid = (valid and cache_path.is_absolute() and cache_path.is_relative_to(root)
+                         and '..' not in cache_path.parts and _auxiliary_member(cache_path))
+                if valid:
+                    cache_name = str(cache_path.relative_to(root))
+                    present = members | set(observed['directories']) | set(auxiliary['directories'])
+                    valid = cache_name not in present or cache_name in auxiliary['members']
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            if diagnostics is not None:
+                diagnostics.append({'module': name, 'path': str(filename), 'reason': 'outside_request_members'})
+            return False
+    return True
 
 
 def _source_imports_coherent(observed, *, diagnostics=None):
@@ -499,7 +633,7 @@ class RuntimeVerifier:
             return self.verify(provider)
         captured = {}
         record = self.verify(lambda: provider(request_boundary=captured))
-        if set(captured) != {'observation', 'directory_epochs'}:
+        if set(captured) != {'observation', 'directory_epochs', 'auxiliary'}:
             # A provider that did not collect the complete request token cannot
             # silently turn a status read into an unverified cached response.
             return self.verify(incomplete)
@@ -508,23 +642,32 @@ class RuntimeVerifier:
 
     def _response_boundary(self, provider, snapshot):
         try:
-            if type(snapshot) is not dict or set(snapshot) != {'record', 'observation', 'directory_epochs'}:
+            if type(snapshot) is not dict or set(snapshot) != {'record', 'observation', 'directory_epochs', 'auxiliary'}:
                 raise ValueError('Malformed request snapshot')
-            _validate_boundary_evidence(snapshot['record'], snapshot['observation'], snapshot['directory_epochs'])
-            if not complete_security(snapshot['observation']):
+            _validate_boundary_evidence(snapshot['record'], snapshot['observation'],
+                                        snapshot['directory_epochs'], snapshot['auxiliary'])
+            if not complete_security(snapshot['observation']) or not _complete_auxiliary(snapshot['auxiliary']):
                 raise ValueError('Incomplete request security evidence')
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeRefusal('incomplete_request_boundary', phase='request-boundary') from exc
         before = snapshot['observation']
         observed = None
         try:
-            record, observed, directories = provider(snapshot)
-            _validate_boundary_evidence(record, observed, directories)
+            record, observed, directories, auxiliary = provider(snapshot)
+            # Both a second full observation and the cheap observation classify
+            # membership first. Added files deliberately have no reused digest.
+            if (type(auxiliary) is dict and all(type(auxiliary.get(key)) is dict
+                                               for key in ('members', 'directories'))
+                    and any(set(auxiliary[key]) != set(snapshot['auxiliary'][key])
+                            for key in ('members', 'directories'))):
+                raise RuntimeRefusal('auxiliary_membership_changed', phase='response-boundary',
+                                     before=snapshot['auxiliary'], after=auxiliary)
+            _validate_boundary_evidence(record, observed, directories, auxiliary)
         except RuntimeRefusal:
             raise
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeRefusal('incomplete_observation', phase='response-boundary', after=observed) from exc
-        if not complete_security(observed):
+        if not complete_security(observed) or not _complete_auxiliary(auxiliary):
             raise RuntimeRefusal('security_metadata_incomplete', phase='response-boundary', after=observed)
         if before != observed or snapshot['directory_epochs'] != directories:
             category = _differences(before, observed)
@@ -533,9 +676,10 @@ class RuntimeVerifier:
         if snapshot['record'] != record:
             raise RuntimeRefusal('interpreter_or_dependency_changed', phase='response-boundary',
                                  before=snapshot['record'], after=record)
-        # The isolated endpoint must not have loaded a new CMW module from a
-        # different origin while the request body ran.
-        if self.isolated and not _source_imports_coherent(observed):
+        if snapshot['auxiliary'] != auxiliary:
+            raise RuntimeRefusal('auxiliary_changed', phase='response-boundary',
+                                 before=snapshot['auxiliary'], after=auxiliary)
+        if not _request_imports_coherent(observed, auxiliary):
             raise RuntimeRefusal('fresh_isolated_observer_required', phase='loaded-code', after=observed)
         return record, observed
 

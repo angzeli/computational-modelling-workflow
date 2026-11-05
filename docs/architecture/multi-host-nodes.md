@@ -430,6 +430,23 @@ interpreter and declared dependency-version identity domain remains unchanged;
 this does not introduce dependency-content pins. Incomplete or lost request
 evidence also taints the verifier. No TTL, root-mtime or hardware cache is used.
 
+The full request collector and response collector use the same bounded,
+no-follow inventory and member classification. Existing installed bytecode
+(`__pycache__`, `.pyc`, `.pyo`) and other excluded artifacts such as `.DS_Store`
+remain outside the enrolled semantic source fingerprint. They are nevertheless
+read once into private request evidence, including hashes, object epochs and
+security metadata; every directory is also captured. The response compares the
+same evidence without rereading content. Unchanged precompiled installations
+pass; cache content, membership, replacement or metadata changes refuse, even
+when source hashes are unchanged. Endpoints use `-B`, which prevents writes but
+does not prevent loading existing bytecode. This proves request-local stability,
+not bytecode authenticity since enrollment: the existing enrollment hash domain
+does not pin bytecode. The source-only import predicate remains required for
+UF_TRACKED metadata recovery; ordinary exact-match status uses the same captured
+source/cache-origin predicate at both boundaries. Installed-wheel acceptance
+compares cheap and repeated-full outcomes for unchanged, modified, added and
+deleted bytecode, including sticky refusal after restoration.
+
 Do not cache host identity merely because an alias matches. An immutable
 session-attested hardware identity may reduce repeated `ioreg` cost only if the
 boot/host/session validation and failure categories remain explicit; this is a
