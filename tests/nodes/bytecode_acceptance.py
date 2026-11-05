@@ -34,7 +34,7 @@ def installed_bytecode_surface(output, *, kind):
     return json.loads(output.read_text())
 
 
-def prepare_installation(owned_prefix):
+def owned_package(owned_prefix):
     """Refuse source/editable/global installs before compiling or changing bytes."""
     prefix = Path(sys.prefix).resolve(strict=True)
     assert Path(owned_prefix).resolve(strict=True) == prefix, 'Wrong owning environment'
@@ -47,7 +47,11 @@ def prepare_installation(owned_prefix):
     origin = Path(spec.origin).absolute()
     assert origin == origin.resolve(strict=True), 'Installed package must not be a source symlink'
     assert origin.is_relative_to(prefix) and 'site-packages' in origin.parts, origin
-    root = origin.parent
+    return origin.parent
+
+
+def prepare_installation(owned_prefix):
+    root = owned_package(owned_prefix)
     sources = sorted(root.rglob('*.py'))
     assert 0 < len(sources) <= 4096, 'Unexpected installed Python source inventory'
     for source in sources:

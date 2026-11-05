@@ -12,6 +12,21 @@ class LoadedCodeEvidenceTests(unittest.TestCase):
     setUp=fixtures.RuntimeObservationTests.setUp
     touch_metadata=fixtures.RuntimeObservationTests.touch_metadata
 
+    def test_import_guard_alone_cannot_authorize_metadata_recovery(self):
+        self.touch_metadata()
+        for isolation, no_write, permitted in ((0, 1, False), (1, 0, False), (1, 1, True)):
+            with self.subTest(isolation=isolation, no_write=no_write):
+                flags = SimpleNamespace(isolated=isolation, dont_write_bytecode=no_write)
+                with patch.object(sys, 'flags', flags), patch.object(sys, 'dont_write_bytecode', True):
+                    verifier = RuntimeVerifier(self.original, self.epoch, process_started_ns=0)
+                with patch('cmw.nodes.runtime_observation._source_imports_coherent', return_value=True):
+                    if permitted:
+                        self.assertEqual(verifier.verify(runtime_observed), self.original)
+                    else:
+                        with self.assertRaises(RuntimeRefusal) as refused:
+                            verifier.verify(runtime_observed)
+                        self.assertEqual(refused.exception.evidence['loaded_code']['failed_predicate'], 'not_isolated')
+
     def test_nonisolated_or_incoherent_imports_refuse_without_changing_original(self):
         self.touch_metadata()
         for isolated in (False,True):
