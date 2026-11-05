@@ -601,6 +601,51 @@ in the task worktree, summarized in `status-final-summary.json`, using
 `.venv/measure_status.py`. Preliminary runs without recorded external member IDs
 are excluded from this final matched table.
 
+#### Status cost after binding Darwin security functions once (2026-11-05)
+
+Four serial runs on the MacBook used the §3.5 method above. The baseline was
+`aa95e88`; the candidate includes the stock-launch, diagnosis and native
+binding changes in this PR. Source-only editable installations had zero CMW
+cache files. The baseline and candidate wheels had all 232 and 236 modules
+precompiled, respectively. Each endpoint used its own installation, Python
+3.14.6, `-I -B` and verified priority 19. All 40 status frames reported BUSY
+with the same eight external engine PIDs and the same sandbox node, queue and
+storage identities. Phase 0 measured a different node.
+
+| Measurement | Source baseline | Source candidate | Compiled baseline | Compiled candidate |
+| --- | ---: | ---: | ---: | ---: |
+| First status wall / total CPU (s) | 1.363 / 0.892 | 0.540 / 0.437 | 0.766 / 0.711 | 0.679 / 0.626 |
+| Warm median wall (s) | 0.572 | 0.264 | 0.695 | 0.527 |
+| Warm wall minimum–maximum (s) | 0.553–1.047 | 0.250–0.735 | 0.656–0.873 | 0.501–0.565 |
+| Warm median observer / child CPU (s) | 0.526 / 0.039 | 0.220 / 0.043 | 0.648 / 0.036 | 0.482 / 0.037 |
+| Warm median total CPU (s) | 0.566 | 0.261 | 0.687 | 0.521 |
+| Median runtime verification wall / CPU share | 85.4% / 85.5% | 58.1% / 58.6% | 87.6% / 87.6% | 78.9% / 77.9% |
+| Whole-session wall / total CPU (s) | 45.603 / 6.249 | 45.323 / 3.859 | 45.782 / 7.086 | 45.510 / 6.108 |
+| Full scans / boundary comparisons per status | 2 / 0 | 1 / 1 | 2 / 0 | 1 / 1 |
+| Warm telemetry fresh / warming-up | 4 / 5 | 9 / 0 | 5 / 4 | 9 / 0 |
+
+Against the matched baseline, warm median total CPU fell by
+53.8% on the source installation and 24.1% on the precompiled
+installation. Darwin binds the nine libc functions once at module import.
+Each probe still opens its descriptor, allocates a fresh ACL record and checks
+the object epoch, ACL and xattrs. Within one file observation, callbacks reuse
+the relative filename. Both request boundaries collect fresh evidence.
+These timings measure the combined PR changes.
+
+**Mini polling estimate.** If the Mini uses the same CPU seconds per request as
+this MacBook, one client polling every five seconds uses 0.261 / 5 =
+0.052 of one core for source, or 0.521 / 5 = 0.104 for a
+precompiled wheel (5.2% or 10.4% of one core). Across 18 logical CPUs that
+is 0.29% or 0.58% of nominal capacity. This extrapolation covers status
+requests only. The whole-session row includes the independent sampler and
+startup. SSH, additional requests and the Mini's own hardware require a
+separate measurement.
+
+Raw frames are in the task worktree under `.venv/logs/`, named
+`status-{source,precompiled}-baseline-binding.json` and
+`status-{source,precompiled}-candidate-binding-qualified.json`. Earlier candidate
+runs preceding the final startup-authority and Doctor changes are excluded.
+
 ### 3.6 Cancellation: D13–D16
 
 [`contracts.py`](../../src/cmw/nodes/contracts.py) adds pure `CancelMode`,

@@ -47,14 +47,13 @@ def _extended_security(path, *, observe=None):
     if sys.platform != 'darwin':
         raise RuntimeRefusal('security_metadata_unavailable', phase='inventory', path=str(path))
     import ctypes
-    from .native_security import acl_evidence, object_epoch, SecurityReadError
-    libc = ctypes.CDLL(None, use_errno=True)
+    from .native_security import _api, acl_evidence, object_epoch, SecurityReadError
+    try:
+        libc = _api()
+    except SecurityReadError as exc:
+        raise RuntimeRefusal('security_metadata_unavailable', phase='security-api', path=str(path),
+                             api=exc.api, errno=exc.errno, security_state=exc.state) from exc
     listing, getting = libc.flistxattr, libc.fgetxattr
-    listing.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
-    listing.restype = ctypes.c_ssize_t
-    getting.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,
-                        ctypes.c_uint32, ctypes.c_int]
-    getting.restype = ctypes.c_ssize_t
     before = path.lstat()
     if observe is not None:
         observe(object_epoch(before), 'security-before')
@@ -137,7 +136,8 @@ def file_epoch(path, *, collection=None):
     if collection is None:
         return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
                 *_security(path, info))
-    observe = lambda value, phase: collection.object(path, value, phase)
+    name = str(path.relative_to(collection.root))
+    observe = lambda value, phase: collection.object(name, value, phase)
     observe(object_epoch(info), 'stat-before')
     extended = _extended_security(path, observe=observe)
     after = path.lstat()
@@ -146,7 +146,7 @@ def file_epoch(path, *, collection=None):
              after.st_mode, after.st_uid, after.st_gid, getattr(after, 'st_flags', 0),
              after.st_nlink, _security_digest(extended),
              not str(extended.get('__cmw_acl__', '')).startswith('UNAVAILABLE:'))
-    collection.security(path, epoch)
+    collection.security(name, epoch)
     return epoch
 
 
@@ -201,9 +201,8 @@ class RuntimeCollection:
         self.evidence.update(status='REFUSED', refusal=error.evidence)
         raise error
 
-    def object(self, path, value, phase):
+    def object(self, name, value, phase):
         self.check()
-        name = str(path.relative_to(self.root))
         previous = self.objects.get(name)
         if previous is not None and previous != value:
             if name in self.strict_members:
@@ -224,8 +223,7 @@ class RuntimeCollection:
             self.evidence['transitions'].append(event)
         self.objects[name] = value
 
-    def security(self, path, epoch):
-        name = str(path.relative_to(self.root))
+    def security(self, name, epoch):
         if not epoch[-1]:
             self.refuse('security_metadata_incomplete', name, after=epoch)
         before = self.epochs.get(name)
@@ -249,9 +247,9 @@ class RuntimeCollection:
         self.reads[name] = count + 1
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(descriptor, 'rb') as handle:
-            self.object(path, object_epoch(os.fstat(handle.fileno())), 'content-open')
+            self.object(name, object_epoch(os.fstat(handle.fileno())), 'content-open')
             data = handle.read(16 * 1024**2 + 1)
-            self.object(path, object_epoch(os.fstat(handle.fileno())), 'content-after')
+            self.object(name, object_epoch(os.fstat(handle.fileno())), 'content-after')
         self.bytes_read += len(data)
         self.evidence['bytes_read'] = self.bytes_read
         if len(data) != before[2] or self.bytes_read > MAX_READ_BYTES:

@@ -35,6 +35,15 @@ class NativeSecurityTests(unittest.TestCase):
         self.assertTrue(root[-1])
         self.assertTrue(all(epoch[-1] for _, epoch in members))
 
+    def test_shared_bindings_recollect_xattrs_on_each_observation(self):
+        with patch('ctypes.CDLL', side_effect=AssertionError('unexpected rebinding')):
+            before = file_epoch(self.file)
+            subprocess.run(['/usr/bin/xattr', '-w', 'cmw.test', 'changed', str(self.file)],
+                           check=True, capture_output=True)
+            after = file_epoch(self.file)
+        self.assertNotEqual(before[-2], after[-2])
+        self.assertTrue(after[-1])
+
     def test_explicit_file_and_directory_acl_are_present_and_changes_differ(self):
         before = file_epoch(self.file)
         for path, rule in ((self.file, 'everyone allow read'),
