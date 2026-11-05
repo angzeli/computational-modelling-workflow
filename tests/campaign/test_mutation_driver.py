@@ -14,6 +14,13 @@ class MutationDriverTests(unittest.TestCase):
         self.assertEqual(len({case['name'] for case in plan}), 6)
         self.assertTrue(all(case['target_line'] > 0 for case in plan))
 
+    def test_missing_and_duplicated_targets_refuse_before_mutation(self):
+        for case in driver.CASES:
+            for count in (0, 2):
+                with self.subTest(case=case['name'], count=count):
+                    with self.assertRaisesRegex(ValueError, f"{case['name']}.*expected exactly one.*found {count}"):
+                        driver.apply_mutation(case, '\n'.join([case['before']] * count))
+
     def test_only_reached_specific_invariant_failure_kills(self):
         case = {'expected': 'EXACT_INVARIANT'}
         baseline = {'returncode': 0, 'result': {'status': 'PASS', 'target_execution': [1]}}

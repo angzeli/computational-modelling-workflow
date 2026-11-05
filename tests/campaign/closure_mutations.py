@@ -33,8 +33,8 @@ CASES = [
          test_file='tests/campaign/mutation_oracles.py', expected='JobsError not raised',
          invariant='Review requires the exact selected immutable attempt before inspection.'),
     dict(name='approved-successor-digest', file='src/cmw/jobs/successor.py',
-         before="        if plan['status']!='READY' or digest!=approved_digest:",
-         after="        if plan['status']!='READY':",
+         before="        if plan['status'] != 'READY' or digest != approved_digest or plan['spec'] != spec:",
+         after="        if plan['status'] != 'READY' or plan['spec'] != spec:",
          test='tests.campaign.mutation_oracles.SuccessorApprovalTests.test_changed_source_refuses_frozen_approval_before_publication',
          test_file='tests/campaign/mutation_oracles.py', expected='SUCCESSOR_SOURCE_APPROVAL: changed source accepted the frozen reviewed digest',
          invariant='Changed native source invalidates the approved plan before publication.'),
@@ -73,13 +73,19 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def apply_mutation(case, source):
+    count = source.count(case['before'])
+    if count != 1:
+        raise ValueError(f"{case['name']} in {case['file']}: expected exactly one mutation target, found {count}")
+    return source.replace(case['before'], case['after'], 1)
+
+
 def preflight(checkout):
     results = []
     for case in CASES:
         path = checkout / case['file']
         source = path.read_text()
-        assert source.count(case['before']) == 1, ('nonunique mutation target', case['name'])
-        ast.parse(source.replace(case['before'], case['after']))
+        ast.parse(apply_mutation(case, source))
         test = checkout / case['test_file']
         tree = ast.parse(test.read_text())
         class_name, method = case['test'].split('.')[-2:]
@@ -280,7 +286,7 @@ def main():
                 if baseline['returncode'] != 0 or baseline['result']['status'] != 'PASS':
                     result['status'] = 'BASELINE_FAILED'; save(destination / 'result.json', result)
                     continue
-                changed = source.replace(case['before'], case['after'])
+                changed = apply_mutation(case, target.read_text())
                 target.write_text(changed)
                 patch = destination / 'mutation.patch'
                 patch.write_text(''.join(difflib.unified_diff(source.splitlines(keepends=True), changed.splitlines(keepends=True),
@@ -309,7 +315,9 @@ def main():
             report['ledger_audit'].append({'path': str(path), 'outcomes': outcome})
         assert all(item['outcomes']['execution_passed'] for item in report['ledger_audit'])
         report['observation_qualified'] = all(item['outcomes']['qualified'] for item in report['ledger_audit'])
-        assert len(report['cases']) == len(plan) and all(case['status'] == 'KILLED' for case in report['cases'])
+        missed = [(case['name'], case['status']) for case in report['cases'] if case['status'] != 'KILLED']
+        if len(report['cases']) != len(plan) or missed:
+            raise AssertionError(f'Mutation controls must reach and kill every selected mutant: {missed}')
         report['status'] = 'PASS'
     except BaseException as exc:
         report.update(status='FAIL', error={'type': type(exc).__name__, 'message': str(exc), 'traceback': traceback.format_exc()})
