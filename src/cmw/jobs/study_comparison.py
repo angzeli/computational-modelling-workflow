@@ -134,7 +134,7 @@ def inspect_case(directory, *, policy_path, spec_path, expected_target, expected
         if finalization_path is not None:
             verified = verify_finalization(finalization_path, policy_path=policy_path)
             result['finalization'] = _status(verified['valid'])
-            if not verified['valid']:
+            if verified['valid'] is not True:
                 result['reasons'].extend(verified['findings'])
                 return result
             record = verified['record']
@@ -180,8 +180,13 @@ def inspect_case(directory, *, policy_path, spec_path, expected_target, expected
             expected_target=expected_target)
         result['process'] = {k: checked_execution.get(k) for k in ('status', 'exit_code', 'signal', 'checks')}
         result['domains']['process'] = _status(checked_execution.get('operational_success'))
-        if checked_execution.get('checks', {}).get('owner_target') is not True:
+        if (checked_execution.get('checks', {}).get('owner_target') is not True
+                and checked_execution['status'] != 'unverifiable'):
             raise ValueError('Result does not match the exact original global attempt')
+        for observation in (checked_execution, execution):
+            if observation.get('status') == 'unverifiable':
+                result['reasons'].extend(item['message'] for item in observation['findings'])
+                return result
         if execution.get('binding', {}).get('state_directory'):
             result['protected_directories'].append(execution['binding']['state_directory'])
         files = {}

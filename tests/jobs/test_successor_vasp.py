@@ -179,6 +179,11 @@ class VaspSuccessorTests(unittest.TestCase):
         self.save()
         result = self.preview()
         self.assertEqual(result['source']['qualification'], 'accepted-periodic-structure')
+        with patch('cmw.jobs.successor_vasp.verify_finalization',
+                   return_value={'valid': None, 'findings': ['original queue unavailable']}):
+            with self.assertRaisesRegex(VaspSuccessorError, 'unverifiable.*original queue unavailable'):
+                self.materialize(result)
+        self.assertFalse(Path(self.options['output']).exists())
         self.parent['attempt_id'] = 'b' * 32
         with self.assertRaisesRegex(VaspSuccessorError, 'different parent attempt'):
             self.preview()

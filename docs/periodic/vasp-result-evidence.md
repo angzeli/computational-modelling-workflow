@@ -205,11 +205,28 @@ It requires one exact positive numeric Job ID and 32-character lowercase attempt
 UUID, matching run directory and attempt log paths, `Done`, zero exit in both
 records, explicit absent signal/cancellation, and ordered finite timestamps.
 A copied receipt at an unrelated path is insufficient. No queue is created or
-mutated. When the explicitly recorded original database exists, the adapter
-reads one selected native attempt and enrollment metadata without process scans.
+mutated. The adapter reads the selected native attempt and enrollment metadata
+in one read-only transaction on the original database. It makes up to three
+attempts, with a 250 ms SQLite busy timeout per attempt and 50 ms between
+attempts (850 ms of configured waits in total).
 This rejects a schema-4 snapshot relabeled as schema 2/3 even if its exported
-enrollment fields were removed. Legacy schema-2/3 saved records without a
-database remain readable under the original local-evidence limitations.
+enrollment fields were removed. A schema-2/3 result published from saved
+evidence alone retains its original local-evidence scope. If publication
+verified an original queue, reverification still requires that queue even for
+older records whose only record of the read is in the native execution checks.
+
+When a live queue is required or observed, `execution.live_queue.status` records
+`MATCH`, `CONTRADICTED` or `UNAVAILABLE`. Contradictions carry a
+`differences` list with the field path and its stored and observed values.
+For example, a readable queue that shows the selected row is gone contradicts
+the binding. A lock or a failed open leaves the row's existence unverifiable.
+POTCAR comparisons report file identity (path, size and digest) only.
+When the original queue is unavailable, the saved snapshot alone cannot
+establish the current producer binding. A separately established discrepancy
+in the recorded sources or producer still invalidates the record.
+If only the queue is unavailable, `binding.checks.execution` and `binding.valid`
+are null and `binding.execution.status` is `unverifiable`. The verification
+response keeps the published record separate from its `observed_binding`.
 
 Schema 4 exports the exact `queue_identity` (node, queue, host, canonical state
 root and original root/database filesystem identities). These must match the
@@ -506,9 +523,15 @@ published. Dry run checks and previews the result without writing anything.
 | Operation | Exit semantics |
 | --- | --- |
 | Inspection without policy | `0`: evidence inspected, not scientific acceptance; `1`: invalid read/parse; `2`: unsupported mode or segment selection required. |
-| Inspection with policy | `0`: policy `PASS`; `1`: `FAIL`; `2`: `UNKNOWN` or `UNSUPPORTED`. Invalid requests/policy/specification exceptions also return `2`. |
-| Finalization | `0`: successful preview or completed publication; `2`: rejected request, failed eligibility or publication failure. Inspect `publication.state` and structured error details. |
-| Record verification | `0`: recorded content/artifacts and required sources verify; `2`: invalid record, changed source, differing requested policy or request error. |
+| Inspection with policy | `0` for policy `PASS`, `1` for `FAIL`, `75` when a required live queue is temporarily unverifiable and the policy is `UNKNOWN`, and `2` for other `UNKNOWN`, `UNSUPPORTED` or invalid requests. |
+| Finalization | `0` for successful preview or completed publication, `75` for a temporarily unverifiable required queue, and `2` for other refusals or publication failure. A temporary refusal leaves the destination untouched. |
+| Record verification | `0` for `VERIFIED` (`valid: true`), `2` for `INVALID` (`valid: false`) or a request error, and `75` for `UNVERIFIABLE` (`valid: null`) when required live evidence is unavailable. |
+
+For `UNVERIFIABLE`, retry the same verification when the original queue on its
+owner is available. Only `VERIFIED` returns artifacts for reuse. Verification
+leaves the published record intact for all three outcomes. An accepted-structure
+successor requires successful reverification, and a study cannot qualify a
+finalized energy from an unverifiable record.
 
 Publication writes only:
 

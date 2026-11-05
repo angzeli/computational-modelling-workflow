@@ -155,7 +155,9 @@ def _accepted(options, parent, state_directory, observed, sources):
                  'Accepted record has malformed source identity')
         sources.observe(str(_path(source['resolved_path'])), 'accepted_required_source')
     checked = verify_finalization(path)
-    _require(checked['valid'], 'Accepted finalization no longer verifies: ' + '; '.join(map(str, checked['findings'])))
+    if checked['valid'] is not True:
+        reason = 'Accepted finalization is unverifiable' if checked['valid'] is None else 'Accepted finalization no longer verifies'
+        raise VaspSuccessorError(reason + ': ' + '; '.join(map(str, checked['findings'])))
     evidence = checked['record']['evidence']
     execution = evidence['binding']['execution']
     job = execution['job']

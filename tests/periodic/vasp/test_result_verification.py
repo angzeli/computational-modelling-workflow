@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from copy import deepcopy
+import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from cmw.cli import main
 from cmw.core.artifacts import artifact_from_dict
+from cmw.jobs.store import Store
 from cmw.periodic.vasp.result_finalization import (
     _record_identity, finalize_result, verify_finalization,
 )
-from .result_case import make_case, write_json
+from cmw.periodic.vasp.results import inspect_result
+from .result_case import digest, make_case, write_json
+from .result_fixtures import write_run
 
 
 class FinalizationRecordVerificationTests(unittest.TestCase):
@@ -47,6 +54,44 @@ class FinalizationRecordVerificationTests(unittest.TestCase):
         self.assertEqual(len(result["artifacts"]), 1)
         self.assertIsNone(result["artifacts"][0].validation.checks["ionic.relaxation"])
         self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+
+    def test_unavailable_parent_withholds_artifacts_but_child_source_change_remains_invalid(self):
+        parent_case = make_case(self.root / "parent", relaxation=True, constrained=True)
+        parent_case["state"].chmod(0o700)
+        store = Store(parent_case["state"])
+        job = json.loads(parent_case["snapshot"].read_text())["jobs"][0]
+        with store.transaction() as conn:
+            conn.execute("INSERT INTO jobs(id, data) VALUES (?, ?)", (job["id"], json.dumps(job)))
+        parent = finalize_result(parent_case["run"], policy_path=parent_case["policy_path"],
+            spec_path=parent_case["spec_path"], scratch_root=parent_case["scratch"], record_directory="complete")
+        parent_path = parent["publication"]["record_path"]
+        artifact = parent["artifact_bundle"]["artifacts"][0]
+        geometry = artifact["metadata"]["periodic_geometry"]
+        write_run(self.case["run"], positions=geometry["cartesian"], flags=geometry["constraints"])
+        evidence = inspect_result(self.case["run"])
+        self.case["spec"].update(snapshot_id=evidence["snapshot_id"], segment_id=evidence["selected_segment"]["segment_id"],
+            source_identities={s["role"]: s["sha256"] for s in evidence["sources"]},
+            parents=[{"record": parent_path, "sha256": digest(parent_path),
+                      "artifact_id": artifact["artifact_id"], "relationship": "input-structure"}])
+        write_json(self.case["spec_path"], self.case["spec"])
+        child = finalize_result(self.case["run"], policy_path=self.case["policy_path"],
+            spec_path=self.case["spec_path"], scratch_root=self.case["scratch"], record_directory="child")
+        child_path = child["publication"]["record_path"]
+        store.path.unlink()
+        for status, valid, expected_exit in (("UNVERIFIABLE", None, 75), ("INVALID", False, 2)):
+            with self.subTest(status=status):
+                if status == "INVALID":
+                    with (self.case["run"] / "OSZICAR").open("a") as output:
+                        output.write("changed child source after publication\n")
+                with redirect_stdout(io.StringIO()) as console:
+                    exit_code = main(["vasp", "verify-result-record", child_path, "--json"])
+                result = json.loads(console.getvalue())
+                self.assertEqual(exit_code, expected_exit, result["findings"])
+                self.assertEqual(result["status"], status)
+                self.assertIs(result["valid"], valid)
+                self.assertEqual(result["artifacts"], [])
+                if status == "INVALID":
+                    self.assertTrue(any("OSZICAR" in diff["field"] for diff in result["differences"]))
 
     def test_exact_schema_kind_and_complete_publication_are_required(self):
         for mutation in (

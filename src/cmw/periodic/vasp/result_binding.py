@@ -115,13 +115,13 @@ def _resolved_spec(spec, base):
     return resolved
 
 
-def inspect_binding(spec_path, evidence, policy_id):
+def inspect_binding(spec_path, evidence, policy_id, *, require_live_queue=False):
     """Validate one declaration against already parsed native evidence, read-only.
 
     Parent declaration syntax is checked here; the artifact finalizer must verify
     the referenced parent records and required core artifact relationships.
     Only an explicit runner declaration reads and hashes POTCAR/KPOINTS. No
-    input payload text is retained, and no queue database is opened.
+    input payload text is retained. The original queue, when needed, is read-only.
     """
     result = {"schema_version": 1, "kind": "vasp-retrospective-binding", "valid": False,
               "input_binding": False, "input_comparison_valid": False, "execution": None,
@@ -135,9 +135,9 @@ def inspect_binding(spec_path, evidence, policy_id):
               ]}
 
     def check(name, passed, message):
-        result["checks"][name] = passed is True
+        result["checks"][name] = None if passed is None else passed is True
         if passed is not True:
-            result["findings"].append({"code": "binding." + name, "severity": "error",
+            result["findings"].append({"code": "binding." + name, "severity": "unknown" if passed is None else "error",
                                        "scope": "binding", "message": message})
 
     try:
@@ -175,7 +175,8 @@ def inspect_binding(spec_path, evidence, policy_id):
         execution = inspect_execution(declared["snapshot"], declared["receipt"],
                                       job_id=declared["job_id"], attempt_id=declared["attempt_id"],
                                       run_directory=run_directory,
-                                      runner_record=declared.get("runner_record"), native_sources=native)
+                                      runner_record=declared.get("runner_record"), native_sources=native,
+                                      require_live_queue=require_live_queue)
         result["execution"] = execution
         result["sources"].extend(execution["sources"])
         result["findings"].extend(execution["findings"])
@@ -183,8 +184,11 @@ def inspect_binding(spec_path, evidence, policy_id):
                     if item["role"] in {"jobs_snapshot", "jobs_receipt"}}
         check("execution_source_identities", observed == declared["source_identities"],
               "Saved Jobs snapshot or receipt content differs from its declared exact identity")
-        check("execution", execution["status"] == "eligible",
-              "Saved native Jobs evidence does not establish successful terminal completion")
+        if execution["status"] == "unverifiable":
+            check("execution", None, "The original Jobs queue is temporarily unverifiable")
+        else:
+            check("execution", execution["status"] == "eligible",
+                  "Saved native Jobs evidence does not establish successful terminal completion")
 
     parsed = evidence.get("filesystem_inputs", {})
     poscar = parsed.get("POSCAR", {})
@@ -273,5 +277,8 @@ def inspect_binding(spec_path, evidence, policy_id):
             if isinstance(exc, SourceSnapshotError):
                 result["sources"].append(exc.record)
             check("preparation_record", False, str(exc))
-    result["valid"] = bool(result["checks"]) and all(result["checks"].values())
+    checks = result["checks"].values()
+    result["valid"] = all(checks)
+    if None in checks and False not in checks:
+        result["valid"] = None
     return result

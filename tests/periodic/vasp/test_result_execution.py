@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from cmw.jobs.store import Store
 from cmw.periodic.vasp.result_execution import inspect_execution
 
 
@@ -47,6 +48,38 @@ class JobsExecutionEvidenceTests(unittest.TestCase):
 
     def codes(self, result):
         return {item["code"] for item in result["findings"]}
+
+    def test_malformed_native_row_and_enrollment_values_are_never_printed(self):
+        self.state.chmod(0o700)
+        store = Store(self.state)
+        enrollment = store.enroll_queue("fixture-node", "fixture-host")
+        snapshot = {**self.snapshot, "schema": 4, "queue_identity": enrollment}
+        private = "synthetic-private-value-for-redaction-test"
+        changed = {**self.job, "argv": {"private-argument-name": private}, "exit_code": 17}
+        with store.transaction() as connection:
+            connection.execute("INSERT INTO jobs(id, data) VALUES (?, ?)", (self.job["id"], json.dumps(changed)))
+        result = self.inspect(snapshot=snapshot)
+        self.assertEqual(result["live_queue"]["status"], "CONTRADICTED")
+        self.assertIn({"field": "job.argv", "stored": self.job["argv"], "observed": {"type": "dict"}},
+                      result["live_queue"]["differences"])
+        self.assertIn({"field": "job.exit_code", "stored": 0, "observed": 17},
+                      result["live_queue"]["differences"])
+        encoded = json.dumps(result)
+        self.assertNotIn("private-argument-name", encoded)
+        self.assertNotIn(private, encoded)
+
+        corrupt = {**enrollment, "token": private, "potcar_content": {"nested-private-field": private}}
+        with store.transaction() as connection:
+            connection.execute("UPDATE meta SET value=? WHERE key='queue_identity'", (json.dumps(corrupt),))
+        result = self.inspect(snapshot=snapshot)
+        self.assertEqual(result["status"], "invalid")
+        self.assertEqual(result["live_queue"]["status"], "CONTRADICTED")
+        for key in ("token", "potcar_content"):
+            self.assertIn({"field": f"queue_identity.{key}", "stored": {"missing": True},
+                           "observed": {"present": True, "redacted": True}}, result["live_queue"]["differences"])
+        encoded = json.dumps(result)
+        self.assertNotIn("nested-private-field", encoded)
+        self.assertNotIn(private, encoded)
 
     def test_schema3_preserves_exact_terminal_evidence_requirements(self):
         snapshot = {**self.snapshot, "schema": 3}

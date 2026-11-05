@@ -12,8 +12,61 @@ import json
 import math
 from pathlib import Path
 import re
+import sqlite3
+import time
 
+from .result_differences import field_differences
 from .result_sources import MAX_JSON_BYTES, SourceSnapshotError, read_json_source
+
+
+_LIVE_QUEUE_ATTEMPTS = 3
+_LIVE_QUEUE_BUSY_TIMEOUT = 0.25
+_LIVE_QUEUE_RETRY_DELAY = 0.05
+_JOB_FIELDS = ("id", "attempt_id", "engine", "argv", "cwd", "layout", "status", "started_at",
+               "finished_at", "exit_code", "signal", "cancel_requested", "termination_requested",
+               "logs", "node_submission", "worker_protocol")
+_SUSPENSION_FIELDS = ("backend", "protocol", "phase", "desired", "revision", "request",
+                      "inhibited", "intervals", "capability", "clock", "accounting_uncertain")
+_LOCATION_EXAMPLE = {"state_root": "", "root_identity": [0, 0], "database_identity": [0, 0]}
+_ENROLLMENT_EXAMPLE = {**_LOCATION_EXAMPLE, "schema": 1, "node_id": "", "queue_id": "", "host_id": ""}
+_OPTIONAL_EXAMPLES = {
+    "signal": 0, "exit_code": 0, "worker_protocol": 0, "finished_at": 0.0, "started_at": 0.0,
+    "termination_requested": False, "layout": {"path": "", "target_id": "", "attempt_id": ""},
+    "clock": {"kind": "", "boot": 0.0},
+    "node_submission": {"schema": 1, "node_id": "", "queue_id": "", "request_id": "", "digest": "", "runtime_id": ""},
+}
+_UNEXPECTED = object()
+_REDACTED = {"present": True, "redacted": True}
+
+
+def _diagnostic_value(value, example):
+    """An unexpected field exposes its presence; an unexpected type exposes its name."""
+    if example is _UNEXPECTED:
+        return _REDACTED
+    if value is None:
+        return None
+    if isinstance(value, dict) and isinstance(example, dict):
+        return {key: _diagnostic_value(item, example.get(key, _UNEXPECTED)) for key, item in value.items()}
+    if isinstance(value, list) and isinstance(example, list):
+        item_example = example[0] if example else _UNEXPECTED
+        return [_diagnostic_value(item, example[i] if i < len(example) else item_example) for i, item in enumerate(value)]
+    if type(value) is type(example) or (type(value) in (int, float) and type(example) is float):
+        return value
+    return {"type": type(value).__name__}
+
+
+def _native_differences(field, stored, observed, example):
+    # Redaction only formats the result. Two different private values can have
+    # the same safe display and must still contradict the original record.
+    if not field_differences(field, stored, observed):
+        return []
+    before, after = _diagnostic_value(stored, example), _diagnostic_value(observed, example)
+    if type(stored) is not type(observed):
+        if field == "queue_identity" and stored is None and isinstance(observed, dict):
+            return [{"field": field, "stored": None, "observed": {"type": "dict"}},
+                    *field_differences(field, {}, after)]
+        return [{"field": field, "stored": before, "observed": after}]
+    return field_differences(field, before, after) or [{"field": field, "stored": before, "observed": after}]
 
 
 def _timestamp(value: object) -> bool:
@@ -48,6 +101,7 @@ def _inspect_execution(
     native_sources=(),
     expected_target: dict | None = None,
     snapshot_document: dict | None = None,
+    require_live_queue: bool = False,
 ) -> dict:
     """Check a selected Jobs invocation and its native receipt, read-only.
 
@@ -88,7 +142,13 @@ def _inspect_execution(
 
     def finish() -> dict:
         values = tuple(result["checks"].values())
-        result["status"] = "invalid" if False in values else "unknown" if None in values else "eligible"
+        live_status = result.get("live_queue", {}).get("status")
+        if False in values or live_status == "CONTRADICTED":
+            result["status"] = "invalid"
+        elif live_status == "UNAVAILABLE":
+            result["status"] = "unverifiable"
+        else:
+            result["status"] = "unknown" if None in values else "eligible"
         result["operational_success"] = (
             True if result["status"] == "eligible" else False if result["status"] == "invalid" else None
         )
@@ -175,7 +235,7 @@ def _inspect_execution(
         "scientific_source_binding": "not_provided_by_jobs",
     }
     result["snapshot_schema"] = snapshot["schema"]
-    _inspect_queue(snapshot, job, root, expected_target, result, check)
+    _inspect_queue(snapshot, job, root, expected_target, result, check, require_live_queue)
     suspension = job.get("suspension")
     if suspension is not None:
         supported = (isinstance(suspension, dict) and type(suspension.get("protocol")) is int
@@ -239,7 +299,46 @@ def _inspect_execution(
     return finish()
 
 
-def _inspect_queue(snapshot, job, root, expected_target, result, check):
+class _QueueUnavailable(Exception):
+    """The original database could not be observed within the bounded read budget."""
+
+
+def _read_original_queue(root, job_id):
+    from cmw.jobs.lifecycle import JobObservationUnavailable, read_job_with_identity
+    from cmw.jobs.store import Store
+
+    for attempt in range(_LIVE_QUEUE_ATTEMPTS):
+        try:
+            return read_job_with_identity(Store(root), job_id, timeout=_LIVE_QUEUE_BUSY_TIMEOUT)
+        except sqlite3.Error as exc:
+            # Fixed queries against missing/malformed native tables are evidence of
+            # an incompatible database. BUSY, LOCKED and I/O/open errors are not.
+            if (getattr(exc, "sqlite_errorcode", 0) & 255) in {
+                    sqlite3.SQLITE_ERROR, sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
+                raise
+            reason = exc
+        except (OSError, JobObservationUnavailable) as exc:
+            reason = exc
+        if attempt + 1 < _LIVE_QUEUE_ATTEMPTS:
+            time.sleep(_LIVE_QUEUE_RETRY_DELAY)
+    raise _QueueUnavailable(str(reason)) from reason
+
+
+def _selected_fields(record, fields):
+    # Native legacy records can omit optional fields equivalent to explicit null.
+    return {key: record.get(key) for key in fields}
+
+
+def _native_field_differences(prefix, saved, current, fields):
+    differences = []
+    for key in fields:
+        stored, observed = saved.get(key), current.get(key)
+        example = stored if stored is not None else _OPTIONAL_EXAMPLES.get(key)
+        differences.extend(_native_differences(f"{prefix}.{key}", stored, observed, example))
+    return differences
+
+
+def _inspect_queue(snapshot, job, root, expected_target, result, check, require_live_queue):
     """Revalidate one explicit original queue, never discover or create state."""
     schema = snapshot["schema"]
     declared = snapshot.get("queue_identity")
@@ -248,43 +347,93 @@ def _inspect_queue(snapshot, job, root, expected_target, result, check):
               and (isinstance(snapshot.get("controller", {}), dict)
                    and snapshot.get("controller", {}).get("schema", schema) == schema),
               "Enrolled schema-4 evidence must not be downgraded to a legacy snapshot")
-    actual, current = None, None
-    if root is not None and (root / "queue.sqlite3").exists():
-        from cmw.jobs.lifecycle import read_job
-        from cmw.jobs.store import JobsError, Store
+    needs_live = require_live_queue or schema == 4 or declared is not None or expected_target is not None
+    if root is not None and not needs_live:
+        # Historical schema-2/3 local evidence may never have included a DB.
+        # Only a confirmed absence qualifies for that route; permission failures
+        # and a database which disappears after detection require verification.
         try:
-            store = Store(root)
-            current, control = read_job(store, job["id"])
-            actual = store.queue_identity()
-            check("native_queue_schema", control["schema"] == schema,
+            (root / "queue.sqlite3").lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            needs_live = True
+        else:
+            needs_live = True
+    actual = None
+    identity_matches = None
+    unavailable = False
+    if needs_live and root is not None:
+        from cmw.jobs.lifecycle import JobObservationConflict
+        from cmw.jobs.store import JobsError
+
+        differences = []
+        live = result["live_queue"] = {"status": "MATCH", "differences": differences}
+        try:
+            current, control, actual = _read_original_queue(root, job["id"])
+        except _QueueUnavailable as exc:
+            unavailable = True
+            live.update(status="UNAVAILABLE", reason=str(exc))
+            check("native_queue", None, f"Original queue unavailable after bounded read retries: {exc}")
+        except JobObservationConflict as exc:
+            controller = snapshot.get("controller")
+            stored = {"job.id": job["id"], "schema": schema, "queue_identity": declared,
+                      "controller.runtime_protocol": controller.get("runtime_protocol", 3)
+                      if isinstance(controller, dict) else 3}
+            examples = {"job.id": 0, "schema": 0, "queue_identity": _ENROLLMENT_EXAMPLE,
+                        "controller.runtime_protocol": 0}
+            for name, value in exc.fields.items():
+                differences.extend(_native_differences(name, stored[name], value, examples[name]))
+            if exc.location is not None:
+                enrollment = exc.fields["queue_identity"]
+                differences.extend(_native_differences("queue_location", _selected_fields(enrollment, exc.location),
+                                                       exc.location, _LOCATION_EXAMPLE))
+            if not differences:
+                differences.append({"field": "queue.structure", "stored": "valid native record", "observed": str(exc)})
+            live.update(status="CONTRADICTED", reason=str(exc))
+            check("native_queue", False, str(exc))
+        except (JobsError, sqlite3.Error, ValueError, TypeError, KeyError, IndexError) as exc:
+            live.update(status="CONTRADICTED", reason=str(exc))
+            differences.append({"field": "queue.structure", "stored": "valid native record", "observed": str(exc)})
+            check("native_queue", False, f"Original queue contradicts the required native format: {exc}")
+        else:
+            schema_diffs = field_differences("schema", schema, control["schema"])
+            differences.extend(schema_diffs)
+            check("native_queue_schema", not schema_diffs,
                   "Snapshot schema must match its original native queue schema")
-            keys = ("id", "attempt_id", "engine", "argv", "cwd", "layout", "status", "started_at",
-                    "finished_at", "exit_code", "signal", "cancel_requested", "termination_requested",
-                    "logs", "node_submission", "worker_protocol")
-            same = all(job.get(key) == current.get(key) for key in keys)
-            suspension_keys = ("backend", "protocol", "phase", "desired", "revision", "request",
-                               "inhibited", "intervals", "capability", "clock", "accounting_uncertain")
-            saved_suspension, current_suspension = job.get("suspension") or {}, current.get("suspension") or {}
-            same = (same and isinstance(saved_suspension, dict) and isinstance(current_suspension, dict)
-                    and all(saved_suspension.get(key) == current_suspension.get(key) for key in suspension_keys))
-            check("native_attempt", same, "Saved invocation must match the selected original native attempt")
-        except (JobsError, OSError, ValueError, TypeError, KeyError) as exc:
-            check("native_queue", False, f"Original queue identity or attempt is unavailable: {exc}")
-    elif schema == 4:
-        check("native_queue", None, "Enrolled completion requires its original queue to remain available on its owner node")
+            job_diffs = _native_field_differences("job", job, current, _JOB_FIELDS)
+            # A missing enrollment and an empty legacy projection both supplied
+            # null for every compared suspension field in earlier records.
+            suspensions = [item.get("suspension") or {} for item in (job, current)]
+            saved, observed = suspensions
+            if isinstance(saved, dict) and isinstance(observed, dict):
+                job_diffs.extend(_native_field_differences("job.suspension", saved, observed, _SUSPENSION_FIELDS))
+            else:
+                job_diffs.extend(_native_differences("job.suspension", saved, observed, {}))
+            differences.extend(job_diffs)
+            check("native_attempt", not job_diffs, "Saved invocation must match the selected original native attempt")
+            if declared is not None or (schema < 4 and actual is not None):
+                identity_diffs = _native_differences("queue_identity", declared, actual, _ENROLLMENT_EXAMPLE)
+                differences.extend(identity_diffs)
+                identity_matches = not identity_diffs
+            if differences:
+                live["status"] = "CONTRADICTED"
     if schema == 4:
-        check("queue_identity", declared == actual if declared is not None and actual is not None else None,
+        check("queue_identity", identity_matches,
               "Schema-4 completion needs matching exported original enrollment; re-export older snapshots missing queue_identity")
         if declared is not None:
             result["binding"]["queue_identity"] = declared
+    identity = declared if unavailable else actual
     if job.get("node_submission") is not None:
         submission = job["node_submission"]
         valid = (isinstance(submission, dict) and type(submission.get("schema")) is int
-                 and submission["schema"] == 1 and actual is not None
-                 and all(submission.get(key) == actual[key] for key in ("node_id", "queue_id"))
+                 and submission["schema"] == 1
+                 and (identity is None or isinstance(identity, dict)
+                      and all(submission.get(key) == identity.get(key) for key in ("node_id", "queue_id")))
                  and all(isinstance(submission.get(key), str) and re.fullmatch(pattern, submission[key])
                          for key, pattern in (("request_id", r"[a-f0-9]{32}"), ("digest", r"[a-f0-9]{64}"))))
-        check("node_submission", bool(valid), "Recorded node request must match the original enrollment and exact request identity")
+        check("node_submission", None if valid and unavailable else bool(valid and actual is not None),
+              "Recorded node request must match the original enrollment and exact request identity")
         result["binding"]["node_submission"] = submission
     if expected_target is not None:
         required = {"node_id", "queue_id", "job_id", "attempt_id"}
@@ -292,12 +441,12 @@ def _inspect_queue(snapshot, job, root, expected_target, result, check):
                  and not set(expected_target) - required - {"host_id", "runtime_id"}
                  and type(expected_target.get("job_id")) is int
                  and expected_target["job_id"] == job["id"]
-                 and expected_target.get("attempt_id") == job["attempt_id"]
-                 and actual is not None
-                 and all(expected_target.get(key) == actual[key] for key in ("node_id", "queue_id")))
-        if valid and "host_id" in expected_target:
-            valid = expected_target["host_id"] == actual["host_id"]
-        check("owner_target", bool(valid), "Review target must match the original node, queue and operational attempt")
+                 and expected_target.get("attempt_id") == job["attempt_id"])
+        if valid and identity is not None:
+            valid = isinstance(identity, dict) and all(expected_target[key] == identity.get(key)
+                for key in ("node_id", "queue_id", "host_id") if key in expected_target)
+        check("owner_target", None if valid and unavailable else bool(valid and actual is not None),
+              "Review target must match the original node, queue and operational attempt")
         if isinstance(expected_target, dict) and "runtime_id" in expected_target:
             submission = job.get("node_submission")
             runtime = submission.get("runtime_id") if isinstance(submission, dict) else None
@@ -306,11 +455,12 @@ def _inspect_queue(snapshot, job, root, expected_target, result, check):
 
 
 def inspect_execution(snapshot_path, receipt_path, *, job_id, attempt_id, run_directory,
-                      runner_record=None, native_sources=(), expected_target=None):
+                      runner_record=None, native_sources=(), expected_target=None, require_live_queue=False):
     """Inspect explicit saved records; retain their complete file source identities."""
     return _inspect_execution(snapshot_path, receipt_path, job_id=job_id, attempt_id=attempt_id,
                               run_directory=run_directory, runner_record=runner_record,
-                              native_sources=native_sources, expected_target=expected_target)
+                              native_sources=native_sources, expected_target=expected_target,
+                              require_live_queue=require_live_queue)
 
 
 def inspect_execution_snapshot(snapshot, receipt_path, *, job_id, attempt_id, run_directory,

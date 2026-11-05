@@ -17,6 +17,7 @@ from pathlib import Path
 import stat
 from typing import BinaryIO, Iterable, Iterator
 
+from .result_differences import field_differences
 
 MAX_LINE_BYTES = 1024 * 1024
 MAX_JSON_BYTES = 4 * 1024 * 1024
@@ -291,5 +292,9 @@ def revalidate_sources(source_records: Iterable[dict[str, object]]) -> dict[str,
                         for key in _STAT_KEYS))
         if not same:
             findings.append({"code": "source.identity_changed", "role": role,
-                             "message": "source identity or exact bytes changed since parsing"})
+                             "message": "source identity or exact bytes changed since parsing",
+                             "differences": field_differences(
+                                 f"sources[{role}:{locator}]",
+                                 {k: expected.get(k) for k in ("stable", "coverage", "sha256", "bytes_read", "stat_before")},
+                                 {k: actual[k] for k in ("stable", "coverage", "sha256", "bytes_read", "stat_before")})})
     return {"valid": not findings, "findings": findings, "sources": observed}

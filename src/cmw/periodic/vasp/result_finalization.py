@@ -13,16 +13,18 @@ from cmw.core.artifacts import ArtifactValidation, EnergyArtifact, StructureArti
 from cmw.core.preparation_publication import record_publication_plan, publish_record
 from cmw.core.provenance import stable_hash
 from .result_binding import inspect_binding
+from .result_differences import field_differences
 from .result_policy import load_policy, assess_result
 from .result_sources import read_json_source, revalidate_sources
 from .results import inspect_result, compare_geometry
 
 
 class ResultFinalizationError(ValueError):
-    def __init__(self, message, *, code="FINALIZATION_REFUSED", findings=None):
+    def __init__(self, message, *, code="FINALIZATION_REFUSED", findings=None, differences=None):
         super().__init__(message)
         self.code = code
         self.findings = findings or []
+        self.differences = differences or []
 
 
 def inspect_with_policy(directory, *, policy_path=None, spec_path=None, segment=None, stdout=None, max_bytes=None):
@@ -42,6 +44,8 @@ def inspect_with_policy(directory, *, policy_path=None, spec_path=None, segment=
     evidence["policy_source"] = source
     evidence["binding"] = binding
     evidence["exit_code"] = assessment["exit_code"]
+    if binding is not None and binding["valid"] is None and assessment["status"] == "UNKNOWN":
+        evidence["exit_code"] = 75
     return evidence
 
 
@@ -49,20 +53,70 @@ def _record_identity(record):
     return stable_hash({k: v for k, v in record.items() if k not in {"record_id", "publication", "publication_id"}})
 
 
+def _binding_differences(stored, observed):
+    """Compare the same binding facts for old and new completed schema-1 records."""
+    fields = ("valid", "spec", "resolved_spec", "checks", "input_binding", "input_comparison_valid", "input_comparisons")
+    execution_fields = ("status", "operational_success", "exit_code", "signal", "job", "checks", "binding", "runner")
+    source_fields = ("role", "absolute_path", "resolved_path", "sha256", "bytes_read", "stat_before",
+                     "stable", "coverage", "eof_reached", "error")
+    pairs = []
+    for binding in (stored, observed):
+        facts = {k: binding.get(k) for k in fields}
+        execution = binding.get("execution") or {}
+        facts["execution"] = {k: execution.get(k) for k in execution_fields}
+        facts["checks"] = dict(facts["checks"])
+        facts["execution"]["checks"] = dict(execution.get("checks", {}))
+        # Retain source identity differences even when the higher-level checks
+        # already disagree. No input payload bytes are part of either projection.
+        facts["sources"] = {s["resolved_path"]: {k: s.get(k) for k in source_fields}
+                            for s in binding["sources"]}
+        facts["execution"]["sources"] = [{k: s.get(k) for k in source_fields}
+                                         for s in execution.get("sources", [])]
+        pairs.append(facts)
+    before, after = pairs
+    observed_execution = observed.get("execution") or {}
+    live = observed_execution.get("live_queue", {})
+    if live.get("status") == "UNAVAILABLE":
+        # Only the comparisons that needed the inaccessible queue are undecidable.
+        # Still report contradictions in the saved files, runner or scientific inputs.
+        if observed.get("valid") is None:
+            before.pop("valid")
+            after.pop("valid")
+        if observed_execution["status"] == "unverifiable":
+            for side in pairs:
+                side["checks"].pop("execution", None)
+                for key in ("status", "operational_success"):
+                    side["execution"].pop(key)
+        for key in ("native_queue", "native_queue_schema", "native_attempt", "queue_identity",
+                    "node_submission", "owner_target"):
+            if after["execution"]["checks"].get(key) is None:
+                for side in pairs:
+                    side["execution"]["checks"].pop(key, None)
+    return [*live.get("differences", []), *field_differences("binding", before, after)]
+
+
 def verify_finalization(path, *, policy_path=None, _ancestors=()):
     """Recheck a completed record and every consumed source before reuse.
 
-    This verifies the recorded snapshot against current files, not a permanent
-    certificate for a path. It cannot authenticate caller-owned local records.
+    The result's valid field is true for verified evidence, false for invalid
+    evidence and null when a required live queue is temporarily unverifiable.
+    Only successful verification returns artifacts for reuse. This checks the
+    current sources and cannot authenticate caller-owned local records.
     """
     from .result_policy import validate_policy
 
-    result = {"valid": False, "findings": [], "record": None, "source": None,
+    result = {"valid": False, "status": "INVALID", "differences": [], "live_queue": None,
+              "findings": [], "record": None, "source": None,
               "artifacts": [], "source_revalidation": {"valid": False}}
 
     def require(condition, message):
         if not condition:
             raise ValueError(message)
+
+    def require_equal(field, stored, observed, message):
+        differences = field_differences(field, stored, observed)
+        result["differences"].extend(differences)
+        require(not differences, message)
 
     def identity(source):
         require(isinstance(source, dict), "Malformed required source observation")
@@ -84,7 +138,7 @@ def verify_finalization(path, *, policy_path=None, _ancestors=()):
                 and isinstance(record.get("publication"), dict)
                 and record["publication"].get("state") == "complete",
                 "Not a complete schema-1 VASP finalization record")
-        require(record.get("record_id") == _record_identity(record), "Finalization record content identity mismatch")
+        require_equal("record_id", record.get("record_id"), _record_identity(record), "Finalization record content identity mismatch")
         locator = source["resolved_path"]
         require(locator not in _ancestors, "Cyclic parent finalization relationship")
         require(len(_ancestors) < 64, "Parent finalization ancestry exceeds the supported depth of 64")
@@ -97,26 +151,28 @@ def verify_finalization(path, *, policy_path=None, _ancestors=()):
                 "Stored producing-run/input binding is not valid")
         policy_source = evidence["policy_source"]
         observed_policy, _observed_policy_source = load_policy(policy_source["resolved_path"])
-        require(observed_policy == policy, "Stored policy differs from its exact source content")
+        require_equal("policy", policy, observed_policy, "Stored policy differs from its exact source content")
         spec_sources = [s for s in binding["sources"] if s.get("role") == "finalization_spec"]
         require(len(spec_sources) == 1, "Binding must retain exactly one finalization-specification source")
-        observed_binding = inspect_binding(spec_sources[0]["resolved_path"], evidence, stable_hash(policy))
-        require(observed_binding.get("valid") is True
-                and all(observed_binding.get(key) == binding.get(key) for key in (
-                    "spec", "resolved_spec", "checks", "input_binding", "input_comparison_valid", "input_comparisons")),
-                "Stored producing-run declaration or binding differs from its source evidence")
-        require({s["resolved_path"]: identity(s) for s in observed_binding["sources"]}
-                == {s["resolved_path"]: identity(s) for s in binding["sources"]},
-                "Stored binding source closure differs from its exact source evidence")
         execution = binding.get("execution")
         require(isinstance(execution, dict) and execution.get("status") == "eligible",
                 "Stored terminal execution evidence is not eligible")
-        require(all(execution.get(key) == observed_binding["execution"].get(key) for key in (
-                    "status", "operational_success", "exit_code", "signal", "job", "checks", "binding", "runner")),
-                "Stored execution facts differ from native saved Jobs evidence")
-        require([identity(s) for s in execution["sources"]]
-                == [identity(s) for s in observed_binding["execution"]["sources"]],
-                "Stored execution source closure differs from its exact source evidence")
+        if "live_queue" in execution:
+            live = execution["live_queue"]
+            require(isinstance(live, dict), "Malformed stored live queue observation")
+            require_equal("binding.execution.live_queue", {k: live.get(k) for k in ("status", "differences")},
+                          {"status": "MATCH", "differences": []},
+                          "Stored live queue observation contradicts the completed binding")
+        require_live = "native_queue_schema" in execution["checks"] or "live_queue" in execution
+        observed_binding = inspect_binding(spec_sources[0]["resolved_path"], evidence, stable_hash(policy),
+                                           require_live_queue=require_live)
+        observed_execution = observed_binding.get("execution") or {}
+        result["live_queue"] = observed_execution.get("live_queue")
+        result["observed_binding"] = {"valid": observed_binding["valid"], "checks": observed_binding["checks"],
+                                      "execution": {k: observed_execution.get(k) for k in ("status", "checks")}}
+        result["differences"].extend(_binding_differences(binding, observed_binding))
+        require(not result["differences"] and observed_binding["valid"] is not False,
+                "Stored producing-run declaration or binding differs from its source evidence")
         require(isinstance(binding.get("checks"), dict) and bool(binding["checks"])
                 and all(value is True for value in binding["checks"].values())
                 and isinstance(execution.get("checks"), dict) and bool(execution["checks"])
@@ -168,15 +224,24 @@ def verify_finalization(path, *, policy_path=None, _ancestors=()):
                 "Declared artifact roles differ from the recorded policy")
         expected_sources = [*native, evidence["policy_source"], *binding["sources"]]
         parents = []
+        unavailable_parents = []
         resolved = binding.get("resolved_spec")
         require(isinstance(resolved, dict), "Resolved source/parent declaration is absent")
         for parent in resolved.get("parents", []):
             require(isinstance(parent, dict) and parent.get("relationship") == "input-structure",
                     "Unsupported parent relationship")
             checked = verify_finalization(parent["record"], _ancestors=(*_ancestors, locator))
-            require(checked["valid"] and checked["source"]["sha256"] == parent["sha256"],
-                    "Declared parent finalization is invalid or changed")
-            matches = [a for a in checked["artifacts"] if a.artifact_id == parent["artifact_id"]]
+            require_equal("parent.sha256", parent["sha256"], (checked["source"] or {}).get("sha256"),
+                          "Declared parent finalization changed")
+            result["differences"].extend(checked["differences"])
+            require(checked["valid"] is not False, "Declared parent finalization is invalid or changed")
+            parent_artifacts = checked["artifacts"]
+            if checked["valid"] is None:
+                unavailable_parents.append(parent["record"])
+                # The parent's record and artifact bytes checked out. Use those
+                # facts only to check the child; withhold reuse of the entire chain.
+                parent_artifacts = [artifact_from_dict(a) for a in checked["record"]["artifact_bundle"]["artifacts"]]
+            matches = [a for a in parent_artifacts if a.artifact_id == parent["artifact_id"]]
             require(len(matches) == 1 and isinstance(matches[0], StructureArtifact),
                     "Required parent does not identify one finalized periodic structure")
             parent_artifact = matches[0]
@@ -252,19 +317,27 @@ def verify_finalization(path, *, policy_path=None, _ancestors=()):
         require(len({a.artifact_id for a in artifacts}) == len(artifacts) == bundle["artifact_count"]
                 and [a.metadata["role"] for a in artifacts] == roles,
                 "Artifact count, roles or identities are inconsistent")
-        result["artifacts"] = artifacts
         try:
             validation = revalidate_sources(required)
         except Exception as error:
             raise ValueError(f"Source revalidation failed: {error}") from error
         result["source_revalidation"] = validation
-        require(isinstance(validation, dict) and validation.get("valid") is True,
+        require(isinstance(validation, dict), "Malformed required source revalidation")
+        for finding in validation.get("findings", []):
+            result["differences"].extend(finding.get("differences", []))
+        require(validation.get("valid") is True,
                 "Required source contents or identities have changed")
         if policy_path is not None:
             selected_policy, _policy_source = load_policy(policy_path)
-            require(stable_hash(selected_policy) == assessment["policy_identity"]["policy_id"],
-                    "Selected policy differs from finalized policy")
-        result["valid"] = True
+            require_equal("policy_identity.policy_id", assessment["policy_identity"]["policy_id"], stable_hash(selected_policy),
+                          "Selected policy differs from finalized policy")
+        if observed_binding["valid"] is None or unavailable_parents:
+            result.update(valid=None, status="UNVERIFIABLE")
+            if observed_binding["valid"] is None:
+                result["findings"].append("Original Jobs queue is temporarily unverifiable; retry verification")
+            result["findings"].extend(f"Parent {path} is temporarily unverifiable" for path in unavailable_parents)
+        else:
+            result.update(valid=True, status="VERIFIED", artifacts=artifacts)
     except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, RecursionError) as error:
         result["findings"].append(str(error) or "Malformed VASP finalization record")
         if result["source"] is None and getattr(error, "record", None) is not None:
@@ -276,6 +349,9 @@ def _parents(binding, evidence):
     artifacts, sources = [], []
     for parent in binding.get("resolved_spec", binding["spec"]).get("parents", []):
         checked = verify_finalization(parent["record"])
+        if checked["valid"] is None and checked["source"]["sha256"] == parent["sha256"]:
+            raise ResultFinalizationError("Required parent is temporarily unverifiable", code="LIVE_QUEUE_UNAVAILABLE",
+                                          findings=checked["findings"])
         if not checked["valid"] or checked["source"]["sha256"] != parent["sha256"]:
             raise ResultFinalizationError("Required parent evidence is invalid or changed", findings=checked["findings"])
         matches = [a for a in checked["artifacts"] if a.artifact_id == parent["artifact_id"]]
@@ -315,9 +391,14 @@ def finalize_result(directory, *, policy_path, spec_path, scratch_root, record_d
                                    segment=segment, stdout=stdout)
     binding = evidence["binding"]
     assessment = evidence["policy_assessment"]
-    if not binding or not binding.get("valid"):
+    if binding is not None and binding["valid"] is None and assessment["status"] != "FAIL":
+        raise ResultFinalizationError("Original Jobs queue is temporarily unverifiable; retry before publication",
+                                      code="LIVE_QUEUE_UNAVAILABLE", findings=binding["findings"])
+    if not binding or binding.get("valid") is not True:
+        live = ((binding or {}).get("execution") or {}).get("live_queue", {})
         raise ResultFinalizationError("Producing-run/source/input binding is not established",
-                                      findings=[] if binding is None else binding.get("findings", []))
+                                      findings=[] if binding is None else binding.get("findings", []),
+                                      differences=live.get("differences", []))
     if binding.get("execution", {}).get("status") != "eligible":
         raise ResultFinalizationError("Bound successful terminal execution evidence is required")
     if not binding.get("input_binding") or not binding.get("input_comparison_valid"):
