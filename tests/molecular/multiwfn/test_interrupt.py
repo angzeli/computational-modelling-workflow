@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -84,7 +85,7 @@ def capture_interrupt_failure(root, *, test_id, failure, started, parent, parent
 
 class InterruptTests(unittest.TestCase):
     def exercise(self, signum=signal.SIGTERM, *, queued=False, unresolved=False, early_interrupt=False,
-                 inherited_int=False, interrupt_query=None, query_failure=False):
+                 inherited_int=False, interrupt_query=None, query_failure=False, check_snapshot_mode=False):
         with tempfile.TemporaryDirectory(prefix='cmw-interrupt-') as directory, install():
             root = Path(directory)
             attempt = root/'attempt'
@@ -111,7 +112,8 @@ while not (root/'release').exists() and time.monotonic()<deadline:
     time.sleep(.02)
 ''')
             executable = root/'fake-multiwfn'
-            executable.write_text('#!/bin/bash\nexec '+shlex.join([sys.executable, str(engine)])+' "$@"\n')
+            observe_child_mask = 'umask > "$CMW_TEST_ROOT/child.umask"\n' if check_snapshot_mode else ''
+            executable.write_text('#!/bin/bash\n'+observe_child_mask+'exec '+shlex.join([sys.executable, str(engine)])+' "$@"\n')
             executable.chmod(0o700)
             command = ['/bin/bash', '-c',
                 'set -euo pipefail; '
@@ -148,6 +150,9 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                 '''kill -TERM $$; fi' DEBUG; fi; '''
                 'multiwfn_runtime_launch "$4"', '_', str(SHELL), str(executable),
                 str(root/'settings.ini'), str(root/'source.xyz')]
+            if check_snapshot_mode:
+                command[2] = ('umask 022; ' + command[2] +
+                              ' || code=$?; umask > "$CMW_TEST_ROOT/after.umask"; exit "${code:-0}"')
             env = {**environment(), 'CMW_TEST_ROOT': str(root), 'TMPDIR': str(root/'tmp')}
             if unresolved:
                 env['CMW_TEST_REFUSE_KILL'] = '1'
@@ -242,6 +247,11 @@ os.execv(sys.argv[1],sys.argv[1:])
                         self.assertEqual(parent.returncode, 128+signum, stderr)
                         self.assertTrue(all(not Path(p).exists() for p in ready['aliases']))
                 self.assertEqual(owner_alive(child), unresolved or query_failure)
+                if check_snapshot_mode:
+                    snapshot = Path(ready['aliases'][0]).parent/'jobs.snapshot'
+                    self.assertEqual(stat.S_IMODE(snapshot.stat().st_mode), 0o600)
+                    for observation in ('child.umask', 'after.umask'):
+                        self.assertEqual(int((root/observation).read_text().strip(), 8), 0o022, observation)
                 if query_failure:
                     self.assertFalse((root/'signal-seen').exists(),
                                      'Unverified job-table observation must not authorize a signal')
@@ -291,6 +301,9 @@ os.execv(sys.argv[1],sys.argv[1:])
 
     def test_unavailable_job_query_retains_aliases_without_signalling_child(self):
         self.exercise(query_failure=True)
+
+    def test_job_snapshot_is_private_without_changing_caller_or_child_umask(self):
+        self.exercise(query_failure=True, check_snapshot_mode=True)
 
     def test_jobs_wrapped_child_ends_before_terminal_state(self):
         self.exercise(queued=True)

@@ -65,7 +65,7 @@ multiwfn_jobs_event() {
 multiwfn_runtime_launch() {
   local alias_root alias_path child_pid="" source_alias="" source_name="" source_path="" status=0
   local previous_exit previous_int previous_term interrupted=0 interrupt_signal="" probe
-  local child_query_failed=0
+  local child_query_failed=0 job_snapshot
   if [[ -z "$MULTIWFN_RUN_SETTINGS_DIRECTORY" || ! -s "$MULTIWFN_RUN_SETTINGS_PATH" ]]; then
     printf 'Multiwfn run-local settings were not prepared\n' >&2
     return 64
@@ -79,24 +79,29 @@ multiwfn_runtime_launch() {
   previous_int=$(trap -p INT || true)
   alias_root=$(mktemp -d "${TMPDIR:-/tmp}/cmw-multiwfn.XXXXXXXX") || return 70
   alias_path=$alias_root/runtime
+  job_snapshot=$alias_root/jobs.snapshot
+  if ! (umask 077 && : > "$job_snapshot"); then
+    rmdir "$alias_root" 2>/dev/null || true
+    return 75
+  fi
   multiwfn_child_active() {
     local owned
     [[ -n "$child_pid" ]] || return 1
     # Stay in the owning shell: a signal during command-substitution parsing
     # can abort even a simple trap before its handler executes on Bash 5.2.
-    if ! { jobs -pr && jobs -ps; } > "$alias_root/jobs.snapshot"; then
+    if ! { jobs -pr && jobs -ps; } > "$job_snapshot"; then
       child_query_failed=1
       return 0
     fi
     while IFS= read -r owned; do
       [[ "$owned" != "$child_pid" ]] || return 0
-    done < "$alias_root/jobs.snapshot" || { child_query_failed=1; return 0; }
+    done < "$job_snapshot" || { child_query_failed=1; return 0; }
     return 1
   }
   cleanup_multiwfn_alias() {
     if multiwfn_child_active; then return 0; fi
     [[ -z "$source_alias" ]] || rm -f -- "$source_alias"
-    rm -f -- "$alias_path" "$alias_root/jobs.snapshot"
+    rm -f -- "$alias_path" "$job_snapshot"
     rmdir "$alias_root" 2>/dev/null || true
   }
   record_multiwfn_signal() {
