@@ -4,7 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from textual.widgets import Static
+from rich.text import Text
+from textual.containers import Vertical
+
+from cmw.progress.receipt import ReceiptCaption
 
 
 @dataclass(frozen=True)
@@ -15,12 +18,16 @@ class ViewReceipt:
 
 
 class NodeViews:
-    def receipt_label(self, owner, receipt):
+    def receipt_caption(self, owner, receipt):
         if receipt is None:
-            return f'{owner}: awaiting owner data; no receipt'
+            return ReceiptCaption(owner, None, None)
         timestamp = datetime.fromtimestamp(receipt.wall, timezone.utc).strftime('%H:%M:%S UTC')
         age = max(0., self.clock() - receipt.monotonic)
-        return f'{owner}: Last reported · received {timestamp} · {age:.0f}s ago'
+        return ReceiptCaption(owner, timestamp, f'{age:.0f}s ago')
+
+    def receipt_label(self, owner, receipt, width=None):
+        width = self.size.width if width is None else width
+        return self.receipt_caption(owner, receipt).format('', width)
 
     def view_receipt(self, owner, operation, target=None):
         lane = self.lanes[owner]
@@ -71,17 +78,22 @@ class NodeViews:
         stale = [(owner, receipt) for owner, receipt in receipts.items()
                  if not self.receipt_current(owner, receipt)]
         allowed = not stale
-        reason = '\n'.join(self.receipt_label(owner, receipt) for owner, receipt in stale)
-        if stale:
-            reason += ' · Commands for the listed owners disabled until this view receives fresh data.'
-        banner = getattr(screen, 'node_receipt_banner', None)
-        if banner is None:
-            banner = screen.node_receipt_banner = Static(markup=False, classes='node-receipt-banner')
-            screen.mount(banner)
-        if getattr(screen, 'node_receipt_reason', None) != reason:
-            screen.node_receipt_reason = reason
-            banner.update(reason)
-            banner.display = bool(reason)
+        frame = getattr(screen, 'node_view_frame', None)
+        if frame is None:
+            # The bound dialog's existing outer panel owns all four edges.
+            frame = screen.node_view_frame = screen.query_one(Vertical)
+            frame.add_class('node-view-frame')
+        # Textual reserves the corners plus two cells on each end of a border title.
+        width = max(1, (frame.region.width or self.size.width) - 6)
+        captions = tuple(self.receipt_label(owner, receipt, width) for owner, receipt in stale)
+        if getattr(screen, 'node_frame_captions', None) != captions:
+            screen.node_frame_captions = captions
+            frame.border_title = Text(captions[0]) if captions else None
+            frame.border_subtitle = 'Owner commands disabled until fresh data' if captions else None
+            # Multi-owner Search lists the remaining receipts in its coverage pane.
+            other_receipts = getattr(screen, 'show_other_receipts', None)
+            if other_receipts is not None:
+                other_receipts(captions[1:])
         stale_owners = frozenset(owner for owner, _ in stale)
         if getattr(screen, 'node_stale_owners', None) != stale_owners:
             screen.node_stale_owners = stale_owners

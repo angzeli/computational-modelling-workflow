@@ -226,6 +226,18 @@ to obtain a new observation. CPU, RAM, guards and external observations remain
 per-node. History and Sources use the selected endpoint, while Copy uses the
 frontend clipboard. Closing the portal closes observers only.
 
+The smallest supported portal is **77 columns by 24 rows**. A retained
+observation shows **Last reported** in the existing frame or status line. A
+record without a receipt shows **Last reported · receipt unknown** and cannot
+authorize a command. The full caption includes the node alias, UTC receipt time
+and monotonic age. At 77 columns ordinary aliases such as `mbp_m3max` fit with
+all three. With less room, the formatter shortens the descriptive title first,
+then drops the timestamp, then the age, and finally shortens the alias. The
+full marker fits at the supported minimum. A caption temporarily narrower
+than 13 cells uses `~` for last reported. The frame reserves the same number of
+job-table rows in all receipt states. In a multi-owner search each affected owner has its own receipt
+in the coverage summary.
+
 Optional CPU average temperature uses the same node-local Jobs provider and
 `machine_usage.thermal` contract. Each endpoint explicitly reads only
 `<enrolled-config-root>/thermal.env` when creating its observer. For example:

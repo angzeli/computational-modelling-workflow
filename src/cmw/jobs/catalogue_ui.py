@@ -52,6 +52,8 @@ class CatalogueSearch(ModalScreen):
             yield Input(', '.join(self.criteria.tags), placeholder='Tags: comma separated, all required', id='catalogue-tags')
             with VerticalScroll(id='catalogue-coverage'):
                 yield Static(self.summary, id='catalogue-summary', markup=False)
+                if hasattr(self, 'node_view_receipts'):
+                    yield Static(id='catalogue-other-receipts', markup=False)
             with Horizontal(id='catalogue-page-row'):
                 options = [(owner,owner) for owner,page in self.pages.items() if page is not None and page.next_cursor]
                 yield Select(options, prompt='Owner with another page', id='catalogue-owner')
@@ -64,6 +66,11 @@ class CatalogueSearch(ModalScreen):
 
     def on_mount(self):
         self.query_one('#catalogue-text', Input).focus()
+
+    def show_other_receipts(self, captions):
+        widget = self.query_one('#catalogue-other-receipts', Static)
+        widget.display = bool(captions)
+        widget.update('\n'.join(captions))
 
     def eligible_owners(self):
         return tuple(owner for owner, receipt in self.node_view_receipts.items()
@@ -173,7 +180,7 @@ class CatalogueDetails(ModalScreen):
                 return
             self.record,self.relations = record,relations
             self.query_one('#catalogue-body',Static).update(catalogue_text(record,relations))
-            if self.owner is not None and receipt is not None:
+            if self.owner is not None:
                 self.app.view_received(self, self.owner, receipt)
             self.node_commands_changed(self.commands_allowed)
         self.request(accepted)
@@ -218,11 +225,13 @@ class CatalogueCommon:
         self.catalogue_busy = False
         self.catalogue_pending = None
 
-    def catalogue_summary(self):
+    def catalogue_summary(self, *, receipt_labels=None):
         if self.catalogue_query is None:
             return 'No catalogue filter. All queue commitments remain in the queue summary.'
         lines = []
         for owner in self.catalogue_owners():
+            if receipt_labels and owner in receipt_labels:
+                lines.append(receipt_labels[owner])
             page = self.catalogue_pages.get(owner)
             error = self.catalogue_errors.get(owner) or (self.lanes[owner].error if hasattr(self,'lanes') else None)
             if error:
@@ -369,7 +378,7 @@ class NodeCatalogue(CatalogueCommon):
         return tuple(self.lanes)
 
     def action_search(self):
-        view = CatalogueSearch(self.catalogue_query, self.catalogue_pages, self.catalogue_summary())
+        view = CatalogueSearch(self.catalogue_query, self.catalogue_pages, self.catalogue_summary(include_receipts=False))
         # A coverage summary freezes the pages it actually displayed. Owners
         # without a page contribute only their current connection observation.
         receipts = {owner: self.catalogue_receipts.get(owner) if owner in self.catalogue_pages else self.view_receipt(owner, 'status')
@@ -381,12 +390,10 @@ class NodeCatalogue(CatalogueCommon):
             self.catalogue_changed(result, eligible=eligible)
         self.push_screen(self.bind_node_view(view, tuple(self.lanes), received=receipts), apply)
 
-    def catalogue_summary(self):
-        summary = super().catalogue_summary()
-        for owner in self.catalogue_pages:
-            if self.catalogue_page_stale(owner):
-                summary += '\n' + self.receipt_label(owner, self.catalogue_receipts.get(owner))
-        return summary
+    def catalogue_summary(self, *, include_receipts=True):
+        labels = {owner: self.receipt_label(owner, self.catalogue_receipts.get(owner))
+                  for owner in self.catalogue_pages if self.catalogue_page_stale(owner)} if include_receipts else None
+        return super().catalogue_summary(receipt_labels=labels)
 
     def catalogue_page_stale(self, owner):
         return owner in self.catalogue_errors or not self.receipt_current(owner, self.catalogue_receipts.get(owner))
@@ -402,7 +409,7 @@ class NodeCatalogue(CatalogueCommon):
         elif owner not in self.catalogue_pages:
             for screen in self.screen_stack:
                 if isinstance(screen, CatalogueSearch):
-                    screen.query_one('#catalogue-summary', Static).update(self.catalogue_summary())
+                    screen.query_one('#catalogue-summary', Static).update(self.catalogue_summary(include_receipts=False))
                     self.view_received(screen, owner, self.view_receipt(owner, 'status'))
 
     def catalogue_refresh(self):
@@ -442,7 +449,7 @@ class NodeCatalogue(CatalogueCommon):
                         self.catalogue_receipts[label] = receipt
                         for screen in self.screen_stack:
                             if isinstance(screen, CatalogueSearch):
-                                screen.query_one('#catalogue-summary', Static).update(self.catalogue_summary())
+                                screen.query_one('#catalogue-summary', Static).update(self.catalogue_summary(include_receipts=False))
                                 options = [(key,key) for key,item in self.catalogue_pages.items() if item.next_cursor]
                                 screen.query_one('#catalogue-owner', Select).set_options(options)
                                 self.view_received(screen, label, receipt)

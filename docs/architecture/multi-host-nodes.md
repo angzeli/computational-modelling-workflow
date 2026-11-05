@@ -384,7 +384,10 @@ labelled as last reported when stale or disconnected. The first failure also
 qualifies every open view displaying that owner's data with its own receipt
 time and monotonic age. After a compatible handshake and new status, each view
 requires a new observation of its displayed data before its commands are
-available again. Frozen reports keep their original receipt. Freshness does not override
+available again. Frozen reports keep their original receipt.
+The portal's 77×24 minimum layout reserves space for “Last reported” in the
+frame. A missing receipt is explicitly unknown. Title text, receipt time, age
+and then the node alias give up space in that order. Freshness does not override
 endpoint, ownership, revision or readiness checks for actions.
 
 Skew is display-only: estimate `node_observed_at - (portal_sent +

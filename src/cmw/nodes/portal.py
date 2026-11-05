@@ -28,7 +28,7 @@ from cmw.jobs.catalogue_ui import NodeCatalogue
 from cmw.jobs.review_models import ReviewRecord, cached_review, review_text
 from cmw.jobs.suspension_presentation import effective_status
 from cmw.jobs.tui import JobsApp, ScientificProgress, detail, literal, table_name
-from cmw.progress.formatting import fit_text, progress_text
+from cmw.progress.formatting import compact_frame, fit_text, progress_text
 from cmw.progress.models import HistoryPage, ProgressSnapshot
 from .codec import decode_typed, encode_typed
 from .connections import observed_machine_usage
@@ -98,7 +98,9 @@ class NodeLane:
 
     def fresh(self, now):
         age = self.age(now)
-        return (self.error is None and not self.handshake_required and self.status_confirmed and self.refusal is None
+        receipt = self.receipts.get('status')
+        return (receipt is not None and receipt.generation == self.observation_generation
+                and self.error is None and not self.handshake_required and self.status_confirmed and self.refusal is None
                 and self.reachability.state == NodeState.REACHABLE
                 and age is not None and 0 <= age <= STALE_AFTER_SECONDS)
 
@@ -106,14 +108,15 @@ class NodeLane:
 class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
     TITLE = 'CMW / JOBS'
     CSS = JobsApp.CSS + '''
-    .node-receipt-banner { dock: top; height: auto; color: $warning; background: $surface; padding: 0 1; }
-    #node-summary { height: auto; max-height: 2; padding: 0 1; color: #b7d8dd; }
-    #table { min-height: 4; margin: 0 1; }
-    #selected { margin: 0 1; max-height: 3; }
-    #execution { max-height: 1; }
-    #progress { max-height: 8; }
+    .node-view-frame { border: solid $accent; border-title-color: $warning; border-subtitle-color: $warning; }
+    #portal-frame { border: solid #5c8996; border-title-align: left; border-subtitle-align: left; }
+    #node-summary { height: auto; max-height: 2; padding: 0; color: #b7d8dd; }
+    #table { min-height: 4; margin: 0; }
+    #selected { margin: 0; max-height: 3; }
+    #execution { margin: 0; max-height: 1; }
+    #progress { margin: 0; max-height: 8; }
     #message { max-height: 2; }
-    #shortcuts { max-height: 2; }
+    #shortcuts { height: 1; padding: 0; }
     '''
     BINDINGS = [Binding('enter', 'details', 'Details'), Binding('f', 'files', 'Files'),
         Binding('g', 'history', 'Progress'), Binding('s', 'sources', 'Sources'),
@@ -156,21 +159,21 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         self.init_catalogue()
 
     def compose(self):
-        yield Static('CMW / JOBS                                    ALL NODES', id='heading', markup=False)
-        yield Static('Connecting to explicitly enrolled nodes…', id='node-summary', markup=False)
-        yield NodesTable(id='table', cursor_type='row', zebra_stripes=True)
-        yield SelectableStatic(id='selected', markup=False)
-        yield Static(id='execution', markup=False)
-        yield ScientificProgress(id='progress', markup=False)
-        yield Static('/ Search · T Catalogue · Q / Ctrl-C detaches; execution continues.', id='message', markup=False)
-        with Vertical(id='command-bar'):
-            yield Static(self.shortcut_text('Suspend'), id='shortcuts', markup=False)
+        with Vertical(id='portal-frame') as frame:
+            frame.border_title = 'CMW / JOBS · ALL NODES'
+            frame.border_subtitle = 'Enter Details · F Files · G Progress · S Sources · Y Copy · L Logs'
+            yield Static('Connecting to explicitly enrolled nodes…', id='node-summary', markup=False)
+            yield NodesTable(id='table', cursor_type='row', zebra_stripes=True)
+            yield SelectableStatic(id='selected', markup=False)
+            yield Static(id='execution', markup=False)
+            yield ScientificProgress(id='progress', markup=False)
+            yield Static('/ Search · T Catalogue · Q / Ctrl-C detaches; execution continues.', id='message', markup=False)
+            with Vertical(id='command-bar'):
+                yield Static(self.shortcut_text('Suspend'), id='shortcuts', markup=False)
 
     def shortcut_text(self, action):
         controls = f'P Dispatch · H Hold · O Order · X Cancel · U {action} · B Queue · R Review · Q Detach'
-        if len(controls) > self.size.width - 2:
-            controls = controls.replace(' · ', '·')
-        return 'Enter Details · F Files · G Progress · S Sources · Y Copy · L Logs\n' + controls
+        return controls if len(controls) <= self.size.width - 2 else controls.replace(' · ', '·')
 
     def on_mount(self):
         self.query_one(DataTable).focus()
@@ -488,6 +491,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
     def _render_state(self):
         now = self.clock()
         summaries = []
+        retained = {}
         rows = {}
         for owner, lane in self.lanes.items():
             state = lane.state or {}
@@ -511,14 +515,13 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
             machine = machine_text(self.machine_usage(owner)).removeprefix('Machine: ')
             if self.size.width >= 100:
                 status += f' · {control}'
+            width = max(1, self.size.width - 2)
             if not lane.fresh(now) and lane.state is not None:
-                # Fit the qualification in the existing summary row. Adding a
-                # row on disconnect would displace the operator's table cursor.
-                receipt = self.receipt_label(owner, self.view_receipt(owner, 'status'))
-                status = f'{identity} {condition} {received} · ' + receipt.removeprefix(owner + ': ')
+                caption = self.receipt_caption(owner, self.view_receipt(owner, 'status'))
+                retained[owner] = caption
+                status = caption.format(f'{condition} · {count_scope} {count}', width)
             summary = status + ('\nMachine: ' if len(self.lanes) == 1 else ' · ') + machine
-            summaries.append(summary if lane.fresh(now) else
-                             '\n'.join(fit_text(line, self.size.width - 2) for line in summary.splitlines()))
+            summaries.append('\n'.join(fit_text(line, width) for line in summary.splitlines()))
             for job in state.get('jobs', ()):
                 target = job.get('target')
                 if target and (target['node_id'], target['queue_id']) == (lane.backend.node_id, lane.backend.queue_id):
@@ -557,36 +560,52 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
             with table.prevent(DataTable.RowHighlighted):
                 table.move_cursor(row=keys.index(self.selected_key), animate=False, scroll=False)
         selected = self.selected()
+        frame = self.query_one('#portal-frame')
+        owner = selected[0] if selected else next(iter(self.lanes))
+        title = 'CMW / JOBS · ALL NODES'
+        if self.catalogue_query is not None:
+            for label in self.catalogue_pages:
+                if self.catalogue_page_stale(label):
+                    retained[label] = self.receipt_caption(label, self.catalogue_receipts.get(label))
+        if retained:
+            caption = retained.get(owner) or next(iter(retained.values()))
+            title = caption.format(title, self.size.width - 6)
+        frame.border_title = literal(title)
         table.set_class(selected is None, 'navigation-unavailable')
         if selected:
             owner, job = selected
             lane = self.lanes[owner]
             status = effective_status(job)
-            if not lane.fresh(now):
-                status = 'Last reported ' + status + ' — ' + self.connection_text(owner).split(' · received')[0]
+
             usage = (lane.state or {}).get('job_usage', {}).get(job['attempt_id'], job.get('usage'))
             usage = deepcopy(usage or {})
             if usage.get('age_seconds') is not None:
                 usage['age_seconds'] += lane.age(now) or 0
             if not lane.fresh(now):
                 usage['stale'] = True
-            connection = (self.connection_text(owner) + ' · ' + status if lane.fresh(now) else
-                          status + f' · received {lane.age(now):.0f}s ago')
-            text = ('SELECTED · ' + self.label(owner, job) + '\n' +
-                    connection + '\n' +
+            identity = 'SELECTED · ' + self.label(owner, job)
+            if lane.fresh(now):
+                connection = self.connection_text(owner) + ' · ' + status
+            else:
+                reason = self.connection_text(owner).split(' · received')[0]
+                identity += f' · {status} — {reason}'
+                connection = self.receipt_caption(owner, self.view_receipt(owner, 'status')).format(
+                    '', max(1, self.size.width - 5))
+            text = (identity + '\n' + connection + '\n' +
                     usage_summary(usage, width=max(20, self.size.width - 7)))
             self.query_one('#selected', Static).update(literal(text))
             cache = lane.cache.get(target_key(job['target']), {})
             observed = cache.get('observe')
             execution = observed[0]['result']['execution'] if observed else None
             suffix = execution.get('summary') or execution.get('observed_execution') if execution else 'worker evidence unavailable'
-            reported = f'reported by {owner}'
+            execution_text = f'Execution: reported by {owner} · {suffix}'
             if observed and (not self.receipt_current(owner, cache.get('observe.receipt')) or cache.get('observe.error')):
-                reported = self.receipt_label(owner, cache.get('observe.receipt'))
-            self.query_one('#execution', Static).update(literal(f'Execution: {reported} · {suffix}'))
+                execution_text = self.receipt_caption(owner, cache.get('observe.receipt')).format(
+                    f'Execution: {suffix}', max(1, self.size.width - 5))
+            self.query_one('#execution', Static).update(literal(execution_text))
             action = 'Continue' if effective_status(job) == 'Suspended' else 'Suspend'
             self.query_one('#shortcuts', Static).update(self.shortcut_text(action) if lane.fresh(now) else
-                'Enter Details · G Progress · Y Copy · B Queue · R Review · Q Detach\nOwner commands disabled until fresh status.')
+                'Owner commands disabled until fresh status · B Queue · R Review · Q Detach')
             self.render_progress(owner, job, cache)
         else:
             self.query_one('#selected', Static).update('Selected attempt is no longer in the current node snapshot.' if self.selected_key else 'No managed jobs reported. Select an enrolled node through the CLI to submit.')
@@ -649,27 +668,28 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
     def render_progress(self, owner, job, cache):
         widget = self.query_one('#progress', Static)
         widget.display = True
+        width = max(20, self.size.width - 7)
         snapshot = self.selected_snapshot(owner, job)
         if snapshot is None:
-            self.card_height, self.viewport = 2, tuple(self.size)
-            widget.update(literal('Scientific: ' + cache.get('progress.error', 'awaiting bounded observation…')))
-            widget.styles.max_height = 2
+            self.card_height, self.viewport = 3, tuple(self.size)
+            message = 'Scientific: ' + cache.get('progress.error', 'awaiting bounded observation…')
+            widget.update(literal(compact_frame([message], width)))
+            widget.styles.max_height = 3
             return
         entry, received = cache['progress']
         # Both timestamps in the formatter originate on the same endpoint clock.
         # Only elapsed transport age comes from this frontend monotonic clock.
         age = max(0., self.clock() - received)
         endpoint_now = entry['observed_at'] + age
-        width = max(20, self.size.width - 7)
         budget = min(8, max(3, self.size.height - 15))
         if cache.get('progress.error'):
             self.message('Scientific read unavailable; earlier cached evidence. ' + cache['progress.error'])
+        receipt = cache.get('progress.receipt')
+        caption = (self.receipt_caption(owner, receipt)
+                   if not self.receipt_current(owner, receipt) or cache.get('progress.error') else None)
         text = progress_text(snapshot, compact=self.size.width < 110 or self.size.height < 36,
-                             width=width, now=endpoint_now, max_lines=budget, framed=True)
-        if not self.receipt_current(owner, cache.get('progress.receipt')) or cache.get('progress.error'):
-            heading, newline, body = text.partition('\n')
-            label = self.receipt_label(owner, cache.get('progress.receipt'))
-            text = fit_text(f'{label} · {heading}', width) + newline + body
+                             width=width, now=endpoint_now, max_lines=budget, require_frame=True,
+                             receipt_caption=caption)
         rendered = literal(text)
         for index, char in enumerate(rendered.plain):
             if char in '─│┌┐└┘├┤┴':
@@ -768,7 +788,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
                 if view.closed or view.expired or generation != view.request_generation:
                     return
                 await view.accept_result(kind, result, str(error) if error else None, generation)
-                if receipt is not None and not view.closed and not view.expired and generation == view.request_generation:
+                if error is None and not view.closed and not view.expired and generation == view.request_generation:
                     self.view_received(view, owner, receipt)
             self.call_later(deliver)
         self.queue(owner, 'sources.' + kind, params, target, accept)
@@ -885,12 +905,14 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         # A composite still contains last-reported data if any displayed component does.
         target = job['target']
         receipts = [self.view_receipt(owner, 'status')]
-        shown = self.lanes[owner].cache.get(target_key(target), {}).get('show')
+        cache = self.lanes[owner].cache.get(target_key(target), {})
+        shown = cache.get('show')
         if shown and shown[0]['result'].get('job') is job:
             receipts.append(self.view_receipt(owner, 'show', target))
-        receipts.extend(self.view_receipt(owner, name, target) for name in components)
-        return min((receipt for receipt in receipts if receipt is not None),
-                   key=lambda receipt: (receipt.generation, receipt.monotonic), default=None)
+        receipts.extend(self.view_receipt(owner, name, target) for name in components if name in cache)
+        if None in receipts:
+            return None
+        return min(receipts, key=lambda receipt: (receipt.generation, receipt.monotonic))
 
     def action_details(self):
         selected = self.selected()

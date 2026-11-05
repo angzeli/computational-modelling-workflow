@@ -51,7 +51,7 @@ class StudyScreen(ModalScreen):
                 self.query_one('#study-body', Static).update('No fresh series evidence. No comparison or convergence verdict is available.')
                 return
             self.record = record
-            if self.owner is not None and receipt is not None:
+            if self.owner is not None:
                 self.app.view_received(self, self.owner, receipt)
             self.query_one('#study-body', Static).update(study_text(record))
             self.query_one('#study-status', Static).update('Recorded study bindings only; use explicit study compare for fresh scientific qualification.')

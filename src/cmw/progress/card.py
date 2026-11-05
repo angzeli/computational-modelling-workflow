@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 
-from .formatting import (age_text, cell_width, context_text, fit_text,
+from .formatting import (age_text, cell_width, compact_frame, context_text, fit_text,
                          observation_problem, source_action, value_text)
 
 
@@ -185,7 +185,7 @@ def verification_summary(snapshot, *, width, now, compact=False):
     return fit_text(text, width)
 
 
-def _frame(snapshot, *, width, now, heading, max_lines):
+def _frame(snapshot, *, width, now, heading, max_lines, require_frame, receipt_caption):
     """Use viewport/descriptor geometry only, so polling cannot shift columns."""
     rows = [(group.label if index == 0 else '', row)
             for group in snapshot.card_groups for index, row in enumerate(group.rows)]
@@ -204,9 +204,11 @@ def _frame(snapshot, *, width, now, heading, max_lines):
     for padding, separator, minimum in ((1, '│', 32), (0, '│', 28)):
         available = width - 2 - columns - 2 * padding * (columns + 1) - label_width
         value_width, remainder = divmod(available, columns)
-        title = (' ' if padding else '') + heading + (' ' if padding else '')
-        if value_width < minimum or cell_width(title) + 1 > width - 2:
+        title_width = width - 3 - 2 * padding
+        if value_width < minimum or (not require_frame and cell_width(heading) > title_width):
             continue
+        captioned = receipt_caption.format(heading, title_width) if receipt_caption is not None else fit_text(heading, title_width)
+        title = ' ' * padding + captioned + ' ' * padding
         widths = [label_width] + [value_width] * columns
         widths[-1] += remainder
         def line(values):
@@ -231,11 +233,8 @@ def _frame(snapshot, *, width, now, heading, max_lines):
     return None
 
 
-def card_text(snapshot, *, width, now, max_lines=None, framed=False):
+def card_text(snapshot, *, width, now, max_lines=None, framed=False, require_frame=False, receipt_caption=None):
     """Render fixed logical groups; engine-specific meaning lives in their cells."""
-    label_width = max((cell_width(group.label) for group in snapshot.card_groups), default=0)
-    label_width = min(label_width, max(0, width // 4))
-    body_width = max(1, width - label_width - 2)
     warnings = {event.event_id for event in snapshot.events
                 if event.kind in ('native-fatal', 'native-failure', 'native-stop-request')}
     notices = []
@@ -264,11 +263,18 @@ def card_text(snapshot, *, width, now, max_lines=None, framed=False):
                        'unsupported' if 'unsupported' in problem else 'source review' if source_action(snapshot) else 'catching up')
     cached = bool(snapshot.metrics and snapshot.read_health not in {'OK', 'PENDING'})
     heading = ' · '.join(dict.fromkeys(('SCIENTIFIC', *(['cached'] if cached else []), *notices)))
-    if framed:
-        panel = _frame(snapshot, width=width, now=now, heading=heading, max_lines=max_lines)
+    if framed or require_frame:
+        panel = _frame(snapshot, width=width, now=now, heading=heading, max_lines=max_lines,
+                       require_frame=require_frame, receipt_caption=receipt_caption)
         if panel is not None:
             return panel
-    lines = [heading]
+    frame_width = width
+    if require_frame:
+        width = max(0, frame_width - 3)
+    label_width = max((cell_width(group.label) for group in snapshot.card_groups), default=0)
+    label_width = min(label_width, max(0, width // 4))
+    body_width = max(1, width - label_width - 2)
+    lines = []
     for group in snapshot.card_groups:
         for index, row in enumerate(group.rows):
             label = fit_text(group.label if index == 0 else '', label_width)
@@ -279,9 +285,15 @@ def card_text(snapshot, *, width, now, max_lines=None, framed=False):
             body = '  '.join(value + ' ' * max(0, size - cell_width(value))
                              for value, size in zip(values, widths)).rstrip()
             lines.append(label + ' ' * (label_width - cell_width(label) + 2) + body)
-    lines.append(verification_summary(snapshot, width=width, now=now))
-    # Removing optional decoration may satisfy a short budget; never drop a metric
-    # group or a safety qualification to create room for a heading.
-    if max_lines is not None and len(lines) > max_lines and not notices:
-        lines.pop(0)
+    footer = verification_summary(snapshot, width=width, now=now)
+    # A short fallback can have room only for metric rows and the evidence
+    # footer. Qualify that footer in place instead of changing the table height.
+    if max_lines is None or len(lines) + 2 <= max_lines or notices:
+        title = receipt_caption.format(heading, width) if receipt_caption is not None else heading
+        lines.insert(0, title)
+    elif receipt_caption is not None:
+        footer = receipt_caption.format(footer, width)
+    lines.append(footer)
+    if require_frame:
+        return compact_frame(lines, frame_width)
     return '\n'.join(fit_text(line, width) for line in lines)

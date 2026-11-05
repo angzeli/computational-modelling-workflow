@@ -89,6 +89,22 @@ def fit_text(text, width):
     return ''.join(result) + ('…' if width > 0 else '')
 
 
+def compact_frame(lines, width):
+    """Use the first and last logical rows as edges without displacing the table."""
+    if width < 3:
+        return '\n'.join(fit_text(line, width) for line in lines)
+    first, *rest = lines
+    last = rest.pop() if rest else ''
+    def edge(left, label, right):
+        label = fit_text(label, width - 3)
+        return left + '─' + label + '─' * (width - 3 - cell_width(label)) + right
+    framed = [edge('┌', first, '┐')]
+    for line in rest or ['']:
+        value = fit_text(line, width - 2)
+        framed.append('│' + value + ' ' * (width - 2 - cell_width(value)) + '│')
+    return '\n'.join([*framed, edge('└', last, '┘')])
+
+
 def comparison_reason(latest, previous):
     if previous is None:
         return 'No comparable previous observation in this snapshot.'
@@ -224,7 +240,7 @@ def _card_duration(timings, width):
     return f'{label}: {position}{text} {clock}/{timing.source}{qualification}'
 
 
-def _card_text(snapshot, *, compact, width, now, max_lines):
+def _card_text(snapshot, *, compact, width, now, max_lines, receipt_caption):
     limit = max(3, max_lines)
     active = 'ACTIVE: ' + (context_text(snapshot.iteration) if snapshot.iteration else snapshot.phase)
     # Phase is retained where it adds context and space permits.
@@ -232,17 +248,18 @@ def _card_text(snapshot, *, compact, width, now, max_lines):
         with_phase = f'ACTIVE: {snapshot.phase} · ' + context_text(snapshot.iteration)
         if not compact or cell_width(with_phase) <= width:
             active = with_phase
-    lines = [active]
     current_present = any(_current(item.latest, snapshot) and _context_key(item.latest.context) == _context_key(snapshot.iteration)
                           for item in snapshot.metrics)
     pending = bool(snapshot.iteration and not current_present and
                    not any(_current(item.latest, snapshot) for item in snapshot.metrics))
-    if pending:
-        if limit >= 5:
-            lines.append('Current metrics: — (pending / unavailable)')
-        else:
-            suffix = ' · metrics pending'
-            lines[0] = fit_text(lines[0], max(0, width - cell_width(suffix))) + suffix
+    if pending and limit < 5:
+        suffix = ' · metrics pending'
+        active = fit_text(active, max(0, width - cell_width(suffix))) + suffix
+    if snapshot.status in {'SOURCE_UNRESOLVED', 'SOURCE_CONFLICT'}:
+        active = 'Cached scientific: ' + snapshot.status
+    lines = [receipt_caption.format(active, width) if receipt_caption is not None else active]
+    if pending and limit >= 5:
+        lines.append('Current metrics: — (pending / unavailable)')
     duration = bool(snapshot.completed_durations and limit >= 5)
     header = not compact and width >= 110
     count = max(1, limit - len(lines) - 1 - int(duration) - int(header))
@@ -291,7 +308,7 @@ def _card_text(snapshot, *, compact, width, now, max_lines):
                  for part in parts]
         evidence = ' · '.join(parts)
     lines.append(evidence)
-    return '\n'.join(fit_text(line, width) for line in lines[:-1][:limit-1] + [lines[-1]])
+    return [fit_text(line, width) for line in lines[:-1][:limit-1] + [lines[-1]]]
 
 
 def source_action(snapshot):
@@ -345,7 +362,7 @@ def observation_problem(snapshot):
     return ''
 
 
-def _unresolved_card(snapshot, *, width, max_lines):
+def _unresolved_card(snapshot, *, width, max_lines, receipt_caption):
     reasons = tuple(dict.fromkeys((*snapshot.messages, *snapshot.context.limitations, *snapshot.limitations)))
     # The association qualification stays in JSON and Details; reserve the card
     # for actionable failures instead of repeating its generic ownership limit.
@@ -358,36 +375,40 @@ def _unresolved_card(snapshot, *, width, max_lines):
     if len(reasons) > available:
         heading += f' (+{len(reasons) - available}; Enter details)'
     action = ' · '.join(filter(None, (source_action(snapshot), 'Enter details')))
-    lines = [heading, *shown, action]
-    return '\n'.join(fit_text(line, width) for line in lines)
+    lines = [receipt_caption.format(heading, width) if receipt_caption is not None else heading, *shown, action]
+    return [fit_text(line, width) for line in lines]
 
 
-def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, width=120, now=None, max_lines=None, framed=False):
+def progress_text(snapshot: ProgressSnapshot, *, compact=False, detailed=False, width=120, now=None,
+                  max_lines=None, framed=False, require_frame=False, receipt_caption=None):
     """Render adapter descriptors without engine-specific metric names or rules."""
     now = time.time() if now is None else now
     context = snapshot.context
+    content_width = max(0, width - 3) if require_frame else width
     if snapshot.status == 'ADAPTER_UNAVAILABLE':
-        return 'Progress adapter unavailable' + (f' ({context.engine})' if context.engine else '')
+        heading = 'Progress adapter unavailable' + (f' ({context.engine})' if context.engine else '')
+        line = receipt_caption.format(heading, content_width) if receipt_caption is not None else heading
+        return compact_frame([line], width) if require_frame else line
     unresolved = snapshot.status in {'SOURCE_UNRESOLVED', 'SOURCE_CONFLICT'}
     if not detailed:
         limit = max_lines or (3 if width < 54 else 6 if compact else 11)
-        if unresolved and not snapshot.metrics and not snapshot.card_groups:
-            return _unresolved_card(snapshot, width=width, max_lines=limit)
         if snapshot.card_groups:
             from .card import card_text
-            card = card_text(snapshot, width=width, now=now, max_lines=limit, framed=framed)
+            return card_text(snapshot, width=width, now=now, max_lines=limit, framed=framed or require_frame,
+                             require_frame=require_frame, receipt_caption=receipt_caption)
+        if unresolved and not snapshot.metrics:
+            lines = _unresolved_card(snapshot, width=content_width, max_lines=limit, receipt_caption=receipt_caption)
         else:
-            card = _card_text(snapshot, compact=compact, width=width, now=now, max_lines=limit)
-        if unresolved and not snapshot.card_groups:
-            lines = card.splitlines()
-            lines[0] = fit_text('Cached scientific: ' + snapshot.status, width)
-            card = '\n'.join(lines)
-        return card
+            lines = _card_text(snapshot, compact=compact, width=content_width, now=now, max_lines=limit,
+                               receipt_caption=receipt_caption)
+        return compact_frame(lines, width) if require_frame else '\n'.join(lines)
     heading = 'SCIENTIFIC PROGRESS · ' + snapshot.status if unresolved else f'PROGRESS · {snapshot.phase}'
     if snapshot.calculation:
         heading += f' · {snapshot.calculation}'
     if context.stage:
         heading += f' · {context.stage}'
+    if receipt_caption is not None:
+        heading = receipt_caption.format(heading, width)
     if snapshot.iteration:
         heading += '\nACTIVE: ' + context_text(snapshot.iteration)
     series = sorted(snapshot.metrics, key=lambda item: (item.latest.priority, item.latest.semantic_id))
