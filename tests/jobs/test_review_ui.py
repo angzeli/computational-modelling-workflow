@@ -1,4 +1,5 @@
 """Selected-only local and node review views, using real Textual rendering."""
+import asyncio
 from dataclasses import replace
 import os
 import json
@@ -13,6 +14,7 @@ from cmw.jobs.review_models import DOMAIN_NAMES, ReviewDomain, ReviewRecord, cac
 from cmw.jobs.snapshot import capture_snapshot, render_snapshot
 from cmw.jobs.store import Store
 from cmw.nodes.codec import encode_typed
+from cmw.nodes.protocol import NodeError
 
 try:
     from textual.widgets import Button, DataTable, Input, Static, TextArea
@@ -68,6 +70,7 @@ if JobsApp is not None:
             for job in self.jobs:
                 job['resources'].update(mpi_ranks=8,threads_per_rank=1)
                 job['reason'] = ''
+            self.fail_next_poll = False
             self.review_service = FakeReview(self.jobs[0])
             self.review_service.record = review(self.jobs[0],self.node_id,self.queue_id)
 
@@ -75,8 +78,10 @@ if JobsApp is not None:
             if not operation.startswith('review.'):
                 return super().call(operation,params,target,**kwargs)
             self.calls.append((operation,params,target))
+            if operation == 'review.poll' and self.fail_next_poll:
+                self.fail_next_poll = False
+                raise NodeError('DISCONNECTED', 'Synthetic targeted review.poll disconnect')
             if self.fail:
-                from cmw.nodes.protocol import NodeError
                 raise NodeError('DISCONNECTED','Synthetic review channel disconnected')
             method = operation.split('.')[1]
             if method == 'start':
@@ -220,21 +225,37 @@ class ReviewUiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press('i')
             await self.until(pilot,lambda:view.record.status=='PENDING' and not view.busy)
             pending = view.record
-            backend.fail = True
-            await self.until(pilot,lambda:view.unavailable)
+            delivered = asyncio.Event()
+            original_request = view.request
+
+            def watch_poll(operation, params, accepted):
+                def replied(record, error):
+                    accepted(record, error)
+                    if operation == 'review.poll' and error is not None:
+                        self.assertEqual(error.code, 'DISCONNECTED')
+                        delivered.set()
+                original_request(operation, params, replied)
+
+            view.request = watch_poll
+            backend.fail_next_poll = True
+            view.poll()
+            app.tick()
+            await asyncio.wait_for(delivered.wait(), timeout=4)
+            self.assertTrue(view.unavailable)
             self.assertEqual(view.record,pending)
             self.assertIn('cached observation retained',str(view.query_one('#review-status',Static).render()))
-            backend.fail = False
             backend.review_service.complete = True
             lane = app.lanes['MINI']
             self.assertTrue(lane.handshake_required)
-            # Reach the configured reconnect deadline without a wall-time sleep.
-            now[0] = lane.next_poll
-            app.tick()
-            await self.until(pilot,lambda:lane.fresh(now[0]))
-            self.assertEqual(view.record,pending)
-            view.unavailable = False
-            view.poll()
+            # Keep the recovery read separate from the status that requalifies the lane.
+            with patch.object(view, 'refresh_node_observation') as refresh:
+                now[0] = lane.next_poll
+                app.tick()
+                await self.until(pilot,lambda:lane.fresh(now[0]))
+                refresh.assert_called_once_with()
+                self.assertEqual(view.record,pending)
+                self.assertFalse(app.view_commands_allowed(view))
+            view.refresh_node_observation()
             await self.until(pilot,lambda:view.record.status=='COMPLETE' and not view.busy)
             await pilot.press('escape','enter')
             self.assertIsInstance(app.screen,FrozenText)
@@ -245,6 +266,100 @@ class ReviewUiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(copied,json.loads(json.dumps(app.selected_review(owner,job).to_dict())))
             await pilot.press('q')
         self.assertEqual(backend.jobs[0]['status'],'Run')
+
+    async def background_failure_before_review_poll(self, complete):
+        backend = ReviewBackend()
+        now = [100.]
+        app = NodesApp({'MINI': backend}, clock=lambda: now[0], wall_clock=lambda: 1700000000.)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.until(pilot, lambda: bool(app.rows))
+            await pilot.press('r')
+            await self.until(pilot, lambda: isinstance(app.screen, ReviewScreen) and not app.screen.busy)
+            view = app.screen
+            await pilot.press('i')
+            await self.until(pilot, lambda: view.record.status == 'PENDING' and not view.busy)
+            if complete:
+                backend.review_service.complete = True
+                view.poll()
+                app.tick()
+                await self.until(pilot, lambda: view.record.status == 'COMPLETE' and not view.busy)
+            lane = app.lanes['MINI']
+            await self.until(pilot, lambda: not lane.busy and not lane.pending and not view.busy)
+            retained = view.record
+            target = backend.jobs[0]['target']
+            self.assertTrue(app.view_commands_allowed(view))
+            self.assertFalse(view.query_one('#review-inspect' if complete else '#review-cancel', Button).disabled)
+            self.assertFalse(any(item[0] == 'review.poll' for item in lane.pending))
+            self.assertIsNone(lane.active_request)
+            called = []
+
+            def failed(envelope, error):
+                # No timer or event-loop yield between the background failure and these checks.
+                self.assertEqual(error.code, 'DISCONNECTED')
+                self.assertEqual(view.record, retained)
+                self.assertFalse(app.view_commands_allowed(view))
+                self.assertTrue(view.query_one('#review-inspect', Button).disabled)
+                self.assertTrue(view.query_one('#review-cancel', Button).disabled)
+                banner = view.query_one('.node-receipt-banner', Static)
+                self.assertTrue(banner.display)
+                self.assertIn('last reported', str(banner.render()).lower())
+                self.assertIn('22:13:20 UTC · 0s ago', str(banner.render()))
+                self.assertEqual(now[0], before)
+                for name in ('inspect', 'cancel_review'):
+                    self.assertFalse(view.check_action(name, ()))
+                with patch.object(app, 'queue') as queue:
+                    view.action_inspect()
+                    view.action_cancel_review()
+                    view.poll()
+                    queue.assert_not_called()
+                called.append(True)
+
+            before = now[0]
+            app.accept('MINI', ('observe', {}, target, failed), None, NodeError('DISCONNECTED', 'background read lost'))
+            self.assertEqual(called, [True])
+            with patch.object(view, 'refresh_node_observation') as recovery:
+                now[0] = lane.next_poll
+                app.tick()
+                await self.until(pilot, lambda: lane.fresh(now[0]))
+                recovery.assert_called_once_with()
+                self.assertEqual(view.record, retained)
+                self.assertTrue(view.query_one('.node-receipt-banner', Static).display)
+                self.assertFalse(app.view_commands_allowed(view))
+            view.refresh_node_observation()
+            await self.until(pilot, lambda: not view.busy and app.view_commands_allowed(view))
+            self.assertFalse(view.query_one('.node-receipt-banner', Static).display)
+            self.assertEqual(view.record.status, 'CACHED' if complete else 'PENDING')
+            self.assertEqual([name for name, _ in backend.review_service.calls if name in {'start', 'cancel'}], ['start'])
+
+    async def test_frozen_review_copy_keeps_parent_receipt_while_parent_recovers(self):
+        backend = ReviewBackend()
+        now = [100.]
+        app = NodesApp({'MINI': backend}, clock=lambda: now[0])
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.until(pilot, lambda: bool(app.rows))
+            await pilot.press('r')
+            await self.until(pilot, lambda: isinstance(app.screen, ReviewScreen) and app.screen.record is not None)
+            parent = app.screen
+            await pilot.press('y')
+            copy = app.screen
+            self.assertIsInstance(copy, FrozenText)
+            lane = app.lanes['MINI']
+            await self.until(pilot, lambda: not lane.busy and not lane.pending)
+            app.accept('MINI', ('status', {}, None, None), None, NodeError('DISCONNECTED', 'background read lost'))
+            banner = copy.query_one('.node-receipt-banner', Static)
+            self.assertTrue(banner.display)
+            self.assertEqual(copy.node_view_receipts, parent.node_view_receipts)
+            now[0] = lane.next_poll
+            app.tick()
+            await self.until(pilot, lambda: app.view_commands_allowed(parent))
+            self.assertTrue(banner.display)
+            self.assertFalse(app.view_commands_allowed(copy))
+
+    async def test_background_failure_before_pending_review_poll(self):
+        await self.background_failure_before_review_poll(False)
+
+    async def test_background_failure_with_open_complete_review(self):
+        await self.background_failure_before_review_poll(True)
 
 
 class ReviewSnapshotTests(unittest.TestCase):

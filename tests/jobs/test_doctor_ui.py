@@ -277,7 +277,7 @@ class DoctorUiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.screen.report['observation']['status'], 'CACHED')
             self.assertEqual(app.screen.report['target']['attempt_id'], backend.jobs[0]['attempt_id'])
             await pilot.press('escape', 'escape')
-            app.lanes['REMOTE'].error = 'synthetic transport stale'
+            # Dispatch from a fresh Details view, then lose transport on the inspection.
             backend.doctor_error = NodeError('UNREACHABLE', 'synthetic transport stale')
             await pilot.press('enter', 'd')
             await self.until(pilot, lambda: isinstance(app.screen, DoctorReport) and not app.screen.pending)

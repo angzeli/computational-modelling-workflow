@@ -52,6 +52,18 @@ class ReachabilityPortalTests(unittest.TestCase):
             self.assertTrue(self.lane.handshake_required)
             self.assertEqual(self.lane.next_poll, self.now + 5)
 
+    def test_data_received_after_expiry_cannot_become_current_on_next_status(self):
+        self.ready()
+        target = self.backend.jobs[0]['target']
+        self.now += 16
+        self.app.accept('node', ('observe', {}, target, None), self.backend.call('observe', {}, target), None)
+        receipt = self.app.view_receipt('node', 'observe', target)
+        self.assertFalse(self.app.receipt_current('node', receipt))
+        self.reply()
+        self.assertFalse(self.app.receipt_current('node', receipt))
+        self.app.accept('node', ('observe', {}, target, None), self.backend.call('observe', {}, target), None)
+        self.assertTrue(self.app.receipt_current('node', self.app.view_receipt('node', 'observe', target)))
+
     def test_timeout_uses_same_counted_transition(self):
         self.ready()
         for _ in range(3):

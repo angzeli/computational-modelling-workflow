@@ -238,7 +238,8 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
                     result['result']['state']['machine_usage'] = deepcopy(self.machine)
                 return result
         backends = {'MBP': ThermalBackend('MBP'), 'MINI': ThermalBackend('MINI', remote=True)}
-        app = NodesApp(backends, clock=lambda: 1000.)
+        wall = [0.]
+        app = NodesApp(backends, clock=lambda: 1000., wall_clock=lambda: wall[0])
         async with app.run_test(size=(77, 24)) as pilot:
             await self.until(pilot, lambda: len(app.rows) == 10)
             job = backends['MINI'].jobs[0]
@@ -263,7 +264,13 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn('MINI / research / J1.1', str(app.query_one('#selected', Static).render()))
                     save_render(app, f'portal-{quality}-{size[0]}x{size[1]}')
             await self.until(pilot, lambda: not app.lanes['MINI'].busy and not app.lanes['MINI'].pending)
+            wall[0] += 3600
             self.assert_disconnected_then_unreachable(app, 'MINI', 'Synthetic SSH unavailable')
+            summary = app.query_one('#node-summary', Static)
+            self.assertIn('MINI Unreachable 0s · Last reported · received 00:00:00 UTC · 0s ago', str(summary.render()))
+            self.assertTrue(app.lanes['MBP'].fresh(app.clock()))
+            self.assertIn('Last reported', str(app.query_one('#progress', Static).render()))
+            self.assertFalse(app.check_action('cancel', ()))
             self.assertIn('avg —', machine_text(app.machine_usage('MINI')))
             snap = app.capture_copy_snapshot().to_dict()
             self.assertEqual(snap['node_origin']['alias'], 'MINI')
@@ -273,6 +280,8 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('Last reported Run', str(app.query_one('#selected', Static).render()))
             app.lanes['MINI'].next_poll = 0
             await self.until(pilot, lambda: app.lanes['MINI'].fresh(app.clock()))
+            self.assertNotIn('Last reported', str(summary.render()))
+            self.assertTrue(app.check_action('cancel', ()))
             self.assertEqual(machine_text(app.machine_usage('MINI')), 'Machine: CPU 88%; avg 76°C RAM 51.2 / 64.0 GiB')
             self.assertEqual(app.selected()[1]['target'], job['target'])
 
