@@ -63,6 +63,14 @@ class StudyServiceTests(unittest.TestCase):
         self.assertEqual(report['qualified_count'], 0)
         self.assertEqual([row['status'] for row in report['rows']], ['MISSING', 'MISSING'])
         selection = complete_study(self.fixture, record)
+        reason = 'Parent closure unverifiable, retry: parent queue temporarily unreadable'
+        with patch('cmw.jobs.study._closure', return_value={'closed': None, 'reason': reason}):
+            unavailable = payload(self.service.compare(record, selection))
+        self.assertEqual(unavailable['qualified_count'], 0)
+        for row in unavailable['rows']:
+            self.assertEqual(row['status'], 'UNAVAILABLE')
+            self.assertIn(reason, row['reasons'])
+            self.assertIsNone(row['delta'])
         compared = self.service.compare(record, selection, str(self.root / 'comparison'))
         report = payload(compared)
         self.assertEqual(compared.status, 'COMPLETE', report)

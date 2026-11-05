@@ -151,6 +151,11 @@ def handle(args):
             return 2
         return 0
     except (NodeError, OSError, ValueError) as exc:
+        code = getattr(exc, 'code', 'NODE_REFUSED')
+        if (args.jobs_operation in {'plan-next', 'materialize-next', 'register-next'}
+                and code in {'QUEUE_UNAVAILABLE', 'SUCCESSOR_UNVERIFIABLE', 'SUCCESSOR_PENDING_VERIFICATION'}):
+            from cmw.jobs.successor_cli import print_retry
+            return print_retry('SUCCESSOR_UNVERIFIABLE' if code == 'QUEUE_UNAVAILABLE' else code, str(exc), args)
         print(json.dumps({'code': getattr(exc, 'code', 'NODE_REFUSED'), 'message': str(exc)}))
         return 2
     finally:

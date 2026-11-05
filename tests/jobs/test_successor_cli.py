@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from cmw.jobs.cli import register
 from cmw.jobs.store import Store
-from cmw.jobs.successor_models import SuccessorResult
+from cmw.jobs.successor_models import SuccessorResult, SuccessorUnverifiable
 from tests.nodes import test_successor
 
 
@@ -88,6 +88,40 @@ class SuccessorCliTests(unittest.TestCase):
             self.assertEqual(code, 2, output)
             self.assertEqual(json.loads(output)['status'], 'BLOCKED')
             factory.return_value.materialize.assert_not_called()
+
+    def test_retryable_local_commands_preserve_status_reason_and_exit_75(self):
+        with patch('cmw.jobs.successor.SuccessorService') as factory:
+            service = factory.return_value
+            reason = 'Parent queue temporarily unreadable; retry'
+            service.plan.return_value = replace(self.result, status='UNVERIFIABLE',
+                payload_json=json.dumps({'closure': {'reason': reason}}))
+            service.materialize.return_value = replace(self.result, operation='materialize',
+                status='PENDING_VERIFICATION', payload_json=json.dumps({'reason': reason, 'record_path': '/owner/record'}))
+            service.register.side_effect = SuccessorUnverifiable(reason)
+            for command, options, status, error in (
+                    ('plan-next', ['--spec', '/owner/spec'], 'UNVERIFIABLE', 'SUCCESSOR_UNVERIFIABLE'),
+                    ('materialize-next', ['--spec', '/owner/spec', '--approve-digest', self.digest],
+                     'PENDING_VERIFICATION', 'SUCCESSOR_PENDING_VERIFICATION'),
+                    ('register-next', ['--materialization', '/owner/record', '--approve-digest', self.digest,
+                                       '--request-id', uuid4().hex], 'UNVERIFIABLE', 'SUCCESSOR_UNVERIFIABLE')):
+                with self.subTest(command=command):
+                    code, output = self.call([command, 'J1.1', *options, '--json'])
+                    self.assertEqual(code, 75, output)
+                    value = json.loads(output)
+                    self.assertEqual((value['status'], value['code'], value['exit_code']), (status, error, 75))
+                    self.assertIn(reason, output)
+
+    def test_remote_preflight_lock_returns_retryable_status(self):
+        from cmw.nodes.protocol import NodeError
+        with patch('cmw.nodes.jobs_cli.connect') as connect:
+            backend = connect.return_value
+            backend.call.side_effect = NodeError('QUEUE_UNAVAILABLE', 'Owner queue temporarily unreadable; retry')
+            code, output = self.call(['--node', 'fixture', 'plan-next', 'J1.1', '--spec', '/owner/spec',
+                                      '--json'], local=False)
+        self.assertEqual(code, 75)
+        value = json.loads(output)
+        self.assertEqual((value['status'], value['code'], value['exit_code']), ('UNVERIFIABLE', 'SUCCESSOR_UNVERIFIABLE', 75))
+        backend.call.assert_called_once_with('lookup', {'id': 'J1.1'})
 
     def test_node_cli_forwards_owner_paths_and_immutable_parent(self):
         fixture = test_successor.SuccessorNodeTests()

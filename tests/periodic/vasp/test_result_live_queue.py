@@ -86,7 +86,7 @@ class LiveQueueVerificationTests(unittest.TestCase):
     def test_lock_released_during_retry_matches_saved_attempt(self):
         with self.exclusive_lock() as writer:
             # Release only after an actual busy read reaches its retry interval.
-            with patch("cmw.periodic.vasp.result_execution.time.sleep",
+            with patch("cmw.jobs.lifecycle.time.sleep",
                        side_effect=lambda delay: writer.rollback()) as retry:
                 code, output = self.verify_cli("--json")
             retry.assert_called_once()

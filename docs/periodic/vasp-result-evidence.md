@@ -533,6 +533,15 @@ leaves the published record intact for all three outcomes. An accepted-structure
 successor requires successful reverification, and a study cannot qualify a
 finalized energy from an unverifiable record.
 
+A successor can already have published its prepared inputs when the parent
+queue becomes unreadable. The owner keeps the input hashes in a
+`PENDING_VERIFICATION` record and withholds registration. Retry
+`materialize-next` with its original digest and destination. Successor
+commands return 75 for temporary refusal. The endpoint reports
+`SUCCESSOR_UNVERIFIABLE` before publication or during registration, and
+`SUCCESSOR_PENDING_VERIFICATION` for a published successor awaiting its
+parent check. See [successor preparation and registration](../../cmw-jobs-successors.md).
+
 Publication writes only:
 
 ```text

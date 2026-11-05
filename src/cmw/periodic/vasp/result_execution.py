@@ -13,15 +13,11 @@ import math
 from pathlib import Path
 import re
 import sqlite3
-import time
 
 from .result_differences import field_differences
 from .result_sources import MAX_JSON_BYTES, SourceSnapshotError, read_json_source
 
 
-_LIVE_QUEUE_ATTEMPTS = 3
-_LIVE_QUEUE_BUSY_TIMEOUT = 0.25
-_LIVE_QUEUE_RETRY_DELAY = 0.05
 _JOB_FIELDS = ("id", "attempt_id", "engine", "argv", "cwd", "layout", "status", "started_at",
                "finished_at", "exit_code", "signal", "cancel_requested", "termination_requested",
                "logs", "node_submission", "worker_protocol")
@@ -299,31 +295,6 @@ def _inspect_execution(
     return finish()
 
 
-class _QueueUnavailable(Exception):
-    """The original database could not be observed within the bounded read budget."""
-
-
-def _read_original_queue(root, job_id):
-    from cmw.jobs.lifecycle import JobObservationUnavailable, read_job_with_identity
-    from cmw.jobs.store import Store
-
-    for attempt in range(_LIVE_QUEUE_ATTEMPTS):
-        try:
-            return read_job_with_identity(Store(root), job_id, timeout=_LIVE_QUEUE_BUSY_TIMEOUT)
-        except sqlite3.Error as exc:
-            # Fixed queries against missing/malformed native tables are evidence of
-            # an incompatible database. BUSY, LOCKED and I/O/open errors are not.
-            if (getattr(exc, "sqlite_errorcode", 0) & 255) in {
-                    sqlite3.SQLITE_ERROR, sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
-                raise
-            reason = exc
-        except (OSError, JobObservationUnavailable) as exc:
-            reason = exc
-        if attempt + 1 < _LIVE_QUEUE_ATTEMPTS:
-            time.sleep(_LIVE_QUEUE_RETRY_DELAY)
-    raise _QueueUnavailable(str(reason)) from reason
-
-
 def _selected_fields(record, fields):
     # Native legacy records can omit optional fields equivalent to explicit null.
     return {key: record.get(key) for key in fields}
@@ -364,14 +335,14 @@ def _inspect_queue(snapshot, job, root, expected_target, result, check, require_
     identity_matches = None
     unavailable = False
     if needs_live and root is not None:
-        from cmw.jobs.lifecycle import JobObservationConflict
-        from cmw.jobs.store import JobsError
+        from cmw.jobs.lifecycle import JobObservationConflict, JobObservationUnavailable, read_job_with_identity_retry
+        from cmw.jobs.store import JobsError, Store
 
         differences = []
         live = result["live_queue"] = {"status": "MATCH", "differences": differences}
         try:
-            current, control, actual = _read_original_queue(root, job["id"])
-        except _QueueUnavailable as exc:
+            current, control, actual = read_job_with_identity_retry(Store(root), job["id"])
+        except JobObservationUnavailable as exc:
             unavailable = True
             live.update(status="UNAVAILABLE", reason=str(exc))
             check("native_queue", None, f"Original queue unavailable after bounded read retries: {exc}")

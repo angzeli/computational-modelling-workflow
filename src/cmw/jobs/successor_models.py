@@ -4,6 +4,14 @@ from dataclasses import asdict, dataclass
 import json
 import re
 
+from .store import JobsError
+
+
+class SuccessorUnverifiable(JobsError):
+    """Required successor evidence could not be observed; retry the same request."""
+
+    code = 'SUCCESSOR_UNVERIFIABLE'
+
 
 @dataclass(frozen=True)
 class SuccessorResult:
@@ -24,7 +32,8 @@ class SuccessorResult:
         identifier(self.node_id, 'node_id'); identifier(self.queue_id, 'queue_id')
         if type(self.job_id) is not int or self.job_id < 1 or not re.fullmatch('[a-f0-9]{32}', self.attempt_id):
             raise ValueError('Invalid successor parent attempt')
-        states = {'plan': {'READY', 'BLOCKED'}, 'materialize': {'MATERIALIZED'}, 'register': {'REGISTERED'}}
+        states = {'plan': {'READY', 'BLOCKED', 'UNVERIFIABLE'},
+                  'materialize': {'MATERIALIZED', 'PENDING_VERIFICATION'}, 'register': {'REGISTERED'}}
         if self.operation not in states or self.status not in states[self.operation]:
             raise ValueError('Unsupported successor operation/status')
         if not re.fullmatch('[a-f0-9]{64}', self.plan_digest):
@@ -34,6 +43,14 @@ class SuccessorResult:
         value = json.loads(self.payload_json, parse_constant=lambda s: (_ for _ in ()).throw(ValueError(s)))
         if type(value) is not dict:
             raise ValueError('Successor payload must be an object')
+
+    @property
+    def retry_code(self):
+        if self.status == 'UNVERIFIABLE':
+            return SuccessorUnverifiable.code
+        if self.status == 'PENDING_VERIFICATION':
+            return 'SUCCESSOR_PENDING_VERIFICATION'
+        return None
 
     def to_dict(self):
         value = asdict(self)

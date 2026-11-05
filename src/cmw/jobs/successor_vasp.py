@@ -15,6 +15,7 @@ from cmw.periodic.vasp.preparation import compare_inputs, resolve_preparation
 from cmw.periodic.vasp.result_finalization import verify_finalization
 from cmw.periodic.vasp.results import inspect_result
 from .review_engines import _Sources
+from .successor_models import SuccessorUnverifiable
 
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 _OPTIONS = {'directory', 'preparation_spec', 'output', 'scratch_root', 'record_directory',
@@ -155,9 +156,10 @@ def _accepted(options, parent, state_directory, observed, sources):
                  'Accepted record has malformed source identity')
         sources.observe(str(_path(source['resolved_path'])), 'accepted_required_source')
     checked = verify_finalization(path)
+    if checked['valid'] is None:
+        raise SuccessorUnverifiable('Accepted finalization is unverifiable; retry: ' + '; '.join(checked['findings']))
     if checked['valid'] is not True:
-        reason = 'Accepted finalization is unverifiable' if checked['valid'] is None else 'Accepted finalization no longer verifies'
-        raise VaspSuccessorError(reason + ': ' + '; '.join(map(str, checked['findings'])))
+        raise VaspSuccessorError('Accepted finalization no longer verifies: ' + '; '.join(checked['findings']))
     evidence = checked['record']['evidence']
     execution = evidence['binding']['execution']
     job = execution['job']
@@ -283,16 +285,31 @@ def preview_vasp(options, parent_target, *, state_directory):
     return _resolve(options, parent_target, state_directory)[0]
 
 
-def materialize_vasp(options, parent_target, approved_preview, *, state_directory):
-    """Revalidate exact approval, then publish only the resolved four input bytes."""
-    current, files, record, publication = _resolve(options, parent_target, state_directory)
-    _require(current == approved_preview, 'VASP sources, settings, identity or destination changed since approval')
+def _verify_sources(current):
     fresh = _Sources(MAX_SOURCE_BYTES, None)
     for expected in current['sources']:
         actual = fresh.observe(expected['path'], expected['role'])
         _require(all(actual[key] == expected[key] for key in ('sha256', 'bytes_read', 'stat_before', 'resolved_path')),
                  'VASP source identity/bytes changed before publication')
     fresh.verify_stable()
+
+
+
+def verify_published_parent(options, parent_target, state_directory, preview, *, recheck_sources):
+    """Verify the approved source/ancestor evidence without planning a new destination."""
+    if recheck_sources:
+        _verify_sources(preview)
+    if options['source_mode'] == 'accepted':
+        sources = _Sources(MAX_SOURCE_BYTES, None)
+        _accepted(options, parent_target, state_directory, preview['source'], sources)
+        sources.verify_stable()
+
+
+def materialize_vasp(options, parent_target, approved_preview, *, state_directory):
+    """Revalidate exact approval, then publish only the resolved four input bytes."""
+    current, files, record, publication = _resolve(options, parent_target, state_directory)
+    _require(current == approved_preview, 'VASP sources, settings, identity or destination changed since approval')
+    _verify_sources(current)
     record = {**record, 'successor': {'schema_version': 1, 'parent': dict(parent_target),
               'source': current['source'], 'plan_digest': current['digest'],
               'relationship': 'new-input-guess', 'checkpoint_reuse': False}}

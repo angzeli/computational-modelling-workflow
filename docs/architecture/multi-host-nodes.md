@@ -141,6 +141,17 @@ must be versioned because current validators are strict. Existing
 `QUEUE_CHANGED`, `RUNTIME_MISMATCH` and `OUTCOME_UNKNOWN` meanings are retained;
 new uppercase codes below are proposed, not current wire promises.
 
+Protocol 1 successor refusals use the existing uppercase `{code, message}`
+error object. `SUCCESSOR_UNVERIFIABLE` means a required parent observation
+is temporarily unavailable. `SUCCESSOR_PENDING_VERIFICATION` means inputs
+have been published and their verification is pending at that destination.
+Shared `lookup` and `capabilities` preflights can report `QUEUE_UNAVAILABLE`
+when the selected queue cannot be read. A node-selected successor command
+reports either kind of temporary refusal with exit 75. A successful mutation
+whose response can no longer be confirmed retains `OUTCOME_UNKNOWN`. These
+codes leave the protocol-1 envelope and negotiated successor success payload
+at schema 1; clients can recognize the refusals without decoding new fields.
+
 D05 adds only the gate described in §3.3. It must not cut off SFTP until the
 replacement transfer path is available and qualified.
 

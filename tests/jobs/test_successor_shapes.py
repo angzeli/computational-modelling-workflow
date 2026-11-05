@@ -45,7 +45,7 @@ class SuccessorShapeTests(unittest.TestCase):
             root = Path(temporary).resolve(); path = root / 'spec.json'
             for spec in candidates:
                 path.write_text(json.dumps(spec))
-                with self.subTest(spec=spec), patch('cmw.jobs.successor.read_job') as read:
+                with self.subTest(spec=spec), patch('cmw.jobs.successor.read_job_with_identity_retry') as read:
                     with self.assertRaises(JobsError):
                         SuccessorService(Store(root / 'missing')).plan(1, str(path))
                     read.assert_not_called()
@@ -80,7 +80,7 @@ class SuccessorShapeTests(unittest.TestCase):
                 digest=stable_hash(plan)
                 path.write_text(json.dumps({'kind':'cmw-successor-materialization','status':'MATERIALIZED',
                     'record_path':str(path),'plan_digest':digest,'plan':plan}))
-                with self.subTest(plan=plan), patch('cmw.jobs.successor.read_job') as read:
+                with self.subTest(plan=plan), patch('cmw.jobs.successor.read_job_with_identity_retry') as read:
                     with self.assertRaises(JobsError):
                         SuccessorService(Store(root/'missing')).register(1,str(path),digest,uuid4().hex)
                     read.assert_not_called()

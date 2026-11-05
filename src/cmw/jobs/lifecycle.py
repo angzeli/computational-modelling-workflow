@@ -26,6 +26,10 @@ import psutil
 from . import ownership
 from .store import ACTIVE, JobsError
 
+# One bounded observation may wait up to 0.85 s for the original queue.
+_QUEUE_READ_ATTEMPTS = 3
+_QUEUE_BUSY_TIMEOUT = 0.25
+_QUEUE_RETRY_DELAY = 0.05
 FRESH_SECONDS = 5
 RECEIPT_LIMIT = 4096
 LIFECYCLE_FIELDS = ('id', 'attempt_id', 'status', 'claim', 'claimed_at', 'worker',
@@ -392,6 +396,29 @@ def read_job_with_identity(store, job_id, *, timeout):
     unavailable evidence without reclassifying a proven record contradiction.
     """
     return _read_job(store, job_id, timeout=timeout, with_identity=True)
+
+
+def queue_read_unavailable(error):
+    """Classify read failures, including those wrapped by Store's JobsError."""
+    while isinstance(error, JobsError) and not isinstance(error, JobObservationUnavailable):
+        error = error.__cause__
+    if isinstance(error, sqlite3.Error):
+        return (getattr(error, 'sqlite_errorcode', 0) & 255) not in {
+            sqlite3.SQLITE_ERROR, sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}
+    return isinstance(error, (OSError, JobObservationUnavailable))
+
+
+def read_job_with_identity_retry(store, job_id):
+    """Bounded retry for unavailable evidence; a readable contradiction is final."""
+    for attempt in range(_QUEUE_READ_ATTEMPTS):
+        try:
+            return read_job_with_identity(store, job_id, timeout=_QUEUE_BUSY_TIMEOUT)
+        except (OSError, JobsError, sqlite3.Error) as exc:
+            if not queue_read_unavailable(exc):
+                raise
+            if attempt + 1 == _QUEUE_READ_ATTEMPTS:
+                raise JobObservationUnavailable(str(exc)) from exc
+            time.sleep(_QUEUE_RETRY_DELAY)
 
 
 def read_job(store, job_id):
