@@ -81,7 +81,7 @@ updates.
 | D26 | A node-wide permanent journal with node identity and durable per-node sequence numbers (Phase 4). |
 | D29 | On battery, `mbp_m3max` accepts submissions into Hold but refuses release and dispatch. While jobs run, the controller holds a `caffeinate` assertion against idle sleep. This cannot prevent lid-close sleep on battery. |
 | D30 | The runner's Python interpreter is pinned by the runner profile; CMW sets `CMW_MANAGED_PYTHON` explicitly at launch. No reliance on inherited environment or PATH. P1 adds profile data; P3a implements the launch path. |
-| D31 | The canonical VASP port runner is commit `51d8209`, used in production only after qualification. Runners are deployed only from clean commits as immutable snapshots under `~/.local/share`, each with a source-commit record and a SHA-256 manifest of its binaries; profiles pin them. The D18 change is based on `51d8209` and deployed as a new snapshot. P1 owns the cutover; P3a owns D18. |
+| D31 | The canonical VASP port runner is commit `51d8209`, used in production only after qualification. Runners are deployed only from clean commits as immutable snapshots under `~/.local/share`, each with a source-commit record and a SHA-256 manifest of its binaries; profiles pin them. Registered endpoint executables use an `-I -B` wrapper. Make runtime snapshots read-only after deployment and qualification, before enrollment. The D18 change is based on `51d8209` and deployed as a new snapshot. P1 owns the cutover; P3a owns D18. |
 | D32 | Benchmarks and experiments never use a production queue; they use a separate sandbox namespace. Each node has exactly one production configuration. Effective immediately. |
 | D33 | The Mini is consolidated in a single cutover after its current research job finishes; no new Mini submissions until then. P1 owns the cutover. |
 
@@ -438,8 +438,8 @@ read once into private request evidence, including hashes, object epochs and
 security metadata; every directory is also captured. The response compares the
 same evidence without rereading content. Unchanged precompiled installations
 pass; cache content, membership, replacement or metadata changes refuse, even
-when source hashes are unchanged. Endpoints use `-B`, which prevents writes but
-does not prevent loading existing bytecode. This proves request-local stability,
+when source hashes are unchanged. D31 requires registered executables to launch
+with `-I -B`. Python may still load existing bytecode. This proves request-local stability,
 not bytecode authenticity since enrollment: the existing enrollment hash domain
 does not pin bytecode. The source-only import predicate remains required for
 UF_TRACKED metadata recovery; ordinary exact-match status uses the same captured
@@ -738,7 +738,12 @@ must refuse missing or mismatched interpreter evidence.
 eligible for production only after qualification. P1 deploys it from a clean
 commit as an immutable snapshot under `~/.local/share`, retaining its
 source-commit record and a SHA-256 manifest of its binaries. Profiles pin the
-snapshot and its evidence. This decision is not a claim that qualification is
+snapshot and its evidence. Registered endpoint executables must launch the pinned
+Python through an `-I -B` wrapper. After deployment and qualification, make the
+runtime snapshot read-only, including its source directories and all compiled
+caches, before recording its enrolled security evidence. This also protects it
+from unrelated Python processes, explicit compilation and installation tools.
+This decision is not a claim that qualification is
 already complete. P3a bases the D18 verify-only/NPAR-rejection change on
 `51d8209`, qualifies it, and deploys it as a new immutable snapshot with new
 profile pins; it must not modify the prior snapshot in place. Benchmark and

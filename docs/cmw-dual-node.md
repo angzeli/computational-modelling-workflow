@@ -482,6 +482,8 @@ without another content read. Any cache change refuses the response. `-B`
 prevents endpoint writes but still permits existing bytecode reads. This is a
 request-stability guarantee, not a new enrollment pin for bytecode; semantic
 fingerprints and the stricter source-only rule for metadata recovery are unchanged.
+For a sticky cache-only refusal, preserve the named paths and follow the
+[bytecode cache recovery walkthrough](runtime-observation-policy.md#bytecode-cache-recovery).
 
 Owner-side code derives operation dependencies, never a client skip list.
 Selected reads check current host/runtime/queue before and after each call. Files

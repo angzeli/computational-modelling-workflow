@@ -63,6 +63,15 @@ def _base(alias, queue, capability):
     return report
 
 
+def _registration(backend, endpoint_runtime=None):
+    # Registry schema 1 records a fixed executable path for SSH. Observe its
+    # resulting interpreter flags on the owner; never read or execute a wrapper.
+    policy = (endpoint_runtime or {}).get('bytecode_policy') or {}
+    entry = getattr(backend, 'connection', {})
+    return {'path': entry.get('executable'), 'transport': entry.get('transport'),
+            'launch_flags': policy.get('launch_flags')}
+
+
 def _refusal(report, exc, cached=None):
     code = getattr(exc, 'code', 'NODE_CONFIGURATION_UNAVAILABLE')
     if 'Unsupported Jobs state schema' in str(exc):
@@ -105,6 +114,7 @@ def inspect_connected(backend, *, target=None, job_id=None, capability=None):
     if target is not None:
         report['target'].update(deepcopy(target_identity(target)))
     report['target']['requested_job'] = job_id
+    report['registered_executable'] = _registration(backend)
     cached = deepcopy(backend.last_envelope)
     params = {}
     if job_id is not None:
@@ -123,6 +133,7 @@ def inspect_connected(backend, *, target=None, job_id=None, capability=None):
 def compose_refusal(backend, error, *, target=None, cached=None, capability=None):
     """Compose a failed serial-lane request without retrying or reopening it."""
     report = _base(backend.alias, backend.queue, capability)
+    report['registered_executable'] = _registration(backend)
     report['target'].update(node_id=backend.node_id, queue_id=backend.queue_id)
     if target is not None:
         report['target'].update(deepcopy(target_identity(target)))
@@ -150,6 +161,7 @@ def compose_report(backend, envelope, *, target=None, request_seconds=0., receiv
         if any(selected.get(key) != value for key, value in target.items()):
             raise NodeError('INVALID_RESPONSE', 'Doctor response changed the selected immutable target')
     report = caller_report if caller_report is not None else _base(backend.alias, backend.queue, None)
+    endpoint['registered_executable'] = _registration(backend, endpoint['runtime'])
     endpoint['endpoint_runtime'] = endpoint['runtime']
     endpoint['runtime'] = report['runtime']
     endpoint['caller_runtime'] = report['caller_runtime']

@@ -3,8 +3,7 @@
 `cmw doctor` observes the code loaded by the selected interpreter. It does not
 initialize a queue, contact configured nodes, inspect research directories, start
 engines, run runner scripts, install software or repair anything. Default inspection
-writes nothing. Package bytecode creation follows Python's normal startup policy;
-use the existing isolated launcher or `python -I -B -m cmw.cli` when auditing it.
+writes nothing. Use the qualified `-I -B` launcher to audit the deployed snapshot.
 
 ```console
 cmw doctor --local --json
@@ -27,6 +26,27 @@ Exit 0 means the captured report contains no ERROR finding, not calculation
 readiness. Exit 1 means at least one ERROR finding. Invalid CLI/export requests
 return 2. Every finding separates its code, domain, scope, severity, evidence,
 affected capability and next safe read-only check. No suggested action is executed.
+
+## Observer bytecode policy
+
+The local and selected endpoint runtime sections show the interpreter's startup
+settings (`sys.flags.isolated`, `sys.flags.dont_write_bytecode`) and its current
+`sys.dont_write_bytecode`. Importing CMW can enable the current setting after
+startup. Doctor separately reads `sys.orig_argv` to report only explicit `-I`
+and `-B` switches before the interpreter's entry point. These switches are
+operator diagnostics and grant no runtime trust. The selected node
+report pairs its registered SSH executable path with the switches observed in
+the resulting interpreter. A local registration runs in the caller. A failed
+connection or an older endpoint can leave launch flags unknown. Doctor never
+executes or reads the registered wrapper to infer its flags.
+
+Doctor checks effective write access as the package-root owner to existing
+bytecode and its directories and to source directories where caches could be
+created. Insufficient evidence or a different observing account gives
+`UNKNOWN`. This bounded read-only check, the launch flags and isolation are
+advisory. A warning does not change queue readiness or runtime trust.
+For a sticky refusal, follow the
+[bytecode cache recovery walkthrough](runtime-observation-policy.md#bytecode-cache-recovery).
 
 ## Which runtime is being described?
 

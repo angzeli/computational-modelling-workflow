@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from cmw.cli import main
 from cmw.doctor.service import inspect_local, inspect_runtime, format_report
+from cmw.doctor.bytecode import _launch_flags, observer_policy
 from cmw.jobs.store import Store
 from cmw.progress.models import SourceDescriptor
 
@@ -43,6 +44,54 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(result['target'], {})
         self.assertEqual(result['scientific_policy'], 'NOT_ASSESSED')
         self.assertEqual(result['worker']['status'], 'UNKNOWN')
+
+    def test_bytecode_policy_reports_effective_flags_separately_from_launch_arguments(self):
+        cases = ((['python', '-IB', '-m', 'cmw.cli'], ['-B', '-I']),
+                 (['python', '-I', '-B', '/bin/cmw'], ['-B', '-I']),
+                 (['python', '-X', '-B', '-Wignore', 'cmw', '-I'], []),
+                 (['python', '--check-hash-based-pycs', 'always', '-c', '-IB'], []))
+        for argv, flags in cases:
+            self.assertEqual(_launch_flags(argv), flags)
+        runtime = inspect_runtime()
+        policy = runtime['bytecode_policy']
+        self.assertEqual(policy['isolated'], sys.flags.isolated)
+        self.assertEqual(policy['startup_dont_write_bytecode'], sys.flags.dont_write_bytecode)
+        self.assertIs(policy['dont_write_bytecode'], sys.dont_write_bytecode)
+        with patch('cmw.doctor.bytecode.sys') as interpreter:
+            interpreter.flags.isolated = 1
+            interpreter.flags.dont_write_bytecode = 0
+            interpreter.dont_write_bytecode = True
+            interpreter.orig_argv = ['python', '-I', '-m', 'cmw.cli', '-B']
+            sampled = observer_policy(self.root)
+        self.assertEqual(sampled['startup_dont_write_bytecode'], 0)
+        self.assertIs(sampled['dont_write_bytecode'], True)
+        self.assertEqual(sampled['launch_flags'], ['-I'])
+        policy.update(sampled, owner_cache_access='WRITABLE')
+        with patch('cmw.doctor.service.inspect_runtime', return_value=runtime):
+            report = inspect_local()
+        warnings = [finding for finding in report['findings'] if finding['code'] == 'BYTECODE_POLICY_WARNING']
+        self.assertEqual([finding['severity'] for finding in warnings], ['WARNING'])
+        text = format_report(report)
+        self.assertIn('owner cache access: WRITABLE', text)
+        self.assertIn('sys.flags.dont_write_bytecode=0', text)
+        self.assertIn('sys.dont_write_bytecode=True', text)
+
+    def test_cache_access_probes_existing_and_potential_locations_without_writing(self):
+        source = self.root / '__init__.py'
+        source.touch()
+        self.assertEqual(observer_policy(self.root)['owner_cache_access'], 'WRITABLE')
+        cache = self.root / '__pycache__'
+        self.assertFalse(cache.exists())
+        cache.mkdir()
+        pyc = cache / 'present.pyc'
+        pyc.touch()
+        with patch('cmw.doctor.bytecode.os.access', side_effect=lambda path, *a, **k: path == pyc):
+            self.assertEqual(observer_policy(self.root)['owner_cache_access'], 'WRITABLE')
+        with patch('cmw.doctor.bytecode.os.access', return_value=False):
+            self.assertEqual(observer_policy(self.root)['owner_cache_access'], 'READ_ONLY')
+        with patch('cmw.doctor.bytecode.os.geteuid', return_value=-1):
+            self.assertEqual(observer_policy(self.root)['owner_cache_access'], 'UNKNOWN')
+        self.assertEqual(set(cache.iterdir()), {pyc})
 
     def test_missing_state_does_not_create_anything(self):
         state = self.root / 'absent' / 'state'

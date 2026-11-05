@@ -95,6 +95,63 @@ class StatusRuntimeBoundaryTests(unittest.TestCase):
     def test_deleted_member_refuses(self):
         self.refuse(self.second.unlink)
 
+    def test_only_bytecode_changes_name_files_and_recovery_including_sticky_retry(self):
+        cache = self.package / '__pycache__'
+        cache.mkdir()
+        removed = cache / 'old.pyc'
+        modified = cache / 'changed.pyc'
+        removed.write_bytes(b'old')
+        modified.write_bytes(b'before')
+        self.begin()
+        new_dir = self.directory / '__pycache__'
+        new_dir.mkdir()
+        (new_dir / 'new.pyc').write_bytes(b'new')
+        removed.unlink()
+        modified.write_bytes(b'after')
+        expected = {'added': ['subdir/__pycache__/new.pyc'], 'removed': ['__pycache__/old.pyc'],
+                    'modified': ['__pycache__/changed.pyc']}
+        with self.assertRaisesRegex(runtime.RuntimeRefusal, 'bytecode_cache_changed') as refusal:
+            self.finish()
+        with self.assertRaisesRegex(runtime.RuntimeRefusal, 'fresh_isolated_observer_required') as sticky:
+            self.verifier.verify(identity.runtime_observed)
+        for error in (refusal.exception, sticky.exception):
+            self.assertEqual(error.evidence['bytecode_changes'], expected)
+            self.assertIn('runtime-observation-policy.md#bytecode-cache-recovery', str(error))
+            for names in expected.values():
+                for name in names:
+                    self.assertIn(name, str(error))
+
+    def test_cache_addition_with_independent_change_keeps_generic_refusal(self):
+        cache = self.package / '__pycache__'
+        cache.mkdir()
+        added = cache / 'new.pyc'
+        for change in ('source', 'directory', 'auxiliary', 'dependency', 'missing-evidence', 'import'):
+            with self.subTest(change=change):
+                self.record, self.observed = identity.runtime_observed()
+                self.verifier = runtime.RuntimeVerifier(self.record, self.observed)
+                self.begin()
+                added.write_bytes(b'new')
+                if change == 'source':
+                    self.second.write_text('other = 3')
+                if change == 'directory':
+                    self.directory.chmod(self.directory.stat().st_mode ^ 0o020)
+                if change == 'auxiliary':
+                    (cache / 'notes.txt').write_text('new')
+                def after(snapshot):
+                    record, observed, directories, auxiliary = identity.runtime_boundary_observed(snapshot)
+                    if change == 'dependency':
+                        record['dependencies']['psutil'] = 'changed'
+                    if change == 'missing-evidence':
+                        del auxiliary['member_sha256']
+                    return record, observed, directories, auxiliary
+                self.request_coherent.return_value = change != 'import'
+                with self.assertRaises(runtime.RuntimeRefusal) as refusal:
+                    self.finish(after)
+                self.assertTrue(self.verifier.tainted)
+                self.assertNotIn('bytecode_changes', refusal.exception.evidence)
+                self.request_coherent.return_value = True
+                added.unlink()
+
     def test_member_mode_change_refuses(self):
         self.refuse(lambda: self.member.chmod(self.member.stat().st_mode ^ 0o020))
 

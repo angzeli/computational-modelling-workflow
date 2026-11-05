@@ -14,11 +14,21 @@ from cmw.core.provenance import stable_hash
 
 class RuntimeRefusal(ValueError):
     def __init__(self, category, *, phase, before=None, after=None, path=None,
-                 expected_digest=None, actual_digest=None, api=None, errno=None, security_state=None, object_type=None):
+                 expected_digest=None, actual_digest=None, api=None, errno=None, security_state=None, object_type=None,
+                 bytecode_changes=None):
         self.evidence = dict(category=category, role="runtime-package", phase=phase, path=path, before=before,
                             after=after, expected_digest=expected_digest, actual_digest=actual_digest, api=api, errno=errno,
                             security_state=security_state, object_type=object_type)
-        super().__init__('CMW runtime verification refused: ' + category)
+        reason = 'CMW runtime verification refused: ' + category
+        if bytecode_changes is None and category == 'fresh_isolated_observer_required' and isinstance(before, dict):
+            bytecode_changes = before.get('bytecode_changes')
+        if bytecode_changes:
+            self.evidence['bytecode_changes'] = bytecode_changes
+            reason += ' (bytecode caches; see docs/runtime-observation-policy.md#bytecode-cache-recovery)'
+            for action, names in bytecode_changes.items():
+                if names:
+                    reason += ' ' + action + ': ' + ', '.join(ascii(name) for name in names)
+        super().__init__(reason)
 
 
 def _extended_security(path, *, observe=None):
@@ -437,10 +447,10 @@ def validate_observation(value):
     return value
 
 
-def _validate_auxiliary(observed, auxiliary):
+def _validate_auxiliary(observed, auxiliary, digest_members=None):
     if (type(auxiliary) is not dict or set(auxiliary) != {'members', 'directories', 'member_sha256'}
             or any(type(auxiliary[key]) is not dict or len(auxiliary[key]) > 8192 for key in auxiliary)
-            or set(auxiliary['member_sha256']) != set(auxiliary['members'])):
+            or set(auxiliary['member_sha256']) != (set(auxiliary['members']) if digest_members is None else digest_members)):
         raise ValueError('Incomplete request auxiliary evidence')
     root = Path(observed['root'])
     semantic = set(observed['members']) | set(observed['directories'])
@@ -471,12 +481,12 @@ def _complete_auxiliary(auxiliary):
     return all(epoch[-1] for kind in ('members', 'directories') for epoch in auxiliary[kind].values())
 
 
-def _validate_boundary_evidence(record, observed, directories, auxiliary):
+def _validate_boundary_evidence(record, observed, directories, auxiliary, *, digest_members=None):
     """Validate the entire private token before any provider indexes into it."""
     from .identity import _validate_runtime
     _validate_runtime(record)
     validate_observation(observed)
-    _validate_auxiliary(observed, auxiliary)
+    _validate_auxiliary(observed, auxiliary, digest_members)
     if (observed['schema'] != 3 or record['package_sha256'] != observed['package_sha256']
             or record['package_origin'] != observed['root']
             or not Path(record['executable']).is_absolute()
@@ -494,6 +504,45 @@ def _validate_boundary_evidence(record, observed, directories, auxiliary):
                 or any(type(item) is not int or item < 0 for item in epoch)
                 or [*epoch[:5], epoch[9]] != expected[name][:6]):
             raise ValueError('Malformed request directory epoch')
+
+
+def _bytecode_changes(snapshot, record, observed, directories, auxiliary):
+    """Diagnose an already refused comparison; incomplete or mixed evidence stays generic."""
+    old = snapshot['auxiliary']
+    if snapshot['record'] != record or snapshot['observation'] != observed:
+        return None
+    # A cheap response carries the original digests, even for a deleted file.
+    # A full comparison carries actual digests for the new member set.
+    digest_members = set(old['members']) if auxiliary['member_sha256'] == old['member_sha256'] else None
+    _validate_boundary_evidence(record, observed, directories, auxiliary, digest_members=digest_members)
+    if not _complete_auxiliary(auxiliary) or not _request_imports_coherent(observed, auxiliary):
+        return None
+    previous, current = old['members'], auxiliary['members']
+    added = current.keys() - previous.keys()
+    removed = previous.keys() - current.keys()
+    modified = {name for name in previous.keys() & current.keys() if previous[name] != current[name]
+                or old['member_sha256'][name] != auxiliary['member_sha256'][name]}
+    if not (added or removed or modified) or any(Path(name).suffix not in {'.pyc', '.pyo'}
+                                                for name in added | removed | modified):
+        return None
+    old_dirs, new_dirs = old['directories'], auxiliary['directories']
+    cache_dirs = old_dirs.keys() ^ new_dirs.keys()
+    changed_parents = {str(Path(name).parent) for name in added | removed}
+    if any(Path(name).name != '__pycache__' or name not in changed_parents for name in cache_dirs):
+        return None
+    if any(old_dirs[name] != new_dirs[name] for name in old_dirs.keys() & new_dirs.keys()):
+        return None
+    # A created/removed or atomically replaced directory entry updates its
+    # parent's link count, size and timestamps. Authority fields still match.
+    replaced = {name for name in modified if previous[name][:2] != current[name][:2]}
+    root = Path(observed['root'])
+    parents = {str((root / name).parent) for name in added | removed | replaced | cache_dirs}
+    old_epochs = snapshot['directory_epochs']
+    for name in directories.keys() & old_epochs.keys():
+        before, after = old_epochs[name], directories[name]
+        if before != after and (name not in parents or before[:5] != after[:5] or before[9:] != after[9:]):
+            return None
+    return {'added': sorted(added), 'removed': sorted(removed), 'modified': sorted(modified)}
 
 
 def _request_imports_coherent(observed, auxiliary, *, diagnostics=None):
@@ -657,6 +706,14 @@ class RuntimeVerifier:
         observed = None
         try:
             record, observed, directories, auxiliary = provider(snapshot)
+            if snapshot['auxiliary'] != auxiliary:
+                try:
+                    changes = _bytecode_changes(snapshot, record, observed, directories, auxiliary)
+                except (KeyError, TypeError, ValueError):
+                    changes = None
+                if changes:
+                    raise RuntimeRefusal('bytecode_cache_changed', phase='response-boundary',
+                                         bytecode_changes=changes, before=snapshot['auxiliary'], after=auxiliary)
             # Both a second full observation and the cheap observation classify
             # membership first. Added files deliberately have no reused digest.
             if (type(auxiliary) is dict and all(type(auxiliary.get(key)) is dict

@@ -11,6 +11,7 @@ import time
 
 
 FINDING_GUIDANCE = {
+    'BYTECODE_POLICY_WARNING': 'Compare the observer launch and cache access with the qualified snapshot. See docs/runtime-observation-policy.md#bytecode-cache-recovery.',
     'RUNTIME_UNAVAILABLE': 'Inspect the reported package origin and interpreter; retry after package files stop changing.',
     'DISTRIBUTION_UNBOUND': 'Compare the loaded package origin with the selected installation metadata.',
     'SOURCE_BUILD_UNKNOWN': 'Use the implementation fingerprint; no verified build commit is available.',
@@ -99,6 +100,7 @@ def distribution_version():
 def inspect_runtime():
     """Report the actual loaded package; never probe scientific executables."""
     import cmw
+    from .bytecode import observer_policy
     from cmw.core.attempt_cleanup import CLEANUP_TOOL_VERSION
     from cmw.nodes.identity import runtime_identity
     from cmw.jobs.runner_assets import _CLOSURES
@@ -143,6 +145,7 @@ def inspect_runtime():
         'MULTIWFN': '2026.7.15 FMO/ESP/IGMH/IFCT bounded native and sequenced runner markers'}
     grammars = {engine: contract for engine, contract in grammar_contracts.items() if _adapter_available(engine)}
     return {'identity': identity, 'identity_error': error, 'distribution': distribution,
+            'bytecode_policy': observer_policy(package),
             'origins': {'package': str(package), 'cli': str(package / 'cli.py'),
                         'executable': sys.executable},
             'build_source': _source_identity(package), 'dependencies': dependencies, 'assets': assets,
@@ -257,6 +260,12 @@ def inspect_local(state=None, job_id=None, expected_attempt_id=None, capability=
             'transport': {'status': 'LOCAL'}, 'progress': None, 'binding': None, 'controller': None},
         'scientific_policy': 'NOT_ASSESSED'}
     add = report['findings'].append
+    policy = runtime.get('bytecode_policy')
+    if policy and (policy['launch_flags'] != ['-B', '-I'] or not policy['isolated']
+                   or not policy['startup_dont_write_bytecode'] or not policy['dont_write_bytecode']
+                   or policy['owner_cache_access'] != 'READ_ONLY'):
+        add(finding('BYTECODE_POLICY_WARNING', 'runtime', evidence=policy,
+                    summary='Observer launch or cache access differs from the qualified read-only snapshot policy.'))
     if runtime['identity'] is None:
         add(finding('RUNTIME_UNAVAILABLE', 'runtime', severity='ERROR'))
     if runtime['distribution']['status'] != 'MATCHED':
@@ -343,6 +352,18 @@ def format_report(report):
                       f"  Python: {runtime.get('origins', {}).get('executable', 'unknown')}",
                       f"  Package: {runtime.get('origins', {}).get('package', 'unknown')}",
                       f"  Fingerprint: {identity.get('fingerprint', 'unknown')}"])
+        policy = runtime.get('bytecode_policy')
+        if isinstance(policy, dict):
+            lines.extend([f"  sys.flags.isolated={policy.get('isolated')}, "
+                          f"sys.flags.dont_write_bytecode={policy.get('startup_dont_write_bytecode')}, "
+                          f"sys.dont_write_bytecode={policy.get('dont_write_bytecode')}",
+                          f"  Explicit -I/-B switches: {policy.get('launch_flags')}; owner cache access: {policy.get('owner_cache_access')}"])
+    registered = report.get('registered_executable')
+    if registered:
+        path = 'embedded in caller' if registered['transport'] == 'local' else registered['path'] or 'unknown'
+        flags = registered['launch_flags']
+        lines.append(f"Registered executable: {path}; observed -I/-B switches: "
+                     + ('unknown' if flags is None else (' '.join(flags) or 'none')))
     if report.get('target'):
         lines.append('Target: ' + json.dumps(report['target'], sort_keys=True))
     lines.append('Worker runtime: ' + report.get('worker', {}).get('status', 'UNKNOWN'))
