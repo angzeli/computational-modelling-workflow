@@ -102,13 +102,15 @@ removed when the child exits. Executable hash, version, settings, requested
 threads, and process-health samples are execution provenance, not scientific
 target identity.
 
-On standalone TERM/INT, the wrapper forwards the signal to its known direct
-child, allows about two seconds for cooperation, then sends KILL and waits for
-bounded drainage. Confirmed termination returns 143/130 and removes the aliases.
-If termination remains unresolved, it returns 75, reports the retained alias
-directory and leaves those resources available to the child. Jobs wrapping adds
-its own process-group completion check; wrapper exit alone does not release a
-Jobs commitment or establish scientific validity.
+The first caught INT or TERM selects the signal forwarded to an active, verified
+direct child and the wrapper's interrupt status (130 for INT, 143 for TERM).
+Later signals do not override that choice, trigger another forward, or shorten
+the grace period. The wrapper allows about two seconds for cooperation, then
+sends KILL to a still-verified child and waits for bounded drainage. Confirmed
+termination removes the aliases. If a job-table query fails or termination
+cannot be verified, the wrapper returns 75 and reports the aliases it retained.
+Jobs wrapping adds its own process-group completion check; wrapper exit alone
+does not release a Jobs commitment or establish scientific validity.
 
 An optional generic execution profile may supply `nthreads` through the same
 runtime path. Its declared total memory is recorded in runtime provenance, but

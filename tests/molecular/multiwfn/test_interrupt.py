@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,54 @@ from tests.jobs.test_jobs import wait_for
 
 ROOT = Path(__file__).resolve().parents[3]
 SHELL = ROOT/'scripts/multiwfn/multiwfn_runtime.sh'
+
+# Save a genuine end marker for replay. Corrupt exactly one later query so
+# retrying could see a good snapshot even though this ownership check failed.
+SNAPSHOT_FAULT_HOOK = r'''
+test_query_start=0
+test_previous_marker=''
+test_inject=0
+test_injected=0
+jobs() {
+    if [[ $1 == -pr ]]; then test_query_start=1; fi
+    builtin jobs "$@"
+}
+pause_until_signal_sent() {
+    local probe
+    : > "$CMW_TEST_ROOT/query-entered"
+    for probe in {1..250}; do
+        [[ ! -f $CMW_TEST_ROOT/query-release && ! -f $CMW_TEST_ROOT/release ]] || break
+        sleep 0.02
+    done
+    [[ -f $CMW_TEST_ROOT/query-release ]]
+}
+read() {
+    if [[ ${FUNCNAME[1]:-} != multiwfn_child_active ]]; then builtin read "$@"; return; fi
+    if ((test_query_start)); then
+        test_query_start=0
+        test_inject=0
+        if ((test_injected == 0)) && [[ -n $test_previous_marker && -f $CMW_TEST_ROOT/ready.json ]]; then
+            test_injected=1
+            test_inject=1
+            case "$CMW_TEST_SNAPSHOT_FAULT" in
+                empty) : > "$alias_root/jobs.snapshot"; pause_until_signal_sent || return 2 ;;
+                truncate) printf '%s\n' "$child_pid" > "$alias_root/jobs.snapshot" ;;
+                replay) printf '%s\n%s\n' "$child_pid" "$test_previous_marker" > "$alias_root/jobs.snapshot" ;;
+            esac
+        fi
+    fi
+    if ((test_inject)) && [[ $CMW_TEST_SNAPSHOT_FAULT == read-error && -f $CMW_TEST_ROOT/query-entered ]]; then
+        : > "$CMW_TEST_ROOT/read-error-injected"
+        return 2
+    fi
+    builtin read "$@" || return $?
+    if [[ $owned == CMW-JOBS-END:* && -z $test_previous_marker ]]; then test_previous_marker=$owned; fi
+    if ((test_inject)) && [[ $owned == "$child_pid" && ! -f $CMW_TEST_ROOT/query-entered ]]; then
+        pause_until_signal_sent || return 2
+    fi
+    return 0
+}
+'''
 
 
 def interrupt_owner_observation(owner):
@@ -55,7 +104,8 @@ def capture_interrupt_failure(root, *, test_id, failure, started, parent, parent
             'parent': interrupt_owner_observation(parent_owner),
             'child': interrupt_owner_observation(child),
             'markers': {name: (root/name).exists() for name in
-                        ('ready.json', 'signal-seen', 'release', 'alias-lost-while-live')},
+                        ('ready.json', 'signal-seen', 'release', 'alias-lost-while-live',
+                         'query-entered', 'query-release', 'trap-job-query', 'subshell-job-query')},
             'ready': ready,
             'launcher_signals': (bounded_tail(root/'signal-state.json', 4096)
                                  if (root/'signal-state.json').is_file() else None),
@@ -83,7 +133,9 @@ def capture_interrupt_failure(root, *, test_id, failure, started, parent, parent
 
 class InterruptTests(unittest.TestCase):
     def exercise(self, signum=signal.SIGTERM, *, queued=False, unresolved=False, early_interrupt=False,
-                 inherited_int=False):
+                 inherited_int=False, interrupt_query=None, query_failure=False, check_snapshot_mode=False,
+                 snapshot_fault=None):
+        refused_query = query_failure or snapshot_fault is not None
         with tempfile.TemporaryDirectory(prefix='cmw-interrupt-') as directory, install():
             root = Path(directory)
             attempt = root/'attempt'
@@ -98,7 +150,7 @@ from cmw.core.provenance import atomic_write_json
 from cmw.jobs.ownership import identity
 root=Path(os.environ['CMW_TEST_ROOT'])
 def interrupted(signum, frame):
-    (root/'signal-seen').touch()
+    atomic_write_json(root/'signal-seen', signum)
 signal.signal(signal.SIGTERM, interrupted)
 signal.signal(signal.SIGINT, interrupted)
 aliases=[Path(os.environ['Multiwfnpath']),Path(sys.argv[1])]
@@ -110,7 +162,8 @@ while not (root/'release').exists() and time.monotonic()<deadline:
     time.sleep(.02)
 ''')
             executable = root/'fake-multiwfn'
-            executable.write_text('#!/bin/bash\nexec '+shlex.join([sys.executable, str(engine)])+' "$@"\n')
+            observe_child_mask = 'umask > "$CMW_TEST_ROOT/child.umask"\n' if check_snapshot_mode else ''
+            executable.write_text('#!/bin/bash\n'+observe_child_mask+'exec '+shlex.join([sys.executable, str(engine)])+' "$@"\n')
             executable.chmod(0o700)
             command = ['/bin/bash', '-c',
                 'set -euo pipefail; '
@@ -120,6 +173,23 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                 'MULTIWFN_RUN_SETTINGS_PATH="$3"; MULTIWFN_RUN_SETTINGS_DIRECTORY=${3%/settings.ini}; '
                 'if [[ ${CMW_TEST_REFUSE_KILL:-0} == 1 ]]; then '
                 'kill() { if [[ "$1" == -KILL ]]; then return 1; fi; builtin kill "$@"; }; fi; '
+                # Pause a live job query and reject signal-handler/subshell
+                # queries independently of whether this Bash emits a parse error.
+                'if [[ -n ${CMW_TEST_INTERRUPT_QUERY:-} || ${CMW_TEST_QUERY_FAILURE:-0} == 1 ]]; then '
+                'trap() { if [[ $# == 2 && "$1" != -p && "$1" != - && '
+                '( "$2" == INT || "$2" == TERM ) ]]; then '
+                '''builtin trap "CMW_TEST_IN_TRAP=1; $1; CMW_TEST_IN_TRAP=0" "$2"; '''
+                'else builtin trap "$@"; fi; }; '
+                'jobs() { '
+                'if [[ ${CMW_TEST_IN_TRAP:-0} == 1 ]]; then : > "$CMW_TEST_ROOT/trap-job-query"; fi; '
+                'if ((BASH_SUBSHELL != 0)); then : > "$CMW_TEST_ROOT/subshell-job-query"; fi; '
+                'if [[ ${CMW_TEST_QUERY_FAILURE:-0} == 1 && -f $CMW_TEST_ROOT/ready.json ]]; then return 1; fi; '
+                'if [[ $1 == "${CMW_TEST_INTERRUPT_QUERY:-}" && -f $CMW_TEST_ROOT/ready.json && ! -f $CMW_TEST_ROOT/query-entered ]]; then '
+                ': > "$CMW_TEST_ROOT/query-entered"; '
+                'for query_probe in {1..250}; do '
+                '[[ ! -f $CMW_TEST_ROOT/query-release && ! -f $CMW_TEST_ROOT/release ]] || break; '
+                'sleep 0.02; done; [[ -f $CMW_TEST_ROOT/query-release ]] || return 75; fi; '
+                'builtin jobs "$@"; }; fi; '
                 # Deliver TERM after $! is captured but before the first wait/poll.
                 'if [[ ${CMW_TEST_EARLY_INTERRUPT:-0} == 1 ]]; then set -T; '
                 '''trap 'if [[ -n ${child_pid:-} && ${CMW_TEST_EARLY_INTERRUPT:-0} == 1 ]]; then '''
@@ -130,11 +200,21 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                 '''kill -TERM $$; fi' DEBUG; fi; '''
                 'multiwfn_runtime_launch "$4"', '_', str(SHELL), str(executable),
                 str(root/'settings.ini'), str(root/'source.xyz')]
+            if check_snapshot_mode:
+                command[2] = ('umask 022; ' + command[2] +
+                              ' || code=$?; umask > "$CMW_TEST_ROOT/after.umask"; exit "${code:-0}"')
             env = {**environment(), 'CMW_TEST_ROOT': str(root), 'TMPDIR': str(root/'tmp')}
             if unresolved:
                 env['CMW_TEST_REFUSE_KILL'] = '1'
             if early_interrupt:
                 env['CMW_TEST_EARLY_INTERRUPT'] = '1'
+            if interrupt_query:
+                env['CMW_TEST_INTERRUPT_QUERY'] = interrupt_query
+            if query_failure:
+                env['CMW_TEST_QUERY_FAILURE'] = '1'
+            if snapshot_fault:
+                env['CMW_TEST_SNAPSHOT_FAULT'] = snapshot_fault
+                command[2] = SNAPSHOT_FAULT_HOOK + command[2]
             sentinel = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(35)'])
             sentinel_owner = identity(sentinel.pid)
             parent = None
@@ -185,9 +265,20 @@ os.execv(sys.argv[1],sys.argv[1:])
                         self.assertEqual(signals['before'], {'ignored': True, 'blocked': True})
                 if queued:
                     store.change(job['id'], 'cancel', confirm=True)
-                elif not early_interrupt:
+                elif not early_interrupt and not query_failure:
+                    if interrupt_query or snapshot_fault:
+                        wait_for((root/'query-entered').exists, timeout=5)
                     parent.send_signal(signum)
-                wait_for((root/'signal-seen').exists, timeout=2)
+                    if interrupt_query or snapshot_fault:
+                        (root/'query-release').touch()
+                if not refused_query:
+                    wait_for((root/'signal-seen').exists, timeout=2)
+                    self.assertEqual(json.loads((root/'signal-seen').read_text()), signum)
+                if interrupt_query:
+                    self.assertFalse((root/'trap-job-query').exists(),
+                                     'Signal trap reentered job-table command substitution')
+                    self.assertFalse((root/'subshell-job-query').exists(),
+                                     'Live job query still enters a command-substitution parser')
                 self.assertTrue(owner_alive(child))
                 self.assertTrue(all(Path(p).exists() for p in ready['aliases']))
                 self.assertFalse((root/'alias-lost-while-live').exists())
@@ -195,19 +286,30 @@ os.execv(sys.argv[1],sys.argv[1:])
                     self.assertEqual(store.snapshot()['jobs'][0]['status'], 'Cancelling')
                     wait_for(lambda: store.snapshot()['jobs'][0]['status'] == 'Cancelled', timeout=8)
                 else:
-                    self.assertIsNone(parent.poll())
+                    if not refused_query:
+                        self.assertIsNone(parent.poll())
                     # Hosted polling reached KILL at 7 s and kept draining after 10 s.
                     # Both waits expire before the fake child's 25 s safety lifetime.
                     parent.wait(timeout=15 if unresolved else 10)
                     stderr = (root/'wrapper.stderr').read_text()
-                    if unresolved:
+                    if unresolved or refused_query:
                         self.assertEqual(parent.returncode, 75, stderr)
                         self.assertIn('termination unresolved; aliases retained', stderr)
                         self.assertTrue(all(Path(p).exists() for p in ready['aliases']))
                     else:
                         self.assertEqual(parent.returncode, 128+signum, stderr)
                         self.assertTrue(all(not Path(p).exists() for p in ready['aliases']))
-                self.assertEqual(owner_alive(child), unresolved)
+                self.assertEqual(owner_alive(child), unresolved or refused_query)
+                if check_snapshot_mode:
+                    snapshot = Path(ready['aliases'][0]).parent/'jobs.snapshot'
+                    self.assertEqual(stat.S_IMODE(snapshot.stat().st_mode), 0o600)
+                    for observation in ('child.umask', 'after.umask'):
+                        self.assertEqual(int((root/observation).read_text().strip(), 8), 0o022, observation)
+                if refused_query:
+                    self.assertFalse((root/'signal-seen').exists(),
+                                     'Unverified job-table observation must not authorize a signal')
+                if snapshot_fault == 'read-error':
+                    self.assertTrue((root/'read-error-injected').exists())
                 self.assertFalse((root/'alias-lost-while-live').exists())
                 self.assertEqual(identity(sentinel.pid), sentinel_owner)
                 self.assertIsNone(sentinel.poll())
@@ -244,6 +346,31 @@ os.execv(sys.argv[1],sys.argv[1:])
         self.exercise(signal.SIGINT, inherited_int=True)
         self.assertEqual(signal.getsignal(signal.SIGINT), handler)
         self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, []), mask)
+
+    def test_signal_during_job_query_defers_supervision_until_trap_returns(self):
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            # Gate both halves of the live job-table lookup, one fresh child per delivery.
+            for query in ('-pr', '-ps'):
+                with self.subTest(signal=signum, query=query):
+                    self.exercise(signum, interrupt_query=query)
+
+    def test_unavailable_job_query_retains_aliases_without_signalling_child(self):
+        self.exercise(query_failure=True)
+
+    def test_job_snapshot_is_private_without_changing_caller_or_child_umask(self):
+        self.exercise(query_failure=True, check_snapshot_mode=True)
+
+    def test_read_error_after_child_pid_retains_aliases_without_forwarding(self):
+        self.exercise(snapshot_fault='read-error')
+
+    def test_truncated_snapshot_after_child_pid_retains_aliases_without_forwarding(self):
+        self.exercise(snapshot_fault='truncate')
+
+    def test_empty_snapshot_does_not_establish_child_absence(self):
+        self.exercise(snapshot_fault='empty')
+
+    def test_replayed_snapshot_end_marker_retains_aliases_without_forwarding(self):
+        self.exercise(snapshot_fault='replay')
 
     def test_jobs_wrapped_child_ends_before_terminal_state(self):
         self.exercise(queued=True)

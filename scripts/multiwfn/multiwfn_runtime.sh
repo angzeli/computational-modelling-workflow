@@ -2,6 +2,10 @@
 
 # Shell-owned Multiwfn launch adapter. Python resolves semantics and provenance;
 # this helper owns environment, short-path alias, stdin, and child execution.
+# The first caught INT or TERM selects the signal forwarded to an active, verified
+# child and the wrapper's interrupt status (130 for INT, 143 for TERM). Later
+# signals do not override that choice, trigger another forward, or shorten the
+# grace period. If termination cannot be verified, return 75 and retain the aliases.
 
 MULTIWFN_RUNTIME_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 MULTIWFN_RUNTIME_ROOT=$(cd "$MULTIWFN_RUNTIME_DIR/../.." && pwd -P)
@@ -65,6 +69,7 @@ multiwfn_jobs_event() {
 multiwfn_runtime_launch() {
   local alias_root alias_path child_pid="" source_alias="" source_name="" source_path="" status=0
   local previous_exit previous_int previous_term interrupted=0 interrupt_signal="" probe
+  local child_query_failed=0 query_number=0 job_snapshot
   if [[ -z "$MULTIWFN_RUN_SETTINGS_DIRECTORY" || ! -s "$MULTIWFN_RUN_SETTINGS_PATH" ]]; then
     printf 'Multiwfn run-local settings were not prepared\n' >&2
     return 64
@@ -78,24 +83,44 @@ multiwfn_runtime_launch() {
   previous_int=$(trap -p INT || true)
   alias_root=$(mktemp -d "${TMPDIR:-/tmp}/cmw-multiwfn.XXXXXXXX") || return 70
   alias_path=$alias_root/runtime
+  job_snapshot=$alias_root/jobs.snapshot
+  if ! (umask 077 && : > "$job_snapshot"); then
+    rmdir "$alias_root" 2>/dev/null || true
+    return 75
+  fi
   multiwfn_child_active() {
-    local owned IFS=$' \t\n'
+    local owned child_status=1 end_marker
     [[ -n "$child_pid" ]] || return 1
-    # The shell's own job table retains authority across interrupted waits.
-    for owned in $(jobs -pr) $(jobs -ps); do
-      [[ "$owned" != "$child_pid" ]] || return 0
-    done
-    return 1
+    # Once ownership is uncertain, preserve the aliases without signalling or
+    # waiting on the child, even if a later job query might succeed.
+    ((child_query_failed == 0)) || return 0
+    query_number=$((query_number + 1))
+    end_marker="CMW-JOBS-END:$query_number:$RANDOM:$RANDOM"
+    # Stay in the owning shell: a signal during command-substitution parsing
+    # can abort even a simple trap before its handler executes on Bash 5.2.
+    if [[ -f "$job_snapshot" ]] &&
+      { jobs -pr && jobs -ps && printf '%s\n' "$end_marker"; } > "$job_snapshot"; then
+      while IFS= read -r owned; do
+        case "$owned" in
+          "$end_marker") return "$child_status" ;;
+          "$child_pid") child_status=0 ;;
+          ''|*[!0-9]*) break ;;
+        esac
+      done < "$job_snapshot"
+    fi
+    # EOF or a read error before this query's marker cannot establish even
+    # positive membership: the running and stopped lists must both be complete.
+    child_query_failed=1
+    return 0
   }
   cleanup_multiwfn_alias() {
     if multiwfn_child_active; then return 0; fi
     [[ -z "$source_alias" ]] || rm -f -- "$source_alias"
-    rm -f -- "$alias_path"
+    rm -f -- "$alias_path" "$job_snapshot"
     rmdir "$alias_root" 2>/dev/null || true
   }
-  forward_multiwfn_signal() {
+  record_multiwfn_signal() {
     if ((interrupted == 0)); then interrupted=$2; interrupt_signal=$1; fi
-    if multiwfn_child_active; then kill -"$1" "$child_pid" 2>/dev/null || true; fi
   }
   restore_multiwfn_traps() {
     trap - EXIT TERM INT
@@ -104,8 +129,10 @@ multiwfn_runtime_launch() {
     [[ -z "$previous_int" ]] || eval "$previous_int"
   }
   trap cleanup_multiwfn_alias EXIT
-  trap 'forward_multiwfn_signal TERM 143' TERM
-  trap 'forward_multiwfn_signal INT 130' INT
+  # Do not reenter job-table substitutions from a signal trap: Bash may still
+  # be parsing the interrupted polling substitution. Supervise after it returns.
+  trap 'record_multiwfn_signal TERM 143' TERM
+  trap 'record_multiwfn_signal INT 130' INT
   ln -s "$MULTIWFN_RUN_SETTINGS_DIRECTORY" "$alias_path"
   if (($#)); then
     source_path=$1
@@ -147,19 +174,21 @@ multiwfn_runtime_launch() {
   # Telemetry failure must never bypass drainage of the child we just launched.
   multiwfn_jobs_event "$PWD" child_launched "$child_pid" || \
     printf 'CMW runner launch evidence could not be recorded; child supervision continues\n' >&2
-  # A trap can run between launch and assigning $!.
-  if ((interrupted != 0)); then forward_multiwfn_signal "$interrupt_signal" "$interrupted"; fi
   # A signal just before a blocking wait would otherwise strand a resistant child.
-  while multiwfn_child_active && ((interrupted == 0)); do sleep 0.1 || true; done
-  if ((interrupted != 0)) && multiwfn_child_active; then
+  # Recorded intent also covers a trap between launch and assigning $!.
+  while multiwfn_child_active && ((interrupted == 0 && child_query_failed == 0)); do sleep 0.1 || true; done
+  if ((interrupted != 0 || child_query_failed != 0)) && multiwfn_child_active; then
+    if ((child_query_failed == 0)); then kill -"$interrupt_signal" "$child_pid" 2>/dev/null || true; fi
     # Give the direct child two seconds to cooperate, then bound KILL drainage.
     for probe in {1..40}; do
       multiwfn_child_active || break
+      ((child_query_failed == 0)) || break
       sleep 0.05 || true
     done
-    if multiwfn_child_active; then kill -KILL "$child_pid" 2>/dev/null || true; fi
+    if multiwfn_child_active && ((child_query_failed == 0)); then kill -KILL "$child_pid" 2>/dev/null || true; fi
     for probe in {1..40}; do
       multiwfn_child_active || break
+      ((child_query_failed == 0)) || break
       sleep 0.05 || true
     done
     if multiwfn_child_active; then
