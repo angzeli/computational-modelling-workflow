@@ -11,7 +11,7 @@ from cmw.jobs.successor_models import SuccessorResult, SuccessorUnverifiable
 from cmw.jobs.store import JobsError, Store
 from cmw.nodes.codec import CodecError, decode_typed, encode_typed
 from cmw.nodes.connections import ConnectedBackend
-from cmw.nodes.protocol import NodeError, decode, encode, is_mutation, request, validate_envelope
+from cmw.nodes.protocol import NodeError, decode, encode, is_mutation, request, response, validate_envelope
 from tests.nodes import test_backend
 from tests.nodes.test_review import DirectTransport
 
@@ -92,6 +92,7 @@ class SuccessorNodeTests(unittest.TestCase):
             status='PENDING_VERIFICATION', payload_json=json.dumps({'record_path': '/owner/record', 'reason': reason}))
         self.service.register.side_effect = SuccessorUnverifiable(reason)
         frames = io.BytesIO()
+        requests = []
         for operation, params in (('plan', {'spec_path': '/owner/spec'}),
                                   ('materialize', {'spec_path': '/owner/spec'}),
                                   ('register', {'record_path': '/owner/record'})):
@@ -99,18 +100,27 @@ class SuccessorNodeTests(unittest.TestCase):
                 params.update(approved_digest=self.digest, _endpoint={'node_id': self.target['node_id'],
                     'queue_id': self.target['queue_id'], 'host_id': self.fixture.config['host_id'],
                     'runtime_id': self.fixture.config['runtime']['fingerprint'], 'clock_id': self.backend.clock_id})
-            frames.write(encode(request('successor.' + operation, params, self.target)))
+            message = request('successor.' + operation, params, self.target)
+            requests.append(message['request_id'])
+            frames.write(encode(message))
         frames.seek(0)
         replies = io.BytesIO()
         self.assertEqual(serve(None, 'research', input_stream=frames, output_stream=replies,
                                backend_factory=lambda *_: self.backend), 0)
         replies.seek(0)
-        for expected_code in ('SUCCESSOR_UNVERIFIABLE', 'SUCCESSOR_PENDING_VERIFICATION', 'SUCCESSOR_UNVERIFIABLE'):
+        expected_codes = ('SUCCESSOR_UNVERIFIABLE', 'SUCCESSOR_PENDING_VERIFICATION', 'SUCCESSOR_UNVERIFIABLE')
+        for request_id, expected_code in zip(requests, expected_codes, strict=True):
             reply = decode(replies.readline())
             self.assertIs(reply['ok'], False)
             self.assertEqual(reply['error']['code'], expected_code)
             self.assertIn(reason, reply['error']['message'])
             self.assertEqual(set(reply['error']), {'code', 'message'})
+            # The protocol-1 reader shared with pre-#15 clients must take the
+            # typed refusal path before a peer decodes its strict success schema.
+            with self.assertRaises(NodeError) as refused:
+                response(reply, request_id)
+            self.assertEqual(refused.exception.code, expected_code)
+            self.assertEqual(str(refused.exception), reply['error']['message'])
 
     def test_queue_lock_at_preflight_is_retryable_but_response_loss_after_registration_is_unknown(self):
         from cmw.jobs.lifecycle import JobObservationUnavailable

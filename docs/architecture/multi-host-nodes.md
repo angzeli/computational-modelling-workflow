@@ -150,7 +150,11 @@ when the selected queue cannot be read. A node-selected successor command
 reports either kind of temporary refusal with exit 75. A successful mutation
 whose response can no longer be confirmed retains `OUTCOME_UNKNOWN`. These
 codes leave the protocol-1 envelope and negotiated successor success payload
-at schema 1; clients can recognize the refusals without decoding new fields.
+at schema 1. D04 defines no protocol minor version. The protocol-1 reader
+accepts string error codes and raises the received refusal before decoding a
+successful result. A node-selected Jobs CLI predating these codes prints the
+code and message and exits 2. Exit 75 requires a client that recognizes the
+retryable code.
 
 D05 adds only the gate described in §3.3. It must not cut off SFTP until the
 replacement transfer path is available and qualified.
