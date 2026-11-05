@@ -162,7 +162,7 @@ class RunnerBindingTests(unittest.TestCase):
         path = self.root / "spec.json"
         self.spec["execution"]["runner_record"]["sha256"] = "d" * 64
         path.write_text(json.dumps(self.spec))
-        self.assertFalse(inspect_binding(path, self.native, "c" * 64)["valid"])
+        self.assertIs(inspect_binding(path, self.native, "c" * 64)["valid"], False)
         self.spec["execution"]["runner_record"]["sha256"] = sha(self.metadata)
         (self.run / "KPOINTS").unlink()
         self.assertNotEqual(self.inspect()["status"], "eligible")
@@ -194,7 +194,7 @@ class RunnerBindingTests(unittest.TestCase):
         result = self.inspect()
         self.assertTrue(revalidate_sources(result["sources"])["valid"])
         (self.run / "POTCAR").write_text("changed synthetic potential\n")
-        self.assertFalse(revalidate_sources(result["sources"])["valid"])
+        self.assertIs(revalidate_sources(result["sources"])["valid"], False)
 
 
 class ControlledRunnerBindingTests(unittest.TestCase):

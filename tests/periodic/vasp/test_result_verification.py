@@ -44,7 +44,7 @@ class FinalizationRecordVerificationTests(unittest.TestCase):
         return verify_finalization(self.path)
 
     def assert_invalid(self, result):
-        self.assertFalse(result["valid"], result)
+        self.assertIs(result["valid"], False, result)
         self.assertTrue(result["findings"], result)
 
     def test_valid_record_remains_compatible_and_read_only(self):

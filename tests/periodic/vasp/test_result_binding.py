@@ -110,7 +110,7 @@ class ResultBindingTests(unittest.TestCase):
         for change in changes:
             with self.subTest(change=change):
                 result = self.inspect(self.spec | change)
-                self.assertFalse(result["valid"])
+                self.assertIs(result["valid"], False)
                 self.assertIn("binding.specification", self.codes(result))
         missing = dict(self.spec)
         del missing["source_identities"]
@@ -119,19 +119,19 @@ class ResultBindingTests(unittest.TestCase):
     def test_duplicate_nonfinite_and_missing_spec_sources_fail(self):
         for text in ('{"schema_version":1,"schema_version":1}', '{"schema_version":NaN}'):
             self.spec_path.write_text(text)
-            self.assertFalse(inspect_binding(self.spec_path, self.evidence, self.policy_id)["valid"])
-        self.assertFalse(inspect_binding(self.root / "missing", self.evidence, self.policy_id)["valid"])
+            self.assertIs(inspect_binding(self.spec_path, self.evidence, self.policy_id)["valid"], False)
+        self.assertIs(inspect_binding(self.root / "missing", self.evidence, self.policy_id)["valid"], False)
 
     def test_exact_snapshot_segment_policy_and_native_role_set_required(self):
         for key in ("snapshot_id", "segment_id", "policy_id"):
             result = self.inspect(self.spec | {key: "d" * 64})
-            self.assertFalse(result["valid"])
+            self.assertIs(result["valid"], False)
         for edit in (lambda ids: ids.pop("OUTCAR"), lambda ids: ids.update(extra="d" * 64),
                      lambda ids: ids.update(INCAR="d" * 64)):
             spec = copy.deepcopy(self.spec)
             edit(spec["source_identities"])
             result = self.inspect(spec)
-            self.assertFalse(result["valid"])
+            self.assertIs(result["valid"], False)
             self.assertIn("binding.source_identities", self.codes(result))
 
     def test_execution_hashes_attempt_and_directory_must_match(self):
@@ -150,7 +150,7 @@ class ResultBindingTests(unittest.TestCase):
         spec = copy.deepcopy(self.spec)
         spec["execution"]["receipt"] = "missing.json"
         result = self.inspect(spec)
-        self.assertFalse(result["valid"])
+        self.assertIs(result["valid"], False)
         self.assertEqual(result["execution"]["status"], "unknown")
 
     def test_changed_or_incomplete_sources_and_missing_input_binding_fail(self):
@@ -162,12 +162,12 @@ class ResultBindingTests(unittest.TestCase):
             evidence = copy.deepcopy(self.evidence)
             edit(evidence)
             result = self.inspect(evidence=evidence)
-            self.assertFalse(result["valid"])
+            self.assertIs(result["valid"], False)
             self.assertFalse(result["input_binding"])
         (self.run / "INCAR").unlink()
         self.refresh()
         result = self.inspect()
-        self.assertFalse(result["valid"])
+        self.assertIs(result["valid"], False)
         self.assertIn("binding.input_sources", self.codes(result))
 
     def test_initial_geometry_match_is_required_even_when_hashes_are_declared(self):
@@ -184,7 +184,7 @@ class ResultBindingTests(unittest.TestCase):
         self.refresh()
         result = self.inspect()
         self.assertFalse(result["input_comparison_valid"])
-        self.assertFalse(result["valid"])
+        self.assertIs(result["valid"], False)
         row = next(row for row in result["input_comparisons"] if row["tag"] == "ENCUT")
         self.assertEqual(row["filesystem"], 400)
         self.assertEqual(row["effective"], 300)
@@ -195,14 +195,14 @@ class ResultBindingTests(unittest.TestCase):
         path = self.run / "INCAR"
         path.write_text(path.read_text().replace("NCORE = 2", "NCORE = 1"))
         self.refresh()
-        self.assertFalse(self.inspect()["valid"])
+        self.assertIs(self.inspect()["valid"], False)
         self.spec["expected_runtime_overlay"] = {"NCORE": 2}
         result = self.inspect()
         self.assertTrue(result["valid"], result)
         row = next(row for row in result["input_comparisons"] if row["tag"] == "NCORE")
         self.assertEqual(row["status"], "declared_runtime_overlay")
         self.spec["expected_runtime_overlay"] = {"NCORE": 3}
-        self.assertFalse(self.inspect()["valid"])
+        self.assertIs(self.inspect()["valid"], False)
         self.spec["expected_runtime_overlay"] = {"NPAR": 2}
         self.assertIn("binding.specification", self.codes(self.inspect()))
         for count in (True, 0, 1.5):
@@ -249,7 +249,7 @@ class ResultBindingTests(unittest.TestCase):
             mutation(record)
             path.write_text(json.dumps(record))
             self.spec["preparation_record"]["sha256"] = file_sha(path)
-            self.assertFalse(self.inspect()["valid"])
+            self.assertIs(self.inspect()["valid"], False)
 
     def test_prepared_runtime_overlay_is_explicit_and_limited(self):
         write_run(self.run, settings={"NCORE": "2"})
@@ -258,7 +258,7 @@ class ResultBindingTests(unittest.TestCase):
         record["resolved_settings"]["incar"]["NCORE"] = 1
         path.write_text(json.dumps(record))
         self.spec["preparation_record"]["sha256"] = file_sha(path)
-        self.assertFalse(self.inspect()["valid"])
+        self.assertIs(self.inspect()["valid"], False)
         self.spec["expected_runtime_overlay"] = {"NCORE": 2}
         result = self.inspect()
         self.assertTrue(result["valid"], result)
