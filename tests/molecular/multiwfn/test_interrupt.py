@@ -84,7 +84,7 @@ def capture_interrupt_failure(root, *, test_id, failure, started, parent, parent
 
 class InterruptTests(unittest.TestCase):
     def exercise(self, signum=signal.SIGTERM, *, queued=False, unresolved=False, early_interrupt=False,
-                 inherited_int=False, query_interrupt=False, query_failure=False):
+                 inherited_int=False, interrupt_query=None, query_failure=False):
         with tempfile.TemporaryDirectory(prefix='cmw-interrupt-') as directory, install():
             root = Path(directory)
             attempt = root/'attempt'
@@ -99,7 +99,7 @@ from cmw.core.provenance import atomic_write_json
 from cmw.jobs.ownership import identity
 root=Path(os.environ['CMW_TEST_ROOT'])
 def interrupted(signum, frame):
-    (root/'signal-seen').touch()
+    atomic_write_json(root/'signal-seen', signum)
 signal.signal(signal.SIGTERM, interrupted)
 signal.signal(signal.SIGINT, interrupted)
 aliases=[Path(os.environ['Multiwfnpath']),Path(sys.argv[1])]
@@ -123,7 +123,7 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                 'kill() { if [[ "$1" == -KILL ]]; then return 1; fi; builtin kill "$@"; }; fi; '
                 # Pause a live job query and reject signal-handler/subshell
                 # queries independently of whether this Bash emits a parse error.
-                'if [[ ${CMW_TEST_QUERY_INTERRUPT:-0} == 1 || ${CMW_TEST_QUERY_FAILURE:-0} == 1 ]]; then '
+                'if [[ -n ${CMW_TEST_INTERRUPT_QUERY:-} || ${CMW_TEST_QUERY_FAILURE:-0} == 1 ]]; then '
                 'trap() { if [[ $# == 2 && "$1" != -p && "$1" != - && '
                 '( "$2" == INT || "$2" == TERM ) ]]; then '
                 '''builtin trap "CMW_TEST_IN_TRAP=1; $1; CMW_TEST_IN_TRAP=0" "$2"; '''
@@ -132,7 +132,7 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                 'if [[ ${CMW_TEST_IN_TRAP:-0} == 1 ]]; then : > "$CMW_TEST_ROOT/trap-job-query"; fi; '
                 'if ((BASH_SUBSHELL != 0)); then : > "$CMW_TEST_ROOT/subshell-job-query"; fi; '
                 'if [[ ${CMW_TEST_QUERY_FAILURE:-0} == 1 && -f $CMW_TEST_ROOT/ready.json ]]; then return 1; fi; '
-                'if [[ ${CMW_TEST_QUERY_INTERRUPT:-0} == 1 && -f $CMW_TEST_ROOT/ready.json && ! -f $CMW_TEST_ROOT/query-entered ]]; then '
+                'if [[ $1 == "${CMW_TEST_INTERRUPT_QUERY:-}" && -f $CMW_TEST_ROOT/ready.json && ! -f $CMW_TEST_ROOT/query-entered ]]; then '
                 ': > "$CMW_TEST_ROOT/query-entered"; '
                 'for query_probe in {1..250}; do '
                 '[[ ! -f $CMW_TEST_ROOT/query-release && ! -f $CMW_TEST_ROOT/release ]] || break; '
@@ -153,8 +153,8 @@ while not (root/'release').exists() and time.monotonic()<deadline:
                 env['CMW_TEST_REFUSE_KILL'] = '1'
             if early_interrupt:
                 env['CMW_TEST_EARLY_INTERRUPT'] = '1'
-            if query_interrupt:
-                env['CMW_TEST_QUERY_INTERRUPT'] = '1'
+            if interrupt_query:
+                env['CMW_TEST_INTERRUPT_QUERY'] = interrupt_query
             if query_failure:
                 env['CMW_TEST_QUERY_FAILURE'] = '1'
             sentinel = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(35)'])
@@ -208,14 +208,15 @@ os.execv(sys.argv[1],sys.argv[1:])
                 if queued:
                     store.change(job['id'], 'cancel', confirm=True)
                 elif not early_interrupt and not query_failure:
-                    if query_interrupt:
+                    if interrupt_query:
                         wait_for((root/'query-entered').exists, timeout=5)
                     parent.send_signal(signum)
-                    if query_interrupt:
+                    if interrupt_query:
                         (root/'query-release').touch()
                 if not query_failure:
                     wait_for((root/'signal-seen').exists, timeout=2)
-                if query_interrupt:
+                    self.assertEqual(json.loads((root/'signal-seen').read_text()), signum)
+                if interrupt_query:
                     self.assertFalse((root/'trap-job-query').exists(),
                                      'Signal trap reentered job-table command substitution')
                     self.assertFalse((root/'subshell-job-query').exists(),
@@ -283,8 +284,10 @@ os.execv(sys.argv[1],sys.argv[1:])
 
     def test_signal_during_job_query_defers_supervision_until_trap_returns(self):
         for signum in (signal.SIGINT, signal.SIGTERM):
-            with self.subTest(signal=signum):
-                self.exercise(signum, query_interrupt=True)
+            # Gate both halves of the live job-table lookup, one fresh child per delivery.
+            for query in ('-pr', '-ps'):
+                with self.subTest(signal=signum, query=query):
+                    self.exercise(signum, interrupt_query=query)
 
     def test_unavailable_job_query_retains_aliases_without_signalling_child(self):
         self.exercise(query_failure=True)
