@@ -39,7 +39,11 @@ class IntegratedPortalTests(unittest.IsolatedAsyncioTestCase):
         backend = FakeBackend('OWNER', remote=True)
         app = NodesApp({'OWNER': backend}, clock=lambda: 100.)
         lane = app.lanes['OWNER']
-        lane.received = 100.
+        self.assertFalse(lane.fresh(100.))
+        with patch.object(app, 'render_state'):
+            app.accept('OWNER', ('capabilities', {}, None, None), backend.call('capabilities'), None)
+            self.assertFalse(lane.fresh(100.), 'Handshake alone must not establish status freshness')
+            app.accept('OWNER', ('status', {}, None, None), backend.call('status'), None)
         self.assertTrue(lane.fresh(100.))
         refusals = []
         app.queue('OWNER', 'doctor.inspect', target=backend.jobs[0]['target'],

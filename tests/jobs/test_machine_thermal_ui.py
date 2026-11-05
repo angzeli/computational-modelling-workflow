@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 from cmw.jobs.cli import machine_detail, machine_text
 from cmw.jobs.snapshot import capture_snapshot, render_snapshot
+from cmw.nodes.contracts import NodeState
+from cmw.nodes.protocol import NodeError
 
 
 def thermal(*, age=12., quality='fresh', temperature=63.2, now=112.):
@@ -162,6 +164,23 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(.05)
         self.fail('Synthetic frontend observation did not settle')
 
+    def assert_disconnected_then_unreachable(self, app, owner, message, retained=None):
+        lane = app.lanes[owner]
+        self.assertEqual(lane.reachability.state, NodeState.REACHABLE)
+        for count in range(1, 4):
+            app.accept(owner, ('status', {}, None, None), None,
+                       NodeError('DISCONNECTED', message))
+            self.assertEqual(lane.reachability.consecutive_failures, count)
+            self.assertEqual(lane.reachability.state,
+                             NodeState.REACHABLE if count < 3 else NodeState.UNREACHABLE)
+            self.assertFalse(lane.fresh(app.clock()))
+            state = 'Disconnected' if count < 3 else 'Unreachable'
+            self.assertIn(f'{owner} {state} 0s', str(app.query_one('#node-summary', Static).render()))
+            connection = f'connection lost ({count}/3)' if count < 3 else 'node unreachable'
+            self.assertIn(connection, app.connection_text(owner))
+            if retained is not None:
+                retained()
+
     async def test_local_actual_views_keep_frozen_scientific_card_and_rows(self):
         from tests.jobs import ui_polish_acceptance as acceptance
         sizes = ((77, 24), (80, 24), (100, 30), (140, 40))
@@ -243,9 +262,8 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertGreaterEqual(app.query_one('#table').size.height - 1, 3)
                     self.assertIn('MINI / research / J1.1', str(app.query_one('#selected', Static).render()))
                     save_render(app, f'portal-{quality}-{size[0]}x{size[1]}')
-            app.lanes['MINI'].error = 'Synthetic SSH unavailable'
-            app.render_state(); await pilot.pause()
-            self.assertIn('MINI Unreachable 0s', str(app.query_one('#node-summary', Static).render()))
+            await self.until(pilot, lambda: not app.lanes['MINI'].busy and not app.lanes['MINI'].pending)
+            self.assert_disconnected_then_unreachable(app, 'MINI', 'Synthetic SSH unavailable')
             self.assertIn('avg —', machine_text(app.machine_usage('MINI')))
             snap = app.capture_copy_snapshot().to_dict()
             self.assertEqual(snap['node_origin']['alias'], 'MINI')
@@ -254,7 +272,7 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(snap['progress'])
             self.assertIn('Last reported Run', str(app.query_one('#selected', Static).render()))
             app.lanes['MINI'].next_poll = 0
-            await self.until(pilot, lambda: app.lanes['MINI'].error is None)
+            await self.until(pilot, lambda: app.lanes['MINI'].fresh(app.clock()))
             self.assertEqual(machine_text(app.machine_usage('MINI')), 'Machine: CPU 88%; avg 76°C RAM 51.2 / 64.0 GiB')
             self.assertEqual(app.selected()[1]['target'], job['target'])
 
@@ -301,7 +319,6 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(backend.closed)
 
     async def test_transport_eof_immediately_marks_cached_thermal_and_node_stale(self):
-        from cmw.nodes.protocol import NodeError
         from tests.nodes.test_portal import FakeBackend
         backend = FakeBackend('MINI', remote=True)
         original = backend.call
@@ -315,14 +332,15 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(77, 24)) as pilot:
             await self.until(pilot, lambda: app.lanes['MINI'].state is not None)
             self.assertIn('avg 63°C RAM', machine_text(app.machine_usage('MINI')))
-            app.accept('MINI', ('status', {}, None, None), None,
-                       NodeError('DISCONNECTED', 'Synthetic endpoint stdout EOF'))
-            self.assertIsNotNone(app.lanes['MINI'].error)
-            self.assertFalse(app.lanes['MINI'].fresh(app.clock()))
-            self.assertIn('avg 63°C~ RAM', machine_text(app.machine_usage('MINI')))
-            self.assertIn('Unreachable', str(app.query_one('#node-summary', Static).render()))
-            self.assertIn('Last reported Run', str(app.query_one('#selected', Static).render()))
-            copied = app.capture_copy_snapshot().to_dict()
-            self.assertEqual(copied['machine_usage']['thermal']['quality'], 'stale')
-            self.assertEqual(copied['machine_usage']['thermal']['sample_timestamp'], 100.)
-            self.assertIn('node unreachable', copied['node_origin']['connection'])
+            await self.until(pilot, lambda: not app.lanes['MINI'].busy and not app.lanes['MINI'].pending)
+            def retained():
+                self.assertIsNotNone(app.lanes['MINI'].error)
+                self.assertFalse(app.lanes['MINI'].fresh(app.clock()))
+                self.assertIn('avg 63°C~ RAM', machine_text(app.machine_usage('MINI')))
+                self.assertIn('Last reported Run', str(app.query_one('#selected', Static).render()))
+                copied = app.capture_copy_snapshot().to_dict()
+                self.assertEqual(copied['machine_usage']['thermal']['quality'], 'stale')
+                self.assertEqual(copied['machine_usage']['thermal']['sample_timestamp'], 100.)
+                self.assertEqual(copied['node_origin']['connection'], app.connection_text('MINI'))
+            self.assert_disconnected_then_unreachable(app, 'MINI', 'Synthetic endpoint stdout EOF', retained)
+            self.assertIn('node unreachable', app.capture_copy_snapshot().to_dict()['node_origin']['connection'])

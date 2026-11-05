@@ -184,6 +184,10 @@ class DoctorUiTests(unittest.IsolatedAsyncioTestCase):
         with patch('cmw.doctor.service.inspect_local', side_effect=inspect_caller):
             async with app.run_test(size=SIZES[0]) as pilot:
                 await self.until(pilot, lambda: len(app.rows) == 10)
+                startup_capabilities = {owner: [call for call in backend.calls if call[0] == 'capabilities']
+                                        for owner, backend in backends.items()}
+                for calls in startup_capabilities.values():
+                    self.assertEqual(calls, [('capabilities', {}, None)])
                 app.select(row_key(target))
                 app.render_state()
                 app.collect_progress()
@@ -222,8 +226,10 @@ class DoctorUiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.selected_key, row_key(target))
         calls = [call for call in backends['REMOTE'].calls if call[0] == 'doctor.inspect']
         self.assertEqual(calls, [('doctor.inspect', {}, target)] * len(SIZES))
-        self.assertFalse(any(call[0] in {'doctor.inspect', 'capabilities'} for call in backends['LOCAL'].calls))
-        self.assertFalse(any(call[0] == 'capabilities' for call in backends['REMOTE'].calls))
+        self.assertFalse(any(call[0] == 'doctor.inspect' for call in backends['LOCAL'].calls))
+        for owner, backend in backends.items():
+            self.assertEqual([call for call in backend.calls if call[0] == 'capabilities'],
+                             startup_capabilities[owner], 'Doctor actions must not repeat the startup handshake')
 
     async def test_slow_closed_remote_report_cannot_retarget_or_reopen(self):
         backends = {'LOCAL': DoctorBackend('LOCAL'), 'REMOTE': DoctorBackend('REMOTE', remote=True)}
