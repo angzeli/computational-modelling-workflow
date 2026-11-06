@@ -215,11 +215,13 @@ def _unknown_ownership_observation(store, job, *, observation=None):
 def execution_text(observation):
     """Describe stored state and narrow operational evidence separately."""
     evidence = observation.get('evidence', {})
+    age = observation.get('age_seconds')
+    displayed_age = 'unavailable' if age is None else f'{age:.1f}s'
     lines = [f"Job: {observation.get('job_id')}",
              f"Persisted status: {observation['persisted_status']}",
              f"Execution observation: {observation['observed_execution']}",
              f"Quality: {observation['observation_quality']}",
-             f"Observation age: {observation.get('age_seconds', 0):.1f}s"
+             f"Observation age: {displayed_age}"
              + (' STALE' if observation.get('stale') else '')]
     for key, label in (('worker', 'Worker'), ('worker_lock', 'Worker lock'),
                        ('domain', 'Process domain'), ('receipt', 'Receipt'),

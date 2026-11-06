@@ -22,7 +22,7 @@ from uuid import uuid4
 
 import psutil
 
-from .ownership import group_exists, identity, owner_alive, snapshot_owned_session
+from .ownership import boot_session_id, group_exists, identity, owner_alive, snapshot_owned_session
 
 PROTOCOL = 1
 BINDING_FIELDS = ('protocol', 'backend', 'job_id', 'attempt_id', 'claim', 'worker',
@@ -54,7 +54,7 @@ def now_clock():
 def clock_descriptor():
     now_clock()  # Refuse platforms whose advertised clock cannot be read.
     return {'kind': 'mach_continuous_time' if sys.platform == 'darwin' else 'CLOCK_BOOTTIME',
-            'boot': psutil.boot_time()}
+            'boot_session_id': boot_session_id()}
 
 
 def _directory_identity(path):

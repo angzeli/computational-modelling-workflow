@@ -203,7 +203,7 @@ class MemoryTelemetryTests(unittest.TestCase):
 
     def test_stale_projection_and_completion_do_not_claim_current_rss(self):
         first = self.sample()['jobs']['a']
-        aged = telemetry.age_usage(first, now=117)
+        aged = telemetry.age_usage(first, current=telemetry.clock_stamp(self.clock + 7))
         self.assertTrue(aged['stale'])
         self.assertEqual(aged['age_seconds'], 7)
         self.job['status'] = 'Done'

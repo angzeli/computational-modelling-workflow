@@ -18,12 +18,14 @@ from uuid import uuid4
 
 from cmw.core.provenance import atomic_write_json
 from .ownership import exclusive, group_exists, group_members, identity, lock_held, owner_alive, signal_session
+from .freshness import age_seconds, clock_stamp
 from .store import ACTIVE, PENDING, JobsError, Store, private_opener
 from . import activity, ownership_hold, sharing
 from .ownership import OwnershipStatus, observe_owner
 
 INTERVAL = 0.15
 CANCEL_GRACE = 2.0
+CLOCK_STEP_THRESHOLD = 2.0
 _CHILDREN = []
 _ADMISSION_SAMPLERS = {}
 
@@ -135,7 +137,8 @@ def reconcile(store, con, job):
             return
     # Starting may be between intent commit and worker registration. A grace
     # period blocks the slot but never authorizes relaunching this attempt.
-    if job["worker"] is None and time.time() - job["claimed_at"] < 5:
+    claim_age = age_seconds(job.get("claim_clock"), clock_stamp())
+    if job["worker"] is None and claim_age is not None and claim_age < 5:
         return
     mark_unknown(store, con, job, "Worker ownership/completion cannot be verified; automatic progression stopped")
 
@@ -195,6 +198,18 @@ def dispatch_authority(store, control):
         return False
 
 
+def update_heartbeat(store, con, control):
+    wall = time.time()
+    current = clock_stamp()
+    elapsed = age_seconds(control.get('heartbeat_clock'), current)
+    previous = control.get('heartbeat')
+    if elapsed is not None and isinstance(previous, (float, int)):
+        step = wall - previous - elapsed
+        if abs(step) > CLOCK_STEP_THRESHOLD:
+            store.event(con, None, f'Wall clock stepped by {step:+.3f} s')
+    control.update(heartbeat=wall, heartbeat_clock=current)
+
+
 def tick(store):
     launch = None
     # OS collection is outside the write transaction. All controls/order are
@@ -212,7 +227,7 @@ def tick(store):
         control = store.control(con)
         record_guard(store, con, guard)
         control = store.control(con)
-        control["heartbeat"] = time.time()
+        update_heartbeat(store, con, control)
         store.set_control(con, control)
         active = [j for j in store.rows(con) if j["status"] in ACTIVE]
         for job in active:
@@ -248,7 +263,7 @@ def tick(store):
             return True
         job.update(admission_order=job["order"], sharing_anchor=decision["anchor_primary"],
                    status="Starting", order=None, claim=uuid4().hex,
-                   claimed_at=time.time(), reason="Launch intent persisted")
+                   claimed_at=time.time(), claim_clock=clock_stamp(), reason="Launch intent persisted")
         store.save(con, job)
         store.normalize(con)
         store.event(con, job["id"], "Launch intent acquired")
@@ -268,7 +283,7 @@ def controller(store):
     with exclusive(store.root / "controller.lock"):
         with store.transaction() as con:
             control = store.control(con)
-            control.update(owner=identity(), heartbeat=time.time(), runtime_protocol=3)
+            control.update(owner=identity(), heartbeat=time.time(), heartbeat_clock=clock_stamp(), runtime_protocol=3)
             store.set_control(con, control)
             store.event(con, None, "Controller online")
         print("CMW Jobs controller online", flush=True)
@@ -429,7 +444,7 @@ def worker(store, job_id, claim):
                                     store.save(con, item)
                             job.update(status='Hold' if final_blocker else 'Queue', order=position,
                                        reason=final_blocker or (decision['reason'] if not decision['permitted'] else 'Admission controls/order changed'))
-                        job.update(worker=None, group=None, claim=None, claimed_at=None, sharing_anchor=None)
+                        job.update(worker=None, group=None, claim=None, claimed_at=None, claim_clock=None, sharing_anchor=None)
                         store.save(con, job)
                         store.normalize(con)
                         return

@@ -2,12 +2,12 @@
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
-import time
 import unittest
 from unittest.mock import patch
 
 import psutil
 
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs import activity, sharing, telemetry
 from tests.jobs import test_activity as activity_fixtures
 from tests.jobs import test_sharing_policy as sharing_fixtures
@@ -126,19 +126,19 @@ class MpiFamilyTests(unittest.TestCase):
                 if change=='rank_exe': p[110].exe_value = p[111].exe_value = '/other/vasp_std'
                 if change=='topology': p[102].ppid.return_value = 100
                 current = self.collect(p, identities=identities)
-                self.assertEqual(sharing.reservation_state(reservation,current,time.time()), 'expired')
+                self.assertEqual(sharing.reservation_state(reservation,current,clock_stamp()), 'expired')
 
     def test_membership_change_and_launcher_loss_do_not_keep_reservation(self):
         p = self.topology(2)
         reservation = self.reserve(self.collect(p))
         del p[111]
-        self.assertEqual(sharing.reservation_state(reservation,self.collect(p),time.time()), 'expired')
+        self.assertEqual(sharing.reservation_state(reservation,self.collect(p),clock_stamp()), 'expired')
         del p[102]
         current = self.collect(p)
         self.assertEqual(current['state'], 'BUSY')
         self.assertEqual(current['observations'][0]['nproc'], 1)
         self.assertIsNone(current['observations'][0]['launcher'])
-        self.assertEqual(sharing.reservation_state(reservation,current,time.time()), 'expired')
+        self.assertEqual(sharing.reservation_state(reservation,current,clock_stamp()), 'expired')
 
     def test_final_collection_revalidates_session_leader_and_rank_parent(self):
         for change in ('leader_loss','leader_reuse','rank_parent'):

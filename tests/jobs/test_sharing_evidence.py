@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 import psutil
 
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs import activity, sharing
 from cmw.jobs.ownership import identity
 
@@ -19,6 +20,7 @@ class SharingEvidenceTests(unittest.TestCase):
         window = sharing.EvidenceWindow()
         usage = {'machine_usage':{'cpu_percent':1},'jobs':{},'external':{}}
         with patch.object(sharing.time,'time',side_effect=[10,10.1,10.6,11.2]), \
+             patch.object(sharing.time,'monotonic',side_effect=[10,10.1,10.6,11.2]), \
              patch.object(psutil,'cpu_count',return_value=8):
             first = window.add(usage,source='controller')
             self.assertEqual(len(first['samples']),1)
@@ -40,7 +42,7 @@ class SharingEvidenceTests(unittest.TestCase):
                                                'jobs':{},'external':{}}
         with patch.object(activity.DEFAULT_OBSERVER,'scan',side_effect=lambda *a,**k:copy.deepcopy(guard)):
             _,evidence = sampler.collect(store,wait=False)
-        self.assertFalse(sharing._samples(evidence,time.time())[0])
+        self.assertFalse(sharing._samples(evidence,clock_stamp())[0])
         self.assertEqual(evidence['source'],'controller')
 
     def test_real_owned_cpu_fixture_yields_fresh_bounded_admission_window(self):
@@ -80,7 +82,7 @@ while not release.exists(): time.sleep(.01)
                      patch.object(psutil,'pids',side_effect=AssertionError('Fixture must not enumerate host processes')):
                     guard,evidence = sampler.collect(store,source='supervisor-admission',wait=True)
                 self.assertLess(time.monotonic()-began,3)
-                samples,reason = sharing._samples(evidence,time.time())
+                samples,reason = sharing._samples(evidence,clock_stamp())
                 self.assertEqual(len(samples),2,reason)
                 self.assertEqual(guard['state'],'BUSY')
                 self.assertEqual(evidence['source'],'supervisor-admission')

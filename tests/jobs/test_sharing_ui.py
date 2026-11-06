@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from cmw.cli import build_parser
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs import activity, sharing
 from cmw.jobs.cli import sharing_text, usage_cells
 from cmw.jobs.store import Store
@@ -32,7 +33,7 @@ def external(directory):
             'age_seconds': 20, 'ownership': 'External / unattributed', 'evidence': ['Fixture identities'],
             'usage': usage(cpu_cores=7.13)}
     return {'state': 'BUSY', 'reason': 'Recognized external computation observed', 'observations': [item],
-            'observed_at': time.time(), 'age_seconds': 0, 'stale': False, 'source': 'client',
+            'observed_clock': clock_stamp(), 'observed_at': time.time(), 'age_seconds': 0, 'stale': False, 'source': 'client',
             'scope': 'fixture only', 'coverage': {'complete': True, 'warnings': []}}
 
 
@@ -156,11 +157,13 @@ class SharingTuiTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.press('escape')
                     now = time.time()
                     samples = []
-                    for stamp in (now - 0.9, now - 0.1):
-                        samples.append({'observed_at': stamp, 'logical_cpus': 16, 'machine_usage': machine(),
-                                        'jobs': {primary['attempt_id']: usage(cpu_cores=9, rss_bytes=2**30, observed_at=stamp),
-                                                 auxiliary['attempt_id']: usage(cpu_cores=0.5, rss_bytes=2**28, observed_at=stamp)}})
-                    clear['observed_at'] = time.time()
+                    for delay in (0.9, 0.1):
+                        stamp = now - delay
+                        clock = clock_stamp(time.monotonic() - delay)
+                        samples.append({'observed_at': stamp, 'observed_clock': clock, 'logical_cpus': 16, 'machine_usage': machine(),
+                                        'jobs': {primary['attempt_id']: usage(cpu_cores=9, rss_bytes=2**30, observed_at=stamp, observed_clock=clock),
+                                                 auxiliary['attempt_id']: usage(cpu_cores=0.5, rss_bytes=2**28, observed_at=stamp, observed_clock=clock)}})
+                    clear['observed_clock'] = clock_stamp()
                     app.accept_activity({**projection, 'sharing_evidence': {'samples': samples}})
                     self.assertIn('CPU exceeds declared', app.activity_projection['admission']['warnings'][0])
                     await pilot.press('b')
@@ -170,7 +173,7 @@ class SharingTuiTests(unittest.IsolatedAsyncioTestCase):
                         row = store.get(con, primary['id'])
                         row.update(status='Done', finished_at=time.time())
                         store.save(con, row)
-                    guard['observed_at'] = time.time()
+                    guard['observed_clock'] = clock_stamp()
                     store.set_external_reservation(sharing.make_reservation(guard['observations'][0], guard, 8, 8))
                     app.accept_activity({**projection, 'external_activity': guard})
                     await pilot.pause()
@@ -183,7 +186,7 @@ class SharingTuiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertGreaterEqual(app.query_one('#controller').region.y, 0)
                     self.assertLessEqual(app.query_one('#shortcuts').region.bottom, 28)
                     expired = deepcopy(guard)
-                    expired['observed_at'] = time.time()
+                    expired['observed_clock'] = clock_stamp()
                     expired['observations'][0]['members'][0]['identity']['birth'] += 1
                     app.accept_activity({**projection, 'external_activity': expired})
                     self.assertEqual(app.activity_projection['admission']['external_reservation_state'], 'expired')

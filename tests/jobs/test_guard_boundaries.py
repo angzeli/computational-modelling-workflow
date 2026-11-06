@@ -7,6 +7,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs import activity, ownership, runtime
 from cmw.jobs.store import Store
 from tests.jobs import test_activity as fixtures
@@ -15,7 +16,7 @@ from tests.jobs.isolated_runtime import install
 
 def clear():
     return {'state': 'NO_MATCH', 'reason': 'Fixture clear', 'observations': [],
-            'observed_at': time.time(), 'stale': False, 'coverage': {'complete': True, 'warnings': []}}
+            'observed_clock': clock_stamp(), 'observed_at': time.time(), 'stale': False, 'coverage': {'complete': True, 'warnings': []}}
 
 
 class GuardBoundaryTests(unittest.TestCase):

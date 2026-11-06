@@ -7,6 +7,7 @@ import threading
 import time
 
 from cmw.jobs.activity import Observer
+from cmw.jobs.freshness import age_seconds, clock_stamp
 from cmw.jobs.sharing import EvidenceWindow, fingerprint
 from cmw.jobs.store import ACTIVE, JobsError
 from cmw.jobs import telemetry as jobs_telemetry
@@ -74,7 +75,6 @@ class NodeTelemetry:
         self._job_bindings = {}
         self._external_bindings = {}
         self._error = 'Node telemetry has not sampled yet'
-        self._window_ages = {}
         if autostart:
             self.start()
 
@@ -95,7 +95,6 @@ class NodeTelemetry:
             self._retired_sampler = None
             self._observer = self.observer_factory()
             self._window = EvidenceWindow()
-            self._window_ages = {}
             self._generation += 1
             self._stop = threading.Event()
             self._running = True
@@ -147,7 +146,7 @@ class NodeTelemetry:
                 if guard.get('stale'):
                     pids = None
                 result = sampler.sample(self.store, state, guard, pids)
-                completed, wall = self.monotonic(), self.wall_time()
+                completed = self.monotonic()
                 with self._lock:
                     if not self._running or generation != self._generation:
                         return False
@@ -161,8 +160,9 @@ class NodeTelemetry:
                         prior = (self._last or {}).get(section, {})
                         prior = prior if section == 'machine_usage' else prior.get(key, {})
                         previous_age = 0.0
-                        retained = (prior.get('observed_at') is not None
-                                    and prior.get('observed_at') == value.get('observed_at'))
+                        stamp = value.get('observed_clock') or value.get('observed_at')
+                        prior_stamp = prior.get('observed_clock') or prior.get('observed_at')
+                        retained = stamp is not None and stamp == prior_stamp
                         if self._accepted_at is not None and retained:
                             previous_age = prior.get('age_seconds', 0.0) + max(0.0, completed - self._accepted_at)
                         if section != 'machine_usage' and (retained or value.get('stale')):
@@ -171,14 +171,12 @@ class NodeTelemetry:
                             bindings[section][key] = previous_bindings[section].get(key) if retained else None
                         stamp = value.get('observed_at')
                         age = max(0.0, float(value.get('age_seconds') or 0.0), previous_age,
-                                  max(0.0, completed-started), max(0.0, wall-stamp) if stamp is not None else 0.0)
+                                  completed-started)
                         value['age_seconds'] = age if stamp is not None else None
                     self._last, self._accepted_at = result, completed
                     self._job_bindings, self._external_bindings = bindings['jobs'], bindings['external']
                     self._error = ''
-                    window = self._window.add(deepcopy(result), source='client')
-                    self._window_ages = {s['observed_at']: self._window_ages.get(s['observed_at'], completed)
-                                         for s in window['samples']}
+                    self._window.add(deepcopy(result), source='client', monotonic=completed)
                     return True
             except Exception as exc:
                 with self._lock:
@@ -202,8 +200,7 @@ class NodeTelemetry:
             result.update(stale=True, reason=error or result.get('reason') or 'Node telemetry has not sampled yet',
                           sampler_status='unavailable')
             return result
-        age = max(float(result.get('age_seconds') or 0.0) + elapsed,
-                  max(0.0, self.wall_time() - stamp))
+        age = float(result.get('age_seconds') or 0.0) + elapsed
         result['age_seconds'] = age
         unavailable = age > UNAVAILABLE_AFTER
         stale = bool(result.get('stale') or stopped or error or age > MAX_AGE)
@@ -260,9 +257,11 @@ class NodeTelemetry:
         """Return actual cadence samples, aged without appending poll-time copies."""
         with self._lock:
             samples = deepcopy(self._window.samples)
-            now = self.monotonic()
+            current = clock_stamp(self.monotonic())
             for sample in samples:
-                elapsed = max(0.0, now - self._window_ages[sample['observed_at']])
+                elapsed = age_seconds(sample.get('observed_clock'), current)
+                if elapsed is None:
+                    return {'samples': [], 'source': source}
                 for section, key, value in self._values(sample):
                     aged = self._age(value, elapsed=elapsed, stopped=not self._running, error=self._error)
                     if section == 'machine_usage':

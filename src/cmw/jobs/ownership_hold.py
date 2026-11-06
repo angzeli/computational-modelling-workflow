@@ -5,6 +5,7 @@ import time
 
 import psutil
 
+from .freshness import age_seconds, clock_stamp
 from .ownership import OwnershipStatus, OwnershipUnavailable, lock_held, observe_owner
 from .store import JobsError
 
@@ -18,15 +19,24 @@ MAX_RETRY = 5.0
 def unavailable(store, con, job, observer, check, now):
     holds = job.setdefault('ownership_holds', {})
     current = holds.get(observer)
-    if current is None or current['check'] != check:
-        since = current['since'] if current else now
-        holds[observer] = current = {'check': check, 'since': since}
+    observed = clock_stamp(now)
+    if current is None:
+        holds[observer] = {'check': check, 'since_clock': observed}
         store.event(con, job['id'], f'Control suspended: {observer} cannot verify {check}')
         store.save(con, job)
-    if now-current['since'] >= UNKNOWN_AFTER and job['status'] != 'Unknown':
+        return
+    if current['check'] != check:
+        current['check'] = check
+        store.event(con, job['id'], f'Control suspended: {observer} cannot verify {check}')
+        store.save(con, job)
+    elapsed = age_seconds(current.get('since_clock'), observed)
+    if (elapsed is None or elapsed >= UNKNOWN_AFTER) and job['status'] != 'Unknown':
         job['ownership_resume_status'] = job['status']
         job['status'] = 'Unknown'
-        job['reason'] = f'Control suspended: {observer} cannot verify {check}; retaining supervision'
+        reason = f'Control suspended: {observer} cannot verify {check}'
+        if elapsed is None:
+            reason += '; hold duration cannot be established on this boot'
+        job['reason'] = reason + '; retaining supervision'
         store.save(con, job)
         store.event(con, job['id'], job['reason'])
 

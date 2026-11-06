@@ -22,6 +22,7 @@ from typing import Any
 
 import psutil
 
+from .freshness import age_seconds, clock_stamp
 from . import ownership
 from .store import ACTIVE, JobsError
 
@@ -59,21 +60,22 @@ class ExecutionObservation:
     observed_execution: str
     observation_quality: str
     observed_at: float
+    observed_clock: dict | None
     state_identity: dict[str, Any]
     evidence: dict[str, Evidence]
     limitations: tuple[str, ...]
     reconciliation_required: bool
     summary: str
 
-    def to_dict(self, *, now=None):
-        age = max(0, (time.time() if now is None else now) - self.observed_at)
+    def to_dict(self, *, now=None, monotonic=None):
+        age = age_seconds(self.observed_clock, clock_stamp(monotonic))
         return {'schema': 1, 'advisory': True, 'job_id': self.job_id,
                 'attempt_id': self.attempt_id, 'claim': self.claim,
                 'persisted_status': self.persisted_status,
                 'observed_execution': self.observed_execution,
                 'observation_quality': self.observation_quality,
                 'observed_at': self.observed_at, 'age_seconds': age,
-                'stale': age > FRESH_SECONDS, 'state_identity': deepcopy(self.state_identity),
+                'stale': age is None or age > FRESH_SECONDS, 'state_identity': deepcopy(self.state_identity),
                 'evidence': {key: value.to_dict() for key, value in self.evidence.items()},
                 'limitations': list(self.limitations),
                 'reconciliation_required': self.reconciliation_required,
@@ -437,14 +439,14 @@ def read_job(store, job_id):
         raise JobsError('Jobs observation source is malformed or unavailable') from exc
 
 
-def _observe_controller(store, control, now):
+def _observe_controller(store, control):
     owner = observe_process(control.get('owner'))
     lock = _observe_lock_path(store, ('controller.lock',))
     details = {'owner': owner.to_dict(), 'lock': lock.to_dict(),
                'heartbeat': control.get('heartbeat'), 'dispatch': control.get('dispatch')}
     if owner.verdict == 'matched' and lock.verdict == 'held':
-        heartbeat = control.get('heartbeat')
-        stale = not _finite(heartbeat) or not 0 <= now-heartbeat <= FRESH_SECONDS
+        age = age_seconds(control.get('heartbeat_clock'), clock_stamp())
+        stale = age is None or age > FRESH_SECONDS
         return Evidence('stale' if stale else 'online', 'Recorded controller authority is present', 'authority_present', details)
     if owner.verdict in {'missing', 'gone', 'mismatch'} and lock.verdict in {'missing', 'unheld'}:
         return Evidence('offline', 'No matching controller owner and held lock observed', 'offline', details)
@@ -497,7 +499,7 @@ def _observe_suspension(job, schema):
                     'stored_phase', details)
 
 
-def observe_execution(store, job, *, state=None, now=None):
+def observe_execution(store, job, *, state=None, now=None, monotonic=None):
     """Observe one selected attempt; results never authorize lifecycle mutation.
 
     ``state`` is accepted for presentation compatibility, but raw schema and
@@ -505,6 +507,7 @@ def observe_execution(store, job, *, state=None, now=None):
     schemas. Lifecycle changes during the probes invalidate the whole result.
     """
     observed_at = time.time() if now is None else now
+    observed_clock = clock_stamp(monotonic)
     evidence = {key: Evidence('unavailable', 'Observation has not been established', 'not_observed')
                 for key in ('source', 'worker', 'worker_lock', 'domain', 'receipt', 'controller', 'suspension')}
     limits = ('Legacy domain membership is incomplete; surviving MPI ranks are not excluded.',
@@ -530,7 +533,7 @@ def observe_execution(store, job, *, state=None, now=None):
             lock = evidence['worker_lock'] = observe_lock(store, job.get('attempt_id'))
             domain = evidence['domain'] = _observe_domain(job, worker, lock)
             receipt = evidence['receipt'] = _observe_receipt(store, job, worker, observed_at)
-            evidence['controller'] = _observe_controller(store, control, observed_at)
+            evidence['controller'] = _observe_controller(store, control)
             quality = 'partial'
             if worker.verdict == 'matched' and lock.verdict == 'held' and domain.verdict == 'anchor_verified':
                 category = 'VERIFIED_STOPPED' if worker.code == 'stopped' else 'VERIFIED_WORKER'
@@ -586,4 +589,4 @@ def observe_execution(store, job, *, state=None, now=None):
         summary = 'Stored status UNVERIFIED; observation source unsupported, unavailable or changed'
     return ExecutionObservation(str(job.get('display_id', job.get('id'))), job.get('attempt_id'),
                                 job.get('claim'), job.get('status', 'Unknown'), category, quality,
-                                observed_at, identity, evidence, limits, required, summary)
+                                observed_at, observed_clock, identity, evidence, limits, required, summary)

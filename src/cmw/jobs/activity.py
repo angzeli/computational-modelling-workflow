@@ -15,6 +15,7 @@ import time
 
 import psutil
 
+from .freshness import age_seconds, clock_stamp
 from .ownership import identity, lock_held, owner_alive
 from .store import ACTIVE, PENDING
 
@@ -65,16 +66,15 @@ def unavailable(reason, *, previous=None, source='client'):
     now = time.time()
     result = copy.deepcopy(previous) if previous else {'observations': [], 'observed_at': None, 'coverage': {}}
     result.update(state='UNAVAILABLE', reason=reason, source=source, scope=SCOPE, stale=True,
-                  checked_at=now, age_seconds=None if result.get('observed_at') is None else max(0, now-result['observed_at']))
+                  checked_at=now, age_seconds=age_seconds(result.get('observed_clock'), clock_stamp()))
     result['coverage'] = {**result.get('coverage', {}), 'complete': False, 'warnings': [reason]}
     return result
 
 
 def permits(result):
-    now = time.time()
-    observed = result.get('observed_at')
+    age = age_seconds(result.get('observed_clock'), clock_stamp())
     return bool(result.get('state') == 'NO_MATCH' and not result.get('stale') and
-                observed is not None and 0 <= now-observed <= MAX_AGE and result.get('coverage', {}).get('complete'))
+                age is not None and age <= MAX_AGE and result.get('coverage', {}).get('complete'))
 
 
 def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factory=psutil.Process):
@@ -284,7 +284,7 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
     reason = ('Recognized external computation observed' if observations else
               'Material process observation uncertainty' if uncertain else 'No recognized external computation observed')
     result = {'state': state_name, 'reason': reason, 'scope': SCOPE, 'observed_at': now,
-            'checked_at': now, 'age_seconds': 0, 'stale': False, 'coverage': coverage,
+            'observed_clock': clock_stamp(), 'checked_at': now, 'age_seconds': 0, 'stale': False, 'coverage': coverage,
             'observations': observations}
     if state.get('_telemetry_membership'):
         result['_pids'] = list(pids)

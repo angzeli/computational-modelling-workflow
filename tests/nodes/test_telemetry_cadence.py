@@ -107,6 +107,15 @@ class NodeTelemetryTests(unittest.TestCase):
         self.assertIsNone(expired['cpu_percent'])
         self.assertIsNone(expired['ram_used_bytes'])
 
+    def test_forward_wall_step_cannot_expire_a_recent_sample(self):
+        provider = self.provider()
+        self.warm(provider)
+        self.wall += 28791.6
+        self.mono += .5
+        current = self.snapshot(provider)['machine_usage']
+        self.assertEqual(current['age_seconds'], .5)
+        self.assertFalse(current['stale'])
+
     def test_backwards_wall_clock_cannot_revive_old_sample(self):
         provider = self.provider()
         self.warm(provider)

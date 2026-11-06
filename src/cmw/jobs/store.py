@@ -15,6 +15,7 @@ import unicodedata
 from uuid import uuid4
 
 from cmw.core.execution_layout import resolve_recorded_layout
+from .freshness import age_seconds, clock_stamp
 
 PENDING = {"Queue", "Hold"}
 ACTIVE = {"Starting", "Run", "Cancelling", "Unknown"}
@@ -849,7 +850,7 @@ class Store:
                 con.close()
         from .ownership import owner_alive, lock_held
         online = bool(control["owner"] and owner_alive(control["owner"]) and lock_held(self.root / "controller.lock"))
-        age = None if control["heartbeat"] is None else max(0, now - control["heartbeat"])
+        age = age_seconds(control.get("heartbeat_clock"), clock_stamp()) if control.get("heartbeat_clock") else None
         stale = bool(online and (age is None or age > 5))
         current = [j for j in jobs if j["status"] in ACTIVE]
         pending = sorted((j for j in jobs if j["status"] in PENDING), key=lambda j: j["order"])

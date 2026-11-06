@@ -149,10 +149,17 @@ def _validate_controlled_metadata(scalar, positions, running, finished, argv):
              "Controlled runner deadline/accounting evidence is inconsistent")
     clock = json.loads(scalar["deadline_clock"])
     intervals = json.loads(scalar["suspension_intervals"])
-    _require(isinstance(clock, dict) and set(clock) == {"kind", "boot"}
-             and clock["kind"] in {"mach_continuous_time", "CLOCK_BOOTTIME"}
-             and type(clock["boot"]) in (int, float) and math.isfinite(clock["boot"]) and clock["boot"] > 0
-             and isinstance(intervals, list), "Controlled runner requires explicit clock and interval records")
+    _require(isinstance(clock, dict) and clock.get("kind") in {"mach_continuous_time", "CLOCK_BOOTTIME"},
+             "Controlled runner clock is unsupported")
+    if set(clock) == {"kind", "boot"}:
+        # Historical immutable records used a positive wall-clock boot time.
+        boot = clock["boot"]
+        complete = type(boot) in (int, float) and math.isfinite(boot) and boot > 0
+    else:
+        session = clock.get("boot_session_id")
+        complete = (set(clock) == {"kind", "boot_session_id"} and isinstance(session, str)
+                    and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", session))
+    _require(complete and isinstance(intervals, list), "Controlled runner requires explicit clock and interval records")
     previous_end, previous_revision, total, seen = 0.0, 0, 0.0, set()
     for interval in intervals:
         _require(isinstance(interval, dict) and set(interval) == {"start", "end", "request_id", "revision"},

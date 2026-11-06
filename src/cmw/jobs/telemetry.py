@@ -17,6 +17,7 @@ import time
 
 import psutil
 
+from .freshness import age_seconds, clock_stamp
 from .ownership import identity, identity_for, observed_group_members
 from .native_memory import footprint_reader
 from .thermal import ThermalProvider, age_thermal, unavailable_thermal
@@ -50,12 +51,17 @@ def empty_usage(reason='No verified current members'):
                 process_samples=[], observed_at=None, age_seconds=None, stale=False, reason=reason)
 
 
-def age_usage(value, now=None):
-    """A pure presentation projection; never reads the operating system."""
+def age_usage(value, now=None, *, current=None):
+    """Age a local observation. Older records have display-only wall timestamps."""
     result = copy.deepcopy(value)
     if result and result.get('observed_at') is not None:
-        result['age_seconds'] = max(0, (time.time() if now is None else now)-result['observed_at'])
-        result['stale'] = bool(result.get('stale') or result['age_seconds'] > MAX_AGE)
+        if 'observed_clock' in result:
+            age = age_seconds(result['observed_clock'], current if current is not None else clock_stamp())
+        else:
+            # Legacy display compatibility. Admission requires an observed_clock.
+            age = max(0, (time.time() if now is None else now)-result['observed_at'])
+        result['age_seconds'] = age
+        result['stale'] = bool(result.get('stale') or age is None or age > MAX_AGE)
     if result and 'thermal' in result:
         result['thermal'] = age_thermal(result['thermal'], now=now)
     return result
@@ -117,7 +123,7 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
     def _failed(self, state, guard, reason):
         last = self.last or {}
         def stale(value, fallback):
-            result = age_usage(value or fallback, self.wall_time())
+            result = age_usage(value or fallback, self.wall_time(), current=clock_stamp(self.monotonic()))
             result.update(stale=True, reason=reason)
             return result
         return {
@@ -189,7 +195,7 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
                         result[target] = None
             except (psutil.Error, OSError, ValueError, TypeError, AttributeError) as exc:
                 reasons.append(f'Machine swap: {type(exc).__name__}')
-        result.update(observed_at=self.wall_time(), age_seconds=0, reason='; '.join(reasons))
+        result.update(observed_at=self.wall_time(), observed_clock=clock_stamp(self.monotonic()), age_seconds=0, reason='; '.join(reasons))
         return result, baseline
 
     def _same_owner(self, owner):
@@ -316,7 +322,7 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
                                       else '; '.join(dict.fromkeys(footprint_reasons)))
         if new:
             reasons.append(f'{new} CPU baseline(s) warming up')
-        result.update(observed_at=self.wall_time(), age_seconds=0,
+        result.update(observed_at=self.wall_time(), observed_clock=clock_stamp(self.monotonic()), age_seconds=0,
                       reason='; '.join(dict.fromkeys(reasons + coverage_reasons)) or ('' if total else 'No verified current members'))
         return result
 
@@ -329,7 +335,7 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
                 continue
             if pids is None:
                 old = (self.last or {}).get('jobs', {}).get(job['attempt_id'])
-                usage = age_usage(old or empty_usage(), self.wall_time())
+                usage = age_usage(old or empty_usage(), self.wall_time(), current=clock_stamp(self.monotonic()))
                 usage.update(stale=True, reason='Managed membership snapshot unavailable')
                 result['jobs'][job['attempt_id']] = usage
                 continue
@@ -345,7 +351,7 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
         for observation in guard['observations']:
             if guard.get('stale'):
                 old = (self.last or {}).get('external', {}).get(observation['id'])
-                usage = age_usage(old or empty_usage(), self.wall_time())
+                usage = age_usage(old or empty_usage(), self.wall_time(), current=clock_stamp(self.monotonic()))
                 usage.update(stale=True, reason='External membership observation stale')
             else:
                 usage = self._workload(observation['members'], baselines, deadline)

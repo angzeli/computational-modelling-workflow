@@ -190,7 +190,7 @@ class TelemetryTests(unittest.TestCase):
     def test_age_projection_is_pure_and_marks_stale(self):
         usage = self.sample()
         original = copy.deepcopy(usage)
-        aged = telemetry.age_usage(usage,now=self.wall+telemetry.MAX_AGE+1)
+        aged = telemetry.age_usage(usage, current=telemetry.clock_stamp(self.clock + telemetry.MAX_AGE + 1))
         self.assertTrue(aged['stale'])
         self.assertEqual(usage,original)
 

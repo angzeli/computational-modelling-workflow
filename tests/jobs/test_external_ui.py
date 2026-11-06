@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs.cli import external_detail, guard_text, safe_text, status_text
 from cmw.jobs.store import Store
 
@@ -20,7 +21,7 @@ def projection():
     return {
         'external_activity': {
             'state': 'BUSY', 'reason': 'External VASP observed', 'source': 'client',
-            'observed_at': time.time(), 'age_seconds': 0, 'stale': False,
+            'observed_clock': clock_stamp(), 'observed_at': time.time(), 'age_seconds': 0, 'stale': False,
             'scope': 'current local user / recognized accessible executables',
             'coverage': {'warnings': ['Fixture coverage']},
             'observations': [{'id': 'E101-birth-17', 'engine': 'VASP', 'pid': 101,

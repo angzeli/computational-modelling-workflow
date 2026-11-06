@@ -8,11 +8,13 @@ from pathlib import Path
 import socket
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
 import psutil
 
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs import lifecycle, ownership
 from cmw.jobs.store import Store
 
@@ -254,7 +256,7 @@ class LifecycleObservationTests(LifecycleFixture):
     def test_online_controller_and_verified_worker_remain_separate_evidence(self):
         with self.store.transaction() as con:
             control = self.store.control(con)
-            control.update(owner=self.controller, heartbeat=NOW)
+            control.update(owner=self.controller, heartbeat=NOW, heartbeat_clock=clock_stamp())
             self.store.set_control(con, control)
         with self.hold(self.lock, self.control_lock), self.live(controller=True):
             result = self.observe()
@@ -338,12 +340,12 @@ class LifecycleObservationTests(LifecycleFixture):
 
     def test_observation_result_is_frozen_and_ages_independently(self):
         with self.live():
-            value = lifecycle.observe_execution(self.store, self.job, now=NOW)
+            value = lifecycle.observe_execution(self.store, self.job, now=NOW, monotonic=100.)
         self.assertTrue(is_dataclass(value))
         with self.assertRaises(FrozenInstanceError):
             value.persisted_status = 'Done'
-        initial = value.to_dict(now=NOW)
-        later = value.to_dict(now=NOW+3600)
+        initial = value.to_dict(monotonic=100.)
+        later = value.to_dict(monotonic=3700.)
         self.assertEqual(initial['age_seconds'], 0)
         self.assertEqual(later['age_seconds'], 3600)
         self.assertTrue(later['stale'])
@@ -533,7 +535,7 @@ class LifecycleReceiptSourceTests(LifecycleFixture):
     def test_controller_stale_heartbeat_is_not_worker_death(self):
         with self.store.transaction() as con:
             control = self.store.control(con)
-            control.update(owner=self.controller, heartbeat=NOW-60)
+            control.update(owner=self.controller, heartbeat=NOW-60, heartbeat_clock=clock_stamp(time.monotonic()-60))
             self.store.set_control(con, control)
         with self.hold(self.lock, self.control_lock), self.live(controller=True):
             result = self.observe()

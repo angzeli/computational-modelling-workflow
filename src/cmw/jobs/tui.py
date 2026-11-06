@@ -1181,9 +1181,10 @@ class JobsApp(LocalCatalogue, NavigationApp):
     def refresh_external(self, wide):
         guard = self.activity_projection.get("external_activity")
         if guard and guard.get("observed_at") is not None:
-            guard["age_seconds"] = max(0, time.time() - guard["observed_at"])
             from .activity import MAX_AGE
-            if guard["age_seconds"] > MAX_AGE:
+            from .freshness import age_seconds, clock_stamp
+            guard["age_seconds"] = age_seconds(guard.get("observed_clock"), clock_stamp())
+            if guard["age_seconds"] is None or guard["age_seconds"] > MAX_AGE:
                 guard.update(state="UNAVAILABLE", stale=True, reason="Client observation is stale")
                 self.activity_projection["admission"] = {"permitted": False, "reason": guard["reason"]}
         if guard:

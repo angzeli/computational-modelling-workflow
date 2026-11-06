@@ -67,7 +67,7 @@ class RunnerProtocolTests(unittest.TestCase):
     def test_unknown_backend_and_clock_refused(self):
         with self.assertRaisesRegex(SuspensionProtocolError, 'backend/protocol'):
             RunnerControl(self.root / 'context.json', backend='other-v1', deadline={}, storage=[], runtime={})
-        self.context['clock']['boot'] -= 100
+        self.context['clock']['boot_session_id'] = 'different-boot-session'
         self.write('context.json', self.context)
         with self.assertRaisesRegex(SuspensionProtocolError, 'clock/boot'):
             self.make()
