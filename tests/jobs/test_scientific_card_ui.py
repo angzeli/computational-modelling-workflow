@@ -14,7 +14,7 @@ from cmw.progress.formatting import cell_width
 from cmw.progress.models import (Criterion, IterationLevel, Metric, MetricSeries,
                                  ProgressEvent, SettingObservation)
 from cmw.progress.vasp_card import vasp_card_groups
-from tests.jobs.ui_polish_acceptance import NOW, scenario_projection, screenshot_text
+from tests.jobs.ui_polish_acceptance import NOW, projection_clock, scenario_projection, screenshot_text
 from tests.progress.test_scientific_card import example
 
 try:
@@ -97,7 +97,7 @@ async def scientific_card_views(root, renders=None):
          patch.object(JobsApp, 'collect_activity'), patch.object(JobsApp, 'collect_progress'), \
          patch.object(JobsApp, 'collect_execution'), patch.object(JobsApp, 'selected_execution', return_value=operational), \
          patch('subprocess.Popen', side_effect=AssertionError('No process launch in synthetic portal acceptance')), \
-         patch('time.time', return_value=NOW):
+         projection_clock():
         async with app.run_test(size=SIZES[0]) as pilot:
             table = app.query_one('#table', DataTable)
             table.move_cursor(row=app.row_ids.index(selected['display_id']), animate=False)

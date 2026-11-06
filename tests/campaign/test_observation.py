@@ -31,6 +31,7 @@ class ObservationTests(unittest.TestCase):
         with patch('builtins.__import__', side_effect=import_without_features):
             namespace = runpy.run_path(str(Path(__file__).with_name('support.py')))
             ledger = namespace['ProcessLedger'](self.id())
+            self.assertEqual(ledger.frontend['birth'], psutil.Process().create_time())
             self.assertEqual(ledger.observe(ledger.frontend)['classification'], 'sampled_live')
 
     def test_original_rank_quantile_is_preserved(self):

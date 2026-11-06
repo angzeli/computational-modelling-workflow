@@ -7,6 +7,7 @@ the source association, native adapters, bounded readers and widgets are real.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from copy import deepcopy
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import xml.etree.ElementTree as ET
 
 from cmw.jobs.activity import admission
 from cmw.jobs.folder_opener import OpenResult
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs.locations import LocationDescriptor
 from cmw.jobs.progress import resolve_context
 from cmw.jobs.store import Store
@@ -101,6 +103,14 @@ def scenario_state(base, cases, scenario):
     return state, selected
 
 
+@contextmanager
+def projection_clock():
+    # Freeze Jobs receipt ages while Textual and asyncio keep their real timers.
+    with patch('time.time', return_value=NOW), patch('cmw.jobs.freshness.time') as receipt_clock:
+        receipt_clock.monotonic.return_value = 100.0
+        yield
+
+
 def scenario_projection(state, scenario):
     usage = dict(cpu_cores=2.35, rss_bytes=2 * 1024**3, cpu_quality='fresh', memory_quality='fresh',
                  cpu_members=3, memory_members=3, total_members=3,
@@ -121,7 +131,8 @@ def scenario_projection(state, scenario):
     if scenario == 'ownership_uncertain':
         guard.update(state='UNCERTAIN', reason='Synthetic recognized identity cannot be verified')
         guard['coverage'] = {'complete': False, 'warnings': ['Synthetic payload ownership unresolved']}
-    with patch('time.time', return_value=NOW):
+    with projection_clock():
+        guard['observed_clock'] = clock_stamp()
         decision = admission(state, guard)
     return {'external_activity': guard, 'admission': decision,
             'machine_usage': dict(cpu_percent=43.0, ram_used_bytes=7 * 1024**3,
@@ -271,7 +282,7 @@ async def console_cases(store, cases, *, renders=None, scenarios=SCENARIOS, size
                 patch.object(JobsApp, 'collect_activity'), \
                 patch.object(store, 'transaction', side_effect=AssertionError('Read-only acceptance may not write Jobs state')), \
                 patch('subprocess.Popen', side_effect=AssertionError('No process launch in UI acceptance')), \
-                patch('time.time', return_value=NOW):
+                projection_clock():
             async with app.run_test(size=sizes[0]) as pilot:
                 await settle(app, pilot)
                 table = app.query_one('#table', DataTable)

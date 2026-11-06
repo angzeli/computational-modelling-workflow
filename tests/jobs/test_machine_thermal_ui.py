@@ -203,7 +203,7 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
             before = {path: path.read_bytes() for path in store.root.rglob('*') if path.is_file()}
             with patch.object(store, 'snapshot', side_effect=lambda **_: deepcopy(state)), \
                     patch.object(JobsApp, 'collect_activity'), \
-                    patch('time.time', return_value=acceptance.NOW):
+                    acceptance.projection_clock():
                 async with app.run_test(size=sizes[0]) as pilot:
                     await acceptance.settle(app, pilot)
                     app.query_one('#table', DataTable).move_cursor(row=app.row_ids.index(selected['display_id']), animate=False)

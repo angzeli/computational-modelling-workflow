@@ -20,7 +20,6 @@ from uuid import uuid4
 
 import psutil
 
-from cmw.jobs.ownership import identity as process_identity
 from cmw.nodes.protocol import encode, request
 from cmw.nodes.transport import ProcessTransport
 from tests.campaign.qualification_v2 import PLAN, FIELDS, coverage, field_sample, role_for
@@ -60,6 +59,13 @@ def resource_sample(process):
     """Legacy endpoint samples preserve partial values and their field evidence."""
     values, fields = field_sample(process, process.create_time())
     return {**values, 'field_observations': fields}
+
+
+def process_identity(pid):
+    """Match the independent psutil birth brackets in campaign qualification evidence."""
+    process = psutil.Process(pid)
+    return {'pid': process.pid, 'birth': process.create_time(), 'host': socket.gethostname(),
+            'boot': psutil.boot_time()}
 
 
 class ProcessLedger:
@@ -431,7 +437,7 @@ class MeterTransport(ProcessTransport):
         super()._start()
         try:
             value = process_identity(self.process.pid)
-        except psutil.Error as exc:
+        except (psutil.Error, OSError) as exc:
             value = {'pid': self.process.pid, 'birth': None, 'identity_error': type(exc).__name__}
         owner = next((row for row in self.owners
                       if row['pid'] == value['pid'] and row['birth'] == value['birth']), None)
