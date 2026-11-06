@@ -9,6 +9,15 @@ recheck before subgroup TERM and KILL. Lines 177–178 wait for drainage at MPI
 exit. The exception path at 201–207 can also enter cleanup. The runner has its
 own control flow and uses CMW's implementation of process identity.
 
+Historical runners call the Boolean `owner_alive` interface. CMW accepts a
+verified observation immediately and refuses a confirmed loss immediately. On
+unreadable evidence it repeats the complete read once immediately, matching the
+old psutil construction and explicit birth check, and once more after 10 ms.
+It starts no retry after a 100 ms monotonic deadline. A kernel call already in
+progress can finish later. The adapter only reads evidence. A final false
+result can mean either confirmed loss or exhausted retries. Callers that need
+to distinguish these outcomes use `observe_owner` and own their retry policy.
+
 ## Separate port change based on 51d8209
 
 1. Require the qualified CMW v2 identity and tri-state API at managed launch.

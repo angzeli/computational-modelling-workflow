@@ -166,8 +166,20 @@ def observe_owner(record):
 
 
 def owner_alive(owner):
-    """Positive-authority predicate. A false result is never evidence of absence."""
-    return observe_owner(owner).status is OwnershipStatus.VERIFIED
+    """Historical runners need a Boolean. Only a complete matching read grants authority."""
+    deadline = time.monotonic() + 0.1
+    result = observe_owner(owner)
+    # psutil's old Process constructor tolerated one denied read before CMW's
+    # explicit birth check. Repeat the full observation, never part of a record.
+    for delay in (0.0, 0.01):
+        if result.status is not OwnershipStatus.UNVERIFIABLE or time.monotonic() + delay >= deadline:
+            break
+        if delay:
+            time.sleep(delay)
+            if time.monotonic() >= deadline:
+                break
+        result = observe_owner(owner)
+    return result.status is OwnershipStatus.VERIFIED
 
 
 @contextmanager
