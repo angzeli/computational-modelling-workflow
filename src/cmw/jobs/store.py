@@ -223,11 +223,11 @@ class Store:
                 # transaction. Keep their state readable until they are done.
                 from .ownership import lock_held
                 from .ownership_hold import blocks_replacement
+                control = self.control(con)
                 if (any(job['status'] in ACTIVE for job in self.rows(con)) or
-                        lock_held(self.root/'controller.lock') or blocks_replacement(raw_control.get('owner'))):
+                        lock_held(self.root/'controller.lock') or blocks_replacement(control.get('owner'))):
                     raise JobsError('Legacy Jobs runtime still active or unresolved; let legacy attempts finish '
                                     'and stop the legacy controller with its original installation before migration')
-                control = self.control(con)
                 self.set_control(con, control)
                 for job in self.rows(con):
                     self.save(con, job)
