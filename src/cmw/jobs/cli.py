@@ -260,6 +260,40 @@ def inspect_lifecycle(store, args):
     return 0
 
 
+def inspect_ownership(store, args):
+    from .lifecycle import queue_read_unavailable
+    from .ownership import observe_owner
+
+    def binding():
+        job, control = _managed_job(store, args.job_id)
+        owner = control.get('owner') if args.role == 'controller' else job.get(args.role)
+        return job['attempt_id'], owner
+
+    try:
+        attempt, owner = binding()
+        result = observe_owner(owner).as_dict()
+        if binding() != (attempt, owner):
+            result.update(status='UNVERIFIABLE', deciding_check='binding')
+            result['checks']['binding'] = {'result': 'UNVERIFIABLE', 'recorded': attempt,
+                                           'observed': None, 'reason': 'Attempt or owner changed during inspection'}
+    except (OSError, JobsError) as exc:
+        if not queue_read_unavailable(exc):
+            raise
+        result = {'status': 'UNVERIFIABLE', 'deciding_check': 'queue', 'record_version': None,
+                  'boot_session': None, 'checks': {'queue': {'recorded': None, 'observed': None,
+                  'result': 'UNVERIFIABLE', 'reason': 'Could not read the original queue'}}}
+    result.update(job=args.job_id, role=args.role)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=True))
+    else:
+        print(safe_text(f"{args.job_id} {args.role}: {result['status']} ({result['deciding_check']})"
+                        f"  record version {result['record_version']}  boot session {result['boot_session']}"))
+        for field, evidence in result['checks'].items():
+            print(safe_text(f"  {field}: {evidence['result']}  recorded={evidence['recorded']!r}"
+                            f"  observed={evidence['observed']!r}  {evidence['reason']}"))
+    return {'VERIFIED': 0, 'GONE': 2, 'UNVERIFIABLE': 75}[result['status']]
+
+
 def inspect_reconciliation(store, args):
     if args.apply:
         raise JobsError('P2 lifecycle recovery apply not implemented/qualified. Reconciliation --apply is unavailable; use --preview.')
@@ -471,6 +505,13 @@ def register(subcommands):
     observe.add_argument("job_id")
     observe.add_argument("--json", action="store_true")
     observe.set_defaults(handler=handle)
+
+    ownership = operations.add_parser("ownership", help="diagnose a recorded local process identity without changing the queue")
+    ownership.add_argument("job_id")
+    ownership.add_argument("--role", choices=("group", "worker", "controller"), default="group",
+                           help="recorded identity to inspect (default: protected group anchor)")
+    ownership.add_argument("--json", action="store_true")
+    ownership.set_defaults(handler=handle)
 
     reconcile = operations.add_parser("reconcile", help="preview conservative recovery; persistent apply is unavailable",
         description="Read-only reconciliation preview. Does not start a controller, signal, update state or release resources.")
@@ -697,6 +738,8 @@ def handle(args):
             print(json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False) if args.json else
                   safe_text(readiness_text(result) if args.preview else submission_text(result)))
             return 0
+        if operation == "ownership":
+            return inspect_ownership(store, args)
         if operation == "observe":
             return inspect_lifecycle(store, args)
         if operation == "reconcile":
