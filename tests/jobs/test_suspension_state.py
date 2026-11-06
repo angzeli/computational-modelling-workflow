@@ -1,7 +1,7 @@
 """Durable control/fault contracts; every process observation and signal is mocked."""
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import json
 from pathlib import Path
 from threading import Event
@@ -132,6 +132,69 @@ class StateTests(unittest.TestCase):
             self.assertEqual((command['operation'], command['request_id']),
                              ('cancel', prepared['suspension']['request']['id']))
             kill.assert_not_called()
+
+    def test_reused_target_while_waiting_for_queue_lock_never_receives_continue(self):
+        job = self.phase('Resuming', revision=3, request={'id': 'resume', 'action': 'continue'})
+        coordinator = self.coordinator()
+        coordinator.authority = WorkerAuthority(self.store, job, ANCHOR, Mock())
+        coordinator.authority.wait = Mock(return_value=job)
+        acquiring, replaced = Event(), Event()
+        transaction = self.store.transaction
+
+        @contextmanager
+        def transaction_start(**options):
+            if options.get('exclusive'):
+                acquiring.set()
+            with transaction(**options) as con:
+                yield con
+
+        def observe(record):
+            status = (control.OwnershipStatus.GONE if record == MEMBER and replaced.is_set()
+                      else control.OwnershipStatus.VERIFIED)
+            return SimpleNamespace(status=status, deciding_check='start_token')
+
+        with patch.object(self.store, 'transaction', transaction_start), \
+                patch.object(control, '_send', REAL_SEND), patch.object(control, '_check_identity'), \
+                patch.object(control, 'observe_owner', side_effect=observe), \
+                patch.object(control.os, 'getsid', return_value=ANCHOR['pid']), \
+                patch.object(control.os, 'getpgid', side_effect=lambda pid: pid), \
+                patch.object(control.os, 'kill') as kill, ThreadPoolExecutor(max_workers=1) as pool:
+            with transaction(create=False):
+                future = pool.submit(coordinator._deliver, job, MEMBER, control.signal.SIGCONT)
+                self.assertTrue(acquiring.wait(5))
+                replaced.set()
+            with self.assertRaisesRegex(JobsError, 'Signal authority changed'):
+                future.result(timeout=5)
+            kill.assert_not_called()
+
+    def test_denied_delivery_witness_releases_lock_before_hold_and_supersession(self):
+        job = self.phase('Resuming', revision=3, request={'id': 'resume', 'action': 'continue'})
+        coordinator = self.coordinator()
+        authority = coordinator.authority = WorkerAuthority(self.store, job, ANCHOR, Mock())
+        authority.wait = Mock(return_value=job)
+        recovered = False
+
+        def observe(record):
+            status = (control.OwnershipStatus.UNVERIFIABLE if record == MEMBER and not recovered
+                      else control.OwnershipStatus.VERIFIED)
+            return SimpleNamespace(status=status, deciding_check='start_token')
+
+        def recover(delay):
+            nonlocal recovered
+            self.assertEqual(self.current()['ownership_holds']['domain']['check'], 'start_token')
+            self.store.change(job['id'], 'cancel', confirm=True)
+            recovered = True
+
+        with patch.object(control, '_send', REAL_SEND), patch.object(control, '_check_identity'), \
+                patch.object(control, 'observe_owner', side_effect=observe), \
+                patch.object(control.os, 'getsid', return_value=ANCHOR['pid']), \
+                patch.object(control.os, 'getpgid', side_effect=lambda pid: pid), \
+                patch.object(authority, '_backoff', side_effect=recover), patch.object(control.os, 'kill') as kill:
+            with self.assertRaises(control.RequestSuperseded):
+                coordinator._deliver(job, MEMBER, control.signal.SIGCONT)
+        kill.assert_not_called()
+        self.assertTrue(recovered)
+        self.assertTrue(self.current()['cancel_requested'])
 
     def test_runner_deadline_during_target_check_prevents_continue(self):
         job = self.phase('Resuming', revision=3, request={'id': 'resume', 'action': 'continue'})

@@ -531,11 +531,36 @@ def bind_domain(registration, anchor):
     return Domain(tuple(computational), tuple(protected), tuple(launchers))
 
 
+def _signal_witness(member, anchor, expected_pgid=None):
+    """One observation under the delivery lock. Never wait or retry in this scope."""
+    def require_live(owner):
+        result = observe_owner(owner)
+        if result.status == OwnershipStatus.UNVERIFIABLE:
+            raise OwnershipUnavailable(result.deciding_check, 'Signal authority cannot be verified')
+        if result.status != OwnershipStatus.VERIFIED:
+            raise JobsError('Signal authority changed before delivery')
+
+    require_live(anchor)
+    try:
+        sid = anchor['pid']
+        if os.getsid(sid) != sid or os.getpgid(sid) != sid or os.getsid(member['pid']) != sid:
+            raise JobsError('Signal target or anchor left the owned session')
+        pgid = os.getpgid(member['pid'])
+        if pgid == sid or (expected_pgid is not None and pgid != expected_pgid):
+            raise JobsError('Signal target changed group before delivery')
+    except OSError as exc:
+        # Missing topology alone cannot prove exit; check each original pin.
+        require_live(anchor)
+        require_live(member)
+        raise OwnershipUnavailable('signal_topology', 'Signal topology cannot be read') from exc
+    require_live(member)
+
+
 def _send(member, anchor, signum, *, authority=None, delivery=None):
     if authority:
         authority.read_domain(lambda: _check_identity(member, anchor))
     else:
-        _check_identity(member, anchor)
+        _signal_witness(member, anchor)
     with delivery if delivery is not None else nullcontext():
         os.kill(member['pid'], signum)
 
@@ -619,10 +644,10 @@ class Coordinator:
         return job
 
     @contextmanager
-    def _intent(self, expected, *, check_deadline=False):
+    def _intent(self, expected, *, check_deadline=False, delivery=False):
         # Serialize only the final publication/signal with client mutations.
         # All blocking authority and topology retries run outside this transaction.
-        with self.store.transaction(create=False) as con:
+        with self.store.transaction(create=False, exclusive=delivery) as con:
             latest = self.store.get(con, self.job_id)
             if (latest['claim'] != self.claim or latest['worker'] != self.context['worker']
                     or latest['attempt_id'] != expected['attempt_id'] or latest['group'] != self.anchor
@@ -638,6 +663,10 @@ class Coordinator:
                 # The runner can publish this before the next worker tick has
                 # copied its bound termination request into the queue.
                 raise RequestSuperseded('Runner termination request pending verification')
+            if delivery:
+                # Exclusive locking mode keeps other writers out through the
+                # syscall/replacement, even after this potentially failing commit.
+                con.commit()
             yield con, latest
 
     def update(self, job, **changes):
@@ -656,7 +685,7 @@ class Coordinator:
         request = value.get('request') or {}
         self.channel.write('command.json', {**self.context, 'revision': value['revision'],
             'request_id': request.get('id'), 'operation': operation, 'boundary': boundary},
-            publication=self._intent(job, check_deadline=operation not in {'cancel', 'invalidate'}))
+            publication=self._intent(job, check_deadline=operation not in {'cancel', 'invalidate'}, delivery=True))
 
     def ack(self, job, operation, status):
         value = self.channel.read('ack.json')
@@ -758,14 +787,36 @@ class Coordinator:
         job = self.current()
         return job.get('cancel_requested') or job.get('termination_requested')
 
+    @contextmanager
+    def _signal_gate(self, job, member, *, expected_pgid=None, check_deadline=False):
+        def witness():
+            _signal_witness(member, self.anchor, expected_pgid)
+        while True:
+            with self._intent(job, check_deadline=check_deadline, delivery=True):
+                try:
+                    witness()
+                except OwnershipUnavailable as exc:
+                    if not self.authority:
+                        raise
+                    first_failure = exc
+                else:
+                    if check_deadline and (self.directory/'deadline_expired.json').exists():
+                        raise RequestSuperseded('Runner termination request pending verification')
+                    yield
+                    return
+            # Register the actual failed observation, then retry reads outside
+            # the transaction. Reacquire the gate even after a successful retry.
+            self.authority.read_domain(witness, first_failure=first_failure)
+
     def _deliver(self, job, member, signum):
         if job['status'] != 'Run' or job.get('cancel_requested') or job.get('termination_requested'):
             raise RequestSuperseded('Termination superseded suspension signal')
         if self.authority:
             self.authority.wait()
-            _send(member, self.anchor, signum, authority=self.authority, delivery=self._intent(job, check_deadline=True))
+            _send(member, self.anchor, signum, authority=self.authority,
+                  delivery=self._signal_gate(job, member, check_deadline=True))
         else:
-            with self._intent(job, check_deadline=True):
+            with self._intent(job, check_deadline=True, delivery=True):
                 _send(member, self.anchor, signum)
 
     def _suspend(self, job):
@@ -944,7 +995,7 @@ class Coordinator:
                     if isinstance(exc.__cause__, (PermissionError, psutil.AccessDenied)):
                         raise exc.__cause__
                     raise
-            with self._intent(self.cancel_intent):
+            with self._signal_gate(self.cancel_intent, member, expected_pgid=row['pgid']):
                 event['operation'] = 'signal-delivery'
                 os.kill(member['pid'], signum)
                 self.termination_signals.add(key)

@@ -141,7 +141,7 @@ class Store:
                             'owned by your user with mode 0700 and use --state; existing permissions were not changed.')
 
     @contextmanager
-    def transaction(self, *, create=True):
+    def transaction(self, *, create=True, exclusive=False):
         self.ensure_private_root(create=create)
         if create:
             with open(self.path, 'ab', opener=private_opener):
@@ -154,7 +154,14 @@ class Store:
         con.row_factory = sqlite3.Row
         try:
             con.execute("PRAGMA busy_timeout=10000")
-            con.execute("BEGIN IMMEDIATE")
+            if exclusive:
+                # SQLite retains the file lock on this connection after COMMIT.
+                # The caller can commit durable state before an irreversible
+                # pipe write or signal, without letting a new intent intervene.
+                con.execute("PRAGMA locking_mode=EXCLUSIVE")
+                con.execute("BEGIN EXCLUSIVE")
+            else:
+                con.execute("BEGIN IMMEDIATE")
             con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             con.execute("CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL)")
             con.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, time REAL, job_id INTEGER, message TEXT)")
@@ -178,7 +185,8 @@ class Store:
                 for job in self.rows(con):
                     self.save(con, job)
             yield con
-            con.commit()
+            if con.in_transaction:
+                con.commit()
         except sqlite3.Error as exc:
             con.rollback()
             raise JobsError(f"Queue database unavailable: {exc}") from exc

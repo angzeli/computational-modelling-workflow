@@ -1,6 +1,6 @@
 """Actual cancellation coordinator with deterministic process/receipt races."""
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 import errno
 from pathlib import Path
@@ -112,6 +112,25 @@ class CancellationCoordinatorTests(unittest.TestCase):
         self.assertEqual(failures, [self.table.record(11)])
         self.assertFalse(self.current().get('ownership_holds'))
         self.assertEqual(self.sent, [(11, signal.SIGTERM)])
+
+    def test_cancel_target_changing_group_during_intent_acquisition_is_not_signalled(self):
+        self.domain()
+        self.coordinator.cancel_intent = self.current()
+        member = self.table.record(11)
+        transaction = self.store.transaction
+
+        @contextmanager
+        def change_group_at_delivery(**options):
+            if options.get('exclusive'):
+                self.table.rows[11]['pgid'] = 20
+            with transaction(**options) as con:
+                yield con
+
+        with patch.object(self.store, 'transaction', change_group_at_delivery):
+            with self.assertRaisesRegex(JobsError, 'changed group before delivery'):
+                self.coordinator._cancel_send(member, signal.SIGTERM)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.coordinator.termination_signals, set())
 
     def test_stopped_direct_root_gets_term_then_termination_cont_once(self):
         self.table.rows[11]['status'] = psutil.STATUS_STOPPED

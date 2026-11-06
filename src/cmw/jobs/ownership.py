@@ -382,7 +382,6 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
     topology before launching children; this option grants no new ownership.
     """
     sid = owner['pid']
-    deliver = send_group if send_group is not None else os.killpg
 
     def read(check, observation):
         if read_domain is None:
@@ -483,7 +482,11 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
             # A current birth-verified member witnesses a leaderless group.
             # Numeric PGID alone never authorizes a signal.
             try:
-                deliver(pgid, signum)
+                if send_group is None:
+                    os.killpg(pgid, signum)
+                elif not send_group(pgid, signum, lambda: _session_read(
+                        'signal_witness', lambda: final_witness(member, pgid))):
+                    continue
             except ProcessLookupError:
                 continue
             except PermissionError as exc:

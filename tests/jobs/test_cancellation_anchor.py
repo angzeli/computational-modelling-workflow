@@ -1,5 +1,5 @@
 """Deterministic worker/receipt races; every signalled identity is task-owned."""
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import json
 import os
 from pathlib import Path
@@ -270,6 +270,7 @@ class WorkerCancellationModel:
             stack.enter_context(patch.object(ownership, '_legacy_identity', side_effect=self.identify))
             stack.enter_context(patch('cmw.jobs.runtime.signal.signal'))
             stack.enter_context(patch('cmw.jobs.ownership_hold.observe_owner', side_effect=self.observe))
+            stack.enter_context(patch.object(suspension, 'observe_owner', side_effect=self.observe))
             for module in (runtime, ownership, suspension):
                 if module is not suspension:
                     stack.enter_context(patch.object(module, 'identity', side_effect=self.identify))
@@ -305,22 +306,48 @@ class CancellationAnchorTests(unittest.TestCase):
             model.store.save(con, job)
         return model
 
-    def test_go_keeps_queue_intent_locked_and_group_already_persisted(self):
+    def test_go_commits_run_and_group_before_writing_while_queue_is_locked(self):
         model = self.ordinary('receipt-first')
+        connect = sqlite3.connect
+        commits = []
+        class Observed(sqlite3.Connection):
+            def commit(connection):
+                row = connection.execute('SELECT data FROM jobs WHERE id=?', (model.job['id'],)).fetchone()
+                super().commit()
+                commits.append(json.loads(row[0]))
         def pipe(data):
             if data == b'GO\n':
-                connection = sqlite3.connect(model.store.path, timeout=0)
+                self.assertEqual(commits[-1]['group'], model.owners[model.anchor])
+                self.assertEqual(commits[-1]['status'], 'Run')
+                connection = connect(model.store.path, timeout=0)
                 try:
-                    row = connection.execute('SELECT data FROM jobs WHERE id=?', (model.job['id'],)).fetchone()
-                    self.assertEqual(json.loads(row[0])['group'], model.owners[model.anchor])
                     with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
                         connection.execute('BEGIN IMMEDIATE')
                 finally:
                     connection.close()
             model.pipe(data)
         model.leader.stdin.write.side_effect = pipe
-        self.assertEqual(model.run()['status'], 'Cancelled')
+        with patch.object(sqlite3, 'connect', side_effect=lambda *a, **kw: connect(*a, **kw, factory=Observed)):
+            self.assertEqual(model.run()['status'], 'Cancelled')
         self.assertIn('GO', model.events)
+
+    def test_failed_run_commit_cannot_launch_the_payload(self):
+        model = self.ordinary('receipt-first')
+        connect = sqlite3.connect
+        failures = []
+        class Full(sqlite3.Connection):
+            def commit(connection):
+                row = connection.execute('SELECT data FROM jobs WHERE id=?', (model.job['id'],)).fetchone()
+                if not failures and json.loads(row[0])['status'] == 'Run':
+                    failures.append(True)
+                    raise sqlite3.OperationalError('database or disk is full')
+                super().commit()
+        with patch.object(sqlite3, 'connect', side_effect=lambda *a, **kw: connect(*a, **kw, factory=Full)):
+            self.assertEqual(model.run()['status'], 'Unknown')
+        self.assertEqual(failures, [True])
+        self.assertNotIn('GO', model.events)
+        self.assertEqual(model.signals, [])
+        model.leader.stdin.close.assert_called_once()
 
     def test_cancel_winning_final_admission_keeps_go_closed(self):
         model = self.ordinary('cancel-before-go')
@@ -389,6 +416,46 @@ class CancellationAnchorTests(unittest.TestCase):
                 self.assertIn('held-independent-unknown', model.events)
                 self.assertEqual(model.signals, [])
                 self.assertFalse(model.released)
+
+    def test_replaced_subgroup_witness_while_acquiring_queue_lock_gets_no_signal(self):
+        model = self.ordinary('no-receipt-escalation', session=True)
+        original = runtime._worker_intent
+        replaced = []
+        @contextmanager
+        def acquiring(*args):
+            with original(*args):
+                if not replaced:
+                    model.owners[model.compute] = {**model.owners[model.compute], 'birth': 999.0}
+                    replaced.append(True)
+                yield
+        with patch.object(runtime, '_worker_intent', acquiring), \
+                patch.object(ownership, 'observe_owner', side_effect=model.observe):
+            self.assertEqual(model.run()['status'], 'Unknown', model.events)
+        self.assertEqual(replaced, [True])
+        self.assertEqual(model.signals, [])
+
+    def test_locked_subgroup_read_denial_releases_queue_before_hold_and_delivery(self):
+        model = self.ordinary('no-receipt-escalation', session=True)
+        original = ownership._session_read
+        denied = []
+        def once(check, read):
+            if check == 'signal_witness' and not denied:
+                denied.append(True)
+                raise ownership.OwnershipUnavailable('signal_witness', 'temporarily denied')
+            return original(check, read)
+        holds = []
+        backoff = runtime.ownership_hold.WorkerAuthority._backoff
+        def held(authority, delay):
+            current = model.current()  # Acquires a new SQLite writer.
+            holds.append(current['ownership_holds']['domain']['check'])
+            self.assertEqual(model.signals, [])
+            backoff(authority, delay)
+        with patch.object(ownership, '_session_read', once), \
+                patch.object(runtime.ownership_hold.WorkerAuthority, '_backoff', held), \
+                patch.object(ownership, 'observe_owner', side_effect=model.observe):
+            self.assertEqual(model.run()['status'], 'Cancelled', model.events)
+        self.assertEqual(holds, ['signal_witness'])
+        self.assertEqual(model.signals.count((model.compute, signal.SIGTERM)), 1)
 
     def test_partial_session_signal_is_not_replayed_when_final_witness_finds_new_intent(self):
         model = self.ordinary('no-receipt-escalation', session=True)

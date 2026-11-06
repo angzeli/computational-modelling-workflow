@@ -78,12 +78,15 @@ class WorkerAuthority:
         time.sleep(delay)
         self.hold_seconds += time.monotonic() - started
 
-    def read_domain(self, observation):
+    def read_domain(self, observation, *, first_failure=None):
         """Retry only a read. Never replay a coordinator command or signal."""
         delay = .25
         held = False
         while True:
             try:
+                if first_failure is not None:
+                    error, first_failure = first_failure, None
+                    raise error  # The final probe failed inside a delivery lock.
                 value = observation()
             except (OwnershipUnavailable, PermissionError, psutil.AccessDenied) as exc:
                 self.wait(retrying_domain=True)

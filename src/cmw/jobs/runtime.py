@@ -23,7 +23,7 @@ from .freshness import age_seconds, clock_stamp
 from .guard_history import configure_recovery, record_guard
 from .store import ACTIVE, PENDING, JobsError, Store, private_opener
 from . import activity, ownership_hold, sharing
-from .ownership import OwnershipStatus, observe_owner
+from .ownership import OwnershipStatus, OwnershipUnavailable, observe_owner
 
 INTERVAL = 0.15
 CANCEL_GRACE = 2.0
@@ -354,10 +354,10 @@ def _worker_intent(store, expected, coordinator):
     from .suspension import RequestSuperseded
     if coordinator:
         terminating = expected.get('cancel_requested') or expected.get('termination_requested')
-        with coordinator._intent(expected, check_deadline=not terminating):
+        with coordinator._intent(expected, check_deadline=not terminating, delivery=True):
             yield
         return
-    with store.transaction(create=False) as con:
+    with store.transaction(create=False, exclusive=True) as con:
         latest = store.get(con, expected['id'])
         if any(latest.get(key) != expected.get(key) for key in ('attempt_id', 'claim', 'worker', 'group')):
             raise JobsError('Recorded worker or group authority changed; refusing control')
@@ -365,6 +365,7 @@ def _worker_intent(store, expected, coordinator):
                 any(latest.get(key) != expected.get(key) for key in
                     ('status', 'cancel_requested', 'termination_requested'))):
             raise RequestSuperseded('Control request or termination intent changed')
+        con.commit()  # The connection keeps its exclusive lock until close.
         yield
 
 
@@ -443,7 +444,7 @@ def worker(store, job_id, claim):
                 authority.wait(before_admission=True)
                 if authority.generation != generation:
                     continue
-                with store.transaction() as con:
+                with store.transaction(exclusive=True) as con:
                     record_guard(store, con, guard)
                     job = store.get(con, job_id)
                     if job.get('ownership_holds'):
@@ -492,6 +493,7 @@ def worker(store, job_id, claim):
                         job.update(group=group, started_at=time.time(), reason="", status="Run")
                         store.save(con, job)
                         store.event(con, job["id"], "Execution started; group ownership persisted")
+                        con.commit()  # Durable Run before GO; the exclusive lock stays held.
                         leader.stdin.write(b"GO\n")
                         leader.stdin.flush()
                         break
@@ -525,11 +527,20 @@ def worker(store, job_id, claim):
                     # additionally protects signalling from corrupted stale metadata.
                     if cancel_at is None or (time.monotonic() - cancel_at > CANCEL_GRACE and observed_members):
                         signum = signal.SIGTERM if cancel_at is None else signal.SIGKILL
-                        def send(pgid, signum):
-                            with _worker_intent(store, job, None):
-                                if (pgid, signum) not in delivered:
-                                    os.killpg(pgid, signum)
-                                    delivered.add((pgid, signum))
+                        def send(pgid, signum, witness=None):
+                            while True:
+                                try:
+                                    with _worker_intent(store, job, None):
+                                        if witness is not None and not witness():
+                                            return False
+                                        if (pgid, signum) not in delivered:
+                                            os.killpg(pgid, signum)
+                                            delivered.add((pgid, signum))
+                                        return True
+                                except OwnershipUnavailable as exc:
+                                    # Drop the queue lock before holding/retrying the
+                                    # read. Reacquire it and recheck before delivery.
+                                    authority.read_domain(witness, first_failure=exc)
                         try:
                             authority.wait()
                             if session:
