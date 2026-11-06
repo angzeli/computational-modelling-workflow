@@ -232,7 +232,8 @@ class NodeTelemetryTests(unittest.TestCase):
 
     def test_failed_cached_sample_cannot_reset_age_after_wall_clock_steps_back(self):
         sampler = Mock()
-        result = {'machine_usage':{**Sampler._empty_machine(), 'observed_at':self.wall,
+        from cmw.jobs.freshness import clock_stamp
+        result = {'machine_usage':{**Sampler._empty_machine(), 'observed_at':self.wall, 'observed_clock':clock_stamp(self.mono),
                                   'cpu_percent':75., 'cpu_quality':'fresh'}, 'jobs':{}, 'external':{}}
         sampler.sample.side_effect = lambda *a: deepcopy(result)
         provider = self.provider(lambda:sampler)
@@ -246,6 +247,22 @@ class NodeTelemetryTests(unittest.TestCase):
         aged = self.snapshot(provider)['machine_usage']
         self.assertEqual(aged['age_seconds'], 6.)
         self.assertTrue(aged['stale'])
+
+    def test_endpoint_display_marks_legacy_and_prior_boot_samples_stale(self):
+        sampler = Mock()
+        provider = self.provider(lambda: sampler)
+        provider.start(background=False)
+        for stamp in (None, {'boot_session_id': 'previous-boot', 'monotonic': self.mono}):
+            with self.subTest(stamp=stamp):
+                usage = {**Sampler._empty_machine(), 'observed_at': self.wall, 'cpu_percent': 75., 'cpu_quality': 'fresh'}
+                if stamp is not None:
+                    usage['observed_clock'] = stamp
+                sampler.sample.return_value = {'machine_usage': usage, 'jobs': {}, 'external': {}}
+                self.assertTrue(provider.collect_once())
+                retained = self.snapshot(provider)['machine_usage']
+                self.assertTrue(retained['stale'])
+                self.assertIsNone(retained['age_seconds'])
+                self.assertEqual((retained['cpu_percent'], retained['cpu_quality']), (75., 'stale'))
 
     def test_restart_waits_for_timed_out_observer_and_discards_late_membership(self):
         entered, finish = threading.Event(), threading.Event()

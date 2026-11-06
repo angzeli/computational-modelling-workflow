@@ -1,11 +1,10 @@
 """Explicit node-selected Jobs commands; ordinary local routing stays unchanged."""
 from __future__ import annotations
 
-from copy import deepcopy
 import json
 import time
 
-from .connections import connect, observed_machine_usage
+from .connections import connect, observed_status_usage
 from .protocol import NodeError
 
 
@@ -77,11 +76,8 @@ def handle(args):
             started = time.monotonic()
             envelope = backend.call('status')
             received = time.monotonic()
-            machine = observed_machine_usage(envelope, received, received,
-                                             transport_age=received-started)
-            envelope = deepcopy(envelope)
-            if machine is not None:
-                envelope['result']['state']['machine_usage'] = machine
+            state = observed_status_usage(envelope, received, received, transport_age=received-started)
+            envelope = {**envelope, 'result': {**envelope['result'], 'state': state}}
         elif operation == 'fetch':
             from .client import fetch
             from .cli import _read_spec

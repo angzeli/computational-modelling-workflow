@@ -54,12 +54,9 @@ def empty_usage(reason='No verified current members'):
 def age_usage(value, now=None, *, current=None):
     """Age a local observation. Older records have display-only wall timestamps."""
     result = copy.deepcopy(value)
-    if result and result.get('observed_at') is not None:
-        if 'observed_clock' in result:
-            age = age_seconds(result['observed_clock'], current if current is not None else clock_stamp())
-        else:
-            # Legacy display compatibility. Admission requires an observed_clock.
-            age = max(0, (time.time() if now is None else now)-result['observed_at'])
+    if result:
+        stamp = result.get('observed_clock')
+        age = age_seconds(stamp, current if current is not None else clock_stamp()) if stamp else None
         result['age_seconds'] = age
         result['stale'] = bool(result.get('stale') or age is None or age > MAX_AGE)
     if result and 'thermal' in result:

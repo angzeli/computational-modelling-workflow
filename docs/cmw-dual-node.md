@@ -277,6 +277,12 @@ Slow samples do not overlap or create catch-up bursts. Cached samples retain
 attempt/owner and external-membership bindings; repeated status polls do not
 manufacture sustained sharing evidence. Temperature keeps its own existing policy.
 
+For remote CPU and memory readings, the client uses the node's sample age plus
+elapsed time on the receiving machine. It verifies that the sample stamp belongs
+to the boot identified by the endpoint. Older records without a comparable
+stamp, and readings without a local receipt, remain visible as stale with
+unknown age. The client never compares monotonic readings from different hosts.
+
 Each node retains independent CPU/RAM/temperature observations, connection state
 and receipt age. At compact widths the portal gives concise node summaries and
 the selected node's full shared line:

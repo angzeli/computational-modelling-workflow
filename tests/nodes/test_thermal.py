@@ -9,10 +9,11 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
+from cmw.core.provenance import stable_hash
 from cmw.jobs.cli import machine_text
 from cmw.nodes.backend import LocalBackend
 from cmw.nodes.codec import CodecError, decode_typed, encode_typed
-from cmw.nodes.connections import ConnectedBackend, observed_machine_usage
+from cmw.nodes.connections import ConnectedBackend, observed_machine_usage, observed_status_usage
 from cmw.nodes.protocol import NodeError, decode, encode, validate_envelope
 from cmw.progress.models import ProgressSnapshot, RunContext
 
@@ -26,19 +27,49 @@ def thermal(value=63.2, age=18.):
 
 def envelope():
     node, queue, attempt = uuid4().hex, uuid4().hex, uuid4().hex
+    boot = str(uuid4())
     target = {'node_id': node, 'queue_id': queue, 'job_id': 1, 'attempt_id': attempt}
     return {'schema': 1, 'node_id': node, 'queue_id': queue, 'queue_alias': 'research',
-        'session_id': uuid4().hex, 'sequence': 1, 'observed_at': 100., 'clock_id': 'a'*64,
+        'session_id': uuid4().hex, 'sequence': 1, 'observed_at': 100.,
+        'clock_id': stable_hash({'host': 'darwin:' + node, 'boot': boot}),
         'runtime': {'fingerprint': 'runtime'}, 'host': {'platform': 'darwin', 'hardware_id': node},
         'result': {'state': {'controller': {}, 'jobs': [{'id': 1, 'attempt_id': attempt,
             'display_id': 'J1.1', 'name': 'never executed', 'status': 'Hold', 'target': target}],
             'machine_usage': {'cpu_percent': 71., 'cpu_quality': 'complete',
                 'ram_used_bytes': int(27.1*2**30), 'ram_total_bytes': 36*2**30,
                 'memory_quality': 'complete', 'observed_at': 100., 'age_seconds': 0.,
+                'observed_clock': {'boot_session_id': boot, 'monotonic': 9000000.},
                 'thermal': thermal()}}}}
 
 
 class ThermalWireTests(unittest.TestCase):
+    def test_receipt_and_remote_boot_qualify_every_status_usage(self):
+        value = envelope()
+        source = value['result']['state']
+        usage = source['machine_usage']
+        usage['age_seconds'] = 1.25
+        source['jobs'][0]['usage'] = usage
+        source['external_activity'] = {'observations': [{'usage': usage}]}
+        source['job_usage'] = {'fixture': usage}
+        original = usage['observed_clock']
+        for receipt, stamp, age in (
+                (1000., original, 3.75),  # 1.25 s on the node + 2 s local elapsed + .5 s in transit
+                (None, original, None), (1003., original, None), (1000., None, None),
+                (1000., {**original, 'boot_session_id': str(uuid4())}, None)):
+            with self.subTest(receipt=receipt, stamp=stamp):
+                if stamp is None:
+                    usage.pop('observed_clock', None)
+                else:
+                    usage['observed_clock'] = stamp
+                state = observed_status_usage(value, receipt, 1002., transport_age=.5)
+                for result in (state['machine_usage'], state['jobs'][0]['usage'], state['job_usage']['fixture'],
+                               state['external_activity']['observations'][0]['usage']):
+                    self.assertEqual(result['age_seconds'], age)
+                    self.assertIs(result['stale'], age is None)
+                    self.assertEqual(result['thermal']['quality'], 'stale' if age is None else 'fresh')
+                    self.assertEqual(result['cpu_percent'], 71.)
+                self.assertEqual(usage['age_seconds'], 1.25)
+
     def test_optional_thermal_roundtrip_preserves_unknown_provider_and_legacy_status(self):
         value = envelope()
         for record in (thermal(), {**thermal(), 'source': 'unknown-optional-provider'}, None):

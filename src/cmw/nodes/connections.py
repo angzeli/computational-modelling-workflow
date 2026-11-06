@@ -9,41 +9,60 @@ from pathlib import Path
 import re
 import stat
 
+from cmw.core.provenance import stable_hash
 from .protocol import NodeError, identifier, validate_envelope
 from .transport import SSHTransport, ssh_command
 from .transport_events import compatible_capabilities
 
 
-def observed_machine_usage(envelope, received_at, now, *, connected=True, transport_age=0.):
-    """Qualify one node's cached telemetry without comparing different host clocks.
-
-    The endpoint timestamp and thermal sample timestamp share a clock. Frontend
-    elapsed time and conservative request duration only age that evidence; they
-    never replace its sample timestamp or revive a disconnected reading.
-    """
+def _observed_usage(envelope, value, received_at, now, *, connected=True, transport_age=0.):
+    """Combine the node's sample age and the receiver's elapsed time."""
     from cmw.jobs.telemetry import MAX_AGE
     from cmw.jobs.thermal import age_thermal
-
-    state = (envelope or {}).get('result', {}).get('state', {})
-    value = state.get('machine_usage')
     if not isinstance(value, dict):
         return None
     result = deepcopy(value)
-    def seconds(value):
-        return float(value) if type(value) in (int, float) and math.isfinite(value) and value >= 0 else 0.
-    elapsed = seconds(now - received_at) if received_at is not None else 0.
-    elapsed += seconds(transport_age)
+    def valid_seconds(v):
+        return type(v) in (int, float) and math.isfinite(v) and v >= 0
+    receipt_valid = valid_seconds(now) and valid_seconds(received_at) and received_at <= now and valid_seconds(transport_age)
+    elapsed = now - received_at + transport_age if receipt_valid else 0.
+    host = envelope.get('host') or {}
+    stamp = value.get('observed_clock') or {}
+    session = stamp.get('boot_session_id') if isinstance(stamp, dict) else None
+    host_id = str(host.get('platform')) + ':' + str(host.get('hardware_id'))
+    # Never subtract a remote monotonic reading from the portal's clock. The
+    # endpoint already computed the age; its clock_id binds the sample's boot.
+    same_boot = (isinstance(session, str) and bool(session) and valid_seconds(stamp.get('monotonic'))
+                 and stable_hash({'host': host_id, 'boot': session}) == envelope.get('clock_id'))
+    qualified = receipt_valid and same_boot and valid_seconds(value.get('age_seconds'))
+    age = value['age_seconds'] + elapsed if qualified else None
+    result['age_seconds'] = age
+    result['stale'] = bool(result.get('stale') or not connected or age is None or age > MAX_AGE)
     node_now = envelope.get('observed_at')
-    node_now = node_now if type(node_now) in (int, float) and math.isfinite(node_now) else 0.
-    sample_at = result.get('observed_at')
-    age = seconds(result.get('age_seconds'))
-    if type(sample_at) in (int, float) and math.isfinite(sample_at):
-        age = max(age, seconds(node_now - sample_at))
-    result['age_seconds'] = age + elapsed
-    result['stale'] = bool(result.get('stale') or not connected or result['age_seconds'] > MAX_AGE)
-    result['thermal'] = age_thermal(result.get('thermal'), now=node_now,
-                                    elapsed=elapsed, unavailable=not connected)
+    if 'thermal' in result:
+        result['thermal'] = age_thermal(result['thermal'], now=node_now if valid_seconds(node_now) else 0.,
+            elapsed=elapsed, unavailable=not connected or not receipt_valid or not same_boot)
     return result
+
+
+def observed_machine_usage(envelope, received_at, now, **options):
+    state = (envelope or {}).get('result', {}).get('state', {})
+    return _observed_usage(envelope, state.get('machine_usage'), received_at, now, **options)
+
+
+def observed_status_usage(envelope, received_at, now, **options):
+    """Qualify every reported usage in a frontend status snapshot for display."""
+    state = deepcopy(envelope['result']['state'])
+    def age(value):
+        return _observed_usage(envelope, value, received_at, now, **options)
+    if 'machine_usage' in state:
+        state['machine_usage'] = age(state['machine_usage'])
+    for row in (*state.get('jobs', ()), *state.get('external_activity', {}).get('observations', ())):
+        if row.get('usage') is not None:
+            row['usage'] = age(row['usage'])
+    if 'job_usage' in state:
+        state['job_usage'] = {key: age(value) for key, value in state['job_usage'].items()}
+    return state
 
 
 def default_config():

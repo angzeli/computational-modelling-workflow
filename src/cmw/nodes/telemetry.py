@@ -193,17 +193,18 @@ class NodeTelemetry:
             for key, value in result[section].items():
                 yield section, key, value
 
-    def _age(self, value, *, elapsed, stopped=False, error=''):
+    def _age(self, value, *, current, elapsed, stopped=False, error=''):
         result = deepcopy(value)
         stamp = result.get('observed_at')
         if stamp is None:
             result.update(stale=True, reason=error or result.get('reason') or 'Node telemetry has not sampled yet',
                           sampler_status='unavailable')
             return result
-        age = float(result.get('age_seconds') or 0.0) + elapsed
-        result['age_seconds'] = age
+        sample_age = age_seconds(result.get('observed_clock'), current)
+        age = max(float(result.get('age_seconds') or 0.0) + elapsed, sample_age or 0.)
+        result['age_seconds'] = age if sample_age is not None else None
         unavailable = age > UNAVAILABLE_AFTER
-        stale = bool(result.get('stale') or stopped or error or age > MAX_AGE)
+        stale = bool(result.get('stale') or sample_age is None or stopped or error or age > MAX_AGE)
         result.update(stale=stale, sampler_status='unavailable' if unavailable else 'stale' if stale else 'running')
         if unavailable:
             for field in ('cpu_percent', 'cpu_cores', 'rss_bytes', 'footprint_bytes', 'ram_used_bytes',
@@ -222,7 +223,9 @@ class NodeTelemetry:
                 if result.get(field) in ('fresh', 'partial', 'warming-up'):
                     result[field] = 'stale'
         if stale:
-            result['reason'] = error or ('Node telemetry sampler stopped' if stopped else 'Node telemetry sample expired')
+            result['reason'] = (error or ('Node telemetry sampler stopped' if stopped else
+                                'Sample lacks comparable boot and time evidence' if sample_age is None else
+                                'Node telemetry sample expired'))
         if 'thermal' in result:
             result['thermal'] = age_thermal(result['thermal'], now=self.wall_time()-elapsed, elapsed=elapsed,
                                             unavailable=stopped)
@@ -232,8 +235,9 @@ class NodeTelemetry:
         """Jobs.project adapter: returns cached observations, performs no sampling."""
         with self._lock:
             last = self._last or {'machine_usage': jobs_telemetry.Sampler._empty_machine(), 'jobs': {}, 'external': {}}
-            elapsed = max(0.0, self.monotonic() - self._accepted_at) if self._accepted_at is not None else 0.0
-            options = dict(elapsed=elapsed, stopped=not self._running, error=self._error)
+            now = self.monotonic()
+            elapsed = max(0.0, now - self._accepted_at) if self._accepted_at is not None else 0.0
+            options = dict(current=clock_stamp(now), elapsed=elapsed, stopped=not self._running, error=self._error)
             result = {'machine_usage': self._age(last['machine_usage'], **options), 'jobs': {}, 'external': {}}
             for job in state['jobs']:
                 if job['status'] not in ACTIVE:
@@ -263,7 +267,7 @@ class NodeTelemetry:
                 if elapsed is None:
                     return {'samples': [], 'source': source}
                 for section, key, value in self._values(sample):
-                    aged = self._age(value, elapsed=elapsed, stopped=not self._running, error=self._error)
+                    aged = self._age(value, current=current, elapsed=elapsed, stopped=not self._running, error=self._error)
                     if section == 'machine_usage':
                         sample[section] = aged
                     else:
