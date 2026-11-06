@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,7 @@ class WorkerCancellationModel:
         self.released = False
         self.held_states = []
         self.armed = False
+        self.just_launched = False
         self.release_checks = 0
         with self.store.transaction() as con:
             job = self.store.get(con, self.job['id'])
@@ -131,24 +133,28 @@ class WorkerCancellationModel:
     def pipe(self, data):
         self.events.append(data.decode().strip())
         if data == b'GO\n':
-            with self.store.transaction() as con:
-                job = self.store.get(con, self.job['id'])
-                if self.mode == 'independent-unknown':
-                    runtime.mark_unknown(self.store, con, job, 'Independent reconciliation required')
-                elif self.mode == 'members-unreadable':
-                    self.armed = True
-                else:
-                    job.update(status='Cancelling', cancel_requested=True)
-                self.store.save(con, job)
-            if self.mode in {'receipt-first', 'late-release', 'independent-unknown', 'members-unreadable'}:
-                self.alive.difference_update((self.runner, self.compute))
-                self.write_receipt()
+            self.just_launched = True
         elif data == b'RELEASE\n':
             assert self.receipt.exists(), 'RELEASE without a receipt'
             assert self.members(self.anchor, session=True) == [self.anchor], 'RELEASE with live descendants'
             assert self.anchor in self.alive, 'RELEASE after authority loss'
             self.released = True
             self.alive.remove(self.anchor)
+
+    def after_go(self):
+        # The client can acquire its write transaction after GO returns.
+        with self.store.transaction() as con:
+            job = self.store.get(con, self.job['id'])
+            if self.mode == 'independent-unknown':
+                runtime.mark_unknown(self.store, con, job, 'Independent reconciliation required')
+            elif self.mode == 'members-unreadable':
+                self.armed = True
+            elif self.mode != 'release-cancel':
+                job.update(status='Cancelling', cancel_requested=True)
+            self.store.save(con, job)
+        if self.mode in {'receipt-first', 'late-release', 'independent-unknown', 'members-unreadable', 'release-cancel'}:
+            self.alive.difference_update((self.runner, self.compute))
+            self.write_receipt()
 
     def wait(self, timeout=None):
         assert self.anchor not in self.alive, 'Reaping a live authority'
@@ -170,6 +176,9 @@ class WorkerCancellationModel:
         return owner == self.owners.get(owner['pid']) and owner['pid'] in self.alive
 
     def observe(self, owner):
+        if self.just_launched:
+            self.just_launched = False
+            self.after_go()
         if self.armed and self.mode in {'late-go', 'late-release'} and owner['pid'] == self.anchor:
             return Mock(status='UNVERIFIABLE', deciding_check='boot_session')
         if self.mode.startswith('unavailable-') and owner['pid'] == self.anchor and 'GO' in self.events:
@@ -222,7 +231,7 @@ class WorkerCancellationModel:
             assert not self.leader.stdin.close.called
             assert job['ownership_holds']['guardian']['check'] == 'anchor.start_token'
             self.held_states.append((job['status'], interval))
-        if self.mode == 'independent-unknown':
+        if self.mode in {'independent-unknown', 'signal-superseded'}:
             assert self.current()['status'] == 'Unknown'
             assert not self.released and not self.leader.stdin.close.called
             assert not self.signals
@@ -284,6 +293,124 @@ class CancellationAnchorTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix='cmw-anchor-model-')
         self.addCleanup(temporary.cleanup)
         return WorkerCancellationModel(Path(temporary.name), mode)
+
+    def ordinary(self, mode, *, session=False):
+        model = self.model(mode)
+        with model.store.transaction() as con:
+            job = model.store.get(con, model.job['id'])
+            job['suspension'] = None
+            job['env'].pop('CMW_JOBS_OWN_SESSION', None)
+            if session:
+                job['env']['CMW_JOBS_OWN_SESSION'] = '1'
+            model.store.save(con, job)
+        return model
+
+    def test_go_keeps_queue_intent_locked_and_group_already_persisted(self):
+        model = self.ordinary('receipt-first')
+        def pipe(data):
+            if data == b'GO\n':
+                connection = sqlite3.connect(model.store.path, timeout=0)
+                try:
+                    row = connection.execute('SELECT data FROM jobs WHERE id=?', (model.job['id'],)).fetchone()
+                    self.assertEqual(json.loads(row[0])['group'], model.owners[model.anchor])
+                    with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
+                        connection.execute('BEGIN IMMEDIATE')
+                finally:
+                    connection.close()
+            model.pipe(data)
+        model.leader.stdin.write.side_effect = pipe
+        self.assertEqual(model.run()['status'], 'Cancelled')
+        self.assertIn('GO', model.events)
+
+    def test_cancel_winning_final_admission_keeps_go_closed(self):
+        model = self.ordinary('cancel-before-go')
+        # The blocked pre-GO shell exits on EOF; no payload has started.
+        model.leader.stdin.close.side_effect = lambda: model.alive.difference_update(
+            (model.anchor, model.runner, model.compute))
+        original = runtime.ownership_hold.WorkerAuthority.wait
+        def cancel_after_read(authority, **kwargs):
+            job = original(authority, **kwargs)
+            if kwargs.get('before_admission'):
+                model.store.change(job['id'], 'cancel', confirm=True)
+            return job
+        with patch.object(runtime.ownership_hold.WorkerAuthority, 'wait', cancel_after_read):
+            self.assertEqual(model.run()['status'], 'Cancelled', model.events)
+        self.assertNotIn('GO', model.events)
+        self.assertEqual(model.signals, [])
+
+    def test_release_superseded_during_drainage_reobserves_accepted_cancel(self):
+        model = self.ordinary('release-cancel')
+        reads = 0
+        original = runtime.ownership_hold.WorkerAuthority.read_domain
+        def cancel_after_drainage(authority, observation):
+            nonlocal reads
+            value = original(authority, observation)
+            reads += 1
+            if reads == 2:
+                model.store.change(model.job['id'], 'cancel', confirm=True)
+            return value
+        with patch.object(runtime.ownership_hold.WorkerAuthority, 'read_domain', cancel_after_drainage):
+            self.assertEqual(model.run()['status'], 'Cancelled', model.events)
+        self.assertGreaterEqual(reads, 4)
+        self.assertLess(model.events.index(('signal', model.anchor, signal.SIGTERM)), model.events.index('RELEASE'))
+
+    def test_superseded_ordinary_signal_after_last_read_never_reaches_kernel(self):
+        for session in (False, True):
+            with self.subTest(owned_session=session):
+                model = self.ordinary('signal-superseded', session=session)
+                def revoke():
+                    with model.store.transaction() as con:
+                        job = model.store.get(con, model.job['id'])
+                        runtime.mark_unknown(model.store, con, job, 'Independent reconciliation required')
+                    model.events.append('revoked')
+                calls = 0
+                def after_read():
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        revoke()
+                wait = runtime.ownership_hold.WorkerAuthority.wait
+                def checked_wait(authority, **kwargs):
+                    value = wait(authority, **kwargs)
+                    if not session and 'GO' in model.events:
+                        after_read()
+                    return value
+                read = ownership._session_read
+                def checked_witness(check, observation):
+                    value = read(check, observation)
+                    if check == 'session_member':
+                        after_read()  # Second read is the final subgroup witness.
+                    return value
+                with patch.object(runtime.ownership_hold.WorkerAuthority, 'wait', checked_wait), \
+                        patch.object(ownership, 'observe_owner', side_effect=model.observe), \
+                        patch.object(ownership, '_session_read', checked_witness):
+                    self.assertEqual(model.run()['status'], 'Unknown', model.events)
+                self.assertIn('revoked', model.events)
+                self.assertIn('held-independent-unknown', model.events)
+                self.assertEqual(model.signals, [])
+                self.assertFalse(model.released)
+
+    def test_partial_session_signal_is_not_replayed_when_final_witness_finds_new_intent(self):
+        model = self.ordinary('no-receipt-escalation', session=True)
+        original = ownership._session_read
+        reads = 0
+        def change_during_anchor_read(check, observation):
+            nonlocal reads
+            value = original(check, observation)
+            if check == 'session_member' and model.signals == [(model.compute, signal.SIGTERM)]:
+                reads += 1
+                if reads == 2:  # The first group was already signalled; the anchor has not been.
+                    with model.store.transaction() as con:
+                        job = model.store.get(con, model.job['id'])
+                        job['termination_requested'] = {'reason': 'new termination intent'}
+                        model.store.save(con, job)
+            return value
+        with patch.object(ownership, 'observe_owner', side_effect=model.observe), \
+                patch.object(ownership, '_session_read', change_during_anchor_read):
+            self.assertEqual(model.run()['status'], 'Cancelled', model.events)
+        self.assertGreater(reads, 2)  # The final witness was reacquired under the new intent.
+        self.assertEqual(model.signals.count((model.compute, signal.SIGTERM)), 1)
+        self.assertEqual(model.signals.count((model.anchor, signal.SIGTERM)), 1)
 
     def test_receipt_writer_in_anchor_group_survives_computational_cancellation(self):
         model = self.model('receipt-race')

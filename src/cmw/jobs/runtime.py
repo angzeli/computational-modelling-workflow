@@ -6,6 +6,7 @@ admission, ownership decisions and bounded process-group supervision.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -347,7 +348,28 @@ def _wait_for_group_end(pgid, *, session=False):
         time.sleep(min(INTERVAL, remaining))
 
 
+@contextmanager
+def _worker_intent(store, expected, coordinator):
+    """Serialize the final syscall/pipe write with queue mutations, never a probe."""
+    from .suspension import RequestSuperseded
+    if coordinator:
+        terminating = expected.get('cancel_requested') or expected.get('termination_requested')
+        with coordinator._intent(expected, check_deadline=not terminating):
+            yield
+        return
+    with store.transaction(create=False) as con:
+        latest = store.get(con, expected['id'])
+        if any(latest.get(key) != expected.get(key) for key in ('attempt_id', 'claim', 'worker', 'group')):
+            raise JobsError('Recorded worker or group authority changed; refusing control')
+        if (latest.get('ownership_holds') or
+                any(latest.get(key) != expected.get(key) for key in
+                    ('status', 'cancel_requested', 'termination_requested'))):
+            raise RequestSuperseded('Control request or termination intent changed')
+        yield
+
+
 def worker(store, job_id, claim):
+    from .suspension import RequestSuperseded
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     with store.transaction() as con:
         initial = store.get(con, job_id)
@@ -395,6 +417,16 @@ def worker(store, job_id, claim):
                     time.sleep(delay)
                     delay = min(delay*2, ownership_hold.MAX_RETRY)
             authority = ownership_hold.WorkerAuthority(store, job, group, leader)
+            # Persist the newly created, unreaped anchor before GO. The final
+            # admission transaction can now issue GO while it owns the queue lock.
+            with store.transaction(create=False) as con:
+                current = store.get(con, job_id)
+                launch_state = current.get('ownership_resume_status') or current['status']
+                if (current['claim'] == claim and current['worker'] == authority.worker
+                        and current['attempt_id'] == initial['attempt_id'] and current['group'] is None
+                        and launch_state in {'Starting', 'Cancelling'}):
+                    current['group'] = group
+                    store.save(con, current)
             while True:
                 generation = authority.generation
                 before = store.snapshot()
@@ -414,12 +446,16 @@ def worker(store, job_id, claim):
                 with store.transaction() as con:
                     record_guard(store, con, guard)
                     job = store.get(con, job_id)
+                    if job.get('ownership_holds'):
+                        continue  # Recheck ownership and admission with the original pipe.
                     control = store.control(con)
                     pending_now = [(j['id'], j['order'], j['status']) for j in store.rows(con) if j['status'] in PENDING]
                     decision_state = {'jobs': store.rows(con), 'scheduler': control.get('scheduler', {}),
                                       'controller': {**control, 'online': dispatch_authority(store, control), 'stale': False}}
                     decision = sharing.evaluate(decision_state, guard, evidence, candidate_id=job_id, final=True)
-                    admitted = (job['claim'] == claim and job['status'] == 'Starting' and
+                    bound = (job['claim'] == claim and job['worker'] == authority.worker and job['group'] == group
+                             and job['attempt_id'] == initial['attempt_id'])
+                    admitted = (bound and job['status'] == 'Starting' and not job.get('termination_requested') and
                                 not job['cancel_requested'] and dispatch_authority(store, control) and
                                 pending_ids == pending_now and decision['permitted'] and not final_blocker)
                     if not admitted:
@@ -431,7 +467,7 @@ def worker(store, job_id, claim):
                         leader.wait(timeout=5)
                         if group_exists(leader.pid):
                             raise JobsError('Unadmitted payload helper has not exited')
-                        if job['claim'] != claim or job['status'] not in {'Starting', 'Cancelling'}:
+                        if not bound or job['status'] not in {'Starting', 'Cancelling'}:
                             # Reconciliation/another identity remains authoritative;
                             # refusal must not erase Unknown or a changed claim.
                             return
@@ -456,15 +492,16 @@ def worker(store, job_id, claim):
                         job.update(group=group, started_at=time.time(), reason="", status="Run")
                         store.save(con, job)
                         store.event(con, job["id"], "Execution started; group ownership persisted")
+                        leader.stdin.write(b"GO\n")
+                        leader.stdin.flush()
                         break
                 from .suspension import Coordinator
                 coordinator = Coordinator(store, job, group)
                 coordinator.authority = authority
                 # Preparing the channel may take time. Recheck admission and both
                 # owners after preparation and before committing the GO decision.
-            leader.stdin.write(b"GO\n")
-            leader.stdin.flush()
             cancel_at = None
+            delivered = set()
             code = None
             session = job.get('env', {}).get('CMW_JOBS_OWN_SESSION') == '1'
             def members():
@@ -486,24 +523,30 @@ def worker(store, job_id, claim):
                 elif terminating:
                     # The unreaped direct child pins this PID/group; birth identity
                     # additionally protects signalling from corrupted stale metadata.
-                    if cancel_at is None:
-                        authority.wait()
-                        if session:
-                            signal_session(group, signal.SIGTERM, check_authority=authority.wait, read_domain=authority.read_domain)
+                    if cancel_at is None or (time.monotonic() - cancel_at > CANCEL_GRACE and observed_members):
+                        signum = signal.SIGTERM if cancel_at is None else signal.SIGKILL
+                        def send(pgid, signum):
+                            with _worker_intent(store, job, None):
+                                if (pgid, signum) not in delivered:
+                                    os.killpg(pgid, signum)
+                                    delivered.add((pgid, signum))
+                        try:
+                            authority.wait()
+                            if session:
+                                signal_session(group, signum, check_authority=authority.wait,
+                                               read_domain=authority.read_domain, send_group=send)
+                            else:
+                                send(leader.pid, signum)
+                        except RequestSuperseded:
+                            continue  # Observe the latest intent; retain the pipe.
+                        if signum == signal.SIGTERM:
+                            cancel_at = time.monotonic()
                         else:
-                            os.killpg(leader.pid, signal.SIGTERM)
-                        cancel_at = time.monotonic()
-                    elif time.monotonic() - cancel_at > CANCEL_GRACE and observed_members:
-                        authority.wait()
-                        if session:
-                            signal_session(group, signal.SIGKILL, check_authority=authority.wait, read_domain=authority.read_domain)
-                        else:
-                            os.killpg(leader.pid, signal.SIGKILL)
-                        leader.wait(timeout=5)
-                        _wait_for_group_end(leader.pid, session=session)
-                        finish(store, job_id, claim, "Cancelled" if job['cancel_requested'] else "Fail",
-                               137 if job['cancel_requested'] else 124, "Termination confirmed", termination_signal=signal.SIGKILL)
-                        return
+                            leader.wait(timeout=5)
+                            _wait_for_group_end(leader.pid, session=session)
+                            finish(store, job_id, claim, "Cancelled" if job['cancel_requested'] else "Fail",
+                                   137 if job['cancel_requested'] else 124, "Termination confirmed", termination_signal=signal.SIGKILL)
+                            return
                 if receipt.exists():
                     evidence = json.loads(receipt.read_text())
                     code = int(evidence["exit_code"])
@@ -511,11 +554,15 @@ def worker(store, job_id, claim):
                     drained = (coordinator.ready_to_release() if coordinator
                                else set(authority.read_domain(members)) == {leader.pid})
                     if drained:
-                        job = authority.wait()
+                        authority.wait()
                         if authority.generation != generation:
                             continue  # Drainage evidence predates an observation gap.
-                        leader.stdin.write(b"RELEASE\n")
-                        leader.stdin.flush()
+                        try:
+                            with _worker_intent(store, job, coordinator):
+                                leader.stdin.write(b"RELEASE\n")
+                                leader.stdin.flush()
+                        except RequestSuperseded:
+                            continue  # Re-evaluate termination, receipt and drainage.
                         if leader.wait(timeout=5) != 0 and coordinator:
                             raise JobsError('Protected anchor did not acknowledge normal RELEASE')
                         if coordinator:

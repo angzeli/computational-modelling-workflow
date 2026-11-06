@@ -373,7 +373,8 @@ def _snapshot_owned_session(owner, known):
     return result
 
 
-def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check_authority=None, read_domain=None):
+def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check_authority=None,
+                   read_domain=None, send_group=None):
     """Signal birth-verified groups in an explicitly owned session.
 
     A trusted sole foreground payload may exclude the protected leader group
@@ -381,6 +382,7 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
     topology before launching children; this option grants no new ownership.
     """
     sid = owner['pid']
+    deliver = send_group if send_group is not None else os.killpg
 
     def read(check, observation):
         if read_domain is None:
@@ -481,7 +483,7 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
             # A current birth-verified member witnesses a leaderless group.
             # Numeric PGID alone never authorizes a signal.
             try:
-                os.killpg(pgid, signum)
+                deliver(pgid, signum)
             except ProcessLookupError:
                 continue
             except PermissionError as exc:
