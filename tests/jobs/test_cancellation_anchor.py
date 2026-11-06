@@ -250,7 +250,7 @@ class WorkerCancellationModel:
             self.alive.remove(self.writer)
             self.write_receipt()
 
-    def run(self):
+    def run(self, *, full_admission=False):
         guard = dict(state='NO_MATCH', observations=[], reason='', observed_at=1)
         def scan(*args, **kwargs):
             self.events.append('admission-scan')
@@ -259,10 +259,11 @@ class WorkerCancellationModel:
         with ExitStack() as stack:
             for target, value in (
                 ('cmw.jobs.runtime.subprocess.Popen', self.leader),
-                ('cmw.jobs.runtime.sharing.evaluate', {'permitted': True}),
                 ('cmw.jobs.runtime.dispatch_authority', True),
             ):
                 stack.enter_context(patch(target, return_value=value))
+            if not full_admission:
+                stack.enter_context(patch.object(runtime.sharing, 'evaluate', return_value={'permitted': True}))
             stack.enter_context(patch('cmw.jobs.runtime.activity.DEFAULT_OBSERVER.scan', side_effect=scan))
             stack.enter_context(patch('cmw.jobs.suspension.Coordinator', side_effect=self.make_coordinator))
             stack.enter_context(patch.object(self.store, 'snapshot', side_effect=lambda: {'jobs': [self.current()]}))
@@ -327,9 +328,19 @@ class CancellationAnchorTests(unittest.TestCase):
                     connection.close()
             model.pipe(data)
         model.leader.stdin.write.side_effect = pipe
-        with patch.object(sqlite3, 'connect', side_effect=lambda *a, **kw: connect(*a, **kw, factory=Observed)):
-            self.assertEqual(model.run()['status'], 'Cancelled')
-        self.assertIn('GO', model.events)
+        def study_preflight(job):
+            # The study verifier looks up its registration through an independent
+            # read-only connection during sharing.evaluate's final admission.
+            with model.store.read_transaction() as con:
+                self.assertEqual(model.store.get(con, job['id'])['status'], 'Starting')
+            model.events.append('nested preflight')
+            return ''
+        with patch.object(sqlite3, 'connect', side_effect=lambda *a, **kw: connect(*a, **kw, factory=Observed)), \
+                patch.object(runtime, 'launch_blocker', side_effect=study_preflight), \
+                patch.object(runtime.sharing, 'guard_fresh', return_value=True):
+            job = model.run(full_admission=True)
+        self.assertEqual(job['status'], 'Cancelled', job['reason'])
+        self.assertLess(model.events.index('nested preflight'), model.events.index('GO'))
 
     def test_failed_run_commit_cannot_launch_the_payload(self):
         model = self.ordinary('receipt-first')

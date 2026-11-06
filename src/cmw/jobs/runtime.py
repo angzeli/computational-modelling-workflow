@@ -444,7 +444,7 @@ def worker(store, job_id, claim):
                 authority.wait(before_admission=True)
                 if authority.generation != generation:
                     continue
-                with store.transaction(exclusive=True) as con:
+                with store.transaction() as con:
                     record_guard(store, con, guard)
                     job = store.get(con, job_id)
                     if job.get('ownership_holds'):
@@ -493,7 +493,12 @@ def worker(store, job_id, claim):
                         job.update(group=group, started_at=time.time(), reason="", status="Run")
                         store.save(con, job)
                         store.event(con, job["id"], "Execution started; group ownership persisted")
-                        con.commit()  # Durable Run before GO; the exclusive lock stays held.
+                        # Study/successor preflight above may read this queue through
+                        # a second connection. Reserve the writer throughout admission,
+                        # then retain the COMMIT's exclusive lock through GO.
+                        if con.execute('PRAGMA locking_mode=EXCLUSIVE').fetchone()[0] != 'exclusive':
+                            raise JobsError('Cannot retain queue authority through payload GO')
+                        con.commit()
                         leader.stdin.write(b"GO\n")
                         leader.stdin.flush()
                         break
