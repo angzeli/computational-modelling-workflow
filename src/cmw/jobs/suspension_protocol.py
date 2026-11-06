@@ -360,7 +360,7 @@ class RunnerControl:
             # here authorize no signal and denial cannot release finalization.
             if any(group_exists(pgid) for pgid in self._drain_groups):
                 return False
-            self._check_authority(check_storage=False)
+            self._check_authority(check_storage=not self.cancel_requested)
             # A cancel or invalidate published during drainage needs its own
             # poll/ack before a completed disposition can leave this runner.
             latest = self._read('command.json', optional=True)
@@ -501,11 +501,12 @@ class RunnerControl:
 
     def request_termination(self, reason, exit_code=124):
         self._check_authority(check_storage=False)
-        self._state = 'cancel'
-        self.cancel_requested = True
         self._write('deadline_expired.json', {**self.binding, 'runner': self.runner,
                     'reason': str(reason), 'exit_code': int(exit_code), 'clock': self.clock,
-                    'recorded_clock': now_clock(), 'intervals': self.intervals})
+                    'recorded_clock': now_clock(), 'intervals': self.intervals},
+                    before_publish=lambda: self._check_authority(check_storage=False))
+        self._state = 'cancel'
+        self.cancel_requested = True
 
 
 def _positive(value):

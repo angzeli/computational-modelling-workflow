@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from cmw.jobs.ownership import OwnershipStatus, identity
+from cmw.jobs.ownership import OwnershipStatus, OwnershipUnavailable, identity
 from cmw.jobs.suspension_protocol import (BINDING_FIELDS, RunnerControl, SuspensionProtocolError,
                                           clock_descriptor, now_clock)
 
@@ -258,6 +258,19 @@ class RunnerProtocolTests(unittest.TestCase):
         self.assertEqual(control.poll(), 'cancel')
         self.assertEqual(json.loads((self.root/'ack.json').read_text())['status'], 'cancel_prepared')
 
+
+    def test_failed_final_authority_read_does_not_commit_deadline_cancellation(self):
+        control = self.make()
+        with patch.object(control, '_check_authority',
+                          side_effect=[None, OwnershipUnavailable('anchor', 'denied')]):
+            with self.assertRaises(OwnershipUnavailable):
+                control.request_termination('test deadline')
+        self.assertFalse((self.root/'deadline_expired.json').exists())
+        self.assertFalse(control.cancel_requested)
+        self.assertEqual(control._state, 'run')
+        control.request_termination('test deadline')
+        self.assertTrue(control.cancel_requested)
+        self.assertTrue((self.root/'deadline_expired.json').is_file())
 
     def test_ack_write_failure_retries_without_double_counting(self):
         control = self.make()

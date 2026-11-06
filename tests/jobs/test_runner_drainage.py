@@ -31,6 +31,7 @@ class RunnerDrainageTests(unittest.TestCase):
         self.control.clock = {}
         self.control._registered = False
         self.control._state = 'run'
+        self.control.cancel_requested = False
         self.control._last_command = None
         self.control._last_ack_clock = None
         self.control.intervals = []
@@ -133,6 +134,18 @@ class RunnerDrainageTests(unittest.TestCase):
                           side_effect=[None, SuspensionProtocolError('Worker authority lost')]):
             self.assertFalse(self.control.domain_drained())
         self.assertIn('authority lost', self.control.last_error)
+
+    def test_missing_storage_holds_ordinary_completion_but_allows_cancelled_drainage(self):
+        self.state = 'absent'
+        self.members.remove(300)
+        def check(*, check_storage):
+            if check_storage:
+                raise PermissionError('storage unreadable')
+        with patch.object(self.control, '_check_authority', side_effect=check):
+            self.assertFalse(self.control.domain_drained())
+            self.assertIn('storage unreadable', self.control.last_error)
+            self.control.cancel_requested = True
+            self.assertTrue(self.control.domain_drained())
 
     def test_final_registration_check_cannot_rebind_reused_or_vanished_root(self):
         from cmw.jobs.process_identity import ConfirmedProcessAbsence
