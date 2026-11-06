@@ -357,6 +357,31 @@ class CancellationCoordinatorTests(unittest.TestCase):
         self.assert_retained()
 
 
+    def test_receipt_winning_ack_wait_cannot_authorize_later_fallback(self):
+        self.mpi = True
+        receipt = self.coordinator.directory.parent/'payload-exit.json'
+        receipt.write_text('{"exit_code":0,"recorded_at":1}')
+        with patch.object(self.coordinator, 'ready_to_release', return_value=True):
+            self.step()
+        self.coordinator.ack.assert_not_called()
+        self.assertFalse(self.coordinator.cancellation_prepared)
+        self.assertIsNone(self.coordinator.cancel_intent)
+        self.assertEqual(self.sent, [])
+
+        # A subsequent read no longer proves drainage. Require a real ACK
+        # before even the first TERM, regardless of the elapsed grace.
+        self.table.clock = 5.0
+        def ack(*args):
+            self.assertEqual(self.sent, [])
+            return {'status': 'cancel_prepared'}
+        self.coordinator.ack.side_effect = ack
+        with patch.object(self.coordinator, 'ready_to_release', return_value=False):
+            self.step()
+        self.coordinator.ack.assert_called_once()
+        self.assertTrue(self.coordinator.cancellation_prepared)
+        self.assertEqual(self.sent, [(11, signal.SIGTERM)])
+        self.assert_retained()
+
     def test_receipt_filename_cannot_release_without_verified_enrolled_domain(self):
         receipt = self.coordinator.directory.parent/'payload-exit.json'
         receipt.write_text('{"exit_code":143,"recorded_at":1}')

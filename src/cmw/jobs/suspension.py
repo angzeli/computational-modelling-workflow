@@ -835,7 +835,6 @@ class Coordinator:
                 state.update(desired='Terminated', inhibited=True)
                 self.store.save(con, latest)
         job = latest
-        self.cancel_intent = job
         self.command(job, 'cancel')
         limit = self._transition_time()+2
         while self._transition_time() < limit:
@@ -847,6 +846,7 @@ class Coordinator:
                 self.update(job, intervals=acknowledged.get('intervals', []),
                             suspended_seconds=acknowledged.get('suspended_seconds'),
                             unsuspended_elapsed=acknowledged.get('unsuspended_elapsed'))
+                self.cancel_intent = job
                 return True
             time.sleep(0.05)
         raise JobsError('Runner termination preparation unacknowledged; refusing ambiguous continuation')
@@ -993,10 +993,10 @@ class Coordinator:
                 raise JobsError('No verified computational domain precedes root exit')
             prepared = self.prepare_cancel(job)
             self.current()
-            self.cancellation_prepared = True
-            self.cancellation_started = self._transition_time()
             if not prepared:
                 return
+            self.cancellation_prepared = True
+            self.cancellation_started = self._transition_time()
             # MPI controls receive TERM once and own initial rank shutdown.
             # A stopped serial producer requires termination-only CONT after TERM.
             root = self.registration['root']
