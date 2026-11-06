@@ -11,10 +11,12 @@ own control flow and uses CMW's implementation of process identity.
 
 Historical runners call the Boolean `owner_alive` interface. CMW accepts a
 verified observation immediately and refuses a confirmed loss immediately. On
-unreadable evidence it repeats the complete read once immediately, matching the
-old psutil construction and explicit birth check, and once more after 10 ms.
-It starts no retry after a 100 ms monotonic deadline. A kernel call already in
-progress can finish later. The adapter only reads evidence. A final false
+unreadable evidence it tries one immediate complete reread. Old psutil
+could recover on the explicit birth read after a denied construction read.
+Omitting sleeps also limits how far exception cleanup can advance into a
+recovering observation window. No retry starts after a 100 ms monotonic
+deadline. A kernel call already in progress can finish later. The adapter
+only reads evidence. A final false
 result can mean either confirmed loss or exhausted retries. Callers that need
 to distinguish these outcomes use `observe_owner` and own their retry policy.
 

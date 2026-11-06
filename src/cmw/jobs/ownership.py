@@ -171,13 +171,9 @@ def owner_alive(owner):
     result = observe_owner(owner)
     # psutil's old Process constructor tolerated one denied read before CMW's
     # explicit birth check. Repeat the full observation, never part of a record.
-    for delay in (0.0, 0.01):
-        if result.status is not OwnershipStatus.UNVERIFIABLE or time.monotonic() + delay >= deadline:
-            break
-        if delay:
-            time.sleep(delay)
-            if time.monotonic() >= deadline:
-                break
+    # Don't sleep: that could make exception cleanup observe recovery after the
+    # original operation already gave up, while its payload still drains.
+    if result.status is OwnershipStatus.UNVERIFIABLE and time.monotonic() < deadline:
         result = observe_owner(owner)
     return result.status is OwnershipStatus.VERIFIED
 

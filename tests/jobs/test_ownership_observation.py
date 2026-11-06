@@ -82,13 +82,12 @@ class OwnershipObservationTests(unittest.TestCase):
         self.assertFalse(ownership.owner_alive(V2))
 
     def test_boolean_retries_only_unverifiable_reads(self):
-        for probes, expected, delays in [
-            ([(111, False)], True, []),
-            ([(112, False)], False, []),
-            ([PermissionError(), (111, False)], True, []),
-            ([PermissionError(), (112, False)], False, []),
-            ([PermissionError(), PermissionError(), (111, False)], True, [0.01]),
-            ([PermissionError()] * 3, False, [0.01]),
+        for probes, expected in [
+            ([(111, False)], True),
+            ([(112, False)], False),
+            ([PermissionError(), (111, False)], True),
+            ([PermissionError(), (112, False)], False),
+            ([PermissionError()] * 2, False),
         ]:
             with self.subTest(probes=probes), patch.object(ownership, 'time') as clock:
                 clock.monotonic.return_value = 1.
@@ -96,16 +95,14 @@ class OwnershipObservationTests(unittest.TestCase):
                 self.process.side_effect = probes
                 self.assertIs(ownership.owner_alive(V2), expected)
                 self.assertEqual(self.process.call_count, len(probes))
-                self.assertEqual([call.args[0] for call in clock.sleep.call_args_list], delays)
+                clock.sleep.assert_not_called()
 
     def test_boolean_starts_no_read_after_its_retry_deadline(self):
-        for times, expected_reads in [([0., .2], 1), ([0., 0., 0., .2], 2)]:
-            with self.subTest(times=times), patch.object(ownership, 'time') as clock:
-                clock.monotonic.side_effect = times
-                self.process.reset_mock()
-                self.process.side_effect = PermissionError()
-                self.assertIs(ownership.owner_alive(V2), False)
-                self.assertEqual(self.process.call_count, expected_reads)
+        with patch.object(ownership, 'time') as clock:
+            clock.monotonic.side_effect = [0., .2]
+            self.process.side_effect = PermissionError()
+            self.assertIs(ownership.owner_alive(V2), False)
+            self.process.assert_called_once_with(V2['pid'])
 
     def test_tri_state_still_returns_the_first_denial(self):
         self.process.side_effect = [PermissionError(), (111, False)]
