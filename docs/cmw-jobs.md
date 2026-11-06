@@ -170,6 +170,14 @@ reason field treats ordinary letters, including U/C/P/X/Q, literally. Enter in
 the reason moves focus to the confirmation button; it does not submit. Escape
 closes the view; Ctrl-C detaches. Notes retain their existing literal text keys.
 
+If a target or computational-root identity is temporarily unreadable, the
+worker keeps its control pipe and retries the observation. A recovered read
+preserves confirmed suspension intervals. Immediately before delivering a
+signal, the worker checks the attempt, request revision, status and termination
+intent again. A cancellation that supersedes Continue takes its own preparation
+path; the superseded Continue sends no signal. A confirmed replacement of the
+computational root invalidates suspension accounting.
+
 During Suspending/Resuming/unverified transitions the execution button is
 disabled. X still opens the separate existing cancellation confirmation after
 closing any modal. Cancellation means termination; it is never a hidden

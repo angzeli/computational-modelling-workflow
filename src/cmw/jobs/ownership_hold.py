@@ -71,6 +71,12 @@ class WorkerAuthority:
         self.anchor = anchor
         self.child = child
         self.generation = 0
+        self.hold_seconds = 0.0
+
+    def _backoff(self, delay):
+        started = time.monotonic()
+        time.sleep(delay)
+        self.hold_seconds += time.monotonic() - started
 
     def read_domain(self, observation):
         """Retry only a read. Never replay a coordinator command or signal."""
@@ -87,7 +93,7 @@ class WorkerAuthority:
                     unavailable(self.store, con, job, 'domain', check, time.monotonic())
                 held = True
                 self.generation += 1
-                time.sleep(delay)
+                self._backoff(delay)
                 delay = min(delay*2, MAX_RETRY)
             else:
                 if held:
@@ -139,5 +145,5 @@ class WorkerAuthority:
             # No queue transaction is held while waiting. Never signal, write
             # GO/RELEASE, reap the anchor or close stdin from this retry loop.
             self.generation += 1
-            time.sleep(delay)
+            self._backoff(delay)
             delay = min(delay*2, MAX_RETRY)

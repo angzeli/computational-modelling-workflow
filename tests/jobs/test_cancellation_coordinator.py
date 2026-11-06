@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 import psutil
 
 from cmw.jobs import ownership, suspension
+from cmw.jobs.ownership_hold import WorkerAuthority
 from cmw.jobs.store import JobsError, Store
 from tests.jobs.test_cancellation_ownership import ProcessTable
 
@@ -89,6 +90,28 @@ class CancellationCoordinatorTests(unittest.TestCase):
         self.assertTrue(self.table.rows[10]['present'])
         self.assertTrue(self.table.rows[90]['present'])
         self.assertFalse(any(signum for _, signum in self.table.signals()))
+
+    def test_raw_identity_read_error_during_cancel_holds_before_any_signal(self):
+        self.mpi = True
+        job = self.current()
+        authority = WorkerAuthority(self.store, job, self.table.anchor, Mock())
+        authority.wait = Mock(return_value=job)
+        self.coordinator.authority = authority
+        original = suspension.identity_for
+        failures = []
+        def read(member, pid=None):
+            if pid is None and not failures:
+                failures.append(member)
+                raise OSError(errno.EIO, 'Unreadable raw start token')
+            return original(member, pid)
+        def held(delay):
+            self.assertEqual(self.current()['ownership_holds']['domain']['check'], 'termination_target')
+            self.assertEqual(self.sent, [])
+        with patch.object(suspension, 'identity_for', side_effect=read), patch.object(authority, '_backoff', held):
+            self.step()
+        self.assertEqual(failures, [self.table.record(11)])
+        self.assertFalse(self.current().get('ownership_holds'))
+        self.assertEqual(self.sent, [(11, signal.SIGTERM)])
 
     def test_stopped_direct_root_gets_term_then_termination_cont_once(self):
         self.table.rows[11]['status'] = psutil.STATUS_STOPPED

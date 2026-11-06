@@ -4,12 +4,15 @@ from copy import deepcopy
 from contextlib import ExitStack
 import json
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
 from cmw.jobs import suspension as control
 from cmw.jobs.store import Store, JobsError
+from cmw.jobs.ownership_hold import WorkerAuthority
 from cmw.jobs.suspension_protocol import RunnerControl
 
 
@@ -19,6 +22,9 @@ OTHER = {**MEMBER, 'pid': 100002}
 WORKER = {**MEMBER, 'pid': 100003}
 ANCHOR = {**MEMBER, 'pid': 100004}
 RUNNER = {**MEMBER, 'pid': 100005}
+
+
+REAL_SEND = control._send
 
 
 class StateTests(unittest.TestCase):
@@ -46,6 +52,9 @@ class StateTests(unittest.TestCase):
         for target, replacement in (
                 ('cmw.jobs.suspension._alive_authority', lambda *args: True),
                 ('cmw.jobs.suspension.owner_alive', lambda *args: True),
+                ('cmw.jobs.suspension.observe_owner', lambda record: SimpleNamespace(
+                    status=(control.OwnershipStatus.VERIFIED if control.owner_alive(record)
+                            else control.OwnershipStatus.GONE), deciding_check='pid')),
                 ('cmw.jobs.suspension_protocol.clock_descriptor', lambda: CLOCK),
                 ('cmw.jobs.suspension_protocol.now_clock', lambda: 100.0)):
             mocked = patch(target, replacement)
@@ -88,6 +97,126 @@ class StateTests(unittest.TestCase):
         coordinator.domain_pending_since = None
         coordinator._validate = Mock(return_value=control.Domain((MEMBER,), (ANCHOR, RUNNER), ()))
         return coordinator
+
+    def test_cancel_during_target_read_supersedes_continue_before_signal(self):
+        job = self.phase('Resuming', revision=3, request={'id': 'resume', 'action': 'continue'})
+        coordinator = self.coordinator()
+        coordinator.authority = WorkerAuthority(self.store, job, ANCHOR, Mock())
+        coordinator.authority.wait = Mock(side_effect=coordinator.current)
+        entered, released = Event(), Event()
+        def observe(member, anchor):
+            self.assertEqual((member, anchor), (MEMBER, ANCHOR))
+            entered.set()
+            self.assertTrue(released.wait(5), 'cancel did not complete during target observation')
+
+        with patch.object(control, '_send', REAL_SEND), patch.object(control, '_check_identity', observe), \
+                patch.object(control.os, 'kill') as kill, ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(coordinator._deliver, job, MEMBER, control.signal.SIGCONT)
+            try:
+                self.assertTrue(entered.wait(5), 'target read did not start')
+                self.store.change(job['id'], 'cancel', confirm=True)
+            finally:
+                released.set()
+            with self.assertRaises(control.RequestSuperseded):
+                future.result(timeout=5)
+            kill.assert_not_called()
+            cancelling = self.current()
+            self.assertEqual(cancelling['status'], 'Cancelling')
+            self.assertEqual(cancelling['suspension']['revision'], 3)
+            coordinator.ack = Mock(return_value={'status': 'cancel_prepared'})
+            self.assertTrue(coordinator.prepare_cancel(cancelling))
+            prepared = self.current()
+            self.assertEqual(prepared['suspension']['request']['action'], 'cancel')
+            self.assertEqual(prepared['suspension']['revision'], 4)
+            command = coordinator.channel.write.call_args.args[1]
+            self.assertEqual((command['operation'], command['request_id']),
+                             ('cancel', prepared['suspension']['request']['id']))
+            kill.assert_not_called()
+
+    def test_runner_deadline_during_target_check_prevents_continue(self):
+        job = self.phase('Resuming', revision=3, request={'id': 'resume', 'action': 'continue'})
+        coordinator = self.coordinator()
+        coordinator.directory.mkdir(mode=0o700, parents=True)
+        coordinator.context['directory_identity'] = control._file_identity(coordinator.directory)
+        coordinator.channel = control.Channel(coordinator.directory, coordinator.context)
+        coordinator.authority = WorkerAuthority(self.store, job, ANCHOR, Mock())
+        coordinator.authority.wait = Mock(side_effect=coordinator.current)
+        def expire(*args):
+            coordinator.channel.write('deadline_expired.json', {**coordinator.context,
+                'runner': RUNNER, 'reason': 'execution budget expired'})
+        with patch.object(control, '_send', REAL_SEND), patch.object(control, '_check_identity', expire), \
+                patch.object(control.os, 'kill') as kill:
+            with self.assertRaises(control.RequestSuperseded):
+                coordinator._deliver(job, MEMBER, control.signal.SIGCONT)
+            coordinator.tick(job)
+            kill.assert_not_called()
+        current = self.current()
+        self.assertEqual(current['status'], 'Cancelling')
+        self.assertEqual(current['termination_requested']['reason'], 'execution budget expired')
+
+    def test_cancel_during_command_file_write_prevents_publication(self):
+        job = self.phase('Resuming', revision=3, request={'id': 'resume', 'action': 'continue'})
+        coordinator = self.coordinator()
+        coordinator.directory.mkdir(mode=0o700, parents=True)
+        coordinator.context['directory_identity'] = control._file_identity(coordinator.directory)
+        coordinator.channel = control.Channel(coordinator.directory, coordinator.context)
+        with patch.object(control.os, 'fsync', side_effect=lambda fd: self.store.change(job['id'], 'cancel', confirm=True)):
+            with self.assertRaises(control.RequestSuperseded):
+                coordinator.command(job, 'run')
+        self.assertEqual(list(coordinator.directory.iterdir()), [])
+        self.assertEqual(self.current()['status'], 'Cancelling')
+
+    def test_denied_root_probe_recovers_without_losing_controls_or_timing(self):
+        from cmw.jobs import ownership_hold
+        verified = SimpleNamespace(status=control.OwnershipStatus.VERIFIED, deciding_check='identity')
+        denied = SimpleNamespace(status=control.OwnershipStatus.UNVERIFIABLE, deciding_check='start_token')
+        for phase in ('Run', 'Resuming'):
+            with self.subTest(phase=phase):
+                intervals = [{'start': 80, 'end': 85}]
+                job = self.phase(phase, revision=2, request={'id': 'continue', 'action': 'continue'},
+                                 intervals=intervals, suspended_seconds=5, accounting_uncertain=False,
+                                 evidence={'checked_clock': 100, 'computational': [MEMBER]})
+                coordinator = self.coordinator()
+                coordinator.authority = WorkerAuthority(self.store, job, ANCHOR, Mock())
+                coordinator.pending = dict(id='continue', stage='verify_continue', started=100,
+                                           domain=control.Domain((MEMBER,), (ANCHOR, RUNNER), ()))
+                during_hold = []
+                def inspect_hold(delay):
+                    snapshot = self.current()
+                    during_hold.append(snapshot['ownership_holds']['domain']['check'])
+                    self.assertEqual(snapshot['suspension']['phase'], phase)
+                    self.assertFalse(snapshot['suspension']['accounting_uncertain'])
+                with patch.object(control, 'observe_owner', side_effect=[denied, verified, verified]) as observed, \
+                        patch.object(ownership_hold, 'observe_owner', return_value=verified), \
+                        patch.object(control, '_stopped', return_value=False), \
+                        patch.object(control.time, 'sleep', side_effect=inspect_hold), \
+                        patch.object(control.time, 'monotonic', return_value=100):
+                    coordinator.tick(job)
+                self.assertEqual(observed.call_count, 3)
+                self.assertEqual(during_hold, ['start_token'])
+                current = self.current()
+                self.assertFalse(current.get('ownership_holds'))
+                state = current['suspension']
+                self.assertEqual((state['phase'], state['revision']), (phase, 2))
+                self.assertEqual((state['intervals'], state['suspended_seconds']), (intervals, 5))
+                self.assertFalse(state['accounting_uncertain'])
+                if phase == 'Run':
+                    self.assertTrue(control.readiness(self.store, job['id'], 'suspend')['ready'])
+                else:
+                    self.assertEqual(coordinator.channel.write.call_args.args[1]['operation'], 'run')
+                self.send.assert_not_called()
+
+    def test_confirmed_replaced_root_invalidates_suspension(self):
+        job = self.phase('Run', accounting_uncertain=False)
+        coordinator = self.coordinator()
+        with patch.object(control, 'observe_owner', return_value=SimpleNamespace(
+                status=control.OwnershipStatus.GONE, deciding_check='start_token')):
+            coordinator.tick(job)
+        state = self.current()['suspension']
+        self.assertEqual(state['phase'], 'Unverified')
+        self.assertTrue(state['accounting_uncertain'])
+        self.assertIn('root identity changed', state['reason'])
+        self.send.assert_not_called()
 
     def test_preview_never_creates_migrates_or_signals(self):
         missing = Store(self.root/'missing')
@@ -385,7 +514,7 @@ class StateTests(unittest.TestCase):
                 self.assertEqual(self.store.snapshot(now=1000)['jobs'][0]['suspension']['unsuspended_elapsed'], 15)
         self.send.assert_not_called()
 
-    def test_stop_state_uncertainty_and_transition_exit_still_invalidate(self):
+    def test_stop_state_read_denial_and_confirmed_transition_loss_remain_distinct(self):
         cases = (('Run', 'reused'), ('Run', 'denied'), ('Run', 'unreadable-zombie'),
                  ('Run', 'escaped-zombie'), ('Run', 'topology-denied'), ('Run', 'status-denied'),
                  ('Run', 'live-topology-gone'),
@@ -425,6 +554,11 @@ class StateTests(unittest.TestCase):
                         process.return_value.status.side_effect = control.psutil.AccessDenied(MEMBER['pid'])
                     coordinator.tick(job)
                 value = self.current()['suspension']
+                if observation == 'status-denied':
+                    self.assertEqual(value['phase'], phase)
+                    self.assertFalse(value['accounting_uncertain'])
+                    coordinator.channel.write.assert_not_called()
+                    continue
                 self.assertEqual(value['phase'], 'Unverified')
                 self.assertTrue(value['accounting_uncertain'])
                 self.assertIsNone(value['unsuspended_elapsed'])
@@ -495,7 +629,7 @@ class StateTests(unittest.TestCase):
                 runner._last_ack_clock, runner._last_ack_status = None, None
                 runner.intervals = deepcopy(job['suspension']['intervals'])
                 runner._ack = Mock()
-                coordinator.channel.write.side_effect = lambda name, command: runner._apply(command)
+                coordinator.channel.write.side_effect = lambda name, command, **_: runner._apply(command)
                 coordinator.ack = Mock(side_effect=lambda *args: {'status': 'cancel_prepared',
                                        'intervals': deepcopy(runner.intervals),
                                        'suspended_seconds': runner.suspended_seconds})
@@ -656,7 +790,7 @@ class StateTests(unittest.TestCase):
         runner._last_ack_clock, runner._last_ack_status = None, None
         runner.intervals = []
         runner._ack = Mock()
-        coordinator.channel.write.side_effect = lambda name, command: runner._apply(command)
+        coordinator.channel.write.side_effect = lambda name, command, **_: runner._apply(command)
         coordinator.ack = Mock(return_value={'status': 'cancel_prepared'})
         job = self.change(status='Cancelling', cancel_requested=True)
         self.assertTrue(coordinator.prepare_cancel(job))
@@ -714,7 +848,8 @@ class DomainTests(unittest.TestCase):
         self.stack.enter_context(patch('cmw.jobs.ownership._legacy_identity', side_effect=lambda pid: self.records[pid]))
         self.stack.enter_context(patch.object(control, '_descends', side_effect=lambda pid, ancestor: pid == ancestor or ancestor in self.parents.get(pid, [])))
         self.process = self.stack.enter_context(patch.object(control.psutil, 'Process'))
-        self.process.return_value.children.side_effect = lambda **kwargs: self.children
+        self.descendants = self.stack.enter_context(patch.object(
+            control, 'descendant_pids', side_effect=lambda _: [child.pid for child in self.children]))
         self.signal = self.stack.enter_context(patch.object(control, '_send', side_effect=AssertionError('Domain binding signalled')))
 
     def child(self, record):
@@ -937,10 +1072,10 @@ class DomainTests(unittest.TestCase):
         self.signal.assert_not_called()
 
     def test_unobservable_descendant_and_unsupported_topology_refuse(self):
-        self.process.return_value.children.side_effect = control.psutil.AccessDenied(MEMBER['pid'])
-        with self.assertRaises(control.psutil.AccessDenied):
+        self.descendants.side_effect = control.psutil.AccessDenied(MEMBER['pid'])
+        with self.assertRaisesRegex(control.OwnershipUnavailable, 'subtree'):
             control.bind_domain(self.registration, ANCHOR)
-        self.process.return_value.children.side_effect = lambda **kwargs: []
+        self.descendants.side_effect = lambda _: []
         for changed in ({**self.registration, 'strategy': 'unknown'},
                         {**self.registration, 'runtime': {'local_only': False}}):
             with self.subTest(registration=changed), self.assertRaises(JobsError):
