@@ -54,10 +54,17 @@ def boot_session_id():
         raise OSError(errno.EIO, 'Unreadable kernel boot UUID') from exc
 
 
+class ConfirmedProcessAbsence(ProcessLookupError):
+    """Identity lookup and an independent kernel PID query both found no process."""
+
+
 def _confirm_absence(pid):
     # An empty sysctl result or a missing /proc entry can also mean that the
     # observer cannot see the process. Only a kernel ESRCH establishes absence.
-    os.getpgid(pid)
+    try:
+        os.getpgid(pid)
+    except ProcessLookupError as exc:
+        raise ConfirmedProcessAbsence(errno.ESRCH, 'PID is absent') from exc
     raise PermissionError(errno.EACCES, 'Process exists but kernel identity is unavailable')
 
 
@@ -66,6 +73,8 @@ def _darwin_process(pid):
     data = ctypes.create_string_buffer(4096)
     size = ctypes.c_size_t(len(data))
     if _darwin_sysctls().sysctl(mib, len(mib), data, ctypes.byref(size), None, 0):
+        if ctypes.get_errno() == errno.ESRCH:
+            _confirm_absence(pid)
         _raise_errno()
     if size.value == 0:
         _confirm_absence(pid)
@@ -88,7 +97,7 @@ def _linux_process(pid):
     fields = tail.split()
     if not separator or not prefix.startswith(f'{pid} ('.encode()) or len(fields) < 20:
         raise OSError(errno.EIO, 'Incomplete kernel process record')
-    if len(fields[0]) != 1 or not fields[19].isdigit():
+    if fields[0] not in (b'R', b'S', b'D', b'Z', b'T', b't', b'X', b'x', b'K', b'W', b'P', b'I') or not fields[19].isdigit():
         raise OSError(errno.EIO, 'Invalid kernel process state or start token')
     return int(fields[19]), fields[0] in (b'Z', b'X', b'x')
 

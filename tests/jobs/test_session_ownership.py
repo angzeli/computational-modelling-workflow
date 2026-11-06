@@ -191,7 +191,7 @@ class SendTimeDisappearanceTests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(patch('cmw.jobs.ownership.owner_alive',
                                       side_effect=lambda item: not (item['pid'] == 10 and lost[0])))
-            stack.enter_context(patch('cmw.jobs.ownership.identity', side_effect=identify))
+            stack.enter_context(patch('cmw.jobs.ownership._legacy_identity', side_effect=identify))
             factory = stack.enter_context(patch('cmw.jobs.ownership.psutil.Process', return_value=process))
             membership = stack.enter_context(patch('cmw.jobs.ownership.group_members', return_value=[12, 13]))
             stack.enter_context(patch('os.getsid', return_value=10))

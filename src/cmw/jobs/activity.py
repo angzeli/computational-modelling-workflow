@@ -173,7 +173,13 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
             except psutil.AccessDenied:
                 cwd = None
                 missing.append('Working directory inaccessible (optional)')
-            candidate = {'identity': owner, 'pid': pid, 'engine': engine, 'exe': exe or None,
+            # Wall-clock birth is only used to display process age. It is never
+            # compared with an ownership token or used to authorize admission.
+            try:
+                display_birth = q.create_time() if owner.get('version') == 2 else owner.get('birth')
+            except (psutil.Error, OSError):
+                display_birth = None
+            candidate = {'display_birth': display_birth, 'identity': owner, 'pid': pid, 'engine': engine, 'exe': exe or None,
                          'status': status, 'ppid': ppid, 'pgid': pgid, 'sid': sid, 'cwd': cwd,
                          'evidence': [evidence], 'missing': missing, 'ownership': 'External / unattributed'}
             if not exe:
@@ -265,10 +271,10 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
         grouped.setdefault(key, []).append(c)
     observations = []
     for key, members in grouped.items():
-        first = min(members, key=lambda c: (c['identity']['birth'], c['pid']))
+        first = min(members, key=lambda c: (c['identity'].get('start_token', c['identity'].get('birth')), c['pid']))
         observations.append({**first, 'id': 'E'+hashlib.sha256(key.encode()).hexdigest()[:12],
                              'nproc': len(members), 'members': members,
-                             'age_seconds': max(0, now-first['identity']['birth']),
+                             'age_seconds': max(0, now-first['display_birth']) if first['display_birth'] is not None else None,
                              'observed_at': now, 'cpus': None, 'memory_gib': None})
     coverage['limitations'] = limitations[:20]
     coverage['warnings'] = uncertain[:20] + limitations[:20]

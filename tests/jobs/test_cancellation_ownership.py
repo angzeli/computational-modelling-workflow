@@ -292,23 +292,23 @@ class SessionSnapshotRaceTests(unittest.TestCase):
         self.assertEqual(result['absent'], [])
 
     def test_raw_esrch_identity_query_is_pending_without_independent_no_such_process(self):
-        original_identity = ownership.identity
+        original_identity = ownership._legacy_identity
         def identify(pid):
             if pid == 20:
                 raise ProcessLookupError(errno.ESRCH, 'raw identity race')
             return original_identity(pid)
-        with patch.object(ownership, 'identity', side_effect=identify):
+        with patch.object(ownership, '_legacy_identity', side_effect=identify):
             result = self.snapshot()
         self.assertEqual([row['identity'] for row in result['pending']], [self.originals[1]])
         self.assertEqual(result['absent'], [])
 
     def test_unreadable_original_zombie_is_pending_not_no_such_process(self):
-        original_identity = ownership.identity
+        original_identity = ownership._legacy_identity
         def identify(pid):
             if pid == 20:
                 raise psutil.ZombieProcess(pid)
             return original_identity(pid)
-        with patch.object(ownership, 'identity', side_effect=identify):
+        with patch.object(ownership, '_legacy_identity', side_effect=identify):
             result = self.snapshot()
         self.assertEqual([row['identity'] for row in result['pending']], [self.originals[1]])
         self.assertEqual(result['absent'], [])
@@ -370,7 +370,7 @@ class SessionSnapshotRaceTests(unittest.TestCase):
         self.assertEqual(result['pending'], [])
 
     def test_identity_change_during_scan_and_conflicting_originals_refuse(self):
-        original_identity = ownership.identity
+        original_identity = ownership._legacy_identity
         reads = [0]
         def identify(pid):
             value = original_identity(pid)
@@ -379,7 +379,7 @@ class SessionSnapshotRaceTests(unittest.TestCase):
                 if reads[0] == 2:
                     value['birth'] = 999.0
             return value
-        with patch.object(ownership, 'identity', side_effect=identify), \
+        with patch.object(ownership, '_legacy_identity', side_effect=identify), \
                 self.assertRaisesRegex(JobsError, 'identity changed'):
             self.snapshot()
         self.originals.append({**self.originals[1], 'birth': 999.0})

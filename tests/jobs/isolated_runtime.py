@@ -150,6 +150,7 @@ def environment():
 def fixture_collect(store, state, deadline):
     from cmw.jobs import activity
     from cmw.jobs.ownership import identity
+    from cmw.jobs.process_identity import ConfirmedProcessAbsence
     import psutil
 
     fixtures = store.root / 'fixture-processes.json'
@@ -159,7 +160,7 @@ def fixture_collect(store, state, deadline):
         try:
             if identity(record['pid']) == record:
                 pids.append(record['pid'])
-        except psutil.NoSuchProcess:
+        except (psutil.NoSuchProcess, ConfirmedProcessAbsence):
             pass
     return activity.collect(store, state, deadline, pids_provider=lambda: pids)
 

@@ -17,7 +17,7 @@ import time
 
 import psutil
 
-from .ownership import identity, observed_group_members
+from .ownership import identity, identity_for, observed_group_members
 from .native_memory import footprint_reader
 from .thermal import ThermalProvider, age_thermal, unavailable_thermal
 from .store import ACTIVE, JobsError
@@ -192,6 +192,10 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
         result.update(observed_at=self.wall_time(), age_seconds=0, reason='; '.join(reasons))
         return result, baseline
 
+    def _same_owner(self, owner):
+        current = identity_for(owner) if self.identity is identity else self.identity(owner['pid'])
+        return current == owner
+
     def _workload(self, members, baseline_out, deadline, *, job=None):
         from .activity import LAUNCHERS, NAMES, native_executable
 
@@ -216,7 +220,7 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
             owner = member['identity']
             try:
                 p = self.process_factory(owner['pid'])
-                if self.identity(owner['pid']) != owner or p.status() == psutil.STATUS_ZOMBIE:
+                if not self._same_owner(owner) or p.status() == psutil.STATUS_ZOMBIE:
                     reasons.append('Member identity changed or became zombie')
                     continue
                 cpu, rss, footprint = None, None, None
@@ -252,7 +256,7 @@ advance its CPU baseline. Access failures leave guard evidence untouched.
                 except (psutil.Error, OSError, AttributeError):
                     ppid = None
                 moment = self.monotonic()
-                if self.identity(owner['pid']) != owner or p.status() == psutil.STATUS_ZOMBIE:
+                if not self._same_owner(owner) or p.status() == psutil.STATUS_ZOMBIE:
                     reasons.append('Member identity changed during usage read')
                     continue
                 if member.get('pgid') is not None and os.getpgid(owner['pid']) != member['pgid']:

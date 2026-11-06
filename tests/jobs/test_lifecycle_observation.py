@@ -76,35 +76,39 @@ class LifecycleProcessTests(unittest.TestCase):
             for key, value in (('host', 'another-host'), ('boot', BOOT-1)):
                 with self.subTest(key=key):
                     result = lifecycle.observe_process({**self.worker, key: value}).to_dict()
-                    self.assertEqual(result['verdict'], 'mismatch')
+                    self.assertEqual(result['verdict'], 'unavailable')
             lookup.assert_not_called()
 
     def test_absent_reused_and_access_denied_are_distinct(self):
-        cases = [(None, 'gone'), ((owner(81001, 300.0), psutil.STATUS_SLEEPING), 'mismatch'),
+        cases = [(None, 'gone'), ((owner(81001, 300.0), psutil.STATUS_SLEEPING), 'unavailable'),
                  (psutil.AccessDenied(81001), 'unavailable'), (PermissionError('fixture'), 'unavailable')]
         for record, expected in cases:
             with self.subTest(expected=expected, record=record), processes({81001: record}):
                 self.assertEqual(lifecycle.observe_process(self.worker).to_dict()['verdict'], expected)
 
     def test_zombie_dead_and_stopped_are_not_running_computation_claims(self):
-        for status, expected in [(psutil.STATUS_ZOMBIE, 'gone'), (psutil.STATUS_DEAD, 'gone'),
+        for status, expected in [(psutil.STATUS_ZOMBIE, 'unavailable'), (psutil.STATUS_DEAD, 'unavailable'),
                                  (psutil.STATUS_STOPPED, 'matched')]:
             with self.subTest(status=status), processes({81001: (self.worker, status)}):
                 result = lifecycle.observe_process(self.worker).to_dict()
                 self.assertEqual(result['verdict'], expected)
-                self.assertIn(status, json.dumps(result).lower())
+                self.assertIn('zombie/dead' if expected == 'unavailable' else status, json.dumps(result).lower())
 
     def test_identity_changing_during_status_read_is_not_matched(self):
-        with processes({81001: (self.worker, psutil.STATUS_SLEEPING)}), \
-             patch.object(ownership, 'identity', side_effect=[self.worker, owner(81001, 300.0)]):
+        probe = Mock(pid=81001)
+        probe.create_time.side_effect = [200.0, 300.0]
+        probe.status.return_value = psutil.STATUS_SLEEPING
+        with processes({}) as lookup:
+            lookup.side_effect = None
+            lookup.return_value = probe
             result = lifecycle.observe_process(self.worker).to_dict()
-        self.assertEqual(result['verdict'], 'mismatch')
+        self.assertEqual(result['verdict'], 'unavailable')
 
     def test_unreadable_zombie_birth_does_not_prove_original_process_is_gone(self):
         with processes({81001: psutil.ZombieProcess(81001)}):
             result = lifecycle.observe_process(self.worker).to_dict()
         self.assertEqual(result['verdict'], 'unavailable')
-        self.assertEqual(result['code'], 'zombie_identity_unverified')
+        self.assertEqual(result['identity_check']['status'], 'UNVERIFIABLE')
 
 
 class LifecycleFixture(unittest.TestCase):
@@ -292,7 +296,7 @@ class LifecycleObservationTests(LifecycleFixture):
     def test_simulated_reboot_does_not_probe_or_adopt_old_pids(self):
         with processes({}) as lookup, patch.object(psutil, 'boot_time', return_value=BOOT+100):
             result = self.observe()
-        self.assertEqual(result['evidence']['worker']['verdict'], 'mismatch')
+        self.assertEqual(result['evidence']['worker']['verdict'], 'unavailable')
         self.assertTrue(result['reconciliation_required'])
         lookup.assert_not_called()
 
