@@ -1,6 +1,7 @@
 """The ORCA shell consumes explicit drained outcomes, never exit-code guesses."""
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from cmw.jobs.suspension_protocol import BINDING_FIELDS, SuspensionProtocolError, controlled_driver
-from cmw.molecular.orca.suspension import verify_completion, write_completion
+from cmw.jobs.ownership import OwnershipStatus
+from cmw.molecular.orca.suspension import main, verify_completion, write_completion
 
 
 class OrcaCompletionTests(unittest.TestCase):
@@ -38,7 +40,11 @@ class OrcaCompletionTests(unittest.TestCase):
         self.environ.start(); self.addCleanup(self.environ.stop)
         clock = patch('cmw.molecular.orca.suspension.clock_descriptor', return_value={'fixture': True})
         clock.start(); self.addCleanup(clock.stop)
-        for name, value in (('owner_alive', True), ('os.getsid', 12341), ('os.getpgid', 12341)):
+        self.observe = patch('cmw.jobs.suspension_protocol.observe_owner')
+        self.owner = self.observe.start()
+        self.owner.return_value.status = OwnershipStatus.VERIFIED
+        self.addCleanup(self.observe.stop)
+        for name, value in (('os.getsid', 12341), ('os.getpgid', 12341)):
             mocked = patch('cmw.molecular.orca.suspension.'+name, return_value=value)
             mocked.start(); self.addCleanup(mocked.stop)
 
@@ -89,8 +95,10 @@ class OrcaCompletionTests(unittest.TestCase):
 
     def test_lost_authority_or_changed_session_refuses_finalization(self):
         write_completion(self.path, self.outcome)
-        with patch('cmw.molecular.orca.suspension.owner_alive', return_value=False):
-            with self.assertRaises(SuspensionProtocolError): self.verify()
+        self.owner.return_value.status = OwnershipStatus.GONE
+        with self.assertRaisesRegex(SuspensionProtocolError, 'authority lost'):
+            self.verify()
+        self.owner.return_value.status = OwnershipStatus.VERIFIED
         with patch('cmw.molecular.orca.suspension.os.getsid', return_value=99999):
             with self.assertRaises(SuspensionProtocolError): self.verify()
 
@@ -108,6 +116,32 @@ class OrcaCompletionTests(unittest.TestCase):
             return result
         with patch.object(suspension, '_read_private_record', side_effect=read):
             with self.assertRaises(SuspensionProtocolError): self.verify()
+
+    def test_denied_gate_returns_retry_then_latest_cancellation_wins(self):
+        write_completion(self.path, self.outcome)
+        argv = ['verify-completion', '--completion-record', str(self.path),
+                '--process-status', '0', '--runner-pid', str(self.runner['pid'])]
+        self.owner.return_value.status = OwnershipStatus.UNVERIFIABLE
+        self.owner.return_value.deciding_check = 'start_token'
+        with patch('sys.stderr') as err:
+            self.assertEqual(main(argv), 75)
+        self.assertIn('temporarily unverifiable', str(err.write.call_args_list))
+        self.owner.return_value.status = OwnershipStatus.VERIFIED
+        def cancel_during_probe(owner):
+            self.record(self.control/'command.json', {**self.context, 'operation': 'cancel',
+                                                      'request_id': 'late', 'revision': 3})
+            return self.owner.return_value
+        self.owner.side_effect = cancel_during_probe
+        self.assertEqual(self.verify(), 'cancelled')
+
+    def test_unreadable_record_is_retryable_but_missing_required_record_refuses(self):
+        argv = ['verify-completion', '--completion-record', str(self.path),
+                '--process-status', '0', '--runner-pid', str(self.runner['pid'])]
+        with patch('sys.stderr'), patch('cmw.molecular.orca.suspension._read_private_record',
+                                       side_effect=OSError(errno.EIO, 'injected failed read')):
+            self.assertEqual(main(argv), 75)
+        with patch('sys.stderr'):
+            self.assertEqual(main(argv), 69)
 
     def test_atomic_publication_does_not_clobber(self):
         write_completion(self.path, self.outcome)

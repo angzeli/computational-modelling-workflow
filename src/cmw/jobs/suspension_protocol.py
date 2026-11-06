@@ -22,7 +22,9 @@ from uuid import uuid4
 
 import psutil
 
-from .ownership import boot_session_id, group_exists, identity, owner_alive, snapshot_owned_session
+from .ownership import (OwnershipStatus, OwnershipUnavailable, boot_session_id, group_exists,
+                        identity, observe_owner, snapshot_owned_session, valid_owner_record)
+from .process_identity import ConfirmedProcessAbsence, ancestor_pids
 
 PROTOCOL = 1
 BINDING_FIELDS = ('protocol', 'backend', 'job_id', 'attempt_id', 'claim', 'worker',
@@ -32,6 +34,32 @@ MAX_RECORD_BYTES = 262144
 
 class SuspensionProtocolError(ValueError):
     """A private runner capability or acknowledgement cannot be trusted."""
+
+
+def require_control_owners(context):
+    """A failed read holds the operation. Only confirmed loss invalidates authority."""
+    for role in ('worker', 'anchor'):
+        owner = context.get(role)
+        if not valid_owner_record(owner):
+            raise SuspensionProtocolError(f'Invalid suspension authority record: {role}')
+        result = observe_owner(owner)
+        if result.status is OwnershipStatus.UNVERIFIABLE:
+            check = f'{role}.{result.deciding_check}'
+            raise OwnershipUnavailable(check, f'Suspension authority temporarily unverifiable: {check}')
+        if result.status is OwnershipStatus.GONE:
+            raise SuspensionProtocolError(f'Suspension authority lost: {role}.{result.deciding_check}')
+
+
+def require_control_session(context):
+    require_control_owners(context)
+    anchor = context['anchor']['pid']
+    try:
+        topology = (os.getsid(0), os.getsid(anchor), os.getpgid(anchor))
+    except OSError as exc:
+        require_control_owners(context)
+        raise OwnershipUnavailable('session', 'Suspension session topology temporarily unverifiable') from exc
+    if topology != (anchor, anchor, anchor):
+        raise SuspensionProtocolError('Process is outside its protected owned session')
 
 
 def now_clock():
@@ -134,7 +162,7 @@ class RunnerControl:
             self.last_error = ''
             self.accounting_uncertain = False
             self._registered = False
-            self._check_authority()
+            self._wait_for_owner_read(self._check_authority)
             self.lock_fd = os.open('runner.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
                                    0o600, dir_fd=self.fd)
             _private_info(os.fstat(self.lock_fd))
@@ -168,7 +196,7 @@ class RunnerControl:
         finally:
             os.close(fd)
 
-    def _write(self, name, value):
+    def _write(self, name, value, *, before_publish=None):
         self._check_directory()
         temporary = f'.{name}.{uuid4().hex}'
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -179,6 +207,8 @@ class RunnerControl:
                 handle.write('\n')
                 handle.flush()
                 os.fsync(handle.fileno())
+            if before_publish is not None:
+                before_publish()
             os.replace(temporary, name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
             os.fsync(self.fd)
         except BaseException:
@@ -203,11 +233,7 @@ class RunnerControl:
             raise SuspensionProtocolError('Suspension context changed')
         if clock_descriptor() != self.clock:
             raise SuspensionProtocolError('Suspension clock/boot changed')
-        if not owner_alive(self.context.get('worker')) or not owner_alive(self.context.get('anchor')):
-            raise SuspensionProtocolError('Suspension worker or ownership anchor is unavailable')
-        anchor = self.context['anchor']['pid']
-        if os.getsid(os.getpid()) != anchor or os.getsid(anchor) != anchor or os.getpgid(anchor) != anchor:
-            raise SuspensionProtocolError('Runner is outside its bound owned session')
+        require_control_session(self.context)
         current = now_clock()
         if current < self._last_clock:
             raise SuspensionProtocolError('Suspension clock moved backwards')
@@ -224,7 +250,7 @@ class RunnerControl:
         """Add runner-created directories before the immutable registration."""
         if self._registered:
             raise SuspensionProtocolError('Storage registration is already sealed')
-        self._check_authority()
+        self._wait_for_owner_read(self._check_authority)
         known = {item['path'] for item in self.storage}
         for path in paths:
             value = _directory_identity(path)
@@ -232,14 +258,40 @@ class RunnerControl:
                 self.storage.append(value)
                 known.add(value['path'])
 
+    def _wait_for_owner_read(self, read):
+        # Never replay an IPC write. Keep any identities already captured while
+        # a later read is temporarily unavailable.
+        delay = .05
+        while True:
+            try:
+                return read()
+            except ConfirmedProcessAbsence as exc:
+                raise SuspensionProtocolError('Registered process is confirmed absent') from exc
+            except (FileNotFoundError, NotADirectoryError):
+                raise
+            except (OwnershipUnavailable, OSError, psutil.AccessDenied) as exc:
+                self.last_error = str(exc)
+            time.sleep(delay)
+            delay = min(1., 2 * delay)
+
     def register(self, root_pid, strategy='direct-tree', protected_pids=()):
         if self._registered or strategy not in {'direct-tree', 'openmpi', 'orca-tree'}:
             raise SuspensionProtocolError('Duplicate or unsupported domain registration')
+        self._wait_for_owner_read(self._check_authority)
+        root = self._wait_for_owner_read(lambda: identity(root_pid))
+        protected = [self._wait_for_owner_read(lambda: identity(pid)) for pid in protected_pids]
+        registration = self._wait_for_owner_read(lambda: self._registration(root, strategy, protected))
+        self._write('registration.json', registration,
+                    before_publish=lambda: self._wait_for_owner_read(lambda: self._check_registration(root)))
+        self._registered = True
+
+    def _registration(self, root, strategy, protected):
         self._check_authority()
-        root = identity(root_pid)
+        root_pid = root['pid']
+        if identity(root_pid) != root:
+            raise SuspensionProtocolError('Computational root changed during registration')
         if os.getsid(root_pid) != self.context['anchor']['pid'] or root_pid == self.runner['pid']:
             raise SuspensionProtocolError('Computational root is outside the owned session')
-        protected = [identity(pid) for pid in protected_pids]
         if any(item['pid'] == root_pid for item in protected):
             raise SuspensionProtocolError('Computational root cannot be protected')
         # Retain original witnesses through root exit; SID lookup failure alone
@@ -247,11 +299,11 @@ class RunnerControl:
         anchor = self.context['anchor']
         controls = [anchor, self.runner, *protected]
         reached_anchor = False
-        for parent in psutil.Process().parents():
-            if os.getsid(parent.pid) != anchor['pid']:
+        for parent in ancestor_pids(self.runner['pid'], anchor['pid']):
+            if os.getsid(parent) != anchor['pid']:
                 break
-            controls.append(identity(parent.pid))
-            if parent.pid == anchor['pid']:
+            controls.append(identity(parent))
+            if parent == anchor['pid']:
                 reached_anchor = True
                 break
         if not reached_anchor:
@@ -264,11 +316,26 @@ class RunnerControl:
             raise SuspensionProtocolError('Computational root shares the protected group')
         self._drain_groups.add(root_group)
         self.clock_started = now_clock()
-        self._write('registration.json', {**self.binding, 'backend': self.context['backend'],
+        return {**self.binding, 'backend': self.context['backend'],
                     'runner': self.runner, 'root': root, 'strategy': strategy,
                     'protected': protected, 'deadline': self.deadline, 'storage': self.storage,
-                    'runtime': self.runtime, 'clock': self.clock, 'clock_started': self.clock_started})
-        self._registered = True
+                    'runtime': self.runtime, 'clock': self.clock, 'clock_started': self.clock_started}
+
+    def _check_registration(self, root):
+        try:
+            self._check_authority()
+            pid = root['pid']
+            if (identity(pid) != root or os.getsid(pid) != self.context['anchor']['pid']
+                    or os.getpgid(pid) not in self._drain_groups):
+                raise SuspensionProtocolError('Computational root changed during registration')
+        except ConfirmedProcessAbsence:
+            raise
+        except OSError as exc:
+            # A topology lookup's ESRCH alone cannot establish exit. Check the
+            # original raw identity again before classifying the failed read.
+            if identity(root['pid']) != root:
+                raise SuspensionProtocolError('Computational root changed during registration') from exc
+            raise OwnershipUnavailable('registration', 'Final registration evidence temporarily unreadable') from exc
 
     def _observe_domain(self):
         snapshot = snapshot_owned_session(self.context['anchor'], self._drain_known.values())
@@ -294,7 +361,10 @@ class RunnerControl:
             if any(group_exists(pgid) for pgid in self._drain_groups):
                 return False
             self._check_authority(check_storage=False)
-            return True
+            # A cancel or invalidate published during drainage needs its own
+            # poll/ack before a completed disposition can leave this runner.
+            latest = self._read('command.json', optional=True)
+            return latest == self._last_command and (latest is None or self._last_ack_clock is not None)
         except (OSError, ValueError, psutil.Error) as exc:
             self.last_error = str(exc)
             return False
@@ -318,14 +388,16 @@ class RunnerControl:
 
     def _ack(self, command, status):
         self._last_ack_status = status
-        self._last_ack_clock = now_clock()
+        self._last_ack_clock = None
+        observed = now_clock()
         self._write('ack.json', {**self.binding, 'revision': command['revision'],
                     'request_id': command['request_id'], 'operation': command['operation'],
                     'runner': self.runner, 'status': status, 'intervals': self.intervals,
                     'suspended_seconds': self.suspended_seconds, 'clock': self.clock,
-                    'deadline': self.deadline, 'observed_clock': now_clock(), 'clock_started': self.clock_started,
+                    'deadline': self.deadline, 'observed_clock': observed, 'clock_started': self.clock_started,
                     'unsuspended_elapsed': self.unsuspended_elapsed,
                     'accounting_uncertain': self.accounting_uncertain})
+        self._last_ack_clock = observed
 
     def _apply(self, command):
         if any(command.get(key) != value for key, value in self.binding.items()):
@@ -342,7 +414,7 @@ class RunnerControl:
             if revision < previous['revision'] or (revision == previous['revision'] and request != previous['request_id']):
                 raise SuspensionProtocolError('Stale suspension request')
             if command == previous:
-                if self._last_ack_clock is not None and now_clock() - self._last_ack_clock >= 1:
+                if self._last_ack_clock is None or now_clock() - self._last_ack_clock >= 1:
                     self._ack(command, self._last_ack_status)
                 return
             if revision == previous['revision'] and operation != 'invalidate' and (previous['operation'], operation) not in {
@@ -409,13 +481,20 @@ class RunnerControl:
             # termination preparation for already-owned processes.
             if command is None or command.get('operation') not in {'cancel', 'invalidate'}:
                 self._check_storage()
-            if command is not None:
-                self._apply(command)
             if self._registered:
                 self._observe_domain()
+            self._check_authority(check_storage=False)
+            if self._read('command.json', optional=True) != command:
+                self.last_error = 'Suspension command changed during observation'
+                return 'hold'
+            if command is not None:
+                self._apply(command)
             self.last_error = ''
             return self._state
-        except (OSError, ValueError, psutil.Error) as exc:
+        except (OwnershipUnavailable, OSError, psutil.AccessDenied) as exc:
+            self.last_error = str(exc)
+            return 'hold'
+        except (ValueError, psutil.Error) as exc:
             self._mark_uncertain()
             self.last_error = str(exc)
             return 'hold'

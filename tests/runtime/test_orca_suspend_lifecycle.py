@@ -201,6 +201,36 @@ raise SystemExit({code})
         self.assertFalse(record['reusable'])
 
     @retain_lifecycle_evidence
+    def test_shell_withholds_finalization_and_retries_only_verification(self):
+        launcher = self.root / 'python-with-gate'
+        waiting = self.root / 'waiting-for-verification'
+        release = self.root / 'restore-verification'
+        launcher.write_text(f"""#!{sys.executable}
+import os,sys
+from pathlib import Path
+if 'verify-completion' in sys.argv and not Path({str(release)!r}).exists():
+    Path({str(waiting)!r}).touch()
+    raise SystemExit(75)
+os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+""")
+        launcher.chmod(0o700)
+        with self.store.transaction() as con:
+            job = next(j for j in self.store.rows(con) if j['id'] == self.job['id'])
+            job['env']['PYTHON_BIN'] = str(launcher)
+            self.store.save(con, job)
+        runtime.start(self.store)
+        try:
+            wait_for(lambda: suspension.readiness(self.store, self.job['id'])['ready'])
+            for stage in (0, 1):
+                (self.root / f'release-{stage}').touch()
+            wait_for(waiting.exists)
+            self.assertFalse(self.metadata.exists())
+        finally:
+            release.touch()
+        wait_for(lambda: self.current()['status'] == 'Done')
+        self.assertTrue(self.metadata.is_file())
+
+    @retain_lifecycle_evidence
     def test_ordinary_exit_137_keeps_failed_attempt_metadata(self):
         self._failed_driver_keeps_metadata(137)
 
