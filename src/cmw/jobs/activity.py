@@ -15,6 +15,7 @@ import time
 
 import psutil
 
+from .freshness import age_seconds, clock_stamp
 from .ownership import identity, lock_held, owner_alive
 from .store import ACTIVE, PENDING
 
@@ -65,16 +66,15 @@ def unavailable(reason, *, previous=None, source='client'):
     now = time.time()
     result = copy.deepcopy(previous) if previous else {'observations': [], 'observed_at': None, 'coverage': {}}
     result.update(state='UNAVAILABLE', reason=reason, source=source, scope=SCOPE, stale=True,
-                  checked_at=now, age_seconds=None if result.get('observed_at') is None else max(0, now-result['observed_at']))
+                  checked_at=now, age_seconds=age_seconds(result.get('observed_clock'), clock_stamp()))
     result['coverage'] = {**result.get('coverage', {}), 'complete': False, 'warnings': [reason]}
     return result
 
 
 def permits(result):
-    now = time.time()
-    observed = result.get('observed_at')
+    age = age_seconds(result.get('observed_clock'), clock_stamp())
     return bool(result.get('state') == 'NO_MATCH' and not result.get('stale') and
-                observed is not None and 0 <= now-observed <= MAX_AGE and result.get('coverage', {}).get('complete'))
+                age is not None and age <= MAX_AGE and result.get('coverage', {}).get('complete'))
 
 
 def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factory=psutil.Process):
@@ -173,7 +173,13 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
             except psutil.AccessDenied:
                 cwd = None
                 missing.append('Working directory inaccessible (optional)')
-            candidate = {'identity': owner, 'pid': pid, 'engine': engine, 'exe': exe or None,
+            # Wall-clock birth is only used to display process age. It is never
+            # compared with an ownership token or used to authorize admission.
+            try:
+                display_birth = q.create_time() if owner.get('version') == 2 else owner.get('birth')
+            except (psutil.Error, OSError):
+                display_birth = None
+            candidate = {'display_birth': display_birth, 'identity': owner, 'pid': pid, 'engine': engine, 'exe': exe or None,
                          'status': status, 'ppid': ppid, 'pgid': pgid, 'sid': sid, 'cwd': cwd,
                          'evidence': [evidence], 'missing': missing, 'ownership': 'External / unattributed'}
             if not exe:
@@ -265,10 +271,10 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
         grouped.setdefault(key, []).append(c)
     observations = []
     for key, members in grouped.items():
-        first = min(members, key=lambda c: (c['identity']['birth'], c['pid']))
+        first = min(members, key=lambda c: (c['identity'].get('start_token', c['identity'].get('birth')), c['pid']))
         observations.append({**first, 'id': 'E'+hashlib.sha256(key.encode()).hexdigest()[:12],
                              'nproc': len(members), 'members': members,
-                             'age_seconds': max(0, now-first['identity']['birth']),
+                             'age_seconds': max(0, now-first['display_birth']) if first['display_birth'] is not None else None,
                              'observed_at': now, 'cpus': None, 'memory_gib': None})
     coverage['limitations'] = limitations[:20]
     coverage['warnings'] = uncertain[:20] + limitations[:20]
@@ -278,7 +284,7 @@ def collect(store, state, deadline, *, pids_provider=psutil.pids, process_factor
     reason = ('Recognized external computation observed' if observations else
               'Material process observation uncertainty' if uncertain else 'No recognized external computation observed')
     result = {'state': state_name, 'reason': reason, 'scope': SCOPE, 'observed_at': now,
-            'checked_at': now, 'age_seconds': 0, 'stale': False, 'coverage': coverage,
+            'observed_clock': clock_stamp(), 'checked_at': now, 'age_seconds': 0, 'stale': False, 'coverage': coverage,
             'observations': observations}
     if state.get('_telemetry_membership'):
         result['_pids'] = list(pids)

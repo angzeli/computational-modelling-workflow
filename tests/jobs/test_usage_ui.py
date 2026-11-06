@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from cmw.jobs.cli import machine_text, usage_cells, usage_detail
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs.store import Store
 from tests.jobs.test_external_ui import projection
 
@@ -17,14 +18,14 @@ from tests.jobs.test_external_ui import projection
 def usage(**updates):
     value = dict(cpu_cores=7.8, rss_bytes=18.3 * 2**30, cpu_quality='fresh', memory_quality='fresh',
                  cpu_members=8, memory_members=8, total_members=8, observed_at=time.time(),
-                 age_seconds=0, stale=False, reason='Synthetic measurement')
+                 observed_clock=clock_stamp(), age_seconds=0, stale=False, reason='Synthetic measurement')
     value.update(updates)
     return value
 
 
 def machine():
     return dict(cpu_percent=61.2, ram_used_bytes=23.8 * 2**30, ram_total_bytes=36 * 2**30,
-                cpu_quality='fresh', memory_quality='fresh', observed_at=time.time(), age_seconds=0,
+                cpu_quality='fresh', memory_quality='fresh', observed_at=time.time(), observed_clock=clock_stamp(), age_seconds=0,
                 stale=False, reason='Synthetic machine')
 
 
@@ -121,6 +122,7 @@ class UsageTuiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertLessEqual(app.query_one('#shortcuts').region.bottom, 28)
                     stale = deepcopy(state)
                     stale['external_activity']['observations'][0]['usage']['observed_at'] = time.time() - 10
+                    stale['external_activity']['observations'][0]['usage']['observed_clock'] = clock_stamp(time.monotonic() - 10)
                     app.accept_activity(stale)
                     self.assertEqual(str(external_table.get_cell('E101-birth-17', 'cpu_now')), '780%~')
                     with store.transaction() as con:

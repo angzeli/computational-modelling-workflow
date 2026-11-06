@@ -213,6 +213,9 @@ repeat CI.
   them silently.
 
 ### How to run
+- Choose targeted local tests by reverse imports. Include every test module
+  that imports a changed module directly or transitively, and the tests that
+  exercise changed shell, subprocess or other non-import entry points.
 - Never run two full test suites at the same time on one machine. Run
   lifecycle, profile and other timing-sensitive tests one test process at a
   time.
@@ -220,6 +223,8 @@ repeat CI.
   comparisons between commits test the intended code.
 - Pushing and opening a PR may proceed while local targeted diagnosis runs;
   merging waits for both.
+- Before reporting a PR as ready, read every review comment, including
+  automated reviews. Address or explicitly answer each comment.
 
 ### Triage before calling a failure real
 1. **Load:** rerun the failing test alone. If it passes, it is load-induced.

@@ -251,7 +251,7 @@ class ActivityTests(unittest.TestCase):
     def test_stale_clear_is_not_admission_and_timeout_keeps_last_known(self):
         clear = self.collect({})
         self.assertTrue(activity.permits(clear))
-        clear['observed_at'] -= activity.MAX_AGE+1
+        clear['observed_clock']['monotonic'] -= activity.MAX_AGE+1
         self.assertFalse(activity.permits(clear))
         busy = self.collect({1:process(1)})
         release = threading.Event()

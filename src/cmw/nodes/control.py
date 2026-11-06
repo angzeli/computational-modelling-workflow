@@ -11,7 +11,8 @@ import re
 
 from cmw.core.provenance import stable_hash
 from cmw.jobs import runtime, suspension
-from cmw.jobs.ownership import exclusive, lock_held, owner_alive
+from cmw.jobs.ownership import exclusive, lock_held
+from cmw.jobs.ownership_hold import blocks_replacement
 from cmw.jobs.store import PENDING, Store, validate_note
 from .protocol import NodeError, identifier, target_identity
 
@@ -120,11 +121,11 @@ def _preview(backend, params, target):
             reasons = [reason for reason in reasons if not reason.startswith(action.capitalize() + ' requires verified ')]
         consequences.append('Acceptance records desired state; completion requires fresh verification by the owning worker.')
     elif action == 'dispatch.resume':
-        if any(item['status'] in {'Unknown', 'Cancelling'} for item in state['jobs']):
+        if any(item.get('ownership_holds') or item['status'] in {'Unknown', 'Cancelling'} for item in state['jobs']):
             reasons.append('Needs attention or cancellation is unresolved; dispatch remains paused')
         consequences.append('Dispatch may admit eligible queued jobs when this controller is online.')
     elif action == 'controller.start':
-        if control['online'] or owner_alive(control.get('owner')) or lock_held(backend.store.root / 'controller.lock'):
+        if control['online'] or blocks_replacement(control.get('owner')) or lock_held(backend.store.root / 'controller.lock'):
             reasons.append('Controller is online or ownership is uncertain; inspect status')
         consequences.append('Start launches a detached controller and enables dispatch unless unresolved work blocks it. Held jobs remain held.')
     elif action == 'controller.stop':
@@ -204,7 +205,7 @@ def dispatch(backend, operation, params, *, target=None, request_id=None):
             elif action.startswith('dispatch.'):
                 store._dispatch(con, action == 'dispatch.resume')
             elif action == 'controller.start':
-                _require(not owner_alive(store.control(con).get('owner'))
+                _require(not blocks_replacement(store.control(con).get('owner'))
                          and not lock_held(store.root / 'controller.lock'),
                          'CONTROL_UNAVAILABLE', 'Controller ownership changed; inspect status')
                 runtime._prepare_start(store, con)

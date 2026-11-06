@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from cmw.jobs.cli import machine_detail, machine_text
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs.snapshot import capture_snapshot, render_snapshot
 from cmw.nodes.contracts import NodeState
 from cmw.nodes.protocol import NodeError
@@ -23,11 +24,11 @@ def thermal(*, age=12., quality='fresh', temperature=63.2, now=112.):
                 freshness_seconds=30., unavailable_seconds=60.)
 
 
-def machine(*, temp=63.2, cpu=71., ram=27.1, total=36., age=12., quality='fresh', now=112.):
+def machine(*, temp=63.2, cpu=71., ram=27.1, total=36., age=12., quality='fresh', now=112., stamp=None):
     return dict(cpu_percent=cpu, cpu_quality='fresh', memory_quality='fresh',
                 ram_used_bytes=ram*2**30, ram_total_bytes=total*2**30,
                 ram_available_bytes=(total-ram)*2**30, memory_source='psutil.virtual_memory()',
-                observed_at=now, age_seconds=0., stale=False,
+                observed_at=now, observed_clock=clock_stamp() if stamp is None else stamp, age_seconds=0., stale=False,
                 thermal=thermal(age=age, quality=quality, temperature=temp, now=now))
 
 
@@ -203,7 +204,7 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
             before = {path: path.read_bytes() for path in store.root.rglob('*') if path.is_file()}
             with patch.object(store, 'snapshot', side_effect=lambda **_: deepcopy(state)), \
                     patch.object(JobsApp, 'collect_activity'), \
-                    patch('time.time', return_value=acceptance.NOW):
+                    acceptance.projection_clock():
                 async with app.run_test(size=sizes[0]) as pilot:
                     await acceptance.settle(app, pilot)
                     app.query_one('#table', DataTable).move_cursor(row=app.row_ids.index(selected['display_id']), animate=False)
@@ -234,7 +235,7 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
                 super().__init__(alias, **kwargs)
                 self.machine = machine(temp=63.2 if alias == 'MBP' else 76.4,
                     cpu=71. if alias == 'MBP' else 88., ram=27.1 if alias == 'MBP' else 51.2,
-                    total=36. if alias == 'MBP' else 64.)
+                    total=36. if alias == 'MBP' else 64., stamp=self.sample_stamp)
             def call(self, operation, *args, **kwargs):
                 result = super().call(operation, *args, **kwargs)
                 if operation == 'status':
@@ -254,8 +255,10 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
                 baseline = str(app.query_one('#progress', Static).render())
                 for quality, age, shown in (('fresh', 12., '76°C'), ('stale', 40., '76°C~'), ('unavailable', 61., '—')):
                     for owner in backends:
-                        record = app.lanes[owner].state['machine_usage']['thermal']
+                        response = backends[owner].call('status')
+                        record = response['result']['state']['machine_usage']['thermal']
                         record.update(quality=quality, sample_age=age, sample_timestamp=112.-age)
+                        app.accept(owner, ('status', {}, None, None), response, None)
                     app.render_state(); await pilot.pause()
                     summary = str(app.query_one('#node-summary', Static).render())
                     self.assertIn('MINI Online 0s', summary)
@@ -319,7 +322,7 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
         def call(operation, *args, **kwargs):
             result = original(operation, *args, **kwargs)
             if operation == 'status':
-                result['result']['state']['machine_usage'] = machine()
+                result['result']['state']['machine_usage'] = machine(stamp=backend.sample_stamp)
             return result
         backend.call = call
         app = NodesApp({'MINI': backend}, clock=lambda: 1000.)
@@ -337,7 +340,7 @@ class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
         def call(operation, *args, **kwargs):
             result = original(operation, *args, **kwargs)
             if operation == 'status':
-                result['result']['state']['machine_usage'] = machine()
+                result['result']['state']['machine_usage'] = machine(stamp=backend.sample_stamp)
             return result
         backend.call = call
         app = NodesApp({'MINI': backend}, clock=lambda: 1000.)

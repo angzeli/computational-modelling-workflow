@@ -114,8 +114,8 @@ class LocalBackend:
         self._custom_identity_checker = identity_checker is not None
         self.clock = clock
         self.session_id = uuid4().hex
-        import psutil
-        self._boot_provider = boot_provider or psutil.boot_time
+        from cmw.jobs.process_identity import boot_session_id
+        self._boot_provider = boot_provider or boot_session_id
         self.clock_id = None
         self.sequence = 0
         self._closed = False
@@ -206,7 +206,11 @@ class LocalBackend:
             raise BackendError('QUEUE_CHANGED', 'Enrolled queue identity differs from its authoritative database')
         if actual['node_id'] != config['node_id'] or actual['host_id'] != config['host_id']:
             raise BackendError('QUEUE_CHANGED', 'Queue belongs to a different node or host')
-        clock_id = _digest({'host': config['host_id'], 'boot': self._boot_provider()})
+        try:
+            boot = self._boot_provider()
+        except OSError as exc:
+            raise BackendError('IDENTITY_CHANGED', 'Cannot verify endpoint boot session') from exc
+        clock_id = _digest({'host': config['host_id'], 'boot': boot})
         pinned = (config['node_id'], actual['queue_id'], config['host_id'], config['runtime']['fingerprint'], clock_id)
         if self._pinned is not None and pinned != self._pinned:
             raise BackendError('IDENTITY_CHANGED', 'Endpoint identity changed during this observation session')

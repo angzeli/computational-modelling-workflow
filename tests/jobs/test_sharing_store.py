@@ -97,7 +97,7 @@ class SharingStoreTests(unittest.TestCase):
                     job = {**jobs[0], 'status': status}
                     con.execute('UPDATE jobs SET data=? WHERE id=?', (json.dumps(job), job['id']))
                 before = self.raw()
-                with patch('cmw.jobs.ownership.owner_alive', return_value=False), \
+                with patch('cmw.jobs.ownership_hold.blocks_replacement', return_value=False), \
                      patch('cmw.jobs.ownership.lock_held', return_value=False):
                     self.store.snapshot()
                     self.assertEqual(self.raw(), before)
@@ -110,13 +110,13 @@ class SharingStoreTests(unittest.TestCase):
         for alive, locked in ((True, False), (False, True)):
             before = self.raw()
             with self.subTest(alive=alive, locked=locked), \
-                 patch('cmw.jobs.ownership.owner_alive', return_value=alive), \
+                 patch('cmw.jobs.ownership_hold.blocks_replacement', return_value=alive), \
                  patch('cmw.jobs.ownership.lock_held', return_value=locked):
                 with self.assertRaisesRegex(JobsError, 'original installation'):
                     with self.store.transaction():
                         self.fail('Live legacy controller must keep schema 1')
             self.assertEqual(self.raw(), before)
-        with patch('cmw.jobs.ownership.owner_alive', return_value=False), \
+        with patch('cmw.jobs.ownership_hold.blocks_replacement', return_value=False), \
              patch('cmw.jobs.ownership.lock_held', return_value=False):
             with self.store.transaction():
                 pass

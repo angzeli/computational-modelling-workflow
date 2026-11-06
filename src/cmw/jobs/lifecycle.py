@@ -15,7 +15,6 @@ import math
 import os
 from pathlib import Path
 import re
-import socket
 import sqlite3
 import stat
 import time
@@ -23,6 +22,7 @@ from typing import Any
 
 import psutil
 
+from .freshness import age_seconds, clock_stamp
 from . import ownership
 from .store import ACTIVE, JobsError
 
@@ -60,21 +60,22 @@ class ExecutionObservation:
     observed_execution: str
     observation_quality: str
     observed_at: float
+    observed_clock: dict | None
     state_identity: dict[str, Any]
     evidence: dict[str, Evidence]
     limitations: tuple[str, ...]
     reconciliation_required: bool
     summary: str
 
-    def to_dict(self, *, now=None):
-        age = max(0, (time.time() if now is None else now) - self.observed_at)
+    def to_dict(self, *, now=None, monotonic=None):
+        age = age_seconds(self.observed_clock, clock_stamp(monotonic))
         return {'schema': 1, 'advisory': True, 'job_id': self.job_id,
                 'attempt_id': self.attempt_id, 'claim': self.claim,
                 'persisted_status': self.persisted_status,
                 'observed_execution': self.observed_execution,
                 'observation_quality': self.observation_quality,
                 'observed_at': self.observed_at, 'age_seconds': age,
-                'stale': age > FRESH_SECONDS, 'state_identity': deepcopy(self.state_identity),
+                'stale': age is None or age > FRESH_SECONDS, 'state_identity': deepcopy(self.state_identity),
                 'evidence': {key: value.to_dict() for key, value in self.evidence.items()},
                 'limitations': list(self.limitations),
                 'reconciliation_required': self.reconciliation_required,
@@ -124,37 +125,44 @@ def _finite(value):
 
 
 def observe_process(owner):
-    """Recheck birth around status; access failure never means process absence."""
-    if not isinstance(owner, dict) or not {'pid', 'birth', 'host', 'boot'} <= owner.keys():
+    """Bracket the advisory process status with the same checks used for control."""
+    required = {'host', 'pid', 'boot_session', 'start_token'} if (
+        isinstance(owner, dict) and owner.get('version') == 2) else {'host', 'pid', 'boot', 'birth'}
+    if not isinstance(owner, dict) or not required <= owner.keys():
         return Evidence('missing', 'No complete recorded process identity', 'identity_missing')
-    if (type(owner['pid']) is not int or owner['pid'] <= 0 or
-            not _finite(owner['birth']) or not _finite(owner['boot']) or
-            not isinstance(owner['host'], str)):
-        return Evidence('unavailable', 'Invalid recorded process identity', 'identity_invalid')
     details = {'recorded_identity': deepcopy(owner)}
+
+    def check():
+        observation = ownership.observe_owner(owner)
+        result = observation.as_dict()
+        details['identity_check'] = result
+        details['observed_identity'] = {key: result['checks'][key]['observed']
+                                        for key in required if key in result['checks']}
+        if observation.status == 'VERIFIED':
+            return None
+        field = observation.deciding_check
+        return Evidence('gone' if observation.status == 'GONE' else 'unavailable',
+                        f"{field}: {result['checks'][field]['reason']}", field, details)
+
+    refusal = check()
+    if refusal:
+        return refusal
     try:
-        if owner['host'] != socket.gethostname():
-            return Evidence('mismatch', 'Recorded host differs from this host', 'host_mismatch', details)
-        if owner['boot'] != psutil.boot_time():
-            return Evidence('mismatch', 'Recorded boot differs from this boot', 'boot_mismatch', details)
-        current = ownership.identity(owner['pid'])
-        details['observed_identity'] = current
-        if current != owner:
-            return Evidence('mismatch', 'Recorded PID birth identity differs', 'pid_reused', details)
         status = psutil.Process(owner['pid']).status()
-        details['process_status'] = status
-        if ownership.identity(owner['pid']) != current:
-            return Evidence('mismatch', 'Process identity changed during observation', 'identity_changed', details)
-        if status in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
-            return Evidence('gone', 'Recorded process is zombie/dead, not a live worker', status, details)
-        return Evidence('matched', 'Recorded process birth identity matches',
-                        'stopped' if status in (psutil.STATUS_STOPPED, psutil.STATUS_TRACING_STOP) else 'live', details)
     except psutil.ZombieProcess:
-        return Evidence('unavailable', 'Zombie PID birth identity could not be verified', 'zombie_identity_unverified', details)
+        return Evidence('unavailable', 'Zombie status could not be verified', 'process_status', details)
     except (psutil.NoSuchProcess, ProcessLookupError):
         return Evidence('gone', 'Recorded PID is absent', 'absent', details)
     except (psutil.Error, OSError):
-        return Evidence('unavailable', 'Process identity/status is inaccessible', 'inaccessible', details)
+        return Evidence('unavailable', 'Process status is inaccessible', 'inaccessible', details)
+    details['process_status'] = status
+    refusal = check()
+    if refusal:
+        return refusal
+    if status in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+        return Evidence('unavailable', f'Recorded process is {status}', 'process_status', details)
+    return Evidence('matched', 'Recorded process identity matches',
+                    'stopped' if status in (psutil.STATUS_STOPPED, psutil.STATUS_TRACING_STOP) else 'live', details)
 
 
 class JobObservationUnavailable(JobsError):
@@ -431,14 +439,14 @@ def read_job(store, job_id):
         raise JobsError('Jobs observation source is malformed or unavailable') from exc
 
 
-def _observe_controller(store, control, now):
+def _observe_controller(store, control):
     owner = observe_process(control.get('owner'))
     lock = _observe_lock_path(store, ('controller.lock',))
     details = {'owner': owner.to_dict(), 'lock': lock.to_dict(),
                'heartbeat': control.get('heartbeat'), 'dispatch': control.get('dispatch')}
     if owner.verdict == 'matched' and lock.verdict == 'held':
-        heartbeat = control.get('heartbeat')
-        stale = not _finite(heartbeat) or not 0 <= now-heartbeat <= FRESH_SECONDS
+        age = age_seconds(control.get('heartbeat_clock'), clock_stamp())
+        stale = age is None or age > FRESH_SECONDS
         return Evidence('stale' if stale else 'online', 'Recorded controller authority is present', 'authority_present', details)
     if owner.verdict in {'missing', 'gone', 'mismatch'} and lock.verdict in {'missing', 'unheld'}:
         return Evidence('offline', 'No matching controller owner and held lock observed', 'offline', details)
@@ -491,7 +499,7 @@ def _observe_suspension(job, schema):
                     'stored_phase', details)
 
 
-def observe_execution(store, job, *, state=None, now=None):
+def observe_execution(store, job, *, state=None, now=None, monotonic=None):
     """Observe one selected attempt; results never authorize lifecycle mutation.
 
     ``state`` is accepted for presentation compatibility, but raw schema and
@@ -499,6 +507,7 @@ def observe_execution(store, job, *, state=None, now=None):
     schemas. Lifecycle changes during the probes invalidate the whole result.
     """
     observed_at = time.time() if now is None else now
+    observed_clock = clock_stamp(monotonic)
     evidence = {key: Evidence('unavailable', 'Observation has not been established', 'not_observed')
                 for key in ('source', 'worker', 'worker_lock', 'domain', 'receipt', 'controller', 'suspension')}
     limits = ('Legacy domain membership is incomplete; surviving MPI ranks are not excluded.',
@@ -524,7 +533,7 @@ def observe_execution(store, job, *, state=None, now=None):
             lock = evidence['worker_lock'] = observe_lock(store, job.get('attempt_id'))
             domain = evidence['domain'] = _observe_domain(job, worker, lock)
             receipt = evidence['receipt'] = _observe_receipt(store, job, worker, observed_at)
-            evidence['controller'] = _observe_controller(store, control, observed_at)
+            evidence['controller'] = _observe_controller(store, control)
             quality = 'partial'
             if worker.verdict == 'matched' and lock.verdict == 'held' and domain.verdict == 'anchor_verified':
                 category = 'VERIFIED_STOPPED' if worker.code == 'stopped' else 'VERIFIED_WORKER'
@@ -580,4 +589,4 @@ def observe_execution(store, job, *, state=None, now=None):
         summary = 'Stored status UNVERIFIED; observation source unsupported, unavailable or changed'
     return ExecutionObservation(str(job.get('display_id', job.get('id'))), job.get('attempt_id'),
                                 job.get('claim'), job.get('status', 'Unknown'), category, quality,
-                                observed_at, identity, evidence, limits, required, summary)
+                                observed_at, observed_clock, identity, evidence, limits, required, summary)

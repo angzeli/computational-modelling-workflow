@@ -28,10 +28,11 @@ from cmw.jobs.catalogue_ui import NodeCatalogue
 from cmw.jobs.review_models import ReviewRecord, cached_review, review_text
 from cmw.jobs.suspension_presentation import effective_status
 from cmw.jobs.tui import JobsApp, ScientificProgress, detail, literal, table_name
+from cmw.jobs.telemetry import MAX_AGE as TELEMETRY_MAX_AGE
 from cmw.progress.formatting import compact_frame, fit_text, progress_text
 from cmw.progress.models import HistoryPage, ProgressSnapshot
 from .codec import decode_typed, encode_typed
-from .connections import observed_machine_usage
+from .connections import observed_machine_usage, observed_status_usage
 from .contracts import (Reachability, NodeEvent, NodeState, transition, estimate_clock_skew,
                         POLL_INTERVAL_SECONDS, STALE_AFTER_SECONDS)
 from .view_freshness import NodeViews, ViewReceipt
@@ -404,10 +405,10 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
             receipt = ViewReceipt(now, self.wall_clock(), generation)
             if error is None and operation == 'status':
                 lane.receipts['status'] = receipt
-                lane.state = envelope['result']['state']
                 lane.status_confirmed = error is None and not lane.handshake_required
                 lane.status_envelope, lane.received = envelope, now
                 lane.status_transport_age = max(0., now - lane.request_started) if lane.request_started is not None else 0.
+                lane.state = observed_status_usage(envelope, now, now, transport_age=lane.status_transport_age)
                 for request_id, pending in tuple(self.unknown_controls.items()):
                     if pending[0] == owner:
                         self.check_control_result(owner, request_id, pending[1])
@@ -581,6 +582,8 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
             usage = deepcopy(usage or {})
             if usage.get('age_seconds') is not None:
                 usage['age_seconds'] += lane.age(now) or 0
+                if usage['age_seconds'] > TELEMETRY_MAX_AGE:
+                    usage['stale'] = True
             if not lane.fresh(now):
                 usage['stale'] = True
             identity = 'SELECTED · ' + self.label(owner, job)

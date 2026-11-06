@@ -419,13 +419,28 @@ child_pid=""
 set -e
 
 if ((controlled_suspension == 1)); then
-  if ! completion_disposition=$("$PYTHON_BIN" -m cmw.molecular.orca.suspension verify-completion \
-    --completion-record "$local_scratch_dir/controlled-completion.json" \
-    --process-status "$process_status" --runner-pid "$completed_runner_pid")
-  then
-    printf 'Controlled ORCA completion could not be verified; scientific finalization withheld\n' >&2
-    exit 69
-  fi
+  verify_delay=1
+  previous_error=""
+  while true; do
+    if completion_disposition=$("$PYTHON_BIN" -m cmw.molecular.orca.suspension verify-completion \
+      --completion-record "$local_scratch_dir/controlled-completion.json" \
+      --process-status "$process_status" --runner-pid "$completed_runner_pid" 2>&1); then
+      break
+    else
+      verify_status=$?
+    fi
+    if [[ "$completion_disposition" != "$previous_error" ]]; then
+      printf '%s\n' "$completion_disposition" >&2
+      previous_error="$completion_disposition"
+    fi
+    if ((verify_status != 75)); then
+      printf 'Controlled ORCA completion could not be verified; scientific finalization withheld\n' >&2
+      exit 69
+    fi
+    # Keep the shell and its evidence until the read-only handoff can decide.
+    sleep "$verify_delay"
+    if ((verify_delay < 4)); then verify_delay=$((verify_delay * 2)); fi
+  done
   if [[ "$completion_disposition" == cancelled ]]; then
     ((process_status != 0)) || process_status=143
     exit "$process_status"

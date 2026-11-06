@@ -34,6 +34,13 @@ def observed(job, **changes):
 
 
 class LifecycleCliTests(unittest.TestCase):
+    def test_observation_with_no_comparable_clock_prints_unavailable_age(self):
+        from cmw.jobs.cli import execution_text
+        text = execution_text({'persisted_status': 'Unknown', 'observed_execution': 'OBSERVATION_UNAVAILABLE',
+                               'observation_quality': 'unavailable', 'age_seconds': None, 'stale': True,
+                               'summary': 'Could not verify ownership', 'reconciliation_required': True})
+        self.assertIn('Observation age: unavailable STALE', text)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='cmw-lifecycle-cli-')
         self.addCleanup(temporary.cleanup)

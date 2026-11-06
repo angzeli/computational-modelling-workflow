@@ -150,6 +150,7 @@ def environment():
 def fixture_collect(store, state, deadline):
     from cmw.jobs import activity
     from cmw.jobs.ownership import identity
+    from cmw.jobs.process_identity import ConfirmedProcessAbsence
     import psutil
 
     fixtures = store.root / 'fixture-processes.json'
@@ -159,7 +160,7 @@ def fixture_collect(store, state, deadline):
         try:
             if identity(record['pid']) == record:
                 pids.append(record['pid'])
-        except psutil.NoSuchProcess:
+        except (psutil.NoSuchProcess, ConfirmedProcessAbsence):
             pass
     return activity.collect(store, state, deadline, pids_provider=lambda: pids)
 
@@ -173,6 +174,7 @@ for final-admission races. Production never reads it or selects this class.
     def collect(self, store, *, source='controller', wait=False):
         import time
         from cmw.jobs import activity
+        from cmw.jobs.freshness import clock_stamp
         state = store.snapshot()
         state['_telemetry_membership'] = True
         guard = activity.DEFAULT_OBSERVER.scan(store, state, source=source)
@@ -182,9 +184,11 @@ for final-admission races. Production never reads it or selects this class.
         override = config.get(source, {})
         now = time.time()
         samples = []
-        for observed in (now-1, now):
-            samples.append({'observed_at': observed, 'logical_cpus': 64,
-                'machine_usage': {'observed_at': observed, 'stale': False,
+        for age in (1, 0):
+            observed = now - age
+            stamp = clock_stamp(time.monotonic()-age)
+            samples.append({'observed_at': observed, 'observed_clock': stamp, 'logical_cpus': 64,
+                'machine_usage': {'observed_at': observed, 'observed_clock': stamp, 'stale': False,
                     'cpu_quality': 'fresh', 'memory_quality': 'fresh',
                     'cpu_percent': override.get('cpu_percent', 0),
                     'ram_total_bytes': 64*2**30,

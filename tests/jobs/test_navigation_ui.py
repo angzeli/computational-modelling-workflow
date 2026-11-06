@@ -12,6 +12,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs.store import Store
 from cmw.jobs.telemetry import Sampler
 from cmw.progress.models import SourceDescriptor
@@ -55,7 +56,7 @@ class SyntheticObserver:
     def scan(self, store, state=None, *, source='client'):
         self.gate.wait()
         return {'state': 'NO_MATCH', 'reason': 'Synthetic clear observation',
-                'observations': deepcopy(self.observations), 'observed_at': time.time(),
+                'observations': deepcopy(self.observations), 'observed_clock': clock_stamp(), 'observed_at': time.time(),
                 'checked_at': time.time(), 'age_seconds': 0, 'stale': False,
                 'source': source, 'scope': 'Synthetic fixture', '_pids': [],
                 'coverage': {'complete': True, 'warnings': []}}
@@ -66,7 +67,7 @@ class SyntheticSampler:
         machine = Sampler._empty_machine()
         machine.update(cpu_percent=22, ram_used_bytes=4 * 2**30,
                        ram_total_bytes=36 * 2**30, cpu_quality='complete',
-                       memory_quality='complete', observed_at=time.time(), age_seconds=0)
+                       memory_quality='complete', observed_at=time.time(), observed_clock=clock_stamp(), age_seconds=0)
         return {'machine_usage': machine, 'jobs': {}, 'external': {}}
 
     def close(self):

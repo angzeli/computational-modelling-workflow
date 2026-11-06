@@ -4,10 +4,11 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from cmw.jobs.ownership import identity
+from cmw.jobs.ownership import OwnershipStatus, OwnershipUnavailable, identity
 from cmw.jobs.suspension_protocol import (BINDING_FIELDS, RunnerControl, SuspensionProtocolError,
                                           clock_descriptor, now_clock)
 
@@ -67,7 +68,7 @@ class RunnerProtocolTests(unittest.TestCase):
     def test_unknown_backend_and_clock_refused(self):
         with self.assertRaisesRegex(SuspensionProtocolError, 'backend/protocol'):
             RunnerControl(self.root / 'context.json', backend='other-v1', deadline={}, storage=[], runtime={})
-        self.context['clock']['boot'] -= 100
+        self.context['clock']['boot_session_id'] = 'different-boot-session'
         self.write('context.json', self.context)
         with self.assertRaisesRegex(SuspensionProtocolError, 'clock/boot'):
             self.make()
@@ -144,7 +145,8 @@ class RunnerProtocolTests(unittest.TestCase):
         self.storage.mkdir()
         self.assertEqual(control.poll(), 'hold')
         self.assertIn('storage identity changed', control.last_error)
-        with patch('cmw.jobs.suspension_protocol.owner_alive', return_value=False):
+        with patch('cmw.jobs.suspension_protocol.observe_owner',
+                   return_value=SimpleNamespace(status=OwnershipStatus.GONE, deciding_check='pid')):
             self.assertEqual(control.poll(), 'hold')
             self.assertIn('authority', control.last_error.replace('worker or ownership anchor', 'authority'))
 
@@ -214,13 +216,74 @@ class RunnerProtocolTests(unittest.TestCase):
         start = now_clock() - 2
         self.command(1, 'suspended', boundary=start); control.poll()
         last_ack = control._last_ack_clock
-        with patch('cmw.jobs.suspension_protocol.owner_alive', return_value=False):
+        with patch('cmw.jobs.suspension_protocol.observe_owner',
+                   return_value=SimpleNamespace(status=OwnershipStatus.GONE, deciding_check='pid')):
             self.assertEqual(control.poll(), 'hold')
         self.assertTrue(control.accounting_uncertain)
         self.assertEqual(control.intervals[-1]['end'], last_ack)
         with patch('cmw.jobs.suspension_protocol.now_clock', return_value=last_ack + 100):
             self.assertLess(control.suspended_seconds, 3)
             self.assertGreater(control.unsuspended_elapsed, 100)
+
+
+    def test_denied_owner_preserves_open_interval_and_recovers(self):
+        control = self.make()
+        self.command(1, 'prepare_suspend')
+        control.poll()
+        start = now_clock() - 2
+        self.command(1, 'suspended', boundary=start)
+        control.poll()
+        self.command(2, 'prepare_continue', boundary=start + 1)
+        with patch('cmw.jobs.suspension_protocol.observe_owner',
+                   return_value=SimpleNamespace(status=OwnershipStatus.UNVERIFIABLE, deciding_check='start_token')):
+            self.assertEqual(control.poll(), 'hold')
+        self.assertIn('worker.start_token', control.last_error)
+        self.assertFalse(control.accounting_uncertain)
+        self.assertIsNone(control.intervals[0]['end'])
+        self.assertEqual(control._last_command['operation'], 'suspended')
+        self.assertEqual(control.poll(), 'hold')
+        self.assertEqual(control.suspended_seconds, 1)
+        self.command(2, 'run')
+        self.assertEqual(control.poll(), 'run')
+        self.assertFalse(control.accounting_uncertain)
+
+    def test_command_superseded_during_storage_check_is_never_applied(self):
+        control = self.make()
+        self.command(1, 'prepare_suspend')
+        with patch.object(control, '_check_storage', side_effect=lambda: self.command(2, 'cancel')):
+            self.assertEqual(control.poll(), 'hold')
+        self.assertIn('changed during observation', control.last_error)
+        self.assertFalse((self.root / 'ack.json').exists())
+        self.assertFalse(control.accounting_uncertain)
+        self.assertEqual(control.poll(), 'cancel')
+        self.assertEqual(json.loads((self.root/'ack.json').read_text())['status'], 'cancel_prepared')
+
+
+    def test_failed_final_authority_read_does_not_commit_deadline_cancellation(self):
+        control = self.make()
+        with patch.object(control, '_check_authority',
+                          side_effect=[None, OwnershipUnavailable('anchor', 'denied')]):
+            with self.assertRaises(OwnershipUnavailable):
+                control.request_termination('test deadline')
+        self.assertFalse((self.root/'deadline_expired.json').exists())
+        self.assertFalse(control.cancel_requested)
+        self.assertEqual(control._state, 'run')
+        control.request_termination('test deadline')
+        self.assertTrue(control.cancel_requested)
+        self.assertTrue((self.root/'deadline_expired.json').is_file())
+
+    def test_ack_write_failure_retries_without_double_counting(self):
+        control = self.make()
+        self.command(1, 'prepare_suspend')
+        self.assertEqual(control.poll(), 'hold')
+        self.command(1, 'suspended', boundary=now_clock() - 1)
+        with patch.object(control, '_write', side_effect=OSError('unavailable')):
+            self.assertEqual(control.poll(), 'hold')
+        self.assertFalse(control.accounting_uncertain)
+        self.assertEqual(len(control.intervals), 1)
+        self.assertEqual(control.poll(), 'hold')
+        self.assertEqual(len(control.intervals), 1)
+        self.assertEqual(json.loads((self.root/'ack.json').read_text())['status'], 'paused')
 
 
 class MpiRuntimeIdentityTests(unittest.TestCase):

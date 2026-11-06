@@ -15,7 +15,8 @@ from uuid import uuid4
 import psutil
 
 from cmw.jobs import runtime
-from cmw.jobs.ownership import identity, owner_alive
+from cmw.jobs.ownership import OwnershipStatus, identity, observe_owner, owner_alive
+from cmw.jobs.process_identity import ConfirmedProcessAbsence
 from cmw.jobs.store import Store
 from cmw.nodes.client import apply_control, fetch, submit
 from cmw.nodes.connections import ConnectedBackend
@@ -31,6 +32,16 @@ def wait_for(predicate, *, timeout=35):
             return
         time.sleep(.05)
     raise AssertionError('Owned node fixture did not reach its bounded condition')
+
+
+def _outstanding_owners(owners):
+    outstanding = []
+    for owner in owners:
+        observation = observe_owner(owner)
+        if observation.status != OwnershipStatus.GONE:
+            outstanding.append({'owner': owner, 'status': observation.status,
+                                'deciding_check': observation.deciding_check})
+    return outstanding
 
 
 def node_surface(root, *, backend_builder=None):
@@ -129,16 +140,16 @@ printf 'completed\\n'
         anchor = active_job['group']
         assert owner_alive(anchor)
         parent = psutil.Process(anchor['pid'])
-        assert parent.create_time() == anchor['birth']
         observed_at = time.time()
         for child in parent.children(recursive=True):
             try:
                 observed = identity(child.pid)
-                if observed['birth'] == child.create_time():
+                # Bracket the independent psutil ancestry check with raw identity.
+                if child.is_running() and parent in child.parents() and identity(child.pid) == observed:
                     payload_owners.append(observed)
-            except psutil.NoSuchProcess:
+            except (psutil.NoSuchProcess, ConfirmedProcessAbsence):
                 pass  # A short-lived fixture descendant may end during census.
-        assert owner_alive(anchor)
+        assert owner_alive(anchor) and payload_owners
         payload_census = {'scope': 'Observed descendants of the verified payload anchor; one census',
                           'observed_at': observed_at, 'anchor': anchor}
         close_backend()
@@ -169,7 +180,7 @@ printf 'completed\\n'
         checks['completed_snapshot_and_verified_replica'] = True
         control('controller.stop')
         wait_for(lambda: not store.snapshot()['controller']['online'])
-        wait_for(lambda: not any(owner_alive(owner) for owner in [*owners, *payload_owners]))
+        wait_for(lambda: not _outstanding_owners([*owners, *payload_owners]))
         checks['owned_runtime_processes_exited'] = True
         return {'checks': checks, 'node_id': config['node_id'], 'queue_id': entry['queues']['research'],
                 'target': target, 'runtime': config['runtime'], 'package_origin': __import__('cmw').__file__,
@@ -202,15 +213,17 @@ printf 'completed\\n'
                     owners.append(owner)
             with install():
                 runtime.stop(store)
-            deadline = time.monotonic() + 8
-            while (any(owner_alive(owner) for owner in [*owners, *payload_owners])
-                   and time.monotonic() < deadline):
-                time.sleep(.05)
         if backend is not None:
             close_backend()
-        remaining = [owner for owner in [*owners, *endpoint_owners, *payload_owners] if owner_alive(owner)]
+        deadline = time.monotonic() + 8
+        tracked = [*owners, *endpoint_owners, *payload_owners]
+        while (outstanding := _outstanding_owners(tracked)) and time.monotonic() < deadline:
+            time.sleep(.05)
+        remaining = [entry['owner'] for entry in outstanding if entry['status'] == OwnershipStatus.VERIFIED]
+        uncertain = [entry for entry in outstanding if entry['status'] == OwnershipStatus.UNVERIFIABLE]
         (root / 'cleanup.json').write_text(json.dumps({
             'owners': owners, 'endpoint_owners': endpoint_owners, 'payload_owners': payload_owners,
-            'payload_census': payload_census, 'remaining_verified_owners': remaining}, indent=2) + '\n')
-        if remaining:
-            raise AssertionError('Verified owned fixture runtime remained live; evidence retained')
+            'payload_census': payload_census, 'remaining_verified_owners': remaining,
+            'unverifiable_owners': uncertain}, indent=2) + '\n')
+        if outstanding:
+            raise AssertionError('Owned fixture exit could not be confirmed; see cleanup.json')

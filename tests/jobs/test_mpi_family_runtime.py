@@ -15,6 +15,7 @@ import unittest
 
 import psutil
 
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs import activity, runtime, sharing
 from cmw.jobs.ownership import exclusive, identity
 from tests.jobs.isolated_runtime import FixtureAdmissionSampler, environment
@@ -137,7 +138,7 @@ class MPIFamilyRuntimeTests(unittest.TestCase):
         with exclusive(self.store.root / 'controller.lock'):
             with self.store.transaction() as con:
                 control = self.store.control(con)
-                control.update(owner=identity(), dispatch=True, stop=False, heartbeat=time.time())
+                control.update(owner=identity(), dispatch=True, stop=False, heartbeat=time.time(), heartbeat_clock=clock_stamp())
                 self.store.set_control(con, control)
             yield
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 from pathlib import Path
@@ -9,10 +10,10 @@ import re
 import sys
 from uuid import uuid4
 
-from cmw.jobs.ownership import owner_alive
+from cmw.jobs.ownership import OwnershipUnavailable, valid_owner_record
 from cmw.jobs.suspension_protocol import (BINDING_FIELDS, PROTOCOL, SuspensionProtocolError,
     _directory_identity, _private_info, _read_fd, clock_descriptor, controlled_driver,
-    file_identity, mpi_runtime_identity)
+    file_identity, mpi_runtime_identity, require_control_session)
 from .input import parse_rendered_orca_input
 from .job import load_target
 from .status import StageType
@@ -135,10 +136,9 @@ def verify_completion(path, *, process_status, runner_pid):
            or registration.get(key) != context[key] for key in BINDING_FIELDS):
         raise SuspensionProtocolError('Completion attempt/authority binding differs')
     runner = registration.get('runner')
-    if (not isinstance(runner, dict) or not {'pid', 'birth', 'host', 'boot'} <= runner.keys()
+    if (not valid_owner_record(runner)
             or value.get('runner') != runner or runner.get('pid') != runner_pid
-            or not isinstance(registration.get('root'), dict)
-            or not {'pid', 'birth', 'host', 'boot'} <= registration['root'].keys()
+            or not valid_owner_record(registration.get('root'))
             or value.get('root') != registration['root']):
         raise SuspensionProtocolError('Completion source is not the registered child runner')
     if (value.get('source') != 'cmw-controlled-driver-drained-v1'
@@ -146,6 +146,9 @@ def verify_completion(path, *, process_status, runner_pid):
             or isinstance(value.get('exit_code'), bool) or not isinstance(value.get('exit_code'), int)
             or value['exit_code'] != process_status or not 0 <= process_status <= 255):
         raise SuspensionProtocolError('Completion disposition or process status differs')
+    if _read_private_record(context_path) != context:
+        raise SuspensionProtocolError('Completion context changed')
+    require_control_session(context)
     disposition = value['disposition']
     try:
         command = _read_private_record(context_path.parent / 'command.json')
@@ -164,13 +167,6 @@ def verify_completion(path, *, process_status, runner_pid):
             disposition = 'cancelled'
         if command['operation'] == 'invalidate':
             raise SuspensionProtocolError('Completion authority was invalidated')
-    if _read_private_record(context_path) != context:
-        raise SuspensionProtocolError('Completion context changed')
-    if not owner_alive(context['worker']) or not owner_alive(context['anchor']):
-        raise SuspensionProtocolError('Completion worker or protected anchor is unavailable')
-    anchor = context['anchor']['pid']
-    if os.getsid(0) != anchor or os.getsid(anchor) != anchor or os.getpgid(anchor) != anchor:
-        raise SuspensionProtocolError('Completion shell is outside its protected owned session')
     return disposition
 
 
@@ -221,7 +217,16 @@ def main(argv=None):
             write_completion(args.completion_record, result)
             return result['exit_code']
         return result
-    except (OSError, ValueError, KeyError) as exc:
+    except (OwnershipUnavailable, OSError) as exc:
+        # Missing or redirected required records contradict the shell handoff.
+        # A failed read of an otherwise bound record can be tried again.
+        if (args.operation == 'verify-completion' and
+                (isinstance(exc, OwnershipUnavailable) or exc.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP))):
+            print(f'Controlled ORCA completion temporarily unverifiable, retry: {exc}', file=sys.stderr)
+            return 75
+        print(f'Controlled ORCA refused: {exc}', file=sys.stderr)
+        return 69
+    except (ValueError, KeyError) as exc:
         print(f'Controlled ORCA refused: {exc}', file=sys.stderr)
         return 69
 

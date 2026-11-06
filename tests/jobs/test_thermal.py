@@ -347,10 +347,12 @@ class ThermalTests(unittest.TestCase):
         cpu=namedtuple('CPU','user system idle')
         provider=Mock()
         provider.snapshot.side_effect=RuntimeError('PRIVATE')
+        clock = Mock(return_value=1.)
         sampler=Sampler(thermal=provider,cpu_times=Mock(side_effect=[cpu(10,10,80),cpu(20,20,160)]),
                         virtual_memory=lambda:SimpleNamespace(total=1000,available=250),
-                        swap_memory=None,footprint=None,monotonic=Mock(side_effect=[1.,2.]))
+                        swap_memory=None,footprint=None,monotonic=clock)
         first,base=sampler._machine();sampler.machine_baseline=base
+        clock.return_value = 2.
         second,_=sampler._machine()
         self.assertEqual(second['ram_used_bytes'],750)
         self.assertAlmostEqual(second['cpu_percent'],20)

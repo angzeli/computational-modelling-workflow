@@ -31,6 +31,7 @@ class RunnerDrainageTests(unittest.TestCase):
         self.control.clock = {}
         self.control._registered = False
         self.control._state = 'run'
+        self.control.cancel_requested = False
         self.control._last_command = None
         self.control._last_ack_clock = None
         self.control.intervals = []
@@ -40,7 +41,7 @@ class RunnerDrainageTests(unittest.TestCase):
         self.control._check_authority = lambda **kwargs: None
         self.control._check_storage = lambda: None
         self.control._read = lambda name, **kwargs: self.control.context if name == 'context.json' else None
-        self.control._write = lambda *args: None
+        self.control._write = lambda name, value, before_publish: before_publish()
         stack = ExitStack()
         self.addCleanup(stack.close)
         for target, options in (
@@ -52,7 +53,8 @@ class RunnerDrainageTests(unittest.TestCase):
             ('cmw.jobs.suspension_protocol.psutil.Process', {'side_effect': self.process}),
             ('cmw.jobs.suspension_protocol.identity', {'side_effect': self.identity}),
             ('cmw.jobs.ownership.identity', {'side_effect': self.identity}),
-            ('cmw.jobs.suspension_protocol.owner_alive', {'return_value': True}),
+            ('cmw.jobs.ownership._legacy_identity', {'side_effect': self.identity}),
+            ('cmw.jobs.suspension_protocol.ancestor_pids', {'return_value': (100,)}),
             ('cmw.jobs.suspension_protocol.now_clock', {'return_value': 1.0}),
         ):
             stack.enter_context(patch(target, **options))
@@ -132,6 +134,38 @@ class RunnerDrainageTests(unittest.TestCase):
                           side_effect=[None, SuspensionProtocolError('Worker authority lost')]):
             self.assertFalse(self.control.domain_drained())
         self.assertIn('authority lost', self.control.last_error)
+
+    def test_missing_storage_holds_ordinary_completion_but_allows_cancelled_drainage(self):
+        self.state = 'absent'
+        self.members.remove(300)
+        def check(*, check_storage):
+            if check_storage:
+                raise PermissionError('storage unreadable')
+        with patch.object(self.control, '_check_authority', side_effect=check):
+            self.assertFalse(self.control.domain_drained())
+            self.assertIn('storage unreadable', self.control.last_error)
+            self.control.cancel_requested = True
+            self.assertTrue(self.control.domain_drained())
+
+    def test_final_registration_check_cannot_rebind_reused_or_vanished_root(self):
+        from cmw.jobs.process_identity import ConfirmedProcessAbsence
+
+        root = self.control._drain_known[300]
+        self.state = 'reused'
+        with self.assertRaisesRegex(SuspensionProtocolError, 'root changed'):
+            self.control._check_registration(root)
+        with patch('cmw.jobs.suspension_protocol.identity', side_effect=ConfirmedProcessAbsence()), \
+             patch('cmw.jobs.suspension_protocol.time.sleep') as sleep:
+            with self.assertRaisesRegex(SuspensionProtocolError, 'confirmed absent'):
+                self.control._wait_for_owner_read(lambda: self.control._check_registration(root))
+            sleep.assert_not_called()
+
+    def test_new_cancel_command_blocks_completion_until_applied(self):
+        self.state = 'absent'
+        self.members.remove(300)
+        late_cancel = {'operation': 'cancel', 'revision': 2, 'request_id': 'later'}
+        with patch.object(self.control, '_read', return_value=late_cancel):
+            self.assertFalse(self.control.domain_drained())
 
     def test_late_owned_descendant_prevents_root_exit_finalization(self):
         self.members.append(400)

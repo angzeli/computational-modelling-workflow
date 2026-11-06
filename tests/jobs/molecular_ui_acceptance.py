@@ -13,7 +13,7 @@ from cmw.jobs.folder_opener import OpenResult
 from cmw.jobs.molecular import submit
 from cmw.jobs.store import Store
 from cmw.progress.service import ObservationService
-from tests.jobs.ui_polish_acceptance import NOW, SIZES, scenario_projection, screenshot_text, settle
+from tests.jobs.ui_polish_acceptance import NOW, SIZES, projection_clock, scenario_projection, screenshot_text, settle
 from tests.molecular.orca.jobs_fixture import make_spec as orca_spec
 from tests.molecular.multiwfn.jobs_fixtures import make_spec as multiwfn_spec
 from tests.progress.orca_fixtures import cycle, header, scf
@@ -63,7 +63,7 @@ async def render_cases(store, cases, renders):
         with patch.object(store, 'snapshot', side_effect=lambda **_: deepcopy(state)), \
              patch.object(store, 'transaction', side_effect=AssertionError('UI must not write state')), \
              patch.object(JobsApp, 'collect_activity'), patch.object(JobsApp, 'collect_execution'), \
-             patch('subprocess.Popen', side_effect=AssertionError('UI must not execute')), patch('time.time', return_value=NOW):
+             patch('subprocess.Popen', side_effect=AssertionError('UI must not execute')), projection_clock():
             async with app.run_test(size=SIZES[0]) as pilot:
                 table = app.query_one('#table', DataTable)
                 table.move_cursor(row=app.row_ids.index(selected['display_id']), animate=False)

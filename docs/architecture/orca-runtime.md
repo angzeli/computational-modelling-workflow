@@ -89,6 +89,14 @@ runs in a separate group in the existing owned session using Python 3.11's
 `process_group` argument. Escaping-session and unobservable/dynamic unsupported domains fail
 closed; process-tree sampling is not an atomic kernel freeze.
 
+After the controlled driver exits, the shell checks its private completion
+record before copy-back or scientific finalization. The completion checker
+returns 75 while ownership or record contents are temporarily unreadable. The
+shell keeps scratch and retries the check with delays of one, two and then four
+seconds. Each retry reads the latest bound command after checking ownership so
+a cancellation can still inhibit finalization. A missing required record,
+confirmed identity loss or contradictory binding refuses the handoff.
+
 The supported ORCA runner has **no configured execution timeout** and acknowledges
 that known policy explicitly. This differs from an unknown external watchdog.
 Scratch directories, local MPI session storage, executable location and attempt

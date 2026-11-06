@@ -1,6 +1,6 @@
 """Actual cancellation coordinator with deterministic process/receipt races."""
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 import errno
 from pathlib import Path
@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 import psutil
 
 from cmw.jobs import ownership, suspension
+from cmw.jobs.ownership_hold import WorkerAuthority
 from cmw.jobs.store import JobsError, Store
 from tests.jobs.test_cancellation_ownership import ProcessTable
 
@@ -71,7 +72,7 @@ class CancellationCoordinatorTests(unittest.TestCase):
         row = self.table.row(pid)
         self.assertEqual(row['sid'], 10)
         self.assertNotEqual(row['pgid'], 10)
-        self.assertEqual(ownership.identity(pid), self.coordinator.observed[pid])
+        self.assertEqual(ownership.identity_for(self.table.anchor, pid), self.coordinator.observed[pid])
         self.sent.append((pid, signum))
         if self.on_signal:
             self.on_signal(pid, signum)
@@ -89,6 +90,46 @@ class CancellationCoordinatorTests(unittest.TestCase):
         self.assertTrue(self.table.rows[10]['present'])
         self.assertTrue(self.table.rows[90]['present'])
         self.assertFalse(any(signum for _, signum in self.table.signals()))
+
+    def test_raw_identity_read_error_during_cancel_holds_before_any_signal(self):
+        self.mpi = True
+        job = self.current()
+        authority = WorkerAuthority(self.store, job, self.table.anchor, Mock())
+        authority.wait = Mock(return_value=job)
+        self.coordinator.authority = authority
+        original = suspension.identity_for
+        failures = []
+        def read(member, pid=None):
+            if pid is None and not failures:
+                failures.append(member)
+                raise OSError(errno.EIO, 'Unreadable raw start token')
+            return original(member, pid)
+        def held(delay):
+            self.assertEqual(self.current()['ownership_holds']['domain']['check'], 'termination_target')
+            self.assertEqual(self.sent, [])
+        with patch.object(suspension, 'identity_for', side_effect=read), patch.object(authority, '_backoff', held):
+            self.step()
+        self.assertEqual(failures, [self.table.record(11)])
+        self.assertFalse(self.current().get('ownership_holds'))
+        self.assertEqual(self.sent, [(11, signal.SIGTERM)])
+
+    def test_cancel_target_changing_group_during_intent_acquisition_is_not_signalled(self):
+        self.domain()
+        self.coordinator.cancel_intent = self.current()
+        member = self.table.record(11)
+        gate = self.store.delivery_gate
+
+        @contextmanager
+        def change_group_at_delivery(**options):
+            self.table.rows[11]['pgid'] = 20
+            with gate(**options) as con:
+                yield con
+
+        with patch.object(self.store, 'delivery_gate', change_group_at_delivery):
+            with self.assertRaisesRegex(JobsError, 'changed group before delivery'):
+                self.coordinator._cancel_send(member, signal.SIGTERM)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.coordinator.termination_signals, set())
 
     def test_stopped_direct_root_gets_term_then_termination_cont_once(self):
         self.table.rows[11]['status'] = psutil.STATUS_STOPPED
@@ -333,6 +374,31 @@ class CancellationCoordinatorTests(unittest.TestCase):
             self.step()
         self.assert_retained()
 
+
+    def test_receipt_winning_ack_wait_cannot_authorize_later_fallback(self):
+        self.mpi = True
+        receipt = self.coordinator.directory.parent/'payload-exit.json'
+        receipt.write_text('{"exit_code":0,"recorded_at":1}')
+        with patch.object(self.coordinator, 'ready_to_release', return_value=True):
+            self.step()
+        self.coordinator.ack.assert_not_called()
+        self.assertFalse(self.coordinator.cancellation_prepared)
+        self.assertIsNone(self.coordinator.cancel_intent)
+        self.assertEqual(self.sent, [])
+
+        # A subsequent read no longer proves drainage. Require a real ACK
+        # before even the first TERM, regardless of the elapsed grace.
+        self.table.clock = 5.0
+        def ack(*args):
+            self.assertEqual(self.sent, [])
+            return {'status': 'cancel_prepared'}
+        self.coordinator.ack.side_effect = ack
+        with patch.object(self.coordinator, 'ready_to_release', return_value=False):
+            self.step()
+        self.coordinator.ack.assert_called_once()
+        self.assertTrue(self.coordinator.cancellation_prepared)
+        self.assertEqual(self.sent, [(11, signal.SIGTERM)])
+        self.assert_retained()
 
     def test_receipt_filename_cannot_release_without_verified_enrolled_domain(self):
         receipt = self.coordinator.directory.parent/'payload-exit.json'

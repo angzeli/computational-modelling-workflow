@@ -15,6 +15,7 @@ import unicodedata
 from uuid import uuid4
 
 from cmw.core.execution_layout import resolve_recorded_layout
+from .freshness import age_seconds, clock_stamp
 
 PENDING = {"Queue", "Hold"}
 ACTIVE = {"Starting", "Run", "Cancelling", "Unknown"}
@@ -139,52 +140,100 @@ class Store:
                             'Persisted argv, env and logs may be sensitive. Create/select a private directory '
                             'owned by your user with mode 0700 and use --state; existing permissions were not changed.')
 
+    @staticmethod
+    def _contention(exc):
+        code = getattr(exc, 'sqlite_errorcode', None)
+        return code is not None and (code & 0xff) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+
     @contextmanager
-    def transaction(self, *, create=True):
+    def _writer(self, wait):
+        # The detached worker may outlive a competing reader or writer.
+        # Retry only acquisition, never the body containing a control effect.
+        delay = .05
+        try:
+            while True:
+                con = None
+                try:
+                    con = sqlite3.connect(self.path.as_uri() + '?mode=rw', uri=True,
+                                          timeout=10 if wait is None else 0, isolation_level=None)
+                    con.execute('BEGIN IMMEDIATE')
+                except sqlite3.Error as exc:
+                    if con is not None:
+                        con.close()
+                    if wait is None or not self._contention(exc):
+                        raise
+                    wait(delay)
+                    delay = min(.5, 2 * delay)
+                    continue
+                break
+            try:
+                con.row_factory = sqlite3.Row
+                yield con
+            finally:
+                con.close()  # Rolls back a read gate or a failed transaction.
+        except sqlite3.Error as exc:
+            raise JobsError(f"Queue database unavailable: {exc}") from exc
+
+    def _commit(self, con, wait):
+        delay = .05
+        while True:
+            try:
+                con.commit()
+                return
+            except sqlite3.Error as exc:
+                if wait is None or not con.in_transaction or not self._contention(exc):
+                    raise
+                # A reader can block COMMIT. Keep the same transaction and
+                # repeat only COMMIT, without reexecuting the caller's work.
+                wait(delay)
+                delay = min(.5, 2 * delay)
+
+    def _schema(self, con):
+        row = con.execute("SELECT value FROM meta WHERE key='control'").fetchone()
+        schema = json.loads(row[0]).get('schema') if row else None
+        if type(schema) is not int or schema not in {1, 2, 3, 4}:
+            raise JobsError("Unsupported Jobs state schema")
+        if schema == 4:
+            self._queue_identity(con, schema)
+        return schema
+
+    @contextmanager
+    def delivery_gate(self, *, wait=None):
+        """Exclude other writers until delivery; allow observers and never write."""
+        self.ensure_private_root(create=False)
+        with self._writer(wait) as con:
+            con.execute('PRAGMA query_only=ON')
+            if self._schema(con) == 1:
+                raise JobsError('Legacy Jobs queue cannot authorize control delivery')
+            yield con
+
+    @contextmanager
+    def transaction(self, *, create=True, wait=None):
         self.ensure_private_root(create=create)
         if create:
             with open(self.path, 'ab', opener=private_opener):
                 pass
-        try:
-            con = sqlite3.connect(self.path.as_uri() + '?mode=rw', uri=True,
-                                  timeout=10, isolation_level=None)
-        except sqlite3.Error as exc:
-            raise JobsError(f"Queue database unavailable: {exc}") from exc
-        con.row_factory = sqlite3.Row
-        try:
-            con.execute("PRAGMA busy_timeout=10000")
-            con.execute("BEGIN IMMEDIATE")
+        with self._writer(wait) as con:
             con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             con.execute("CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL)")
             con.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, time REAL, job_id INTEGER, message TEXT)")
             con.execute("INSERT OR IGNORE INTO meta VALUES ('control', ?)", (json.dumps({"schema": 2, "dispatch": False, "stop": False, "reason": "Not started", "heartbeat": None, "owner": None, "scheduler": scheduler_defaults()}),))
-            raw_control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
-            if type(raw_control.get('schema')) is not int or raw_control['schema'] not in {1, 2, 3, 4}:
-                raise JobsError("Unsupported Jobs state schema")
-            if raw_control['schema'] == 4:
-                self._queue_identity(con, raw_control['schema'])
-            if raw_control['schema'] == 1:
+            if self._schema(con) == 1:
                 # Old supervisors reject schema 2 on their next receipt/finalize
                 # transaction. Keep their state readable until they are done.
-                from .ownership import lock_held, owner_alive
+                from .ownership import lock_held
+                from .ownership_hold import blocks_replacement
+                control = self.control(con)
                 if (any(job['status'] in ACTIVE for job in self.rows(con)) or
-                        lock_held(self.root/'controller.lock') or owner_alive(raw_control.get('owner'))):
+                        lock_held(self.root/'controller.lock') or blocks_replacement(control.get('owner'))):
                     raise JobsError('Legacy Jobs runtime still active or unresolved; let legacy attempts finish '
                                     'and stop the legacy controller with its original installation before migration')
-                control = self.control(con)
                 self.set_control(con, control)
                 for job in self.rows(con):
                     self.save(con, job)
             yield con
-            con.commit()
-        except sqlite3.Error as exc:
-            con.rollback()
-            raise JobsError(f"Queue database unavailable: {exc}") from exc
-        except BaseException:
-            con.rollback()
-            raise
-        finally:
-            con.close()
+            if con.in_transaction:
+                self._commit(con, wait)
 
     def _queue_identity(self, con, schema):
         row = con.execute("SELECT value FROM meta WHERE key='queue_identity'").fetchone()
@@ -275,9 +324,10 @@ class Store:
                 if (existing['node_id'], existing['host_id']) != (node_id, host_id):
                     raise JobsError('Queue is already enrolled to another node or host identity')
                 return existing
-            from .ownership import lock_held, owner_alive
+            from .ownership import lock_held
+            from .ownership_hold import blocks_replacement
             if (any(job['status'] in ACTIVE for job in self.rows(con))
-                    or lock_held(self.root / 'controller.lock') or owner_alive(control.get('owner'))):
+                    or lock_held(self.root / 'controller.lock') or blocks_replacement(control.get('owner'))):
                 raise JobsError('Queue enrollment requires no active or unresolved attempts and an offline controller')
             root_info, database_info = self.root.stat(), self.path.stat()
             record = {'schema': 1, 'node_id': node_id, 'host_id': host_id,
@@ -409,7 +459,7 @@ class Store:
         keys = ('id', 'attempt_id', 'display_id', 'name', 'engine', 'argv', 'cwd', 'env',
                 'status', 'order', 'claim', 'claimed_at', 'worker', 'worker_protocol', 'group',
                 'started_at', 'finished_at', 'cancel_requested', 'termination_requested',
-                'resources', 'scheduling', 'sharing_anchor', 'on_failure')
+                'resources', 'scheduling', 'sharing_anchor', 'on_failure', 'ownership_holds')
         result = {key: job.get(key) for key in keys}
         suspension = job.get('suspension') or {}
         result['suspension'] = {key: suspension.get(key) for key in
@@ -755,7 +805,7 @@ class Store:
 
     def _dispatch(self, con, enabled):
         control = self.control(con)
-        if enabled and any(j["status"] in {"Unknown", "Cancelling"} for j in self.rows(con)):
+        if enabled and any(j.get("ownership_holds") or j["status"] in {"Unknown", "Cancelling"} for j in self.rows(con)):
             raise JobsError("Needs attention or cancellation is unresolved; dispatch remains paused")
         control.update(dispatch=bool(enabled), reason="" if enabled else "User pause")
         self.set_control(con, control)
@@ -840,14 +890,19 @@ class Store:
                     control, jobs = self.control(con), self.rows(con)
                     if control['schema'] == 4:
                         queue_identity = self._queue_identity(con, control['schema'])
-                    events = [dict(zip(("id", "time", "job_id", "message"), row)) for row in con.execute("SELECT * FROM events ORDER BY id DESC LIMIT 30")][::-1]
+                    from .guard_history import GUARD_ROWS
+                    # Keep recent queue and job history visible during a flood of guard observations.
+                    recent = (f"SELECT * FROM (SELECT * FROM events WHERE {GUARD_ROWS} ORDER BY id DESC LIMIT 30) "
+                              f"UNION ALL SELECT * FROM (SELECT * FROM events WHERE NOT ({GUARD_ROWS}) "
+                              "ORDER BY id DESC LIMIT 30) ORDER BY id")
+                    events = [dict(zip(("id", "time", "job_id", "message"), row)) for row in con.execute(recent)]
             except sqlite3.Error as exc:
                 raise JobsError(f"Queue database unavailable: {exc}") from exc
             finally:
                 con.close()
         from .ownership import owner_alive, lock_held
         online = bool(control["owner"] and owner_alive(control["owner"]) and lock_held(self.root / "controller.lock"))
-        age = None if control["heartbeat"] is None else max(0, now - control["heartbeat"])
+        age = age_seconds(control.get("heartbeat_clock"), clock_stamp()) if control.get("heartbeat_clock") else None
         stale = bool(online and (age is None or age > 5))
         current = [j for j in jobs if j["status"] in ACTIVE]
         pending = sorted((j for j in jobs if j["status"] in PENDING), key=lambda j: j["order"])

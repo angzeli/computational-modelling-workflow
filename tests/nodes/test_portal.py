@@ -17,6 +17,7 @@ from uuid import uuid4
 from cmw.jobs.clipboard import CopyResult
 from cmw.jobs.source_selection import SourceInspection, SourceValidation, SessionSelection
 from cmw.nodes.codec import encode_typed
+from cmw.core.provenance import stable_hash
 from cmw.nodes.protocol import NodeError
 from cmw.progress.models import HistoryPage, HistoryEntry, SourceDescriptor
 from tests.progress.test_electronic_notation import electronic_example
@@ -33,6 +34,8 @@ class FakeBackend:
     def __init__(self, alias, *, remote=False):
         self.alias, self.queue = alias, 'research'
         self.node_id, self.queue_id = uuid4().hex, uuid4().hex
+        self.sample_stamp = {'boot_session_id': str(uuid4()), 'monotonic': 9000000.}
+        self.clock_id = stable_hash({'host': 'darwin:' + alias, 'boot': self.sample_stamp['boot_session_id']})
         self.connection = {'transport': 'ssh' if remote else 'local', 'read_only': False}
         self.calls, self.blocks = [], {}
         self.fail = False
@@ -71,7 +74,7 @@ class FakeBackend:
         elif operation == 'status':
             result = {'state': {'jobs': deepcopy(self.jobs), 'controller': {'online': True, 'dispatch': True},
                 'job_usage': {self.jobs[0]['attempt_id']: {'cpu_cores': 7.91, 'cpu_quality': 'complete',
-                    'rss_bytes': 2**30, 'memory_quality': 'complete', 'age_seconds': 0}},
+                    'rss_bytes': 2**30, 'memory_quality': 'complete', 'observed_clock': self.sample_stamp, 'age_seconds': 0}},
                 'external_activity': {'state': 'NO_MATCH'}, 'admission': {'permitted': False}},
                 'has_more': False}
         elif operation == 'progress':
@@ -103,7 +106,7 @@ class FakeBackend:
             result = {'cleared': True}
         elif operation == 'control.preview':
             result = {'ready': True, 'reasons': [], 'confirmation_required': True, 'node_id': self.node_id,
-                'queue_id': self.queue_id, 'target': target, 'action': params['action'], 'expected_clock_id': 'clock-' + self.alias,
+                'queue_id': self.queue_id, 'target': target, 'action': params['action'], 'expected_clock_id': self.clock_id,
                 'expected_revision': {'job': 3 if target else None, 'queue': 9}, **({'position': params['position']} if 'position' in params else {})}
         elif operation.startswith('review.'):
             raise NodeError('UNSUPPORTED_REVIEW', 'Synthetic older endpoint has no review capability')
@@ -113,7 +116,7 @@ class FakeBackend:
             raise AssertionError(operation)
         return {'schema': 1, 'node_id': self.node_id, 'queue_id': self.queue_id, 'queue_alias': self.queue,
             'session_id': self.session, 'sequence': self.sequence, 'observed_at': 112.,
-            'clock_id': 'clock-' + self.alias, 'runtime': {'fingerprint': 'runtime-' + self.alias, 'version': 'test'},
+            'clock_id': self.clock_id, 'runtime': {'fingerprint': 'runtime-' + self.alias, 'version': 'test'},
             'host': {'platform': 'darwin', 'hardware_id': self.alias}, 'result': result}
 
 

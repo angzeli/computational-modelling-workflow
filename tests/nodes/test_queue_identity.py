@@ -241,11 +241,20 @@ finally:
 
     def test_controller_lock_or_owner_prevents_schema_promotion(self):
         self.add()
-        for symbol in ('lock_held', 'owner_alive'):
-            with self.subTest(symbol=symbol), patch('cmw.jobs.ownership.' + symbol, return_value=True):
+        from cmw.jobs.ownership import identity
+        with patch('cmw.jobs.ownership.lock_held', return_value=True):
+            with self.assertRaisesRegex(JobsError, 'offline controller'):
+                self.enroll()
+        current = identity()
+        for recorded in (current, {**current, 'host': 'other-node'}):
+            with self.subTest(host=recorded['host']):
+                with self.store.transaction() as con:
+                    control = self.store.control(con)
+                    control['owner'] = recorded
+                    self.store.set_control(con, control)
                 with self.assertRaisesRegex(JobsError, 'offline controller'):
                     self.enroll()
-        self.assertIsNone(self.store.queue_identity())
+                self.assertIsNone(self.store.queue_identity())
 
     def test_enrollment_record_and_schema_share_one_commit(self):
         self.add()

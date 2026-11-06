@@ -1,30 +1,181 @@
 """Kernel locks and birth identity; never identify ownership by engine name."""
 from contextlib import contextmanager
+from dataclasses import asdict, dataclass
+from enum import StrEnum
 import errno
 import fcntl
+import math
 import os
 from pathlib import Path
 import socket
 import time
+from uuid import UUID
 
 import psutil
 
+from . import process_identity
+from .process_identity import boot_session_id
 from .store import JobsError, private_opener
 
 
+class OwnershipStatus(StrEnum):
+    VERIFIED = 'VERIFIED'
+    GONE = 'GONE'
+    UNVERIFIABLE = 'UNVERIFIABLE'
+
+
+@dataclass
+class OwnershipObservation:
+    status: OwnershipStatus
+    deciding_check: str
+    record_version: int | None
+    boot_session: str | None
+    checks: dict
+
+    def as_dict(self):
+        return asdict(self)
+
+
 def identity(pid=None):
-    process = psutil.Process(os.getpid() if pid is None else pid)
-    return {"pid": process.pid, "birth": process.create_time(), "host": socket.gethostname(), "boot": psutil.boot_time()}
+    return process_identity.capture(pid)
+
+
+def _legacy_identity(pid):
+    process = psutil.Process(pid)
+    return {'pid': process.pid, 'birth': process.create_time(), 'host': socket.gethostname(),
+            'boot': psutil.boot_time()}
+
+
+def identity_for(record, pid=None):
+    """Recapture in the originating format, including members of a v1 session."""
+    pid = record['pid'] if pid is None else pid
+    if record.get('version', 1) == 1 and 'boot' in record:
+        return _legacy_identity(pid)
+    return identity(pid)
+
+
+def valid_owner_record(record):
+    if not isinstance(record, dict):
+        return False
+    version = record.get('version', 1)
+    if (type(version) is not int or type(record.get('pid')) is not int or
+            not 0 < record['pid'] <= 2**31 - 1 or not isinstance(record.get('host'), str)
+            or not record['host']):
+        return False
+    if version == 1:
+        return all(type(record.get(key)) is int or
+                   (type(record.get(key)) is float and math.isfinite(record[key]))
+                   for key in ('boot', 'birth'))
+    if version != 2 or type(record.get('start_token')) is not int or record['start_token'] < 0:
+        return False
+    try:
+        return str(UUID(record['boot_session'])) == record['boot_session']
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
+def observe_owner(record):
+    """Observe ownership. Absence needs positive evidence on the recorded host."""
+    status = OwnershipStatus
+    version = record.get('version', 1) if isinstance(record, dict) else None
+    current_boot_session = None
+    checks = {}
+
+    def check(name, recorded, observed, result, reason):
+        checks[name] = {'recorded': recorded, 'observed': observed, 'result': result, 'reason': reason}
+
+    def finish(result, name):
+        return OwnershipObservation(result, name, version, current_boot_session, checks)
+
+    if not valid_owner_record(record):
+        check('record', record, None, status.UNVERIFIABLE, 'Incomplete or unsupported identity record')
+        return finish(status.UNVERIFIABLE, 'record')
+    pid = record['pid']
+    boot_key, start_key = ('boot_session', 'start_token') if version == 2 else ('boot', 'birth')
+    for name in ('host', boot_key, 'pid', start_key, 'process_status'):
+        expected = 'live' if name == 'process_status' else record[name]
+        check(name, expected, None, status.UNVERIFIABLE, 'Not observed')
+    field = 'host'
+    try:
+        host = socket.gethostname()
+        if host != record['host']:
+            check(field, record[field], host, status.UNVERIFIABLE, 'Recorded host differs from this host')
+            return finish(status.UNVERIFIABLE, field)
+        check(field, record[field], host, status.VERIFIED, 'Host matches')
+        field = boot_key
+        if version == 2:
+            boot = current_boot_session = boot_session_id()
+            if str(UUID(boot)) != boot:
+                raise ValueError('Incomplete kernel boot UUID')
+        else:
+            # Advisory context for v1 diagnosis. The boot UUID was never recorded by v1.
+            try:
+                current_boot_session = boot_session_id()
+            except Exception:
+                pass
+            boot = psutil.boot_time()
+        if boot != record[field]:
+            result = status.GONE if version == 2 else status.UNVERIFIABLE
+            check(field, record[field], boot, result, 'Boot session differs' if version == 2 else
+                  'Legacy wall-clock boot timestamp differs')
+            return finish(result, field)
+        check(field, record[field], boot, status.VERIFIED, 'Boot evidence matches')
+        field = start_key
+        if version == 2:
+            token, ended = process_identity.process_evidence(pid)
+            if type(token) is not int or token < 0 or type(ended) is not bool:
+                raise ValueError('Incomplete kernel process evidence')
+        else:
+            process = psutil.Process(pid)
+            token = process.create_time()
+        check('pid', pid, pid, status.VERIFIED, 'PID observed')
+        if token != record[field]:
+            result = status.GONE if version == 2 else status.UNVERIFIABLE
+            check(field, record[field], token, result, 'Kernel start token differs' if version == 2 else
+                  'Legacy adjusted process birth differs')
+            return finish(result, field)
+        check(field, record[field], token, status.VERIFIED, 'Start evidence matches')
+        if version == 1:
+            field = 'process_status'
+            ended = process.status() in {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}
+            field = start_key
+            after = psutil.Process(pid).create_time()
+            if after != token:
+                check(field, record[field], after, status.UNVERIFIABLE, 'Legacy birth changed during observation')
+        check('process_status', 'live', 'zombie/dead' if ended else 'live',
+              status.UNVERIFIABLE if ended else status.VERIFIED,
+              'Process has exited but still occupies its PID' if ended else 'Process is live')
+    except (psutil.ZombieProcess, PermissionError, psutil.AccessDenied) as exc:
+        check(field, checks[field]['recorded'], None, status.UNVERIFIABLE, type(exc).__name__)
+        return finish(status.UNVERIFIABLE, field)
+    except (psutil.NoSuchProcess, ProcessLookupError) as exc:
+        # ESRCH from a boot or host query cannot establish process absence.
+        if field in (start_key, 'process_status'):
+            check('pid', pid, None, status.GONE, 'Kernel confirms PID is absent')
+            return finish(status.GONE, 'pid')
+        check(field, checks[field]['recorded'], None, status.UNVERIFIABLE, type(exc).__name__)
+        return finish(status.UNVERIFIABLE, field)
+    except Exception as exc:
+        check(field, checks[field]['recorded'], None, status.UNVERIFIABLE, type(exc).__name__)
+        return finish(status.UNVERIFIABLE, field)
+
+    for field, row in checks.items():
+        if row['result'] != status.VERIFIED:
+            return finish(row['result'], field)
+    return finish(status.VERIFIED, 'identity')
 
 
 def owner_alive(owner):
-    if not owner or owner.get("host") != socket.gethostname() or owner.get("boot") != psutil.boot_time():
-        return False
-    try:
-        process = psutil.Process(owner["pid"])
-        return process.create_time() == owner["birth"] and process.status() != psutil.STATUS_ZOMBIE
-    except (psutil.Error, KeyError):
-        return False
+    """Historical runners need a Boolean. Only a complete matching read grants authority."""
+    deadline = time.monotonic() + 0.1
+    result = observe_owner(owner)
+    # psutil's old Process constructor tolerated one denied read before CMW's
+    # explicit birth check. Repeat the full observation, never part of a record.
+    # Don't sleep: that could make exception cleanup observe recovery after the
+    # original operation already gave up, while its payload still drains.
+    if result.status is OwnershipStatus.UNVERIFIABLE and time.monotonic() < deadline:
+        result = observe_owner(owner)
+    return result.status is OwnershipStatus.VERIFIED
 
 
 @contextmanager
@@ -59,30 +210,73 @@ def lock_held(path, *, strict=False):
         return True  # Inaccessible ownership must not authorize dispatch.
 
 
+class OwnershipUnavailable(JobsError):
+    """A read-only session observation can be retried without replaying control."""
+
+    def __init__(self, deciding_check, message):
+        super().__init__(message)
+        self.deciding_check = deciding_check
+
+
+def _session_read(check, observe):
+    try:
+        return observe()
+    except JobsError:
+        raise
+    except Exception as exc:
+        raise OwnershipUnavailable(check, 'Managed process group is not fully observable') from exc
+
+
 def group_members(pgid, *, pids=None, process_factory=psutil.Process, session=False):
     """Only inspect membership of the group we created. No engine-name discovery."""
-    members = []
     membership = os.getsid if session else os.getpgid
-    for pid in psutil.pids() if pids is None else pids:
-        # POSIX PID 0 means the caller to getsid/getpgid, not the kernel row.
-        if pid <= 0:
-            continue
-        try:
-            if membership(pid) == pgid and process_factory(pid).status() != psutil.STATUS_ZOMBIE:
-                members.append(pid)
-        except (ProcessLookupError, psutil.NoSuchProcess):
-            continue
-        except (PermissionError, psutil.AccessDenied) as exc:
-            # A group member whose state is unreadable cannot be declared ended.
+
+    def scan():
+        members = []
+        for pid in psutil.pids() if pids is None else pids:
+            # POSIX PID 0 means the caller to getsid/getpgid, not the kernel row.
+            if pid <= 0:
+                continue
             try:
-                if membership(pid) == pgid:
-                    raise JobsError("Managed process group is not fully observable") from exc
-            except ProcessLookupError:
-                pass
-    return members
+                if membership(pid) == pgid and process_factory(pid).status() != psutil.STATUS_ZOMBIE:
+                    members.append(pid)
+            except psutil.ZombieProcess as exc:
+                raise OwnershipUnavailable('group_members', 'Member state is unreadable') from exc
+            except (ProcessLookupError, psutil.NoSuchProcess):
+                continue
+            except (PermissionError, psutil.AccessDenied) as exc:
+                # An unreadable member cannot be declared ended. The PID may
+                # have changed groups or disappeared since the first read.
+                try:
+                    if membership(pid) == pgid:
+                        raise OwnershipUnavailable('group_members', 'Managed process group is not fully observable') from exc
+                except ProcessLookupError:
+                    pass
+        return members
+
+    return _session_read('group_members', scan)
+
+
+def _require_same_member(record, current, message):
+    if current == record:
+        return
+    for field in ('host', 'boot', 'birth'):
+        if field in record and record[field] != current.get(field):
+            # A v1 mismatch or foreign host cannot establish a lost owner.
+            raise OwnershipUnavailable(field, message)
+    raise JobsError(message)
 
 
 def snapshot_owned_session(owner, known=()):
+    try:
+        return _snapshot_owned_session(owner, known)
+    except JobsError:
+        raise
+    except Exception as exc:
+        raise OwnershipUnavailable('session_observation', 'Session evidence cannot be read') from exc
+
+
+def _snapshot_owned_session(owner, known):
     """Observe an anchored session without equating exit races with drainage.
 
     ``known`` contains original birth identities retained by the cancellation
@@ -102,14 +296,16 @@ def snapshot_owned_session(owner, known=()):
 
     def verify_anchor():
         try:
-            if (identity(sid) != owner or os.getsid(sid) != sid or os.getpgid(sid) != sid
-                    or psutil.Process(sid).status() in
-                    {psutil.STATUS_STOPPED, psutil.STATUS_TRACING_STOP,
-                     psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}
-                    or identity(sid) != owner):
-                raise JobsError('Protected session authority is unavailable')
+            message = 'Protected session authority is unavailable'
+            _require_same_member(owner, identity_for(owner), message)
+            if os.getsid(sid) != sid or os.getpgid(sid) != sid:
+                raise JobsError(message)
+            if psutil.Process(sid).status() in {
+                    psutil.STATUS_STOPPED, psutil.STATUS_TRACING_STOP, psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+                raise OwnershipUnavailable('process_status', message)
+            _require_same_member(owner, identity_for(owner), message)
         except (OSError, psutil.Error) as exc:
-            raise JobsError('Protected session authority is unavailable') from exc
+            raise OwnershipUnavailable('anchor', 'Protected session authority is unavailable') from exc
 
     def pending(member, reason):
         result['pending'].append({'identity': member, 'reason': reason})
@@ -117,19 +313,18 @@ def snapshot_owned_session(owner, known=()):
     def disappearance(pid, member):
         # A failed getsid/getpgid is not independently verified process exit.
         try:
-            current = identity(pid)
+            current = identity_for(member)
         except psutil.ZombieProcess:
             pending(member, 'Original process has unreadable zombie metadata')
-        except psutil.NoSuchProcess:
+        except (psutil.NoSuchProcess, process_identity.ConfirmedProcessAbsence):
             if pid in originals:
                 result['absent'].append(originals[pid])
         except ProcessLookupError:
             pending(member, 'Original identity query returned ESRCH without independent absence')
         except (PermissionError, psutil.AccessDenied) as exc:
-            raise JobsError('Original session member is not fully observable') from exc
+            raise OwnershipUnavailable('session_member', 'Original session member is not fully observable') from exc
         else:
-            if current != member:
-                raise JobsError('Original session member identity changed')
+            _require_same_member(member, current, 'Original session member identity changed')
             pending(member, 'Original birth identity remains readable while topology is unavailable')
 
     verify_anchor()
@@ -146,32 +341,31 @@ def snapshot_owned_session(owner, known=()):
             except ProcessLookupError:
                 continue
             except PermissionError as exc:
-                raise JobsError('Session membership is not fully observable') from exc
+                raise OwnershipUnavailable('session_id', 'Session membership is not fully observable') from exc
         member = original
         try:
-            current = identity(pid)
-            if original is not None and current != original:
-                raise JobsError('Original session member identity changed')
+            current = identity_for(original or owner, pid)
+            if original is not None:
+                _require_same_member(original, current, 'Original session member identity changed')
             member = current
             if os.getsid(pid) != sid:
                 raise JobsError('Original session member escaped its owned session')
             pgid = os.getpgid(pid)
             process = psutil.Process(pid)
             status, ppid = process.status(), process.ppid()
-            if identity(pid) != member:
-                raise JobsError('Session member identity changed during observation')
+            _require_same_member(member, identity_for(member), 'Session member identity changed during observation')
             if os.getsid(pid) != sid or os.getpgid(pid) != pgid:
                 raise JobsError('Session member topology changed during observation')
         except psutil.ZombieProcess:
             if member is None:
-                raise JobsError('Session zombie identity cannot be verified')
+                raise OwnershipUnavailable('session_member', 'Session zombie identity cannot be verified')
             pending(member, 'Original process has unreadable zombie metadata')
         except (ProcessLookupError, psutil.NoSuchProcess):
             if member is None:
                 continue
             disappearance(pid, member)
         except (PermissionError, psutil.AccessDenied) as exc:
-            raise JobsError('Original session member is not fully observable') from exc
+            raise OwnershipUnavailable('session_member', 'Original session member is not fully observable') from exc
         else:
             result['members'].append({'identity': member, 'pgid': pgid,
                                       'status': status, 'ppid': ppid})
@@ -179,7 +373,8 @@ def snapshot_owned_session(owner, known=()):
     return result
 
 
-def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
+def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check_authority=None,
+                   read_domain=None, send_group=None):
     """Signal birth-verified groups in an explicitly owned session.
 
     A trusted sole foreground payload may exclude the protected leader group
@@ -188,9 +383,27 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
     """
     sid = owner['pid']
 
+    def read(check, observation):
+        if read_domain is None:
+            return observation()
+        return read_domain(lambda: _session_read(check, observation))
+
+    def live(member):
+        if read_domain is None:
+            return owner_alive(member)
+        outcome = observe_owner(member)
+        if outcome.status == OwnershipStatus.UNVERIFIABLE:
+            raise OwnershipUnavailable(outcome.deciding_check, 'Session member ownership cannot be verified')
+        return outcome.status == OwnershipStatus.VERIFIED
+
+    def require_anchor():
+        if not live(owner) or os.getsid(sid) != sid or os.getpgid(sid) != sid:
+            raise JobsError('Dedicated session ownership lost or unverified; no signal sent')
+
     def verify_owner():
-        if not owner_alive(owner) or os.getsid(sid) != sid or os.getpgid(sid) != sid:
-            raise JobsError('Dedicated session ownership lost; no signal sent')
+        if check_authority is not None:
+            check_authority()
+        read('anchor_topology', require_anchor)
 
     def await_absence(pgid):
         # Observation only: a reaping group can briefly be positive or denied.
@@ -211,10 +424,10 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
     def witness_exited(member):
         # owner_alive(False) also includes access denial and cannot prove exit.
         try:
-            if identity(member['pid']) != member:
+            if identity_for(member) != member:
                 return False
             return (psutil.Process(member['pid']).status() == psutil.STATUS_ZOMBIE
-                    and identity(member['pid']) == member)
+                    and identity_for(member) == member)
         except psutil.ZombieProcess:
             return False  # An unreadable zombie is not a birth-verified zombie.
         except (ProcessLookupError, psutil.NoSuchProcess):
@@ -222,34 +435,58 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
         except (PermissionError, psutil.AccessDenied):
             return False
 
-    verify_owner()
-    groups = {sid: [owner]}
-    for pid in group_members(sid, session=True):
+    def collect_groups():
+        groups = {sid: [owner]}
+        if read_domain is not None:
+            require_anchor()
+        for pid in group_members(sid, session=True):
+            try:
+                member = identity_for(owner, pid)
+                pgid = os.getpgid(pid)
+                if os.getsid(pid) != sid:
+                    raise JobsError('Session subgroup identity cannot be verified')
+                groups.setdefault(pgid, []).append(member)
+            except psutil.ZombieProcess as exc:
+                raise OwnershipUnavailable('session_member', 'Session member evidence is unavailable') from exc
+            except (ProcessLookupError, psutil.NoSuchProcess):
+                continue
+        return groups
+
+    def witness(member, pgid):
         try:
-            member = identity(pid)
-            pgid = os.getpgid(pid)
-            if os.getsid(pid) != sid:
+            if not live(member):
+                return False
+            if os.getsid(member['pid']) != sid or os.getpgid(member['pid']) != pgid:
                 raise JobsError('Session subgroup identity cannot be verified')
-            groups.setdefault(pgid, []).append(member)
+            return live(member)
         except (ProcessLookupError, psutil.NoSuchProcess):
-            continue
+            return False
+
+    def final_witness(member, pgid):
+        # A suspended observation may have waited. Rebuild both the anchor
+        # authority and the witness topology before addressing a numeric PGID.
+        if read_domain is not None:
+            require_anchor()
+        return witness(member, pgid)
+
+    verify_owner()
+    groups = read('session_groups', collect_groups)
     for pgid in sorted(groups.keys() - {sid}) + ([sid] if include_leader else []):
         verify_owner()
         for member in groups[pgid]:
-            if not owner_alive(member):
+            if not read('session_member', lambda: witness(member, pgid)):
                 continue
-            try:
-                if os.getsid(member['pid']) != sid or os.getpgid(member['pid']) != pgid:
-                    raise JobsError('Session subgroup identity cannot be verified')
-                verify_owner()
-                if not owner_alive(member):
-                    continue
-            except ProcessLookupError:
+            verify_owner()
+            if not read('session_member', lambda: final_witness(member, pgid)):
                 continue
             # A current birth-verified member witnesses a leaderless group.
             # Numeric PGID alone never authorizes a signal.
             try:
-                os.killpg(pgid, signum)
+                if send_group is None:
+                    os.killpg(pgid, signum)
+                elif not send_group(pgid, signum, lambda: _session_read(
+                        'signal_witness', lambda: final_witness(member, pgid))):
+                    continue
             except ProcessLookupError:
                 continue
             except PermissionError as exc:
@@ -286,8 +523,11 @@ A live replacement with the original leader PID is never accepted.
         return [], 'Managed membership unavailable'
     if not lock_held(store.root/'attempts'/job['attempt_id']/'worker.lock', strict=True):
         return [], 'Managed guardian lock unavailable'
+    def read_identity(pid):
+        return identity_for(group, pid) if identity_provider is identity else identity_provider(pid)
+
     try:
-        if identity_provider(group['pid']) != group:
+        if read_identity(group['pid']) != group:
             return [], 'Managed group leader identity changed'
     except (psutil.NoSuchProcess, ProcessLookupError):
         pass
@@ -295,8 +535,9 @@ A live replacement with the original leader PID is never accepted.
     session = job.get('env', {}).get('CMW_JOBS_OWN_SESSION') == '1'
     for pid in group_members(group['pid'], pids=pids, process_factory=process_factory, session=session):
         try:
-            owner = identity_provider(pid)
-            if (owner['host'] != group['host'] or owner['boot'] != group['boot'] or
+            owner = read_identity(pid)
+            boot_key = 'boot_session' if group.get('version') == 2 else 'boot'
+            if (owner['host'] != group['host'] or owner.get(boot_key) != group[boot_key] or
                     os.getsid(pid) != group['pid'] or (not session and os.getpgid(pid) != group['pid'])):
                 continue
             members.append({'identity': owner, 'pgid': os.getpgid(pid)})

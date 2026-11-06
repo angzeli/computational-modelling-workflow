@@ -7,6 +7,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs import activity, ownership, runtime
 from cmw.jobs.store import Store
 from tests.jobs import test_activity as fixtures
@@ -15,7 +16,7 @@ from tests.jobs.isolated_runtime import install
 
 def clear():
     return {'state': 'NO_MATCH', 'reason': 'Fixture clear', 'observations': [],
-            'observed_at': time.time(), 'stale': False, 'coverage': {'complete': True, 'warnings': []}}
+            'observed_clock': clock_stamp(), 'observed_at': time.time(), 'stale': False, 'coverage': {'complete': True, 'warnings': []}}
 
 
 class GuardBoundaryTests(unittest.TestCase):
@@ -53,6 +54,7 @@ class GuardBoundaryTests(unittest.TestCase):
             stack.enter_context(patch.object(runtime, 'identity', side_effect=lambda pid=None: fixtures.owner(pid or 700)))
             stack.enter_context(patch.object(runtime, 'group_exists', return_value=False))
             stack.enter_context(patch.object(runtime, 'owner_alive', return_value=True))
+            stack.enter_context(patch('cmw.jobs.ownership_hold.observe_owner', return_value=Mock(status='VERIFIED')))
             # Only dispatch-authority lock evidence is replaced; the worker still
             # acquires/releases its real isolated attempt lock through exclusive.
             stack.enter_context(patch.object(runtime, 'lock_held', return_value=True))

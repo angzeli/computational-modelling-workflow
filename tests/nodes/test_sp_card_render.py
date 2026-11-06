@@ -15,7 +15,7 @@ from cmw.nodes.protocol import NodeError
 from cmw.progress.formatting import cell_width, progress_text
 from cmw.progress.models import ProgressSnapshot
 from cmw.progress.vasp_card import vasp_card_groups
-from tests.jobs.ui_polish_acceptance import NOW, scenario_projection, screenshot_text
+from tests.jobs.ui_polish_acceptance import NOW, projection_clock, scenario_projection, screenshot_text
 from tests.nodes.test_portal import FakeBackend
 from tests.progress.test_scientific_card import example
 
@@ -98,7 +98,7 @@ async def local_views(root, output=None):
          patch.object(JobsApp, 'collect_activity'), patch.object(JobsApp, 'collect_progress'), \
          patch.object(JobsApp, 'collect_execution'), patch.object(JobsApp, 'selected_execution', return_value=operational), \
          patch('subprocess.Popen', side_effect=AssertionError('No process launch')), \
-         patch('time.time', return_value=NOW):
+         projection_clock():
         async with app.run_test(size=SIZES[0]) as pilot:
             table = app.query_one('#table', DataTable)
             table.move_cursor(row=app.row_ids.index(selected['display_id']), animate=False)

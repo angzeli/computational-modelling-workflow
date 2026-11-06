@@ -4,6 +4,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs.activity import admission
 from cmw.jobs.cli import guard_text
 from cmw.jobs.status_presentation import admission_presentation, scheduling_detail
@@ -21,7 +22,7 @@ def state_fixture(*, running=True, queued=False):
              'external_activity': {
                  'state': 'NO_MATCH', 'reason': 'No recognized external computation observed',
                  'source': 'client', 'scope': 'Synthetic recognized-executable scope',
-                 'observed_at': time.time(), 'age_seconds': 0, 'stale': False,
+                 'observed_clock': clock_stamp(), 'observed_at': time.time(), 'age_seconds': 0, 'stale': False,
                  'observations': [], 'coverage': {'complete': True, 'uncertainties': 0,
                                                 'warnings': [], 'limitations': []}}}
     state['admission'] = admission(state, state['external_activity'])

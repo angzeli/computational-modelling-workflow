@@ -190,9 +190,21 @@ class TelemetryTests(unittest.TestCase):
     def test_age_projection_is_pure_and_marks_stale(self):
         usage = self.sample()
         original = copy.deepcopy(usage)
-        aged = telemetry.age_usage(usage,now=self.wall+telemetry.MAX_AGE+1)
+        aged = telemetry.age_usage(usage, current=telemetry.clock_stamp(self.clock + telemetry.MAX_AGE + 1))
         self.assertTrue(aged['stale'])
         self.assertEqual(usage,original)
+
+    def test_retained_usage_without_same_boot_stamp_has_no_current_age(self):
+        current = {'boot_session_id': 'current-boot', 'monotonic': 5.}
+        for stamp in (None, {'boot_session_id': 'previous-boot', 'monotonic': 4.}):
+            with self.subTest(stamp=stamp):
+                value = {'observed_at': self.wall, 'rss_bytes': 1024}
+                if stamp:
+                    value['observed_clock'] = stamp
+                retained = telemetry.age_usage(value, self.wall, current=current)
+                self.assertTrue(retained['stale'])
+                self.assertIsNone(retained['age_seconds'])
+                self.assertEqual(retained['rss_bytes'], 1024)
 
     def test_timeout_one_inflight_discards_late_baselines(self):
         self.sample()

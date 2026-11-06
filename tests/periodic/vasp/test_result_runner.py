@@ -225,6 +225,11 @@ class ControlledRunnerBindingTests(unittest.TestCase):
         self.spec["execution"]["runner_record"]["dialect"] = "vasp-run-metadata-text-v1"
         self.assertNotEqual(self.inspect()["status"], "eligible")
 
+    def test_boot_session_clock_and_historical_immutable_clock(self):
+        self.assertEqual(self.inspect()["status"], "eligible")
+        self.replace_metadata(self.original.replace('"boot":1', '"boot_session_id":"01234567-89ab-cdef-0123-456789abcdef"'))
+        self.assertEqual(self.inspect()["status"], "eligible")
+
     def test_malformed_or_open_accounting_fails_closed(self):
         cases = [('confirmed_suspended_seconds: 0.5', 'confirmed_suspended_seconds: -0.5'),
                  ('"end":5.5', '"end":null'), ('"end":5.5', '"end":4'),
@@ -232,6 +237,7 @@ class ControlledRunnerBindingTests(unittest.TestCase):
                  ('execution_budget_seconds: 30', 'execution_budget_seconds: 20'),
                  ('hard_budget_seconds: 60', 'hard_budget_seconds: 50'),
                  ('"CLOCK_BOOTTIME"', '"unknown"'), ('"boot":1', '"boot":null'),
+                 ('"boot":1', '"boot_session_id":""'), ('"boot":1', '"boot":1,"boot_session_id":"ambiguous"'),
                  ('runner_metadata_version: 2', 'runner_metadata_version: 3'),
                  ('elapsed_s: 1.6', 'elapsed_s: NaN')]
         for before, after in cases:

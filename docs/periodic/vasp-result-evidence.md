@@ -215,6 +215,14 @@ evidence alone retains its original local-evidence scope. If publication
 verified an original queue, reverification still requires that queue even for
 older records whose only record of the read is in the native execution checks.
 
+### Unavailable evidence
+
+An observer may establish a match, establish a contradiction, or be unable to
+establish either. Only a demonstrated contradiction invalidates a binding.
+When required evidence is unavailable, withhold the operation and allow a
+retry. [Jobs ownership](../architecture/multi-host-nodes.md#39-process-identity-and-supervision-d34)
+applies the same principle to process control.
+
 When a live queue is required or observed, `execution.live_queue.status` records
 `MATCH`, `CONTRADICTED` or `UNAVAILABLE`. Contradictions carry a
 `differences` list with the field path and its stored and observed values.

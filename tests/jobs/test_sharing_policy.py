@@ -6,6 +6,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
+from cmw.jobs.freshness import clock_stamp
 from cmw.jobs import sharing
 from cmw.jobs.store import JobsError
 
@@ -21,7 +22,7 @@ class SharingPolicyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='cmw-sharing-policy-')
         self.addCleanup(self.temp.cleanup)
-        timer = patch.object(sharing.time,'time',return_value=NOW)
+        timer = patch.object(sharing.time,'monotonic',return_value=NOW)
         timer.start()
         self.addCleanup(timer.stop)
         self.root = Path(self.temp.name).resolve()
@@ -37,7 +38,7 @@ class SharingPolicyTests(unittest.TestCase):
                       'scheduler':{'mode':'bounded-sharing','cpu_budget':8,'memory_gib':12,
                                    'cpu_reserve':1,'min_available_gib':2,'external_reservation':None}}
         self.guard = {'state':'NO_MATCH','reason':'No recognized external computation observed',
-                      'observed_at':NOW,'stale':False,'coverage':{'complete':True},'observations':[]}
+                      'observed_clock':clock_stamp(NOW),'observed_at':NOW,'stale':False,'coverage':{'complete':True},'observations':[]}
         self.evidence = {'samples':[self.sample(NOW-1),self.sample(NOW)],'source':'controller'}
 
     def job(self,jid,role,status,order,cwd,cpus=2,memory=4):
@@ -50,13 +51,13 @@ class SharingPolicyTests(unittest.TestCase):
 
     def usage(self,when,cpu=1,rss=GIB):
         return {'cpu_cores':cpu,'rss_bytes':rss,'cpu_quality':'fresh','memory_quality':'fresh',
-                'observed_at':when,'age_seconds':0,'stale':False,'cpu_members':1,'memory_members':1,'total_members':1}
+                'observed_clock':clock_stamp(when),'observed_at':when,'age_seconds':0,'stale':False,'cpu_members':1,'memory_members':1,'total_members':1}
 
     def sample(self,when,percent=50,available=16*GIB):
-        return {'observed_at':when,'logical_cpus':16,
+        return {'observed_clock':clock_stamp(when),'observed_at':when,'logical_cpus':16,
                 'machine_usage':{'cpu_percent':percent,'ram_total_bytes':32*GIB,
                                  'ram_used_bytes':32*GIB-available,'cpu_quality':'fresh','memory_quality':'fresh',
-                                 'observed_at':when,'age_seconds':0,'stale':False},
+                                 'observed_clock':clock_stamp(when),'observed_at':when,'age_seconds':0,'stale':False},
                 'jobs':{'P1-attempt':self.usage(when)},'external':{}}
 
     def evaluate(self,**kwargs):
@@ -209,8 +210,8 @@ class SharingPolicyTests(unittest.TestCase):
         self.evidence['samples'] = self.evidence['samples'][-1:]
         self.assertBlocked()
         self.evidence = copy.deepcopy(original)
-        self.evidence['samples'][0]['observed_at'] = NOW-.1
-        self.evidence['samples'][0]['machine_usage']['observed_at'] = NOW-.1
+        self.evidence['samples'][0]['observed_clock']['monotonic'] = NOW-.1
+        self.evidence['samples'][0]['machine_usage']['observed_clock']['monotonic'] = NOW-.1
         self.assertBlocked()
         for metric in ['cpu_quality','memory_quality']:
             self.evidence = copy.deepcopy(original)
@@ -218,8 +219,8 @@ class SharingPolicyTests(unittest.TestCase):
             self.assertBlocked()
         self.evidence = copy.deepcopy(original)
         for sample in self.evidence['samples']:
-            sample['observed_at'] -= 6
-            sample['machine_usage']['observed_at'] -= 6
+            sample['observed_clock']['monotonic'] -= 6
+            sample['machine_usage']['observed_clock']['monotonic'] -= 6
         self.assertBlocked()
 
     def test_cpu_sustained_overrun_and_rss_partial_overrun_block_without_mutation(self):

@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import psutil
 
@@ -31,9 +31,11 @@ class UnknownDiagnosticsTests(unittest.TestCase):
     def worker_probes(self, *, current=None, status=psutil.STATUS_SLEEPING):
         with patch('socket.gethostname', return_value='fixture-host'), \
              patch.object(psutil, 'boot_time', return_value=1.0), \
-             patch.object(ownership, 'identity', return_value=current or self.owner) as lookup, \
-             patch.object(psutil, 'Process', return_value=Mock(status=Mock(return_value=status))) as process:
-            yield lookup, process
+             patch.object(psutil, 'Process') as process:
+            process.return_value.status.return_value = status
+            birth = process.return_value.create_time
+            birth.return_value = (current or self.owner)['birth']
+            yield birth, process
 
     def show(self, state, operation='show', *, json_output=True):
         command = ['jobs', '--state', str(self.store.root), operation]
@@ -70,7 +72,7 @@ class UnknownDiagnosticsTests(unittest.TestCase):
         observed = result['ownership_observation']
         self.assertTrue(observed['advisory'])
         self.assertIsInstance(observed['observed_at'], float)
-        self.assertEqual(observed['worker']['verdict'], 'mismatch')
+        self.assertEqual(observed['worker']['verdict'], 'unavailable')
         self.assertEqual(observed['worker']['observed_identity'], self.owner)
         self.assertEqual(observed['worker_lock']['verdict'], 'missing')
         self.assertEqual(state, original)
@@ -93,7 +95,7 @@ class UnknownDiagnosticsTests(unittest.TestCase):
             for field, value in (('host', 'other-host'), ('boot', 2.0)):
                 with self.subTest(field=field):
                     result = cli._unknown_worker_observation({**self.owner, field: value})
-                    self.assertEqual(result['verdict'], 'mismatch')
+                    self.assertEqual(result['verdict'], 'unavailable')
                     self.assertIn(field, result['reason'])
             lookup.assert_not_called()
             process.assert_not_called()
@@ -102,7 +104,7 @@ class UnknownDiagnosticsTests(unittest.TestCase):
         with self.worker_probes() as (lookup, process):
             self.assertEqual(cli._unknown_worker_observation(self.owner)['verdict'], 'matched')
             process.return_value.status.return_value = psutil.STATUS_ZOMBIE
-            self.assertEqual(cli._unknown_worker_observation(self.owner)['verdict'], 'gone')
+            self.assertEqual(cli._unknown_worker_observation(self.owner)['verdict'], 'unavailable')
             for error, expected in ((psutil.NoSuchProcess(self.owner['pid']), 'gone'),
                                     (psutil.AccessDenied(self.owner['pid']), 'unavailable'),
                                     (PermissionError('private path must not appear'), 'unavailable')):
@@ -114,8 +116,8 @@ class UnknownDiagnosticsTests(unittest.TestCase):
 
     def test_identity_change_during_status_observation_is_not_a_match(self):
         with self.worker_probes() as (lookup, _):
-            lookup.side_effect = [self.owner, {**self.owner, 'birth': 200.0}]
-            self.assertEqual(cli._unknown_worker_observation(self.owner)['verdict'], 'mismatch')
+            lookup.side_effect = [self.owner['birth'], 200.0]
+            self.assertEqual(cli._unknown_worker_observation(self.owner)['verdict'], 'unavailable')
 
     def test_held_and_unheld_lock_leave_fixture_contents_and_mode_unchanged(self):
         self.lock.parent.mkdir(parents=True)
