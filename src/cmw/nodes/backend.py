@@ -135,7 +135,17 @@ class LocalBackend:
         if not defer_check:
             self._check()
 
-    def _check(self, operation=None, *, phase="initial", request_id=None):
+    @staticmethod
+    def _unavailable_queue(operation, phase, reason):
+        if operation in {'lookup', 'capabilities'}:
+            return BackendError('QUEUE_UNAVAILABLE', f'Owner queue temporarily unreadable; retry: {reason}')
+        if operation and operation.startswith('successor.'):
+            if phase == 'after' and is_mutation(operation):
+                return BackendError('OUTCOME_UNKNOWN', 'Cannot confirm the response after dispatch; inspect the original materialization or registration request before retrying')
+            return BackendError('SUCCESSOR_UNVERIFIABLE', f'Parent queue temporarily unreadable; retry: {reason}')
+        return None
+
+    def _check(self, operation=None, *, phase="initial", request_id=None, retry_refusal=None):
         config = self._load_identity(self.config_root)
         if not self._custom_identity_checker:
             from .runtime_observation import RuntimeVerifier
@@ -146,6 +156,9 @@ class LocalBackend:
                 runtime_request=self._runtime_request, runtime_response=phase == 'after')
         else:
             readiness = self._check_identity(config)
+        if (readiness.get('queue_read_unavailable') and readiness.get('runtime_ready')
+                and (refusal := self._unavailable_queue(operation, phase, '; '.join(readiness['identity_errors'])))):
+            raise retry_refusal or refusal
         if not readiness.get('identity_ready', False):
             raise BackendError('IDENTITY_CHANGED', '; '.join(readiness.get('identity_errors') or readiness.get('errors') or ['Node/queue identity is unavailable']))
         self.runtime_diagnostic = readiness.get('runtime_diagnostic')
@@ -179,8 +192,16 @@ class LocalBackend:
         if not isinstance(state, str):
             raise BackendError('INVALID_QUEUE', 'Enrolled queue lacks its local state path')
         store = Store(state)
-        actual = (store.queue_identity() if self._custom_identity_checker
-                  else readiness.get('queues', {}).get(self.queue_alias))
+        if self._custom_identity_checker:
+            try:
+                actual = store.queue_identity()
+            except (OSError, JobsError) as exc:
+                from cmw.jobs.lifecycle import queue_read_unavailable
+                if queue_read_unavailable(exc) and (refusal := self._unavailable_queue(operation, phase, exc)):
+                    raise (retry_refusal or refusal) from exc
+                raise
+        else:
+            actual = readiness.get('queues', {}).get(self.queue_alias)
         if actual is None or any(actual.get(key) != record.get(key) for key in actual):
             raise BackendError('QUEUE_CHANGED', 'Enrolled queue identity differs from its authoritative database')
         if actual['node_id'] != config['node_id'] or actual['host_id'] != config['host_id']:
@@ -429,6 +450,7 @@ class LocalBackend:
                 if params.get('_endpoint') != expected:
                     raise BackendError('ENDPOINT_CHANGED', 'Mutation lacks the exact verified endpoint/boot guard')
                 params = {key: value for key, value in params.items() if key != '_endpoint'}
+            retry_refusal = None
             if operation == 'doctor.inspect':
                 _params(params, ('job_id', 'capability'))
                 if target is not None and 'job_id' in params:
@@ -472,7 +494,7 @@ class LocalBackend:
                 result = dispatch(self, operation, params, target, request_id=request_id)
             elif operation.startswith('successor.'):
                 from .successor import dispatch
-                result = dispatch(self, operation, params, target, request_id=request_id)
+                result, retry_refusal = dispatch(self, operation, params, target, request_id=request_id)
             elif operation.startswith('catalogue.'):
                 from .catalogue import dispatch
                 result = dispatch(self, operation, params, target, request_id=request_id)
@@ -502,12 +524,21 @@ class LocalBackend:
                     _params(params, ('id',), ('id',))
                     if type(params['id']) not in (str, int) or len(str(params['id'])) > 128:
                         raise BackendError('INVALID_PARAMS', 'Lookup requires a bounded local job identifier')
-                    job, _ = _read_job(self.store, params['id'])
+                    try:
+                        job, _ = _read_job(self.store, params['id'])
+                    except (OSError, JobsError) as exc:
+                        from cmw.jobs.lifecycle import queue_read_unavailable
+                        if queue_read_unavailable(exc):
+                            raise self._unavailable_queue('lookup', 'before', exc) from exc
+                        raise
                     result = {'target': self.target(job), 'job': self._row(job)}
             else:
                 job = self._job(target)
                 result = self._selected(operation, params, job)
                 self._job(target)
+            if retry_refusal is not None:
+                self._check(operation, phase="after", request_id=durable_id, retry_refusal=retry_refusal)
+                raise retry_refusal
             self._check(operation, phase="after", request_id=durable_id)
             self.sequence += 1
             envelope = {'schema': 1, 'node_id': self.config['node_id'], 'queue_id': self.queue['queue_id'],

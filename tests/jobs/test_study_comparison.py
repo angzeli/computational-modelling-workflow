@@ -200,6 +200,27 @@ class StudyComparisonEvidenceTests(unittest.TestCase):
         inputs['POTCAR']['sha256'] = 'a' * 64
         self.assertEqual(self.inspect(expected_inputs=inputs)['domains']['binding'], 'FAIL')
 
+    def test_unavailable_original_queue_withholds_energy_until_it_returns(self):
+        scratch = self.root / 'unavailable-scratch'
+        scratch.mkdir()
+        record = finalize_result(self.run_directory, policy_path=self.policy_path, spec_path=self.spec_path,
+                                 scratch_root=scratch, record_directory='finalized')
+        record_path = record['publication']['record_path']
+        moved = self.store.path.with_suffix('.unavailable')
+        self.store.path.rename(moved)
+        try:
+            for options in ({}, {'finalization_path': record_path}):
+                with self.subTest(options=options):
+                    result = self.inspect(**options)
+                    self.assertEqual(result['status'], 'UNASSESSED')
+                    self.assertEqual(result['domains']['binding'], 'UNKNOWN')
+                    self.assertIsNone(result['energy'])
+                    if options:
+                        self.assertEqual(result['finalization'], 'UNKNOWN')
+        finally:
+            moved.rename(self.store.path)
+        self.assertEqual(self.inspect(finalization_path=record_path)['status'], 'QUALIFIED')
+
     def test_runtime_overlay_requires_exact_preparation_and_effective_values(self):
         original_incar = (self.run_directory / 'INCAR').read_bytes()
         original_outcar = (self.run_directory / 'OUTCAR').read_bytes()

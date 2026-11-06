@@ -12,6 +12,13 @@ def _json(value: dict) -> None:
     print(json.dumps(value, indent=2, sort_keys=True, allow_nan=False))
 
 
+def _print_differences(differences) -> None:
+    for entry in differences:
+        stored = json.dumps(entry["stored"], sort_keys=True)
+        observed = json.dumps(entry["observed"], sort_keys=True)
+        print(f"  {entry['field']}: stored {stored}, observed {observed}")
+
+
 def _failure(error: Exception, *, as_json: bool) -> int:
     from cmw.core.preparation_publication import PublicationError
 
@@ -19,15 +26,20 @@ def _failure(error: Exception, *, as_json: bool) -> int:
               "message": str(error), "exit_code": 2}
     if hasattr(error, "findings"):
         result["findings"] = error.findings
+    if getattr(error, "differences", None):
+        result["differences"] = error.differences
+    if result["code"] == "LIVE_QUEUE_UNAVAILABLE":
+        result.update(status="UNVERIFIABLE", exit_code=75)
     if isinstance(error, PublicationError):
         result.update(record_path=error.record_path, incomplete=error.incomplete)
     if as_json:
         _json(result)
     else:
         print(f"{result['code']}: {error}")
+        _print_differences(result.get("differences", []))
         if result.get("record_path"):
             print(f"Scratch record: {result['record_path']}; incomplete: {result['incomplete']}")
-    return 2
+    return result["exit_code"]
 
 
 def _summary(result: dict) -> None:
@@ -72,6 +84,10 @@ def _summary(result: dict) -> None:
     if result.get("conflicts"):
         print("Evidence conflicts: " + ", ".join(item["code"] for item in result["conflicts"]))
     assessment = result.get("policy_assessment")
+    live = ((result.get("binding") or {}).get("execution") or {}).get("live_queue")
+    if live:
+        print(f"Original Jobs queue: {live['status']}")
+        _print_differences(live["differences"])
     if assessment:
         print(f"Policy {assessment['policy_identity']['name']}: {assessment['status']}")
         for check in assessment.get("checks", []):
@@ -118,13 +134,17 @@ def _verify(args: argparse.Namespace) -> int:
     try:
         result = verify_finalization(args.record, policy_path=args.policy)
         result = {**result, "artifacts": [item.to_dict() for item in result.get("artifacts", [])]}
-        result["exit_code"] = 0 if result["valid"] else 2
+        result["exit_code"] = {True: 0, False: 2, None: 75}[result["valid"]]
         if args.json:
             _json(result)
         else:
-            print("Finalization record: " + ("valid for current recorded sources" if result["valid"] else "invalid"))
+            description = {True: "valid for current recorded sources", False: "invalid", None: "temporarily unverifiable"}
+            print("Finalization record: " + description[result["valid"]])
+            if result.get("live_queue"):
+                print(f"Original Jobs queue: {result['live_queue']['status']}")
             for finding in result.get("findings", []):
                 print(f"  {finding}")
+            _print_differences(result.get("differences", []))
         return result["exit_code"]
     except (OSError, ValueError, TypeError) as error:
         return _failure(error, as_json=args.json)

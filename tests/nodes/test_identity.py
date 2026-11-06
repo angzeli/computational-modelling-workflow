@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import sqlite3
 from pathlib import Path
 import stat
 import tempfile
@@ -73,6 +74,25 @@ class IdentityTests(unittest.TestCase):
         result = check_node(config, **self.checks)
         self.assertFalse(result['identity_ready'])
         self.assertFalse(self.state.exists())
+
+    def test_locked_queue_keeps_scoped_readiness_unavailable_without_hiding_an_identity_change(self):
+        config = enroll(self.config, self.spec, **self.enrollment)
+        scoped = dict(self.checks, operation='successor.plan', queue_alias='research')
+        con = sqlite3.connect(Store(self.state).path)
+        try:
+            con.execute('BEGIN EXCLUSIVE')
+            result = check_node(config, **scoped)
+            self.assertFalse(result['identity_ready'])
+            self.assertIs(result['queue_read_unavailable'], True)
+            unscoped = check_node(config, **self.checks)
+            self.assertIs(unscoped['queue_read_unavailable'], True)
+            changed = dict(scoped, host_provider=lambda: {**HOST, 'hardware_id': 'another-host'})
+            different_host = check_node(config, **changed)
+            self.assertFalse(different_host['identity_ready'])
+            self.assertNotIn('queue_read_unavailable', different_host)
+        finally:
+            con.close()
+        self.assertTrue(check_node(config, **scoped)['ready'])
 
     def test_missing_storage_keeps_identity_observable(self):
         config = enroll(self.config, self.spec, **self.enrollment)

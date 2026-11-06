@@ -142,11 +142,11 @@ class FinalizationTests(unittest.TestCase):
         record = self.finalize()
         path = record["publication"]["record_path"]
         self.case["policy_path"].write_text(self.case["policy_path"].read_text()+" ")
-        self.assertFalse(verify_finalization(path)["valid"])
+        self.assertIs(verify_finalization(path)["valid"], False)
         other = make_case(self.root/"other")
         record2 = self.finalize(other)
         (other["run"]/"OUTCAR").write_text((other["run"]/"OUTCAR").read_text()+"\n")
-        self.assertFalse(verify_finalization(record2["publication"]["record_path"])["valid"])
+        self.assertIs(verify_finalization(record2["publication"]["record_path"])["valid"], False)
 
     def test_artifact_identity_changes_for_attempt_or_policy(self):
         original = self.finalize(dry_run=True)["artifact_bundle"]["artifacts"][0]["artifact_id"]
@@ -187,14 +187,14 @@ class FinalizationTests(unittest.TestCase):
         self.assertEqual(child["artifact_bundle"]["artifacts"][0]["parent_artifacts"], [artifact["artifact_id"]])
         self.assertTrue(verify_finalization(child["publication"]["record_path"])["valid"])
         (parent_case["run"]/"OUTCAR").write_text("changed parent")
-        self.assertFalse(verify_finalization(child["publication"]["record_path"])["valid"])
+        self.assertIs(verify_finalization(child["publication"]["record_path"])["valid"], False)
 
     def test_source_revalidation_failure_preserves_failed_record(self):
         with patch("cmw.periodic.vasp.result_finalization.revalidate_sources", return_value={"valid":False,"findings":[]}):
             with self.assertRaises(PublicationError): self.finalize()
         path = self.case["scratch"]/"result/finalization.json"
         self.assertEqual(json.loads(path.read_text())["publication"]["state"], "failed")
-        self.assertFalse(verify_finalization(path)["valid"])
+        self.assertIs(verify_finalization(path)["valid"], False)
 
     def test_publisher_failure_does_not_return_success(self):
         with patch("cmw.core.preparation_publication._write_record", side_effect=OSError("invented write failure")):

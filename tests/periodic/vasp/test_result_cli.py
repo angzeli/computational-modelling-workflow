@@ -183,7 +183,7 @@ class ResultCliTests(unittest.TestCase):
         before = self.snapshot()
         code, output = self.call("verify-result-record", self.spec, "--json")
         self.assertEqual(code, 2)
-        self.assertFalse(json.loads(output)["valid"])
+        self.assertIs(json.loads(output)["valid"], False)
         self.assertEqual(before, self.snapshot())
 
     def test_finalization_requires_all_explicit_arguments(self):

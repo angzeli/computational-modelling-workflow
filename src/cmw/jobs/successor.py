@@ -5,20 +5,24 @@ The engine adapters retain scientific semantics; Store retains attempt numbering
 and durable registration. No scheduler or process-control action is used here.
 """
 from __future__ import annotations
+from contextlib import contextmanager
 from copy import deepcopy
 import json
 import math
 import os
 from pathlib import Path
 import re
+import tempfile
+import sqlite3
 import time
 
 from cmw.core.provenance import stable_hash
-from .lifecycle import read_job, observe_lock, observe_process
+from .lifecycle import (JobObservationUnavailable, observe_lock, observe_process,
+                        queue_read_unavailable, read_job, read_job_with_identity_retry)
 from .locations import read_location_metadata
 from .runner_assets import file_identity
 from .store import JobsError
-from .successor_models import SuccessorResult
+from .successor_models import SuccessorResult, SuccessorUnverifiable
 
 _FIELDS = {'schema','parent','mode','engine','name','resources','runtime','adapter','approved_changes','checkpoint'}
 _CATEGORIES = {'geometry/cell','atom/species order','constraints','k sampling','potentials',
@@ -132,30 +136,126 @@ def _closure(store,job,control,owner):
     # A nonzero/cancelled native producer can still yield an explicitly reviewed
     # complete geometry. These success tests are separate from closure checks.
     success_only={'terminal_done','exit_zero','no_signal','not_cancelled','not_terminated','suspension_terminal'}
-    invalid={k:v for k,v in observed['checks'].items() if k not in success_only and v is not True}
-    if invalid or job.get('worker_protocol')!=3:
-        return {'closed':False,'reason':'Native receipt/attempt binding is incomplete','checks':invalid}
-    worker=observe_process(job.get('worker'));anchor=observe_process(job.get('group'))
-    lock=observe_lock(store,job['attempt_id'])
-    if worker.verdict!='gone' or anchor.verdict!='gone' or lock.verdict!='unheld':
-        return {'closed':False,'reason':'Original worker, domain or lock is not confirmed closed',
-                'worker':worker.verdict,'anchor':anchor.verdict,'lock':lock.verdict}
-    if group_members(job['group']['pid'],session=True):
-        return {'closed':False,'reason':'Original payload session still has live members'}
-    return {'closed':True,'receipt':file_identity(receipt,max_bytes=65536),'status':job['status'],
+    checks = {name: value for name, value in observed['checks'].items()
+              if name not in success_only and value is not True}
+    if job.get('worker_protocol') != 3:
+        checks['worker_protocol'] = False
+    contradicted = [name for name, value in checks.items() if value is False]
+    if contradicted:
+        return {'closed': False, 'reason': 'Parent closure contradicted: ' + ', '.join(contradicted),
+                'checks': checks}
+    worker = observe_process(job.get('worker')).verdict
+    anchor = observe_process(job.get('group')).verdict
+    lock = observe_lock(store, job['attempt_id']).verdict
+    authorities = {'worker': worker, 'anchor': anchor, 'lock': lock}
+    if worker in {'matched', 'mismatch'} or anchor in {'matched', 'mismatch'} or lock == 'held':
+        return {'closed': False, 'reason': 'Original worker, domain or lock is not confirmed closed',
+                **authorities}
+    unavailable = [f'{name} ({verdict})' for name, verdict in authorities.items()
+                   if verdict not in {'gone', 'unheld'}]
+    if anchor == 'gone':
+        try:
+            if group_members(job['group']['pid'], session=True):
+                return {'closed': False, 'reason': 'Original payload session still has live members'}
+        except (JobsError, OSError) as exc:
+            unavailable.append(f'original payload session ({exc})')
+    if checks or unavailable:
+        missing = [*checks, *unavailable]
+        live = observed.get('live_queue') or {}
+        if live.get('status') == 'UNAVAILABLE':
+            missing.insert(0, 'parent queue temporarily unreadable: ' + live['reason'])
+        return {'closed': None, 'reason': 'Parent closure unverifiable, retry: ' + ', '.join(missing),
+                'checks': checks, **authorities}
+    try:
+        receipt_identity = file_identity(receipt, max_bytes=65536)
+    except OSError as exc:
+        return {'closed': None, 'reason': f'Parent receipt unverifiable, retry: {exc}'}
+    return {'closed':True,'receipt':receipt_identity,'status':job['status'],
             'exit_code':job['exit_code'],'worker':job['worker'],'group':job['group'],
             'started_at':job['started_at'],'finished_at':job['finished_at'],
             'qualification':'Native terminal receipt and original domain absence; not scientific acceptance'}
 
 
-def _write_new(path,value):
-    path=_path(str(path))
-    raw=(json.dumps(value,indent=2,allow_nan=False)+'\n').encode()
-    if len(raw)>128*1024:
+def _record_path(spec):
+    adapter = spec['adapter']
+    if spec['engine'] == 'ORCA':
+        return _path(adapter['output']) / 'successor.json'
+    scratch = Path(adapter['scratch_root']).expanduser().absolute()
+    directory = _path(str(scratch / Path(adapter['record_directory']).expanduser()))
+    if directory == scratch or not directory.is_relative_to(scratch):
+        raise JobsError('Successor record directory must be inside its Scratch root')
+    return directory / 'successor.json'
+
+
+@contextmanager
+def _publication_lock(directory):
+    # The private publication directory remains in place when successor.json is replaced.
+    import fcntl
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _save_record(path, value, directory_fd, *, create=False):
+    raw = (json.dumps(value, indent=2, allow_nan=False) + '\n').encode()
+    if len(raw) > 128 * 1024:
         raise JobsError('Successor record exceeds 128 KiB')
-    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
-    with os.fdopen(fd,'wb') as out:
-        out.write(raw);out.flush();os.fsync(out.fileno())
+    fd, name = tempfile.mkstemp(prefix='.successor-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if create:
+            os.link(name, path)  # No-clobber publication of a complete document.
+        else:
+            os.replace(name, path)
+        os.fsync(directory_fd)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def _expected_inputs(plan, materialized):
+    if plan['spec']['engine'] == 'ORCA':
+        return materialized['prepared_plan']['dependencies']
+    root = Path(plan['spec']['adapter']['output'])
+    return {name: {'path': str(root / name), **identity}
+            for name, identity in plan['adapter']['preparation']['prepared_inputs'].items()}
+
+
+def _check_published_inputs(record):
+    plan = record['plan']
+    expected = _expected_inputs(plan, record['materialized'])
+    if record['prepared'] != expected:
+        raise JobsError('Recorded successor inputs differ from the approved publication')
+    if plan['spec']['engine'] == 'ORCA':
+        from .molecular import _verified_dependencies
+        _verified_dependencies({'dependencies': expected})
+        return
+    output = _path(plan['spec']['adapter']['output'])
+    with os.scandir(output) as entries:
+        if any(entry.name not in expected for entry in entries):
+            raise JobsError('Published VASP input directory contains an unapproved file')
+    for name, identity in expected.items():
+        actual = file_identity(_path(identity['path']), max_bytes=64*1024*1024)
+        if actual != identity:
+            raise JobsError('Published VASP input differs from approved bytes: ' + name)
+    work = _path(plan['runtime']['cwd']).stat()
+    if record['working_identity'] != [work.st_dev, work.st_ino]:
+        raise JobsError('Published successor working directory changed')
+
+
+def _require_vasp_readiness(config):
+    from cmw.nodes.identity import check_node
+    readiness = check_node(config)
+    if not readiness['ready']:
+        reason = '; '.join(readiness['errors'])
+        if readiness.get('queue_read_unavailable'):
+            raise SuccessorUnverifiable(f'VASP profile queue temporarily unreadable; unverifiable, retry: {reason}')
+        raise JobsError(f'VASP runtime profile is not ready: {reason}')
 
 
 class SuccessorService:
@@ -163,10 +263,14 @@ class SuccessorService:
         self.store,self.origin=store,dict(origin or {})
 
     def _parent(self,job_id,expected_attempt_id):
-        job,control=read_job(self.store,job_id)
+        try:
+            job, control, owner = read_job_with_identity_retry(self.store, job_id)
+        except JobObservationUnavailable as exc:
+            raise SuccessorUnverifiable(f'Parent queue temporarily unreadable; unverifiable, retry: {exc}') from exc
+        except sqlite3.Error as exc:
+            raise JobsError(f'Parent queue is malformed: {exc}') from exc
         if expected_attempt_id is not None and job['attempt_id']!=expected_attempt_id:
             raise JobsError('Successor parent attempt changed')
-        owner=self.store.queue_identity()
         if not owner:
             raise JobsError('Successor requires an existing enrolled owner queue; no automatic enrollment')
         if any(k in self.origin and self.origin[k]!=owner[k] for k in ('node_id','queue_id','host_id')):
@@ -188,18 +292,16 @@ class SuccessorService:
         value=spec['runtime']
         if set(value)!={'node_config','profile','vasp','run_directory'}:
             raise JobsError('VASP runtime requires node_config, profile, vasp options and new run_directory')
-        from cmw.nodes.identity import load_node,check_node
+        from cmw.nodes.identity import load_node
         config=load_node(_path(value['node_config']))
         if config['node_id']!=target['node_id'] or not any(q['queue_id']==target['queue_id'] and q['state']==str(self.store.root) for q in config['queues'].values()):
             raise JobsError('VASP runtime profile belongs to another owner queue')
-        readiness=check_node(config)
-        if not readiness['ready']:
-            raise JobsError('VASP runtime profile is not ready: '+'; '.join(readiness['errors']))
         profile=config['profiles'].get(value['profile'])
         if not profile or profile['engine']!='VASP':
             raise JobsError('An enrolled VASP runtime profile is required')
         if spec['resources']['cpus']>profile['max_cpus'] or spec['resources']['mpi_ranks']>profile['max_ranks']:
             raise JobsError('Successor resources exceed the pinned VASP profile')
+        _require_vasp_readiness(config)
         from cmw.nodes.submission import _argv
         output=_path(spec['adapter']['output']);run=_path(value['run_directory'])
         if run.exists() or not run.parent.is_dir() or run==output or run.is_relative_to(output) or output.is_relative_to(run):
@@ -220,14 +322,22 @@ class SuccessorService:
               'parent':target,'state_directory':str(self.store.root),'closure':closure,
               'checkpoint':{'requested':'none','reuse':'REFUSED','reason':'No complete electronic-checkpoint validator is claimed'},
               'execution':'Preparation only; separate held registration, release and dispatch'}
+        if closure['closed'] is None:
+            plan.update(status='UNVERIFIABLE', reason=closure['reason'])
+            return plan
         if not closure['closed']:
-            plan['status']='BLOCKED';return plan
+            plan['status'] = 'BLOCKED'
+            return plan
         from .review_worker import _directory
         if spec['engine']=='VASP':
             if _path(spec['adapter']['directory'])!=Path(_directory(self.store,job)).resolve():
                 raise JobsError('Selected VASP directory is not the parent attempt declared output')
             from .successor_vasp import preview_vasp
-            preview=preview_vasp(spec['adapter'],target,state_directory=str(self.store.root))
+            try:
+                preview = preview_vasp(spec['adapter'], target, state_directory=str(self.store.root))
+            except SuccessorUnverifiable as exc:
+                plan.update(status='UNVERIFIABLE', reason=str(exc))
+                return plan
         else:
             from .successor_orca import preview_orca
             preview=preview_orca(spec['adapter'],target,job=job,state_directory=str(self.store.root),
@@ -244,7 +354,11 @@ class SuccessorService:
                 raise JobsError('Prepared VASP runtime overlay differs from the explicit runner options')
             if spec['resources']['threads_per_rank']!=1:
                 raise JobsError('VASP successors currently support one explicit OpenMP thread per rank')
-        runtime=self._runtime(spec,target)
+        try:
+            runtime = self._runtime(spec, target)
+        except SuccessorUnverifiable as exc:
+            plan.update(status='UNVERIFIABLE', reason=str(exc))
+            return plan
         protected=[Path(job['cwd']).resolve(),self.store.root.resolve()]
         if job.get('molecular_submission'):
             protected.append(Path(job['molecular_submission']['spec']['workdir']).resolve())
@@ -275,46 +389,131 @@ class SuccessorService:
         return self._result(plan['parent'],'plan',plan['status'],stable_hash(plan),plan)
 
     def materialize(self,job_id,spec_path,approved_digest,expected_attempt_id=None):
-        plan=self._build(job_id,spec_path,expected_attempt_id)
-        digest=stable_hash(plan)
-        if plan['status']!='READY' or digest!=approved_digest:
+        value, spec_identity = _document(spec_path)
+        spec = _spec(value)
+        path = _record_path(spec)
+        if os.path.lexists(path):
+            with _publication_lock(path.parent) as lock:
+                record, _ = _document(path)
+                if 'parent_selector' not in record:
+                    raise JobsError('Existing publication does not support materialization replay; inspect its registration record')
+                plan = record.get('plan') or {}
+                target = spec['parent']
+                if (record.get('kind') != 'cmw-successor-materialization'
+                        or record.get('record_path') != str(path)
+                        or record.get('plan_digest') != approved_digest or stable_hash(plan) != approved_digest
+                        or plan.get('spec') != spec or plan.get('specification_source') != spec_identity
+                        or plan.get('parent') != target or plan.get('state_directory') != str(self.store.root)
+                        or str(job_id) not in {str(target['job_id']), record.get('parent_display_id'),
+                                              record.get('parent_selector')}
+                        or expected_attempt_id not in (None, target['attempt_id'])
+                        or any(k in self.origin and self.origin[k] != target[k] for k in ('node_id', 'queue_id'))):
+                    raise JobsError('Existing successor record does not match this approved request')
+                observed = os.fstat(lock)
+                if record.get('publication_directory') != [observed.st_dev, observed.st_ino]:
+                    raise JobsError('Successor publication directory identity changed')
+                if spec['engine'] == 'VASP':
+                    mount = plan['adapter']['publication_plan']['scratch_mount']
+                    if mount is not None and not os.path.ismount(_path(mount)):
+                        raise SuccessorUnverifiable('Original Scratch mount unavailable; retry on its owner')
+                if record['status'] not in {'PENDING_VERIFICATION', 'MATERIALIZED'}:
+                    raise JobsError('Existing successor materialization is incomplete')
+                # A display label must still resolve to this immutable parent.
+                selector_error = None
+                if str(job_id) != str(target['job_id']):
+                    try:
+                        _, _, _, selected = self._parent(job_id, target['attempt_id'])
+                    except SuccessorUnverifiable as exc:
+                        selector_error = exc
+                    else:
+                        if selected != target:
+                            raise JobsError('Current job selector differs from the approved parent')
+                return self._finish_publication(path, record, lock, retry=True, selector_error=selector_error)
+
+        plan = self._build(job_id, spec_path, expected_attempt_id)
+        if plan['status'] == 'UNVERIFIABLE':
+            raise SuccessorUnverifiable(plan['reason'])
+        digest = stable_hash(plan)
+        if plan['status'] != 'READY' or digest != approved_digest or plan['spec'] != spec:
             raise JobsError('Successor plan changed or is blocked; review the new plan digest')
-        spec,target=plan['spec'],plan['parent']
-        job,_,_,_=self._parent(job_id,target['attempt_id'])
-        if spec['engine']=='VASP':
+        target = plan['parent']
+        job, _, _, _ = self._parent(job_id, target['attempt_id'])
+        if spec['engine'] == 'VASP':
             from .successor_vasp import materialize_vasp
-            materialized=materialize_vasp(spec['adapter'],target,plan['adapter'],state_directory=str(self.store.root))
-            record_path=Path(plan['adapter']['publication_plan']['record_directory'])/'successor.json'
+            materialized = materialize_vasp(spec['adapter'], target, plan['adapter'], state_directory=str(self.store.root))
         else:
             from .successor_orca import materialize_orca
-            materialized=materialize_orca(spec['adapter'],target,plan['adapter'],job=job,
-                state_directory=str(self.store.root),runtime=spec['runtime'],resources=spec['resources'])
-            record_path=Path(spec['adapter']['output'])/'successor.json'
-        record={'schema':1,'kind':'cmw-successor-materialization','status':'INCOMPLETE',
-                'record_path':str(record_path),'plan_digest':digest,'plan':plan,'materialized':materialized}
+            materialized = materialize_orca(spec['adapter'], target, plan['adapter'], job=job,
+                state_directory=str(self.store.root), runtime=spec['runtime'], resources=spec['resources'])
+        record = {'schema': 1, 'kind': 'cmw-successor-materialization', 'status': 'PENDING_VERIFICATION',
+                  'record_path': str(path), 'plan_digest': digest, 'plan': plan, 'materialized': materialized,
+                  'parent_selector': str(job_id), 'parent_display_id': job['display_id'],
+                  'prepared': _expected_inputs(plan, materialized)}
+        with _publication_lock(path.parent) as lock:
+            directory = os.fstat(lock)
+            record['publication_directory'] = [directory.st_dev, directory.st_ino]
+            if spec['engine'] == 'VASP':
+                try:
+                    work = _path(plan['runtime']['cwd'])
+                    work.mkdir(mode=0o700)
+                    created = work.stat()
+                    record['working_identity'] = [created.st_dev, created.st_ino]
+                except (OSError, ValueError) as exc:
+                    record.update(status='INCOMPLETE', error=str(exc)[:2048])
+                    _save_record(path, record, lock, create=True)
+                    raise
+            _save_record(path, record, lock, create=True)
+            return self._finish_publication(path, record, lock, retry=False)
+
+    def _finish_publication(self, path, record, lock, *, retry, selector_error=None):
+        plan = record['plan']
+        target, spec = plan['parent'], plan['spec']
+        completed = record['status'] == 'MATERIALIZED'
         try:
-            current,control,owner,_=self._parent(job_id,target['attempt_id'])
-            if _closure(self.store,current,control,owner)!=plan['closure']:
+            _check_published_inputs(record)
+            if selector_error is not None:
+                raise selector_error
+            current, control, owner, observed = self._parent(target['job_id'], target['attempt_id'])
+            if target != observed:
+                raise JobsError('Parent identity changed during materialization')
+            closure = _closure(self.store, current, control, owner)
+            if closure['closed'] is None:
+                raise SuccessorUnverifiable(closure['reason'])
+            if closure != plan['closure']:
                 raise JobsError('Parent closure changed during materialization; inputs retained without registration')
-            if spec['engine']=='VASP':
-                Path(plan['runtime']['cwd']).mkdir(mode=0o700)
+            if spec['engine'] == 'VASP':
                 from cmw.periodic.vasp.inputs import check_inputs
-                checked=check_inputs(spec['adapter']['output'])
-                if checked['status']!='valid':
+                if check_inputs(spec['adapter']['output'])['status'] != 'valid':
                     raise JobsError('Published VASP four-input check did not pass')
-                prepared={name:file_identity(Path(spec['adapter']['output'])/name,max_bytes=64*1024*1024)
-                          for name in ('INCAR','POSCAR','KPOINTS','POTCAR')}
-            else:
-                from .molecular import _verified_dependencies
-                _verified_dependencies(materialized['prepared_plan'])
-                prepared=materialized['prepared_plan']['dependencies']
-            record.update(status='MATERIALIZED',prepared=prepared)
-        except Exception as exc:
-            record['error']=str(exc)[:2048];_write_new(record_path,record)
+                from .successor_vasp import verify_published_parent
+                verify_published_parent(spec['adapter'], target, str(self.store.root), plan['adapter'],
+                                        recheck_sources=retry)
+            elif retry:
+                from .successor_orca import verify_materialized_orca
+                verify_materialized_orca(spec['adapter'], target, plan['adapter'], record['materialized'],
+                    job=current, state_directory=str(self.store.root), runtime=spec['runtime'], resources=spec['resources'])
+        except SuccessorUnverifiable as exc:
+            if completed:
+                raise
+            return self._publication_result(record, reason=str(exc))
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            if not completed:
+                record.update(status='INCOMPLETE', error=str(exc)[:2048])
+                _save_record(path, record, lock)
             raise
-        _write_new(record_path,record)
-        return self._result(target,'materialize','MATERIALIZED',digest,
-                            {'record_path':str(record_path),'materialized':materialized,'registration':'not requested'})
+        if completed:
+            return self._publication_result(record, replayed=True)
+        record['status'] = 'MATERIALIZED'
+        _save_record(path, record, lock)
+        return self._publication_result(record)
+
+    def _publication_result(self, record, *, replayed=False, reason=None):
+        payload = {'record_path': record['record_path'], 'registration': 'not requested', 'replayed': replayed}
+        if reason is None:
+            payload['materialized'] = record['materialized']
+        else:
+            payload['reason'] = reason
+        return self._result(record['plan']['parent'], 'materialize', record['status'], record['plan_digest'], payload)
 
     def register(self,job_id,record_path,approved_digest,request_id,expected_attempt_id=None):
         try:
@@ -326,7 +525,7 @@ class SuccessorService:
         if not isinstance(request_id,str) or not re.fullmatch('[a-f0-9]{32}',request_id):
             raise JobsError('Registration requires a new lowercase UUID hex request identity')
         record,_=_document(record_path)
-        if (record.get('kind')!='cmw-successor-materialization' or record.get('status')!='MATERIALIZED'
+        if (record.get('kind')!='cmw-successor-materialization' or record.get('status') not in {'MATERIALIZED','PENDING_VERIFICATION'}
                 or record.get('record_path')!=str(_path(record_path)) or record.get('plan_digest')!=approved_digest
                 or stable_hash(record.get('plan'))!=approved_digest):
             raise JobsError('Materialization record or approved plan identity is invalid')
@@ -338,16 +537,29 @@ class SuccessorService:
         job,control,owner,target=self._parent(job_id,expected_attempt_id)
         if target!=plan['parent'] or target!=spec['parent'] or plan['state_directory']!=str(self.store.root):
             raise JobsError('Materialization belongs to a different original owner/parent')
+        if record['status'] == 'PENDING_VERIFICATION':
+            raise SuccessorUnverifiable('Parent verification pending; retry materialize-next before registration')
         registration_digest=stable_hash({'plan_digest':approved_digest,'record_path':str(record_path)})
-        previous=self.store.request_lookup(request_id)
+        try:
+            previous = self.store.request_lookup(request_id)
+        except (JobsError, OSError, sqlite3.Error) as exc:
+            if queue_read_unavailable(exc):
+                raise SuccessorUnverifiable(f'Parent queue receipt unverifiable, retry: {exc}') from exc
+            raise
         if previous:
             if previous['operation']!='submit' or previous['digest']!=registration_digest:
                 raise JobsError('Registration request ID belongs to a different successor')
             return self._registered(target,approved_digest,previous['result'],True)
-        if _closure(self.store,job,control,owner)!=plan['closure']:
+        closure = _closure(self.store, job, control, owner)
+        if closure['closed'] is None:
+            raise SuccessorUnverifiable(closure['reason'])
+        if closure != plan['closure']:
             raise JobsError('Parent closure changed since approved materialization')
         from .molecular import _verified_dependencies
         if spec['engine']=='VASP':
+            from .successor_vasp import verify_published_parent
+            verify_published_parent(spec['adapter'], target, str(self.store.root), plan['adapter'],
+                                    recheck_sources=False)
             expected=plan['adapter']['preparation']['prepared_inputs']
             prepared={name:file_identity(Path(spec['adapter']['output'])/name,max_bytes=64*1024*1024)
                       for name in ('INCAR','POSCAR','KPOINTS','POTCAR')}
@@ -372,10 +584,11 @@ class SuccessorService:
         kwargs={}
         if spec['engine']=='VASP':
             runtime=plan['runtime'];argv,cwd,env=runtime['argv'],runtime['cwd'],runtime['env']
-            from cmw.nodes.identity import load_node,check_node
+            from cmw.nodes.identity import load_node
             config=load_node(spec['runtime']['node_config'])
-            if not check_node(config)['ready'] or config['profiles'].get(spec['runtime']['profile'])!=runtime['profile_record']:
+            if config['profiles'].get(spec['runtime']['profile']) != runtime['profile_record']:
                 raise JobsError('VASP runtime profile changed before registration')
+            _require_vasp_readiness(config)
         else:
             from .molecular import binding
             data=record['materialized']

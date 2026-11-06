@@ -93,6 +93,15 @@ class EngineReviewTests(unittest.TestCase):
         result = self.review({'engine': 'VASP', 'status': 'Done'}, directory=str(run))
         self.assertEqual(result['domains']['electronic']['status'], 'UNSUPPORTED')
 
+    def test_unverifiable_vasp_binding_remains_unknown_in_review(self):
+        run = write_run(self.root / 'vasp')
+        binding = {'valid': None, 'execution': {'live_queue': {'status': 'UNAVAILABLE'}}}
+        with patch('cmw.periodic.vasp.result_finalization.inspect_with_policy',
+                   return_value={'binding': binding}):
+            result = self.review({'engine': 'VASP'}, directory=str(run))
+        self.assertEqual(result['domains']['source_binding']['status'], 'UNKNOWN')
+        self.assertEqual(result['domains']['source_binding']['evidence'], binding)
+
     def test_orca_review_reuses_validation_without_finalizing(self):
         job, plan = self.prepared(orca_spec(self.root / 'orca'))
         before = Path(plan['result_path']).read_bytes()

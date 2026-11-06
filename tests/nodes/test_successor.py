@@ -1,15 +1,17 @@
 """Successor owner boundaries, strict wire negotiation and mutation guards."""
 from copy import deepcopy
+from dataclasses import replace
+import io
 import json
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from cmw.jobs.successor_models import SuccessorResult
-from cmw.jobs.store import JobsError
+from cmw.jobs.successor_models import SuccessorResult, SuccessorUnverifiable
+from cmw.jobs.store import JobsError, Store
 from cmw.nodes.codec import CodecError, decode_typed, encode_typed
 from cmw.nodes.connections import ConnectedBackend
-from cmw.nodes.protocol import NodeError, is_mutation, validate_envelope
+from cmw.nodes.protocol import NodeError, decode, encode, is_mutation, request, response, validate_envelope
 from tests.nodes import test_backend
 from tests.nodes.test_review import DirectTransport
 
@@ -80,6 +82,59 @@ class SuccessorNodeTests(unittest.TestCase):
             self.assertEqual(call.args, (self.job['id'], '/owner/materialization.json', self.digest, request))
             self.assertEqual(call.kwargs, {'expected_attempt_id': self.job['attempt_id']})
         self.assertEqual(self.store.snapshot()['jobs'][0]['status'], 'Hold')
+
+    def test_endpoint_reports_retryable_plan_materialization_and_registration(self):
+        from cmw.nodes.endpoint import serve
+        reason = 'Parent queue temporarily unreadable; retry'
+        self.service.plan.return_value = replace(self.service.plan.return_value, status='UNVERIFIABLE',
+            payload_json=json.dumps({'closure': {'reason': reason}}))
+        self.service.materialize.return_value = replace(self.service.materialize.return_value,
+            status='PENDING_VERIFICATION', payload_json=json.dumps({'record_path': '/owner/record', 'reason': reason}))
+        self.service.register.side_effect = SuccessorUnverifiable(reason)
+        frames = io.BytesIO()
+        requests = []
+        for operation, params in (('plan', {'spec_path': '/owner/spec'}),
+                                  ('materialize', {'spec_path': '/owner/spec'}),
+                                  ('register', {'record_path': '/owner/record'})):
+            if operation != 'plan':
+                params.update(approved_digest=self.digest, _endpoint={'node_id': self.target['node_id'],
+                    'queue_id': self.target['queue_id'], 'host_id': self.fixture.config['host_id'],
+                    'runtime_id': self.fixture.config['runtime']['fingerprint'], 'clock_id': self.backend.clock_id})
+            message = request('successor.' + operation, params, self.target)
+            requests.append(message['request_id'])
+            frames.write(encode(message))
+        frames.seek(0)
+        replies = io.BytesIO()
+        self.assertEqual(serve(None, 'research', input_stream=frames, output_stream=replies,
+                               backend_factory=lambda *_: self.backend), 0)
+        replies.seek(0)
+        expected_codes = ('SUCCESSOR_UNVERIFIABLE', 'SUCCESSOR_PENDING_VERIFICATION', 'SUCCESSOR_UNVERIFIABLE')
+        for request_id, expected_code in zip(requests, expected_codes, strict=True):
+            reply = decode(replies.readline())
+            self.assertIs(reply['ok'], False)
+            self.assertEqual(reply['error']['code'], expected_code)
+            self.assertIn(reason, reply['error']['message'])
+            self.assertEqual(set(reply['error']), {'code', 'message'})
+            # The protocol-1 reader shared with pre-#15 clients must take the
+            # typed refusal path before a peer decodes its strict success schema.
+            with self.assertRaises(NodeError) as refused:
+                response(reply, request_id)
+            self.assertEqual(refused.exception.code, expected_code)
+            self.assertEqual(str(refused.exception), reply['error']['message'])
+
+    def test_queue_lock_at_preflight_is_retryable_but_response_loss_after_registration_is_unknown(self):
+        from cmw.jobs.lifecycle import JobObservationUnavailable
+        with patch.object(Store, 'queue_identity', side_effect=PermissionError('read denied')):
+            for op, code in (('lookup', 'QUEUE_UNAVAILABLE'), ('capabilities', 'QUEUE_UNAVAILABLE'),
+                             ('successor.plan', 'SUCCESSOR_UNVERIFIABLE')):
+                with self.subTest(op=op), self.assertRaises(NodeError) as refused:
+                    self.backend.call(op)
+                self.assertEqual(refused.exception.code, code)
+        with patch.object(self.backend, '_job', side_effect=[self.job, JobObservationUnavailable('read denied')]):
+            with self.assertRaises(NodeError) as refused:
+                self.client(readonly=False).call('successor.register', {'record_path': '/owner/record',
+                    'approved_digest': self.digest}, self.target, request_id=uuid4().hex)
+            self.assertEqual(refused.exception.code, 'OUTCOME_UNKNOWN')
 
     def test_old_or_ambiguous_capability_refuses_before_operation(self):
         for capability in (None, {}, {'schema': True, 'model': 'SuccessorResult', 'geometry_only': True},

@@ -625,6 +625,7 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
         if isinstance(exc, RuntimeRefusal):
             result['runtime_diagnostic'] = exc.evidence
     store_type = Store if store_factory is None else store_factory
+    unreadable_queues = 0
     queues = {queue_alias: config['queues'][queue_alias]} if scoped else config['queues']
     for alias, expected in queues.items():
         try:
@@ -633,6 +634,9 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
                 raise ValueError('Queue identity changed or enrollment is unavailable')
             result['queues'][alias] = observed
         except (OSError, ValueError, RuntimeError) as exc:
+            from cmw.jobs.lifecycle import queue_read_unavailable
+            if queue_read_unavailable(exc):
+                unreadable_queues += 1
             result['identity_errors'].append(f'{alias}: {exc}')
     if scoped:
         # Operation dependencies are derived on the owner, never a wire skip list.
@@ -672,6 +676,8 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
     result['identity_ready'] = not result['identity_errors']
     result['runtime_ready'] = not result['runtime_errors']
     result['errors'] += result['identity_errors'] + result['runtime_errors']
+    if unreadable_queues and unreadable_queues == len(result['errors']):
+        result['queue_read_unavailable'] = True
     required = ('identity_ready', 'runtime_ready') + (('storage_ready',) if storages else ()) + (('profiles_ready',) if profiles else ())
     result['ready'] = all(result[key] for key in required)
     return result

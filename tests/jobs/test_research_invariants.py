@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
+from cmw.core.preparation_publication import PublicationError
 from cmw.doctor.service import inspect_local
 from cmw.jobs.catalogue import CatalogueStore
 from cmw.jobs.catalogue_models import CatalogueQuery
@@ -276,7 +277,15 @@ class ResearchSuccessorTests(unittest.TestCase):
         before = self.store.path.read_bytes()
         output = Path(self.spec['adapter']['output'])
         record = Path(json.loads(plan.payload_json)['adapter']['publication_plan']['record_directory']) / 'successor.json'
-        with patch('cmw.jobs.successor._write_new', side_effect=OSError(errno.ENOSPC, 'injected record disk full')):
+        link = os.link
+
+        def disk_full_at_exclusive_create(source, destination):
+            if Path(destination) == record:
+                self.assertEqual(json.loads(Path(source).read_text())['status'], 'PENDING_VERIFICATION')
+                raise OSError(errno.ENOSPC, 'injected record disk full', str(record))
+            return link(source, destination)
+
+        with patch('cmw.jobs.successor.os.link', side_effect=disk_full_at_exclusive_create):
             with self.assertRaises(OSError) as caught:
                 self.materialize(plan)
         self.assertEqual(caught.exception.errno, errno.ENOSPC)
@@ -286,5 +295,28 @@ class ResearchSuccessorTests(unittest.TestCase):
             self.service.register(self.parent['id'], str(record), plan.plan_digest, uuid4().hex,
                                   self.parent['attempt_id'])
         self.assertEqual(self.store.path.read_bytes(), before)
-        trace('publication-disk-full', ['plan', 'publish four inputs', 'inject ENOSPC writing successor record',
-                                       'no authoritative record', 'registration refused', 'queue unchanged'])
+        self.assertEqual({p.name for p in record.parent.iterdir()}, {'preparation.json'})
+        preparation = (record.parent / 'preparation.json').read_bytes()
+        self.assertEqual(json.loads(preparation)['publication']['state'], 'complete')
+        self.assertEqual(list(Path(self.spec['runtime']['run_directory']).iterdir()), [])
+        published = {p.name: p.read_bytes() for p in output.iterdir()}
+
+        # Disk space is available again, but the absent successor record cannot authorize replay.
+        with self.assertRaises(PublicationError) as retry:
+            self.materialize(plan)
+        self.assertEqual(str(retry.exception), f'Refusing existing destination: {output}')
+
+        # Recover by planning fresh destinations, preserving the first publication as evidence.
+        self.spec, self.path = successor_case(self.fixture, uuid4().hex)
+        recovery = self.plan()
+        self.assertNotEqual(recovery.plan_digest, plan.plan_digest)
+        with self.assertRaisesRegex(JobsError, 'review the new plan digest'):
+            self.materialize(plan)
+        self.assertEqual(self.materialize(recovery).status, 'MATERIALIZED')
+        self.assertEqual({p.name: p.read_bytes() for p in output.iterdir()}, published)
+        self.assertEqual((record.parent / 'preparation.json').read_bytes(), preparation)
+        self.assertFalse(record.exists())
+        self.assertEqual(self.store.path.read_bytes(), before)
+        trace('publication-disk-full', ['plan', 'publish four inputs', 'exclusive successor record create hits ENOSPC',
+                                       'no authoritative record', 'registration refused', 'same destination refused',
+                                       'fresh destinations and reviewed digest materialized', 'queue unchanged'])

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from cmw.jobs.successor_models import SuccessorUnverifiable
 from cmw.jobs.successor_vasp import VaspSuccessorError, materialize_vasp, preview_vasp
 from cmw.periodic.vasp.inputs import check_inputs
 from cmw.periodic.vasp.preparation import PreparationError, prepare
@@ -179,6 +180,11 @@ class VaspSuccessorTests(unittest.TestCase):
         self.save()
         result = self.preview()
         self.assertEqual(result['source']['qualification'], 'accepted-periodic-structure')
+        with patch('cmw.jobs.successor_vasp.verify_finalization',
+                   return_value={'valid': None, 'findings': ['original queue unavailable']}):
+            with self.assertRaisesRegex(SuccessorUnverifiable, 'unverifiable.*original queue unavailable'):
+                self.materialize(result)
+        self.assertFalse(Path(self.options['output']).exists())
         self.parent['attempt_id'] = 'b' * 32
         with self.assertRaisesRegex(VaspSuccessorError, 'different parent attempt'):
             self.preview()

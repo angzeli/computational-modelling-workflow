@@ -377,6 +377,8 @@ class StudyService:
                         raise JobsError('Result is not the recorded registered case attempt; no silent rerun replacement')
                     row.update(target=target, case_binding={'status': 'PASS', 'digest': stable_hash(binding)})
                     closure = _closure(self.store, job, control, self._owner())
+                    if closure['closed'] is None:
+                        raise JobsError(closure['reason'])
                     if not closure['closed']:
                         raise JobsError('Selected producing domain is not established closed: ' + closure['reason'])
                     runtime = plan['runtimes'][case['case_id']]

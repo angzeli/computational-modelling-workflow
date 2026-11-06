@@ -170,8 +170,11 @@ def _vasp(job, directory, policy_path, spec_path, segment, stdout, sources):
                     'UNSUPPORTED' if evidence.get('status') == 'unsupported' else 'NOT ASSESSED')
     endpoint_checks = [c for c in checks if c['code'].startswith(('endpoint.', 'artifact.'))]
     endpoint_status = _status(c['status'] for c in endpoint_checks) if endpoint_checks else 'NOT ASSESSED'
+    binding_status = 'NOT ASSESSED'
+    if binding:
+        binding_status = {True: 'PASS', False: 'FAIL', None: 'UNKNOWN'}[binding['valid']]
     domains = {
-        'source_binding': _domain('PASS' if binding and binding.get('valid') else 'FAIL' if binding else 'NOT ASSESSED',
+        'source_binding': _domain(binding_status,
             'Explicit retrospective input and execution binding' if binding else 'No explicit input/execution binding selected',
             binding),
         'electronic': _domain(electronic, 'Native and numerical electronic convergence within observed coverage',

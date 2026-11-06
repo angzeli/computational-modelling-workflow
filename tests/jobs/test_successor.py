@@ -1,8 +1,10 @@
 """Owner service exercised with real benign native receipts and no engines."""
+from contextlib import closing
 from copy import deepcopy
 import json
 from pathlib import Path
 import shutil
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -10,7 +12,8 @@ from uuid import uuid4
 
 from cmw.jobs.store import JobsError
 from cmw.jobs import runtime
-from cmw.jobs.successor import SuccessorService, launch_blocker as successor_launch_blocker
+from cmw.jobs.successor import SuccessorService, _closure, launch_blocker as successor_launch_blocker
+from cmw.jobs.successor_models import SuccessorUnverifiable
 from cmw.jobs.runner_assets import file_identity
 from tests.jobs.successor_fixtures import make_vasp_fixture, successor_case
 
@@ -145,7 +148,7 @@ class SuccessorServiceTests(unittest.TestCase):
                 with patch('cmw.jobs.successor_vasp.preview_vasp', side_effect=AssertionError('Blocked parent opened science')):
                     result = self.plan()
                 self.assertEqual(result.status, 'BLOCKED')
-                self.assertFalse(json.loads(result.payload_json)['closure']['closed'])
+                self.assertIs(json.loads(result.payload_json)['closure']['closed'], False)
         finally:
             with self.store.transaction() as con:
                 self.store.save(con, original)
@@ -167,6 +170,52 @@ class SuccessorServiceTests(unittest.TestCase):
         shutil.copyfile(record, copied)
         with self.assertRaises(JobsError):
             self.service.register(self.parent['id'], str(copied), plan.plan_digest, uuid4().hex, self.parent['attempt_id'])
+
+    def test_queue_unavailable_during_vasp_profile_readiness_stays_retryable(self):
+        unavailable = {'ready': False, 'queue_read_unavailable': True, 'errors': ['research: database locked']}
+        with patch('cmw.nodes.identity.check_node', return_value=unavailable):
+            plan = self.plan()
+            self.assertEqual(plan.status, 'UNVERIFIABLE')
+            self.assertIn('database locked', json.loads(plan.payload_json)['reason'])
+        plan, _, record = self.materialize()
+        request_id = uuid4().hex
+        with patch('cmw.nodes.identity.check_node', return_value=unavailable):
+            with self.assertRaisesRegex(SuccessorUnverifiable, 'profile queue temporarily unreadable'):
+                self.service.register(self.parent['id'], str(record), plan.plan_digest, request_id)
+        self.assertIsNone(self.store.request_lookup(request_id))
+        self.assertEqual(self.service.register(self.parent['id'], str(record), plan.plan_digest, request_id).status, 'REGISTERED')
+
+    def test_locked_parent_is_retryable_at_entry_planning_and_registration(self):
+        plan, _, record = self.materialize()
+        request_id = uuid4().hex
+
+        def lock_during_closure(*args):
+            # The initial owner/target read has succeeded. Only the live
+            # comparison for the already selected parent is unavailable.
+            with closing(sqlite3.connect(self.store.path, isolation_level=None)) as writer:
+                writer.execute('BEGIN EXCLUSIVE')
+                return _closure(*args)
+
+        with closing(sqlite3.connect(self.store.path, isolation_level=None)) as writer:
+            writer.execute('BEGIN EXCLUSIVE')
+            with self.assertRaisesRegex(SuccessorUnverifiable, 'Parent queue temporarily unreadable'):
+                self.plan()
+        with patch('cmw.jobs.successor._closure', side_effect=lock_during_closure):
+            unavailable = self.plan()
+            self.assertEqual(unavailable.status, 'UNVERIFIABLE')
+            closure = json.loads(unavailable.payload_json)['closure']
+            self.assertIsNone(closure['closed'])
+            self.assertIn('parent queue temporarily unreadable', closure['reason'])
+            with self.assertRaisesRegex(SuccessorUnverifiable, 'unverifiable, retry') as refused:
+                self.service.register(self.parent['id'], str(record), plan.plan_digest, request_id)
+            self.assertEqual(refused.exception.code, 'SUCCESSOR_UNVERIFIABLE')
+        self.assertIsNone(self.store.request_lookup(request_id))
+        self.assertEqual(json.loads(record.read_text())['status'], 'MATERIALIZED')
+        registered = self.service.register(self.parent['id'], str(record), plan.plan_digest, request_id)
+        self.assertEqual(registered.status, 'REGISTERED')
+        with self.assertRaises(JobsError) as missing:
+            self.service._parent(self.parent['id'] + 100, None)
+        self.assertNotIsInstance(missing.exception, SuccessorUnverifiable)
 
     def test_accepted_geometry_uses_genuine_native_receipt_and_existing_finalizer(self):
         from cmw.core.provenance import stable_hash

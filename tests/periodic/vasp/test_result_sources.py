@@ -55,7 +55,7 @@ class ResultSourceTests(unittest.TestCase):
         self.assertEqual(reader.record["coverage"], "incomplete")
         self.assertFalse(reader.record["eof_reached"])
         self.assertEqual(reader.record["sha256"], hashlib.sha256(b"first\n").hexdigest())
-        self.assertFalse(revalidate_sources([reader.record])["valid"])
+        self.assertIs(revalidate_sources([reader.record])["valid"], False)
 
     def test_byte_limit_partial_line_not_yielded(self):
         self.path.write_bytes(b"first\nsecond\n")
@@ -122,7 +122,7 @@ class ResultSourceTests(unittest.TestCase):
             list(reader)
         self.assertIn("truncation", reader.record["changes"])
         self.assertFalse(reader.record["stable"])
-        self.assertFalse(revalidate_sources([reader.record])["valid"])
+        self.assertIs(revalidate_sources([reader.record])["valid"], False)
 
     def test_replacement_keeps_open_descriptor_bytes_and_detects_path_change(self):
         data = b"first\nsecond\n"
@@ -151,7 +151,7 @@ class ResultSourceTests(unittest.TestCase):
         self.path.write_bytes(b"other\nsecond\n")
         os.utime(self.path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
         result = revalidate_sources([record])
-        self.assertFalse(result["valid"])
+        self.assertIs(result["valid"], False)
         self.assertEqual(result["findings"][0]["code"], "source.identity_changed")
 
     def test_revalidation_detects_identical_bytes_in_replacement_inode(self):
@@ -159,7 +159,7 @@ class ResultSourceTests(unittest.TestCase):
         replacement = self.root / "replacement"
         replacement.write_bytes(self.path.read_bytes())
         replacement.replace(self.path)
-        self.assertFalse(revalidate_sources([record])["valid"])
+        self.assertIs(revalidate_sources([record])["valid"], False)
 
     def test_revalidation_accepts_unchanged_source_without_writes(self):
         _, record = self.observe()

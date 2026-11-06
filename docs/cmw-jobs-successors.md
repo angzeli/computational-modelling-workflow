@@ -70,6 +70,30 @@ KPOINTS and POTCAR; its records go to explicit Scratch and a separate new wrappe
 working directory remains empty. ORCA uses its existing target/layout/attempt
 materializer. Failed publication preserves incomplete evidence and never registers.
 
+If the parent queue or other required parent evidence cannot be read, planning
+reports `UNVERIFIABLE` with the reason and exits 75. Retry the same request.
+A contradicted closure reports `BLOCKED` and exits 2. Study comparisons keep
+the specific reason on an `UNAVAILABLE` row.
+
+Once the engine has published the approved inputs, `successor.json` records
+their hashes, the approved plan digest and a `PENDING_VERIFICATION` state.
+If the parent recheck is temporarily unavailable, `materialize-next` returns
+that state and exits 75. Registration refuses with exit 75. After access
+recovers, repeat **the same materialize command, specification, digest and
+destination**. The owner locks the publication directory, checks the input
+bytes and parent evidence, then atomically changes the record to
+`MATERIALIZED`. Concurrent retries observe a single promotion. A changed
+parent or altered input leaves a terminal `INCOMPLETE` record for inspection.
+A completed materialization from an older CMW version retains its original
+registration route.
+
+On a node connection, a retryable evidence refusal uses
+`SUCCESSOR_UNVERIFIABLE`; a publication awaiting its final check uses
+`SUCCESSOR_PENDING_VERIFICATION`. Both CLI routes return 75. A lost mutation
+reply can instead be `OUTCOME_UNKNOWN`; inspect the original destination or
+request receipt before retrying. See the [result-verification exit
+semantics](periodic/vasp-result-evidence.md#commands-output-and-reuse).
+
 Registration independently checks the approved prepared bytes, original record
 location and runtime. It creates one new Hold attempt through Store, preserving
 the parent identity and mode in immutable submission metadata. Retry a lost reply
@@ -78,6 +102,25 @@ the original child. A new request ID cannot register the same materialization
 again. A subsequent launch still requires separate release/dispatch consent and
 rechecks original-location, inputs, runtime and working-directory identity through
 the existing admission path. No catalogue relation or scientific PASS is invented.
+
+### Disk full creating the first successor record
+
+If `materialize-next` reports `ENOSPC` while first creating
+`successor.json`, check the approved locations. For VASP, the input directory
+can already contain INCAR, POSCAR, KPOINTS and POTCAR, Scratch can contain a
+complete `preparation.json`, and the wrapper working directory can exist and
+be empty. Registration requires the separate `successor.json`. When it is
+absent, a retry at those locations refuses with `Refusing existing destination`
+and preserves the files.
+
+Restore sufficient space and retain the first publication for inspection. Copy
+the original successor specification to a new path and choose unused
+`adapter.output`, `adapter.record_directory` and `runtime.run_directory`
+locations. Run `plan-next` against the same parent and attempt, review the
+new locations and digest, then run `materialize-next` with that digest.
+Use the new record for any subsequent held registration. If the original
+`successor.json` exists and says `PENDING_VERIFICATION`, follow the
+same-destination retry procedure above instead.
 
 ## Caller-owned schema 1
 

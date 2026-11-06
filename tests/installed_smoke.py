@@ -486,7 +486,7 @@ raise SystemExit(main(sys.argv[1:]))
             raise AssertionError('Failed source revalidation unexpectedly finalized')
     failed_path = case['scratch']/'failed-publication'/'finalization.json'
     assert json.loads(failed_path.read_text())['publication']['state'] == 'failed'
-    assert not invoke(['vasp', 'verify-result-record', failed_path, '--json'], expected=2)['valid']
+    assert invoke(['vasp', 'verify-result-record', failed_path, '--json'], expected=2)['valid'] is False
 
     for case in all_cases:
         assert {path.name for path in case['inputs'].iterdir()} == {'INCAR', 'KPOINTS', 'POSCAR', 'POTCAR'}
@@ -549,6 +549,8 @@ def handoff_surface(root, cli):
     The compatible protocol fixture is not the external VASP port. Child runtime
     helpers live beside this copied driver; scientific CLI calls remove PYTHONPATH.
     """
+    from contextlib import closing
+    import sqlite3
     from tests.periodic.vasp.handoff_case import bind_completed_case, prepare_case
 
     root.mkdir()
@@ -604,6 +606,17 @@ def handoff_surface(root, cli):
                         runtime.reap_detached()
                     wait_for(lambda: not any(owner_alive(owner) for owner in owners if owner))
                     assert not store.snapshot()['controller']['online'] and not runtime._CHILDREN
+        if name == 'static':
+            # Hold the real fixture queue only after its controller has stopped.
+            with closing(sqlite3.connect(store.path, isolation_level=None)) as writer:
+                writer.execute('BEGIN EXCLUSIVE')
+                locked = subprocess.run([cli, 'vasp', 'verify-result-record', record_path, '--json'],
+                                        cwd=root, env=child_env, capture_output=True, text=True, timeout=30)
+            assert locked.returncode == 75, (locked.stdout, locked.stderr)
+            verdict = json.loads(locked.stdout)
+            assert verdict['status'] == 'UNVERIFIABLE' and verdict['valid'] is None
+            assert verdict['artifacts'] == [] and verdict['live_queue']['status'] == 'UNAVAILABLE'
+            rows[-1]['locked_queue_exit'] = locked.returncode
     return {'compatible_fixture_only': True, 'actual_external_port_qualified': False,
             'prepared_managed_finalized_reverified': rows, 'cli_pythonpath_removed': True,
             'live_recorded_owners_after_cleanup': 0}

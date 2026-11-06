@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from .store import JobsError
+from .successor_models import SuccessorUnverifiable
 
 OPERATIONS = {'plan-next': 'plan', 'materialize-next': 'materialize', 'register-next': 'register'}
 
@@ -32,9 +33,13 @@ def register(operations, handler):
 def _print(result, args):
     from .cli import safe_text
     value = result.to_dict()
+    if result.retry_code:
+        value.update(code=result.retry_code, exit_code=75)
     # The complete plan remains visible in text mode; no truncated summary is approval.
     text = json.dumps(value, indent=2, ensure_ascii=args.json, allow_nan=False)
     print(text if args.json else safe_text(text))
+    if result.retry_code:
+        return 75
     return 2 if result.status == 'BLOCKED' else 0
 
 
@@ -50,9 +55,19 @@ def local(store, args):
         else:
             result = service.register(args.job_id, args.materialization, args.approve_digest,
                                       args.request_id, **expected)
+    except SuccessorUnverifiable as exc:
+        return print_retry(exc.code, str(exc), args)
     except ValueError as exc:
         raise JobsError(str(exc)) from exc
     return _print(result, args)
+
+
+def print_retry(code, reason, args):
+    from .cli import safe_text
+    status = 'PENDING_VERIFICATION' if code == 'SUCCESSOR_PENDING_VERIFICATION' else 'UNVERIFIABLE'
+    value = {'status': status, 'code': code, 'reason': reason, 'exit_code': 75}
+    print(json.dumps(value, ensure_ascii=True) if args.json else safe_text(f'{status}: {reason}'))
+    return 75
 
 
 def remote(backend, args):

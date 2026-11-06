@@ -68,7 +68,7 @@ class RunnerFinalizationTests(unittest.TestCase):
                 original = path.read_bytes()
                 try:
                     path.write_bytes(original + b"changed\n")
-                    self.assertFalse(verify_finalization(record["publication"]["record_path"])["valid"])
+                    self.assertIs(verify_finalization(record["publication"]["record_path"])["valid"], False)
                 finally:
                     path.write_bytes(original)
 
@@ -86,7 +86,7 @@ class RunnerFinalizationTests(unittest.TestCase):
             mutation(record)
             record["record_id"] = _record_identity(record)
             write_json(path, record)
-            self.assertFalse(verify_finalization(path)["valid"])
+            self.assertIs(verify_finalization(path)["valid"], False)
 
     def test_contextual_input_identity_changes_artifact_identity(self):
         original = self.finalize(dry_run=True)

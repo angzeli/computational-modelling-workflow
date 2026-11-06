@@ -26,6 +26,10 @@ import psutil
 from . import ownership
 from .store import ACTIVE, JobsError
 
+# One bounded observation may wait up to 0.85 s for the original queue.
+_QUEUE_READ_ATTEMPTS = 3
+_QUEUE_BUSY_TIMEOUT = 0.25
+_QUEUE_RETRY_DELAY = 0.05
 FRESH_SECONDS = 5
 RECEIPT_LIMIT = 4096
 LIFECYCLE_FIELDS = ('id', 'attempt_id', 'status', 'claim', 'claimed_at', 'worker',
@@ -153,8 +157,12 @@ def observe_process(owner):
         return Evidence('unavailable', 'Process identity/status is inaccessible', 'inaccessible', details)
 
 
+class JobObservationUnavailable(JobsError):
+    """The protected observation could not safely read a stable source."""
+
+
 @contextmanager
-def _read_file(store, parts):
+def _read_file(store, parts, *, verify_failure=False):
     """Pin ordinary path components without following symlinks or creating files.
 
     Revalidate names against the pinned descriptors after inspection, including
@@ -166,7 +174,7 @@ def _read_file(store, parts):
         handles.append(root_fd)
         root = os.fstat(root_fd)
         if root.st_uid != os.geteuid() or stat.S_IMODE(root.st_mode) & 0o077:
-            raise JobsError('State directory is not private and owned by this user')
+            raise JobObservationUnavailable('State directory is not private and owned by this user')
         identities.append((None, store.root, root))
         parent = root_fd
         for index, part in enumerate(parts):
@@ -178,17 +186,23 @@ def _read_file(store, parts):
             info = os.fstat(descriptor)
             expected = stat.S_ISREG if index == len(parts)-1 else stat.S_ISDIR
             if not expected(info.st_mode) or info.st_uid != os.geteuid():
-                raise JobsError('Evidence path is not an owned ordinary file/directory')
+                raise JobObservationUnavailable('Evidence path is not an owned ordinary file/directory')
             identities.append((parent, part, info))
             parent = descriptor
-        yield handles[-1]
-        for parent, name, original in identities:
-            try:
-                current = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            except OSError as exc:
-                raise JobsError('Evidence path disappeared during observation') from exc
-            if (original.st_dev, original.st_ino, original.st_mode) != (current.st_dev, current.st_ino, current.st_mode):
-                raise JobsError('Evidence path identity changed during observation')
+        completed = False
+        try:
+            yield handles[-1]
+            completed = True
+        finally:
+            # A definitive provenance contradiction also needs a stable path.
+            if completed or verify_failure:
+                for parent, name, original in identities:
+                    try:
+                        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    except OSError as exc:
+                        raise JobObservationUnavailable('Evidence path disappeared during observation') from exc
+                    if (original.st_dev, original.st_ino, original.st_mode) != (current.st_dev, current.st_ino, current.st_mode):
+                        raise JobObservationUnavailable('Evidence path identity changed during observation')
     finally:
         for descriptor in reversed(handles):
             os.close(descriptor)
@@ -281,40 +295,130 @@ def _observe_receipt(store, job, worker, now):
         return Evidence('malformed', 'Receipt is not a supported payload-exit record', 'malformed')
 
 
-def _read_job(store, job_id):
+class JobObservationConflict(JobsError):
+    """A readable native record contradicts a required field."""
+
+    def __init__(self, message, fields, *, location=None):
+        super().__init__(message)
+        self.fields = fields
+        self.location = location
+
+
+def _provenance_queue_identity(store, con, schema, descriptor):
+    """Keep the rejected enrollment and its physical location distinct for diagnosis."""
+    try:
+        return store._queue_identity(con, schema)
+    except JobsError as exc:
+        if isinstance(exc.__cause__, OSError):
+            raise exc.__cause__
+        row = con.execute("SELECT value FROM meta WHERE key='queue_identity'").fetchone()
+        try:
+            observed = json.loads(row[0]) if row else None
+        except (ValueError, TypeError) as malformed:
+            raise JobObservationConflict('Malformed native queue enrollment', {
+                'queue_identity': {'malformed_json': True}, 'schema': schema}) from malformed
+        location = None
+        if isinstance(observed, dict):
+            root_info, db_info = store.root.lstat(), os.fstat(descriptor)
+            location = {'state_root': str(store.root),
+                        'root_identity': [root_info.st_dev, root_info.st_ino],
+                        'database_identity': [db_info.st_dev, db_info.st_ino]}
+        raise JobObservationConflict(str(exc), {'queue_identity': observed, 'schema': schema},
+                                     location=location) from exc
+
+
+def _read_job(store, job_id, *, timeout=0.1, with_identity=False):
     """One bounded read transaction; never migrate, create or repair state."""
-    with _read_file(store, ('queue.sqlite3',)) as descriptor:
+    with _read_file(store, ('queue.sqlite3',), verify_failure=with_identity) as descriptor:
         # CMW schema 1/2/3/4 uses rollback journalling. Refuse WAL rather than let a
         # read-only SQLite connection create shared-memory sidecars.
         header = os.pread(descriptor, 20, 0)
         if len(header) < 20 or header[18:20] != b'\x01\x01':
             raise JobsError('Unsupported database journal format for read-only observation')
-        con = sqlite3.connect(store.path.as_uri() + '?mode=ro', uri=True, timeout=0.1)
+        con = sqlite3.connect(store.path.as_uri() + '?mode=ro', uri=True, timeout=timeout)
         try:
             con.execute('PRAGMA query_only=ON')
+            if with_identity:
+                # Retain Store.read_transaction's journal check without a second connection.
+                con.execute('PRAGMA locking_mode=EXCLUSIVE')
             con.execute('BEGIN')
-            control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
-            if type(control.get('schema')) is not int or control['schema'] not in {1, 2, 3, 4}:
-                raise JobsError('Unsupported Jobs state schema')
-            if control['schema'] == 4:
-                store._queue_identity(con, control['schema'])
+            if with_identity and con.execute('PRAGMA journal_mode').fetchone()[0] != 'delete':
+                raise JobsError('Unsupported database journal format for read-only observation')
+            control_row = con.execute("SELECT value FROM meta WHERE key='control'").fetchone()
+            try:
+                control = json.loads(control_row[0]) if control_row else None
+            except (ValueError, TypeError) as malformed:
+                if not with_identity:
+                    raise
+                raise JobObservationConflict('Malformed Jobs controller record', {
+                    'schema': {'malformed_json': str(malformed)}}) from malformed
+            schema = control.get('schema') if isinstance(control, dict) else None
+            if type(schema) is not int or schema not in {1, 2, 3, 4}:
+                raise JobObservationConflict('Unsupported Jobs state schema', {'schema': schema})
+            identity = None
+            if with_identity:
+                identity = _provenance_queue_identity(store, con, schema, descriptor)
+            elif schema == 4:
+                store._queue_identity(con, schema)
             if (control['schema'] >= 3 and control.get('runtime_protocol') is not None and
                     (type(control['runtime_protocol']) is not int or control['runtime_protocol'] != 3)):
-                raise JobsError('Unsupported Jobs controller runtime protocol')
+                raise JobObservationConflict('Unsupported Jobs controller runtime protocol',
+                                             {'controller.runtime_protocol': control['runtime_protocol'], 'schema': schema})
             if type(job_id) is int:
                 row = con.execute('SELECT data FROM jobs WHERE id=?', (job_id,)).fetchone()
                 if row is None:
-                    raise JobsError('Recorded job is missing')
-                job = json.loads(row[0])
+                    raise JobObservationConflict('Recorded job is missing', {
+                        'job.id': None, 'schema': schema, 'queue_identity': identity})
+                try:
+                    job = json.loads(row[0])
+                except (ValueError, TypeError) as malformed:
+                    if not with_identity:
+                        raise
+                    raise JobObservationConflict('Malformed Jobs attempt record', {
+                        'job.id': {'malformed_json': str(malformed)}, 'schema': schema,
+                        'queue_identity': identity}) from malformed
                 if not isinstance(job, dict) or job.get('id') != job_id:
-                    raise JobsError('Recorded job identity differs')
+                    raise JobObservationConflict('Recorded job identity differs', {
+                        'job.id': job.get('id') if isinstance(job, dict) else None, 'schema': schema})
             else:
                 # Reuse established display-label and attempt validation. This
                 # reads one job and never constructs a history-wide snapshot.
                 job = store.get(con, job_id)
         finally:
             con.close()
-    return job, control
+    return (job, control, identity) if with_identity else (job, control)
+
+
+def read_job_with_identity(store, job_id, *, timeout):
+    """Observe an attempt and its enrollment in the same protected read transaction.
+
+    Storage and SQLite exceptions remain typed so provenance readers can retry
+    unavailable evidence without reclassifying a proven record contradiction.
+    """
+    return _read_job(store, job_id, timeout=timeout, with_identity=True)
+
+
+def queue_read_unavailable(error):
+    """Classify read failures, including those wrapped by Store's JobsError."""
+    while isinstance(error, JobsError) and not isinstance(error, JobObservationUnavailable):
+        error = error.__cause__
+    if isinstance(error, sqlite3.Error):
+        return (getattr(error, 'sqlite_errorcode', 0) & 255) not in {
+            sqlite3.SQLITE_ERROR, sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}
+    return isinstance(error, (OSError, JobObservationUnavailable))
+
+
+def read_job_with_identity_retry(store, job_id):
+    """Bounded retry for unavailable evidence; a readable contradiction is final."""
+    for attempt in range(_QUEUE_READ_ATTEMPTS):
+        try:
+            return read_job_with_identity(store, job_id, timeout=_QUEUE_BUSY_TIMEOUT)
+        except (OSError, JobsError, sqlite3.Error) as exc:
+            if not queue_read_unavailable(exc):
+                raise
+            if attempt + 1 == _QUEUE_READ_ATTEMPTS:
+                raise JobObservationUnavailable(str(exc)) from exc
+            time.sleep(_QUEUE_RETRY_DELAY)
 
 
 def read_job(store, job_id):
