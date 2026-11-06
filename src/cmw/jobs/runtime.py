@@ -306,8 +306,8 @@ def controller(store):
             print("CMW Jobs controller offline", flush=True)
 
 
-def finish(store, job_id, claim, status, code, reason, *, termination_signal=None):
-    with store.transaction() as con:
+def finish(store, job_id, claim, status, code, reason, *, termination_signal=None, wait=None):
+    with store.transaction(wait=wait) as con:
         job = store.get(con, job_id)
         if job["claim"] != claim or job["status"] not in ACTIVE:
             raise JobsError("Attempt no longer owns completion")
@@ -349,7 +349,7 @@ def _wait_for_group_end(pgid, *, session=False):
 
 
 @contextmanager
-def _worker_intent(store, expected, coordinator):
+def _worker_intent(store, expected, coordinator, wait):
     """Serialize the final syscall/pipe write with queue mutations, never a probe."""
     from .suspension import RequestSuperseded
     if coordinator:
@@ -357,7 +357,7 @@ def _worker_intent(store, expected, coordinator):
         with coordinator._intent(expected, check_deadline=not terminating, delivery=True):
             yield
         return
-    with store.transaction(create=False, exclusive=True) as con:
+    with store.delivery_gate(wait=wait) as con:
         latest = store.get(con, expected['id'])
         if any(latest.get(key) != expected.get(key) for key in ('attempt_id', 'claim', 'worker', 'group')):
             raise JobsError('Recorded worker or group authority changed; refusing control')
@@ -365,7 +365,6 @@ def _worker_intent(store, expected, coordinator):
                 any(latest.get(key) != expected.get(key) for key in
                     ('status', 'cancel_requested', 'termination_requested'))):
             raise RequestSuperseded('Control request or termination intent changed')
-        con.commit()  # The connection keeps its exclusive lock until close.
         yield
 
 
@@ -535,7 +534,7 @@ def worker(store, job_id, claim):
                         def send(pgid, signum, witness=None):
                             while True:
                                 try:
-                                    with _worker_intent(store, job, None):
+                                    with _worker_intent(store, job, None, authority.queue_wait):
                                         if witness is not None and not witness():
                                             return False
                                         if (pgid, signum) not in delivered:
@@ -561,7 +560,7 @@ def worker(store, job_id, claim):
                             leader.wait(timeout=5)
                             _wait_for_group_end(leader.pid, session=session)
                             finish(store, job_id, claim, "Cancelled" if job['cancel_requested'] else "Fail",
-                                   137 if job['cancel_requested'] else 124, "Termination confirmed", termination_signal=signal.SIGKILL)
+                                   137 if job['cancel_requested'] else 124, "Termination confirmed", termination_signal=signal.SIGKILL, wait=authority.queue_wait)
                             return
                 if receipt.exists():
                     evidence = json.loads(receipt.read_text())
@@ -574,7 +573,9 @@ def worker(store, job_id, claim):
                         if authority.generation != generation:
                             continue  # Drainage evidence predates an observation gap.
                         try:
-                            with _worker_intent(store, job, coordinator):
+                            with _worker_intent(store, job, coordinator, authority.queue_wait):
+                                if authority.generation != generation:
+                                    continue  # The lock wait aged the drainage observation.
                                 leader.stdin.write(b"RELEASE\n")
                                 leader.stdin.flush()
                         except RequestSuperseded:
@@ -587,12 +588,13 @@ def worker(store, job_id, claim):
                         else:
                             _wait_for_group_end(leader.pid, session=session)
                         if job['cancel_requested']:
-                            finish(store, job_id, claim, 'Cancelled', code, 'Termination confirmed')
+                            finish(store, job_id, claim, 'Cancelled', code, 'Termination confirmed', wait=authority.queue_wait)
                         elif job.get('termination_requested'):
-                            finish(store, job_id, claim, 'Fail', 124, 'Declared execution deadline expired')
+                            finish(store, job_id, claim, 'Fail', 124, 'Declared execution deadline expired', wait=authority.queue_wait)
                         else:
                             finish(store, job_id, claim, "Done" if code == 0 else "Fail", code,
-                                   "Execution contract completed; scientific checks not evaluated" if code == 0 else f"Exit code {code}")
+                                   "Execution contract completed; scientific checks not evaluated" if code == 0 else f"Exit code {code}",
+                                   wait=authority.queue_wait)
                         return
                 time.sleep(INTERVAL)
         except Exception as exc:

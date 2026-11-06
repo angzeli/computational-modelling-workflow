@@ -181,7 +181,9 @@ def trace_runtime(root):
         return result
 
     def finished(store, job_id, claim, status, code, reason, **kwargs):
-        record('finish', job_id=job_id, claim=claim, status=status, code=code, reason=reason, **kwargs)
+        # The worker's contention-wait callback is process-local, not receipt data.
+        signal_evidence = {'termination_signal': kwargs['termination_signal']} if 'termination_signal' in kwargs else {}
+        record('finish', job_id=job_id, claim=claim, status=status, code=code, reason=reason, **signal_evidence)
         return finish(store, job_id, claim, status, code, reason, **kwargs)
 
     def uncertain(store, con, job, reason):

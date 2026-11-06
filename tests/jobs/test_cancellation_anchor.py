@@ -360,6 +360,68 @@ class CancellationAnchorTests(unittest.TestCase):
         self.assertEqual(model.signals, [])
         model.leader.stdin.close.assert_called_once()
 
+    def test_delivery_gate_excludes_writers_allows_readers_and_disallows_sql_writes(self):
+        store = self.model('receipt-first').store
+        peer = sqlite3.connect(store.path, timeout=0, isolation_level=None)
+        self.addCleanup(peer.close)
+        with store.delivery_gate() as con:
+            self.assertEqual(peer.execute('SELECT count(*) FROM jobs').fetchone(), (1,))
+            with self.assertRaises(sqlite3.OperationalError) as writer:
+                peer.execute('BEGIN IMMEDIATE')
+            self.assertEqual(writer.exception.sqlite_errorcode, sqlite3.SQLITE_BUSY)
+            with self.assertRaises(sqlite3.OperationalError) as write:
+                con.execute('UPDATE jobs SET data=data')
+            self.assertEqual(write.exception.sqlite_errorcode, sqlite3.SQLITE_READONLY)
+        peer.execute('BEGIN IMMEDIATE')
+        peer.rollback()
+
+    def test_release_waits_out_competing_writer_and_reobserves_drained_job(self):
+        model = self.ordinary('release-cancel')
+        peer = sqlite3.connect(model.store.path, timeout=0, isolation_level=None)
+        self.addCleanup(peer.close)
+        original = runtime._worker_intent
+        retries = []
+        @contextmanager
+        def disputed(store, job, coordinator, wait):
+            if not retries:
+                peer.execute('BEGIN IMMEDIATE')
+                def release_writer(delay):
+                    self.assertFalse(model.leader.stdin.close.called)
+                    self.assertFalse(model.released)
+                    retries.append(delay)
+                    peer.rollback()
+                    wait(delay)
+                with original(store, job, coordinator, release_writer):
+                    yield
+                self.assertFalse(model.released)  # Pre-wait drainage was discarded.
+            else:
+                peer.execute('BEGIN')
+                self.assertEqual(peer.execute('SELECT count(*) FROM jobs').fetchone(), (1,))
+                try:
+                    with original(store, job, coordinator, wait):
+                        yield
+                    self.assertTrue(model.released)  # RELEASE coexists with a reader.
+                finally:
+                    peer.rollback()
+        with patch.object(runtime, '_worker_intent', disputed):
+            job = model.run()
+        self.assertEqual(retries, [.05])
+        self.assertEqual(model.events.count('RELEASE'), 1)
+        self.assertEqual((job['status'], job['exit_code']), ('Fail', 143))
+
+    def test_contention_in_transaction_body_is_not_replayed(self):
+        store = self.model('receipt-first').store
+        waits = Mock()
+        with self.assertRaisesRegex(JobsError, 'database is locked'):
+            with store.transaction(wait=waits):
+                # The typed exception is produced by SQLite, not message matching.
+                other = sqlite3.connect(store.path, timeout=0)
+                try:
+                    other.execute('BEGIN IMMEDIATE')
+                finally:
+                    other.close()
+        waits.assert_not_called()
+
     def test_cancel_winning_final_admission_keeps_go_closed(self):
         model = self.ordinary('cancel-before-go')
         # The blocked pre-GO shell exits on EOF; no payload has started.

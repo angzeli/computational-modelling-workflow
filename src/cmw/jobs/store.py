@@ -140,38 +140,85 @@ class Store:
                             'Persisted argv, env and logs may be sensitive. Create/select a private directory '
                             'owned by your user with mode 0700 and use --state; existing permissions were not changed.')
 
+    @staticmethod
+    def _contention(exc):
+        code = getattr(exc, 'sqlite_errorcode', None)
+        return code is not None and (code & 0xff) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+
     @contextmanager
-    def transaction(self, *, create=True, exclusive=False):
+    def _writer(self, wait):
+        # The detached worker may outlive a competing reader or writer.
+        # Retry only acquisition, never the body containing a control effect.
+        delay = .05
+        try:
+            while True:
+                con = None
+                try:
+                    con = sqlite3.connect(self.path.as_uri() + '?mode=rw', uri=True,
+                                          timeout=10 if wait is None else 0, isolation_level=None)
+                    con.execute('BEGIN IMMEDIATE')
+                except sqlite3.Error as exc:
+                    if con is not None:
+                        con.close()
+                    if wait is None or not self._contention(exc):
+                        raise
+                    wait(delay)
+                    delay = min(.5, 2 * delay)
+                    continue
+                break
+            try:
+                con.row_factory = sqlite3.Row
+                yield con
+            finally:
+                con.close()  # Rolls back a read gate or a failed transaction.
+        except sqlite3.Error as exc:
+            raise JobsError(f"Queue database unavailable: {exc}") from exc
+
+    def _commit(self, con, wait):
+        delay = .05
+        while True:
+            try:
+                con.commit()
+                return
+            except sqlite3.Error as exc:
+                if wait is None or not con.in_transaction or not self._contention(exc):
+                    raise
+                # A reader can block COMMIT. Keep the same transaction and
+                # repeat only COMMIT, without reexecuting the caller's work.
+                wait(delay)
+                delay = min(.5, 2 * delay)
+
+    def _schema(self, con):
+        row = con.execute("SELECT value FROM meta WHERE key='control'").fetchone()
+        schema = json.loads(row[0]).get('schema') if row else None
+        if type(schema) is not int or schema not in {1, 2, 3, 4}:
+            raise JobsError("Unsupported Jobs state schema")
+        if schema == 4:
+            self._queue_identity(con, schema)
+        return schema
+
+    @contextmanager
+    def delivery_gate(self, *, wait=None):
+        """Exclude other writers until delivery; allow observers and never write."""
+        self.ensure_private_root(create=False)
+        with self._writer(wait) as con:
+            con.execute('PRAGMA query_only=ON')
+            if self._schema(con) == 1:
+                raise JobsError('Legacy Jobs queue cannot authorize control delivery')
+            yield con
+
+    @contextmanager
+    def transaction(self, *, create=True, wait=None):
         self.ensure_private_root(create=create)
         if create:
             with open(self.path, 'ab', opener=private_opener):
                 pass
-        try:
-            con = sqlite3.connect(self.path.as_uri() + '?mode=rw', uri=True,
-                                  timeout=10, isolation_level=None)
-        except sqlite3.Error as exc:
-            raise JobsError(f"Queue database unavailable: {exc}") from exc
-        con.row_factory = sqlite3.Row
-        try:
-            con.execute("PRAGMA busy_timeout=10000")
-            if exclusive:
-                # SQLite retains the file lock on this connection after COMMIT.
-                # The caller can commit durable state before an irreversible
-                # pipe write or signal, without letting a new intent intervene.
-                con.execute("PRAGMA locking_mode=EXCLUSIVE")
-                con.execute("BEGIN EXCLUSIVE")
-            else:
-                con.execute("BEGIN IMMEDIATE")
+        with self._writer(wait) as con:
             con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             con.execute("CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL)")
             con.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, time REAL, job_id INTEGER, message TEXT)")
             con.execute("INSERT OR IGNORE INTO meta VALUES ('control', ?)", (json.dumps({"schema": 2, "dispatch": False, "stop": False, "reason": "Not started", "heartbeat": None, "owner": None, "scheduler": scheduler_defaults()}),))
-            raw_control = json.loads(con.execute("SELECT value FROM meta WHERE key='control'").fetchone()[0])
-            if type(raw_control.get('schema')) is not int or raw_control['schema'] not in {1, 2, 3, 4}:
-                raise JobsError("Unsupported Jobs state schema")
-            if raw_control['schema'] == 4:
-                self._queue_identity(con, raw_control['schema'])
-            if raw_control['schema'] == 1:
+            if self._schema(con) == 1:
                 # Old supervisors reject schema 2 on their next receipt/finalize
                 # transaction. Keep their state readable until they are done.
                 from .ownership import lock_held
@@ -186,15 +233,7 @@ class Store:
                     self.save(con, job)
             yield con
             if con.in_transaction:
-                con.commit()
-        except sqlite3.Error as exc:
-            con.rollback()
-            raise JobsError(f"Queue database unavailable: {exc}") from exc
-        except BaseException:
-            con.rollback()
-            raise
-        finally:
-            con.close()
+                self._commit(con, wait)
 
     def _queue_identity(self, con, schema):
         row = con.execute("SELECT value FROM meta WHERE key='queue_identity'").fetchone()

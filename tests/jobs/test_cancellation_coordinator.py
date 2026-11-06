@@ -117,16 +117,15 @@ class CancellationCoordinatorTests(unittest.TestCase):
         self.domain()
         self.coordinator.cancel_intent = self.current()
         member = self.table.record(11)
-        transaction = self.store.transaction
+        gate = self.store.delivery_gate
 
         @contextmanager
         def change_group_at_delivery(**options):
-            if options.get('exclusive'):
-                self.table.rows[11]['pgid'] = 20
-            with transaction(**options) as con:
+            self.table.rows[11]['pgid'] = 20
+            with gate(**options) as con:
                 yield con
 
-        with patch.object(self.store, 'transaction', change_group_at_delivery):
+        with patch.object(self.store, 'delivery_gate', change_group_at_delivery):
             with self.assertRaisesRegex(JobsError, 'changed group before delivery'):
                 self.coordinator._cancel_send(member, signal.SIGTERM)
         self.assertEqual(self.sent, [])

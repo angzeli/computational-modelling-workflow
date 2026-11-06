@@ -4,6 +4,7 @@ from copy import deepcopy
 from contextlib import ExitStack, contextmanager
 import json
 from pathlib import Path
+import sqlite3
 from threading import Event
 from types import SimpleNamespace
 import tempfile
@@ -139,13 +140,12 @@ class StateTests(unittest.TestCase):
         coordinator.authority = WorkerAuthority(self.store, job, ANCHOR, Mock())
         coordinator.authority.wait = Mock(return_value=job)
         acquiring, replaced = Event(), Event()
-        transaction = self.store.transaction
+        gate = self.store.delivery_gate
 
         @contextmanager
         def transaction_start(**options):
-            if options.get('exclusive'):
-                acquiring.set()
-            with transaction(**options) as con:
+            acquiring.set()
+            with gate(**options) as con:
                 yield con
 
         def observe(record):
@@ -153,19 +153,102 @@ class StateTests(unittest.TestCase):
                       else control.OwnershipStatus.VERIFIED)
             return SimpleNamespace(status=status, deciding_check='start_token')
 
-        with patch.object(self.store, 'transaction', transaction_start), \
+        with patch.object(self.store, 'delivery_gate', transaction_start), \
                 patch.object(control, '_send', REAL_SEND), patch.object(control, '_check_identity'), \
                 patch.object(control, 'observe_owner', side_effect=observe), \
                 patch.object(control.os, 'getsid', return_value=ANCHOR['pid']), \
                 patch.object(control.os, 'getpgid', side_effect=lambda pid: pid), \
                 patch.object(control.os, 'kill') as kill, ThreadPoolExecutor(max_workers=1) as pool:
-            with transaction(create=False):
+            with self.store.transaction(create=False):
                 future = pool.submit(coordinator._deliver, job, MEMBER, control.signal.SIGCONT)
                 self.assertTrue(acquiring.wait(5))
                 replaced.set()
             with self.assertRaisesRegex(JobsError, 'Signal authority changed'):
                 future.result(timeout=5)
             kill.assert_not_called()
+
+    def test_busy_second_continue_gate_retries_only_that_target(self):
+        intervals = [{'start': 90., 'end': 95.}]
+        domain = control.Domain((MEMBER, OTHER), (ANCHOR, RUNNER), ())
+        job = self.phase('Resuming', inhibited=True, revision=2,
+                         request={'id': 'resume', 'action': 'continue'},
+                         evidence=domain.evidence(), intervals=intervals)
+        coordinator = self.coordinator()
+        authority = coordinator.authority = WorkerAuthority(self.store, job, ANCHOR, Mock())
+        authority.wait = Mock(return_value=job)
+        coordinator.pending = {'id': 'resume', 'stage': 'prepare_continue', 'started': 100.}
+        coordinator._validate.return_value = domain
+        coordinator.ack = Mock(return_value={'intervals': intervals, 'suspended_seconds': 5.,
+                                             'unsuspended_elapsed': 30.})
+        locker = sqlite3.connect(self.store.path)
+        self.addCleanup(locker.close)
+        gate = self.store.delivery_gate
+        sent, waits = [], []
+        clock = [100.]
+
+        @contextmanager
+        def contend_at_second_target(**options):
+            if len(sent) == 1 and not waits:
+                locker.execute('BEGIN IMMEDIATE')
+            with gate(**options) as con:
+                yield con
+
+        def release_writer(delay):
+            self.assertTrue(locker.in_transaction)
+            self.assertEqual(sent, [(OTHER['pid'], control.signal.SIGCONT)])
+            waits.append(delay)
+            clock[0] += 20.  # Longer than the entire transition deadline.
+            locker.rollback()
+
+        with patch.object(self.store, 'delivery_gate', contend_at_second_target), \
+                patch.object(control, '_send', REAL_SEND), patch.object(control, '_check_identity'), \
+                patch.object(control, '_stopped', side_effect=lambda m: (m['pid'], control.signal.SIGCONT) not in sent), \
+                patch.object(control.os, 'getsid', return_value=ANCHOR['pid']), \
+                patch.object(control.os, 'getpgid', side_effect=lambda pid: pid), \
+                patch.object(control.os, 'kill', side_effect=lambda p, sig: sent.append((p, sig))), \
+                patch.object(control.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(control.time, 'sleep', side_effect=release_writer):
+            coordinator.tick(job)
+            self.assertEqual(coordinator.pending['stage'], 'verify_continue')
+            coordinator.tick(self.current())
+            coordinator.tick(self.current())
+        state = self.current()['suspension']
+        self.assertEqual((state['phase'], state['intervals'], state['suspended_seconds']), ('Run', intervals, 5.))
+        self.assertFalse(state.get('accounting_uncertain'))
+        self.assertEqual(sent, [(p['pid'], control.signal.SIGCONT) for p in (OTHER, MEMBER)])
+        self.assertEqual(len(waits), 1)
+        self.assertEqual(authority.hold_seconds, 20.)
+
+    def test_busy_evidence_commit_retains_phase_and_runs_observation_once(self):
+        intervals = [{'start': 90., 'end': 95.}]
+        job = self.phase('Run', revision=2, intervals=intervals, suspended_seconds=5.)
+        coordinator = self.coordinator()
+        authority = coordinator.authority = WorkerAuthority(self.store, job, ANCHOR, Mock())
+        authority.wait = Mock(return_value=job)
+        reader = sqlite3.connect(self.store.path)
+        self.addCleanup(reader.close)
+        evidence = {'computational': [MEMBER], 'checked_clock': 101.}
+
+        def observe(domain, **kwargs):
+            # A real SQLite reader allows the UPDATE but holds off its COMMIT.
+            reader.execute('BEGIN')
+            reader.execute('SELECT id FROM jobs').fetchall()
+            return evidence
+
+        def release_reader(delay):
+            self.assertTrue(reader.in_transaction)
+            reader.rollback()
+
+        with patch.object(coordinator, '_evidence', side_effect=observe) as observation, \
+                patch.object(authority, '_backoff', side_effect=release_reader) as wait:
+            coordinator.tick(job)
+        state = self.current()['suspension']
+        self.assertEqual(state['evidence'], evidence)
+        self.assertEqual((state['phase'], state['intervals'], state['suspended_seconds']), ('Run', intervals, 5.))
+        self.assertFalse(state.get('accounting_uncertain'))
+        observation.assert_called_once()
+        wait.assert_called_once()
+        self.send.assert_not_called()
 
     def test_denied_delivery_witness_releases_lock_before_hold_and_supersession(self):
         job = self.phase('Resuming', revision=3, request={'id': 'resume', 'action': 'continue'})

@@ -78,6 +78,10 @@ class WorkerAuthority:
         time.sleep(delay)
         self.hold_seconds += time.monotonic() - started
 
+    def queue_wait(self, delay):
+        self.generation += 1
+        self._backoff(delay)
+
     def read_domain(self, observation, *, first_failure=None):
         """Retry only a read. Never replay a coordinator command or signal."""
         delay = .25
@@ -90,7 +94,7 @@ class WorkerAuthority:
                 value = observation()
             except (OwnershipUnavailable, PermissionError, psutil.AccessDenied) as exc:
                 self.wait(retrying_domain=True)
-                with self.store.transaction(create=False) as con:
+                with self.store.transaction(create=False, wait=self.queue_wait) as con:
                     job = self.store.get(con, self.job_id)
                     check = exc.deciding_check if isinstance(exc, OwnershipUnavailable) else 'domain.access'
                     unavailable(self.store, con, job, 'domain', check, time.monotonic())
@@ -100,7 +104,7 @@ class WorkerAuthority:
                 delay = min(delay*2, MAX_RETRY)
             else:
                 if held:
-                    with self.store.transaction(create=False) as con:
+                    with self.store.transaction(create=False, wait=self.queue_wait) as con:
                         recovered(self.store, con, self.store.get(con, self.job_id), 'domain')
                     held = False
                     self.wait()
@@ -110,12 +114,15 @@ class WorkerAuthority:
     def wait(self, *, before_admission=False, retrying_domain=False):
         delay = .25
         while True:
+            generation = self.generation
             worker = observe_owner(self.worker)
             group = observe_owner(self.anchor)
             if group.status == OwnershipStatus.UNVERIFIABLE and self.child.poll() is not None:
                 # waitpid confirms this exact child exited (including zombies).
                 raise JobsError('Group leader disappeared: direct child exit confirmed by waitpid')
-            with self.store.transaction(create=False) as con:
+            with self.store.transaction(create=False, wait=self.queue_wait) as con:
+                if self.generation != generation:
+                    continue  # Contention delayed the ownership read; observe again.
                 job = self.store.get(con, self.job_id)
                 if job['claim'] != self.claim or job['worker'] != self.worker or (
                         job.get('group') is not None and job['group'] != self.anchor):

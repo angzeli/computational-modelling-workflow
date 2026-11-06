@@ -634,8 +634,14 @@ class Coordinator:
     def context_path(self):
         return str(self.directory/'context.json')
 
+    def _queue_transaction(self, *, delivery=False):
+        wait = self.authority._backoff if self.authority else None
+        if delivery:
+            return self.store.delivery_gate(wait=wait)
+        return self.store.transaction(create=False, wait=wait)
+
     def current(self):
-        with self.store.transaction(create=False) as con:
+        with self._queue_transaction() as con:
             job = self.store.get(con, self.job_id)
         if job['claim'] != self.claim or job['worker'] != self.context['worker']:
             raise JobsError('Suspension authority changed')
@@ -647,7 +653,7 @@ class Coordinator:
     def _intent(self, expected, *, check_deadline=False, delivery=False):
         # Serialize only the final publication/signal with client mutations.
         # All blocking authority and topology retries run outside this transaction.
-        with self.store.transaction(create=False, exclusive=delivery) as con:
+        with self._queue_transaction(delivery=delivery) as con:
             latest = self.store.get(con, self.job_id)
             if (latest['claim'] != self.claim or latest['worker'] != self.context['worker']
                     or latest['attempt_id'] != expected['attempt_id'] or latest['group'] != self.anchor
@@ -663,10 +669,6 @@ class Coordinator:
                 # The runner can publish this before the next worker tick has
                 # copied its bound termination request into the queue.
                 raise RequestSuperseded('Runner termination request pending verification')
-            if delivery:
-                # Exclusive locking mode keeps other writers out through the
-                # syscall/replacement, even after this potentially failing commit.
-                con.commit()
             yield con, latest
 
     def update(self, job, **changes):
@@ -872,7 +874,7 @@ class Coordinator:
         """Inhibit runner producers before TERM and termination-only CONT."""
         if self.registration is None:
             return True
-        with self.store.transaction(create=False) as con:
+        with self._queue_transaction() as con:
             latest = self.store.get(con, self.job_id)
             if (latest['claim'] != self.claim or latest['worker'] != self.context['worker']
                     or not (latest.get('cancel_requested') or latest.get('termination_requested'))):
@@ -1146,7 +1148,7 @@ class Coordinator:
             if expired is not None:
                 if expired.get('runner') != self.registration['runner']:
                     raise JobsError('Foreign deadline owner')
-                with self.store.transaction(create=False) as con:
+                with self._queue_transaction() as con:
                     latest = self.store.get(con, self.job_id)
                     if latest['claim'] == self.claim and latest['status'] == 'Run':
                         latest.update(status='Cancelling', termination_requested=expired,
