@@ -87,7 +87,7 @@ def _darwin_process(pid):
     return row.start.seconds * 1_000_000 + row.start.microseconds, row.state == 5  # SZOMB
 
 
-def _linux_process(pid):
+def _linux_fields(pid):
     try:
         record = Path(f'/proc/{pid}/stat').read_bytes()
     except FileNotFoundError:
@@ -99,6 +99,11 @@ def _linux_process(pid):
         raise OSError(errno.EIO, 'Incomplete kernel process record')
     if fields[0] not in (b'R', b'S', b'D', b'Z', b'T', b't', b'X', b'x', b'K', b'W', b'P', b'I') or not fields[19].isdigit():
         raise OSError(errno.EIO, 'Invalid kernel process state or start token')
+    return fields
+
+
+def _linux_process(pid):
+    fields = _linux_fields(pid)
     return int(fields[19]), fields[0] in (b'Z', b'X', b'x')
 
 
@@ -117,3 +122,106 @@ def capture(pid=None):
     pid = os.getpid() if pid is None else pid
     return {'version': 2, 'host': socket.gethostname(), 'boot_session': boot_session_id(),
             'pid': pid, 'start_token': process_evidence(pid)[0]}
+
+
+@cache
+def _darwin_libproc():
+    libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+    fn = libproc.proc_listpids
+    fn.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int]
+    fn.restype = ctypes.c_int
+    libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                                     ctypes.c_void_p, ctypes.c_int]
+    libproc.proc_pidinfo.restype = ctypes.c_int
+    return libproc
+
+
+def _children(pid):
+    if sys.platform == 'darwin':
+        # libproc's PROC_PPID_ONLY returns bytes of child PIDs. A full buffer
+        # may have been truncated, so grow it or refuse the incomplete census.
+        capacity = 32
+        while capacity <= 2**18:
+            buf = (ctypes.c_int * capacity)()
+            ctypes.set_errno(0)
+            size = _darwin_libproc().proc_listpids(6, pid, buf, ctypes.sizeof(buf))
+            if size < 0 or (size == 0 and ctypes.get_errno()):
+                _raise_errno()
+            if size < ctypes.sizeof(buf) and size % ctypes.sizeof(ctypes.c_int) == 0:
+                return buf[:size // ctypes.sizeof(ctypes.c_int)]
+            capacity *= 2
+        raise OSError(errno.EOVERFLOW, 'Incomplete kernel child PID list')
+    if sys.platform.startswith('linux'):
+        # Linux lists children per *thread*. Include non-leader parents.
+        tasks = Path(f'/proc/{pid}/task')
+        return {int(child) for thread in tasks.iterdir()
+                for child in (thread / 'children').read_bytes().split()}
+    raise OSError(errno.ENOTSUP, 'Kernel child PID list unavailable')
+
+
+def _parent(pid):
+    if sys.platform == 'darwin':
+        # PROC_PIDT_SHORTBSDINFO begins with two uint32_t fields, PID and PPID.
+        buf = (ctypes.c_uint32 * 64)()
+        ctypes.set_errno(0)
+        size = _darwin_libproc().proc_pidinfo(pid, 13, 0, buf, ctypes.sizeof(buf))
+        if size <= 0:
+            if ctypes.get_errno() == errno.ESRCH:
+                _confirm_absence(pid)
+            if ctypes.get_errno():
+                _raise_errno()
+        if size < 8 or buf[0] != pid:
+            raise OSError(errno.EIO, 'Incomplete kernel parent identity')
+        return buf[1]
+    if sys.platform.startswith('linux'):
+        fields = _linux_fields(pid)
+        if not fields[1].isdigit():
+            raise OSError(errno.EIO, 'Invalid kernel parent PID')
+        return int(fields[1])
+    raise OSError(errno.ENOTSUP, 'Kernel parent PID unavailable')
+
+
+def _check_edges(nodes, edges):
+    # A PID can be recycled or reparented during either walk. Compare raw
+    # identities for equality, never order wall-clock birth times.
+    for pid, ppid in edges:
+        if _parent(pid) != ppid:
+            raise OSError(errno.EAGAIN, 'Process parent changed during ancestry observation')
+    for pid, evidence in nodes.items():
+        if process_evidence(pid) != evidence:
+            raise OSError(errno.EAGAIN, 'Process identity changed during ancestry observation')
+
+
+def ancestor_pids(pid, stop_pid):
+    """Return nearest parents up to stop_pid, bound to unchanged kernel identities."""
+    nodes = {pid: process_evidence(pid)}
+    edges = []
+    while pid != stop_pid:
+        parent = _parent(pid)
+        if parent == 0:
+            break
+        if parent in nodes:
+            raise OSError(errno.EAGAIN, 'Inconsistent kernel parent chain')
+        nodes[parent] = process_evidence(parent)
+        edges.append((pid, parent))
+        pid = parent
+    _check_edges(nodes, edges)
+    return tuple(parent for _, parent in edges)
+
+
+def descendant_pids(root_pid):
+    """Census live descendants, refusing unverifiable parentage or PID reuse."""
+    nodes = {root_pid: process_evidence(root_pid)}
+    edges = []
+    pending = [root_pid]
+    while pending:
+        pid = pending.pop()
+        for child in _children(pid):
+            if child in nodes:
+                raise OSError(errno.EAGAIN, 'Inconsistent kernel child list')
+            nodes[child] = process_evidence(child)
+            edges.append((child, pid))
+            if not nodes[child][1]:
+                pending.append(child)
+    _check_edges(nodes, edges)
+    return tuple(pid for pid, _ in edges if not nodes[pid][1])
