@@ -32,7 +32,8 @@ cmw jobs status
 
 Without the `jobs` extra, non-interactive commands still work; `watch` reports the
 missing optional dependency. Importing `cmw` and using existing commands do not
-import Textual or initialize a UI. psutil supplies process birth identity.
+import Textual or initialize a UI. New Jobs records use the kernel boot session
+and raw process start token. Legacy records use psutil birth evidence.
 
 ## Prepared jobs and controls
 
@@ -333,7 +334,7 @@ Starting, Run, Cancelling and Unknown. The existing persisted status and elapsed
 time retain their meaning: they are stored lifecycle history, not a fresh claim
 that a computation is alive. No controller is started for observation.
 
-The shared observer checks the recorded worker birth/host/boot, existing worker
+The shared observer checks the recorded worker identity, existing worker
 lock, recorded process-group/session anchor, bounded attempt-local receipt and
 controller availability. It opens existing schema-1/2/3 state read-only, inspects
 only recorded PIDs, and never creates missing state or evidence. Unsupported
@@ -793,8 +794,16 @@ subsequent dispatch alive during the current logged-in OS session. No LaunchAgen
 service, login item or shell startup hook is installed. Logout, reboot, shutdown,
 crash and power loss are outside the survival guarantee.
 
+Use `cmw jobs ownership JOB [--role group|worker|controller] [--json]` to
+inspect the recorded local identity. The default role is the protected group
+anchor. Each sub-check reports its recorded and observed values, the outcome
+and a reason. Exit 0 means VERIFIED, 2 means GONE (or an invalid command),
+and 75 means UNVERIFIABLE. A held or never-started job may have no anchor yet.
+The command reads the selected queue without taking control or writing to it.
+[Identity rules, legacy records and supervision recovery](architecture/multi-host-nodes.md#39-process-identity-and-supervision-d34).
+
 Restart acquires the controller kernel lock and reconciles active attempts by
-worker lock, host/boot/PID birth identity and persisted launch claims. A live
+worker lock, recorded process identity and persisted launch claims. A live
 verified supervisor remains responsible for completion; the same attempt is not
 relaunched. The supervisor records completion only after exit evidence and
 process-group drainage, with a final kernel check that the group is absent after
@@ -809,8 +818,8 @@ unsafe override for Unknown. In particular, do not erase state to resume a queue
 while an old execution might still be alive.
 
 For an Unknown job, `cmw jobs show J1.1` adds an ephemeral
-`ownership_observation`: the worker identity is matched, mismatched, gone,
-unavailable, or missing, and its attempt lock is held, unheld, missing, or
+`ownership_observation`: the worker identity is matched, gone, unavailable,
+or missing, and its attempt lock is held, unheld, missing, or
 unavailable. This advisory observation includes a timestamp and reasons. It
 does not update stored state or authorize recovery, signalling, or dispatch.
 The lock check briefly probes an existing file with a nonblocking kernel lock;

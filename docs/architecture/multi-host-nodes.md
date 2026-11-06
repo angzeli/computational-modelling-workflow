@@ -57,7 +57,7 @@ updates.
 | D01 | Keep existing node, queue and storage UUIDs as durable identities. Aliases become `mbp_m3max` and `mm_m5pro`. |
 | D02 | Each machine's production configuration has exactly one node enrollment, one queue (alias `main`) and one storage (alias `scratch`, outside TCC-protected folders). Each machine has one default production registry at `~/.config/cmw/nodes/connections.json` listing every node, including itself. |
 | D03 | Mini reuses node `702779636fc14335bcf71c1395549f43` and queue `2b975d09e4104933b7c1c146538fbc6b`, which hold research jobs that must be preserved; only aliases change. MacBook is enrolled fresh as `mbp_m3max`. Test enrollments are archived after confirming they hold nothing to keep. |
-| D04 | Keep the existing integer protocol plus `capabilities`. No MAJOR.MINOR scheme. |
+| D04 | Keep the existing integer protocol plus `capabilities`. New protocol-1 error codes require a compatibility test showing that every earlier client handles an unknown code as a refusal without crashing. |
 | D05 | Keep the persistent SSH endpoint stream and host-key pinning; add a forced-command gate that dispatches by whitelist to the endpoint or to the binary transfer endpoint. It ships only after D06. |
 | D06 | All file transfer, upload and fetch, moves to one dedicated binary transfer endpoint replacing SFTP: 16 MiB chunks, byte-offset resumption, per-chunk and whole-file SHA-256, content-addressed deduplication on the target, background QoS, disk-space preflight. Reuse the existing stable-capture, hashing, receipt and non-overwriting publication logic. |
 | D07 | Input files keep the existing limits (128 files, 64 MiB per file, 256 MiB total) and explicit `potcar_authorized`. Explicitly declared restart artifacts (WAVECAR, CHGCAR) are bounded only by the disk-space preflight. |
@@ -84,6 +84,7 @@ updates.
 | D31 | The canonical VASP port runner is commit `51d8209`, used in production only after qualification. Runners are deployed only from clean commits as immutable snapshots under `~/.local/share`, each with a source-commit record and a SHA-256 manifest of its binaries; profiles pin them. Registered endpoint executables use an `-I -B` wrapper. Make runtime snapshots read-only after deployment and qualification, before enrollment. The D18 change is based on `51d8209` and deployed as a new snapshot. P1 owns the cutover; P3a owns D18. |
 | D32 | Benchmarks and experiments never use a production queue; they use a separate sandbox namespace. Each node has exactly one production configuration. Effective immediately. |
 | D33 | The Mini is consolidated in a single cutover after its current research job finishes; no new Mini submissions until then. P1 owns the cutover. |
+| D34 | Bind Jobs process ownership to host, boot session, PID and raw kernel start token. Suspend control on unverifiable evidence, use same-boot monotonic freshness, and retain job events independently of guard noise. [J4.1 incident](../incidents/2026-11-j4.1-clock-step.md) |
 
 ## 3. Deltas
 
@@ -155,6 +156,11 @@ accepts string error codes and raises the received refusal before decoding a
 successful result. A node-selected Jobs CLI predating these codes prints the
 code and message and exits 2. Exit 75 requires a client that recognizes the
 retryable code.
+
+Under D04 a new code may ship within protocol 1 only if tests exercise every
+earlier client implementation against the unknown code. Each must return a
+non-success refusal without crashing. A client that recognizes the code can
+provide a more precise diagnostic or exit status.
 
 D05 adds only the gate described in §3.3. It must not cut off SFTP until the
 replacement transfer path is available and qualified.
@@ -856,6 +862,59 @@ release and dispatch while on battery. While jobs run, the controller holds a
 `caffeinate` assertion against idle sleep. This cannot prevent lid-close sleep
 on battery. This is a future runtime policy; Phase 0 adds no power checks or
 sleep assertions.
+
+### 3.9 Process identity and supervision: D34
+
+Use the [shared evidence rule](../periodic/vasp-result-evidence.md#unavailable-evidence)
+when deciding whether CMW still controls the recorded process. A v2 owner pins the
+host, kernel boot UUID, PID and kernel start token. Darwin reads the public
+`KERN_PROC_PID` record's `p_starttime` in integer microseconds. Linux reads
+field 22 of `/proc/<pid>/stat` in ticks. Neither uses psutil's wall-clock adjustment.
+A missing native field, a host mismatch or a denied probe leaves ownership
+UNVERIFIABLE. GONE requires confirmed absence on the recorded host, a different
+boot session or a different start token. VERIFIED requires the complete matching
+identity and live process evidence. Existing v1 records retain their recorded
+fields. A v1 timestamp mismatch suspends control.
+
+The worker retains its pipe, claim and resource commitments on the first
+unverifiable observation. The worker and controller block admission and
+process control. The worker retries from 250 ms, doubling to a five-second cap.
+A continuous hold escalates to Unknown after 60 seconds on the same boot. If a
+subsequent failed check cannot place the persisted hold on the current clock
+(missing or changed boot, missing or reversed ticks), it also escalates. The
+worker keeps the pipe open. VERIFIED permits normal supervision of the original claim;
+confirmed loss follows the conservative Unknown path. An unrelated Unknown
+or explicit dispatch pause requires separate operator attention.
+
+Heartbeat, launch grace and admission samples carry a boot session and
+monotonic timestamp alongside their wall time. Missing, future or different-boot
+evidence cannot authorize work. A change greater than two seconds in the wall
+minus monotonic offset between controller ticks records a clock-step event.
+This observation has no effect on ownership.
+
+Guard samples always take effect immediately. A scan that becomes available
+within five seconds updates the same event with its unavailable sample count,
+wall-time range, monotonic duration and observed reasons. Set
+`CMW_JOBS_GUARD_RECOVERY_SECONDS` in the controller environment to change the
+window (zero disables grouping). Events 109–208 on `mm_m5pro` showed 1–2 second
+recoveries separated by 20–40 minutes; five seconds groups each brief outage
+without joining those episodes. Only the latest 100 guard events are retained.
+The status snapshot shows up to 30 recent guard and 30 recent non-guard events.
+
+**Deferred cutover measurement.** After J4.1 finishes, use the D32 sandbox on
+`mm_m5pro` during an exclusive qualification window. Run the base observer
+at `0e22fdc` with its normal one-second budget and controller cadence. Record
+ten minutes idle, then at least two hours with one synthetic busy child per
+physical core. Record the OS, interpreter, core count, cadence, process count
+and each call's monotonic elapsed time, outcome and exact failure reason.
+Report sample counts, median, p95, p99, maximum, timeout/budget-exceeded
+counts and recovery intervals, distinguishing calls returning while an earlier
+collector is still running. Repeat with the candidate on the same machine.
+Stop only the synthetic children and retain the raw samples in the sandbox.
+
+The [separate runner plan](vasp-runner-ownership-plan.md) covers managed MPI
+drainage and cleanup. These changes apply to new supervision; the lost J4.1
+pipe cannot be restored by upgrading CMW.
 
 ## 4. Phase plan
 
