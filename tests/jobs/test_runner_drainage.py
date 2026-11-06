@@ -52,6 +52,7 @@ class RunnerDrainageTests(unittest.TestCase):
             ('cmw.jobs.suspension_protocol.psutil.Process', {'side_effect': self.process}),
             ('cmw.jobs.suspension_protocol.identity', {'side_effect': self.identity}),
             ('cmw.jobs.ownership.identity', {'side_effect': self.identity}),
+            ('cmw.jobs.ownership._legacy_identity', {'side_effect': self.identity}),
             ('cmw.jobs.suspension_protocol.owner_alive', {'return_value': True}),
             ('cmw.jobs.suspension_protocol.now_clock', {'return_value': 1.0}),
         ):

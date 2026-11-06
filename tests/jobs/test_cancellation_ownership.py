@@ -313,6 +313,13 @@ class SessionSnapshotRaceTests(unittest.TestCase):
         self.assertEqual([row['identity'] for row in result['pending']], [self.originals[1]])
         self.assertEqual(result['absent'], [])
 
+    def test_v1_changed_birth_is_a_retryable_session_observation(self):
+        self.table.rows[20]['birth'] += 28791.6
+        with self.assertRaises(ownership.OwnershipUnavailable) as error:
+            self.snapshot()
+        self.assertEqual(error.exception.deciding_check, 'birth')
+        self.assertEqual(self.table.signals(), [])
+
     def test_reused_known_identity_and_escape_cannot_be_adopted(self):
         for change in ({'birth': 999.0}, {'sid': 90}):
             with self.subTest(change=change):

@@ -53,6 +53,7 @@ class GuardBoundaryTests(unittest.TestCase):
             stack.enter_context(patch.object(runtime, 'identity', side_effect=lambda pid=None: fixtures.owner(pid or 700)))
             stack.enter_context(patch.object(runtime, 'group_exists', return_value=False))
             stack.enter_context(patch.object(runtime, 'owner_alive', return_value=True))
+            stack.enter_context(patch('cmw.jobs.ownership_hold.observe_owner', return_value=Mock(status='VERIFIED')))
             # Only dispatch-authority lock evidence is replaced; the worker still
             # acquires/releases its real isolated attempt lock through exclusive.
             stack.enter_context(patch.object(runtime, 'lock_held', return_value=True))

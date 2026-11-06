@@ -3,11 +3,58 @@ import signal
 import unittest
 from unittest.mock import patch, Mock
 
-from cmw.jobs.ownership import group_members, signal_session
+from cmw.jobs.ownership import OwnershipUnavailable, group_members, signal_session
 from cmw.jobs.store import JobsError
 
 
 class SessionOwnershipTests(unittest.TestCase):
+    def test_inaccessible_member_or_enumeration_is_retryable(self):
+        for failure in (PermissionError('denied'), OSError('read failure'), RuntimeError('bad metadata')):
+            with self.subTest(failure=failure):
+                process = Mock()
+                process.status.side_effect = failure
+                with patch('os.getpgid', return_value=10), self.assertRaises(OwnershipUnavailable) as caught:
+                    group_members(10, pids=[12], process_factory=lambda pid: process)
+                self.assertEqual(caught.exception.deciding_check, 'group_members')
+                with patch('psutil.pids', side_effect=failure), self.assertRaises(OwnershipUnavailable):
+                    group_members(10)
+
+    def test_partial_signal_traversal_retries_only_the_read_and_revalidates_topology(self):
+        from cmw.jobs.ownership import OwnershipStatus
+        for moved in (False, True):
+            with self.subTest(moved=moved):
+                sent, held = [], []
+                def observe(member):
+                    if member['pid'] == 13 and sent and not held:
+                        return Mock(status=OwnershipStatus.UNVERIFIABLE, deciding_check='start_token')
+                    return Mock(status=OwnershipStatus.VERIFIED)
+
+                def read_domain(observation):
+                    try:
+                        return observation()
+                    except OwnershipUnavailable as exc:
+                        held.append(exc.deciding_check)
+                        return observation()
+
+                def pgid(pid):
+                    return 99 if pid == 13 and moved and held else pid
+
+                with patch('cmw.jobs.ownership.observe_owner', side_effect=observe), \
+                     patch('cmw.jobs.ownership.identity', side_effect=lambda pid: {'pid': pid}), \
+                     patch('cmw.jobs.ownership.group_members', return_value=[12, 13]), \
+                     patch('os.getsid', return_value=10), patch('os.getpgid', side_effect=pgid), \
+                     patch('os.killpg', side_effect=lambda group, sig: sent.append(group)):
+                    def terminate():
+                        signal_session({'pid': 10}, signal.SIGTERM, include_leader=False,
+                                       check_authority=lambda: None, read_domain=read_domain)
+                    if moved:
+                        with self.assertRaisesRegex(JobsError, 'identity cannot be verified'):
+                            terminate()
+                    else:
+                        terminate()
+                self.assertEqual(held, ['start_token'])
+                self.assertEqual(sent, [12] if moved else [12, 13])
+
     def test_zero_pid_is_not_current_process_membership(self):
         process = Mock()
         process.status.return_value = 'running'
@@ -98,6 +145,28 @@ class SessionOwnershipTests(unittest.TestCase):
              patch('os.killpg') as kill:
             signal_session({'pid': 10}, signal.SIGTERM)
             self.assertEqual([call.args for call in kill.call_args_list], [(11, signal.SIGTERM), (10, signal.SIGTERM)])
+
+    def test_witness_topology_rechecked_after_a_blocking_authority_callback(self):
+        # Move the only witness precisely during the final callback, after its
+        # PGID was observed. Even the same surviving birth cannot authorize it.
+        checks = 0
+        moved = False
+
+        def authority():
+            nonlocal checks, moved
+            checks += 1
+            if checks == 3:
+                moved = True
+
+        with patch('cmw.jobs.ownership.owner_alive', return_value=True), \
+             patch('cmw.jobs.ownership.identity', side_effect=lambda pid: {'pid': pid}), \
+             patch('cmw.jobs.ownership.group_members', return_value=[12]), \
+             patch('os.getsid', return_value=10), \
+             patch('os.getpgid', side_effect=lambda pid: 10 if pid == 10 else (99 if moved else 11)), \
+             patch('os.killpg') as send:
+            with self.assertRaisesRegex(JobsError, 'identity cannot be verified'):
+                signal_session({'pid': 10}, signal.SIGTERM, check_authority=authority)
+            send.assert_not_called()
 
     def test_pinned_owner_loss_during_witness_validation_prevents_signal(self):
         checks = 0

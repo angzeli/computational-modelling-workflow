@@ -19,7 +19,8 @@ from uuid import uuid4
 from cmw.core.provenance import atomic_write_json
 from .ownership import exclusive, group_exists, group_members, identity, lock_held, owner_alive, signal_session
 from .store import ACTIVE, PENDING, JobsError, Store, private_opener
-from . import activity, sharing
+from . import activity, ownership_hold, sharing
+from .ownership import OwnershipStatus, observe_owner
 
 INTERVAL = 0.15
 CANCEL_GRACE = 2.0
@@ -56,10 +57,12 @@ def start(store):
     store.ensure_private_root()
     # Serialize client start requests separately from the long-lived owner lock.
     with exclusive(store.root / "start.lock"):
+        # A controller this client started can be a zombie until we poll it.
+        reap_detached()
         state = store.snapshot()
         if state["controller"]["online"]:
             raise JobsError("Controller already online; use resume to enable dispatch")
-        if lock_held(store.root / "controller.lock"):
+        if ownership_hold.blocks_replacement(state["controller"]["owner"]) or lock_held(store.root / "controller.lock"):
             raise JobsError("Controller ownership is uncertain; inspect controller.log")
         with store.transaction() as con:
             _prepare_start(store, con)
@@ -76,7 +79,9 @@ def start(store):
 
 def _prepare_start(store, con):
     control = store.control(con)
-    blocked = any(j['status'] in {'Unknown', 'Cancelling'} for j in store.rows(con))
+    if ownership_hold.blocks_replacement(control.get('owner')):
+        raise JobsError('Existing controller ownership has not been disproved')
+    blocked = any(j.get('ownership_holds') or j['status'] in {'Unknown', 'Cancelling'} for j in store.rows(con))
     control.update(stop=False, dispatch=not blocked, reason='Needs attention' if blocked else 'Starting controller')
     store.set_control(con, control)
 
@@ -98,6 +103,8 @@ def stop(store):
 
 
 def mark_unknown(store, con, job, reason):
+    job.pop("ownership_holds", None)
+    job.pop("ownership_resume_status", None)
     job.update(status="Unknown", reason=reason)
     store.save(con, job)
     control = store.control(con)
@@ -107,11 +114,25 @@ def mark_unknown(store, con, job, reason):
 
 
 def reconcile(store, con, job):
-    if job["status"] == "Unknown":
+    if job["status"] == "Unknown" and not job.get("ownership_holds"):
         return
     attempt = store.root / "attempts" / job["attempt_id"]
-    if job["worker"] and owner_alive(job["worker"]) and lock_held(attempt / "worker.lock"):
-        return
+    if job["worker"]:
+        result = observe_owner(job['worker'])
+        if result.status == OwnershipStatus.UNVERIFIABLE:
+            ownership_hold.unavailable(store, con, job, 'controller', f'worker.{result.deciding_check}', time.monotonic())
+            return
+        if result.status == OwnershipStatus.GONE:
+            mark_unknown(store, con, job, f'Recorded worker is gone ({result.deciding_check}); completion unverified')
+            return
+        try:
+            locked = lock_held(attempt / 'worker.lock', strict=True)
+        except OSError:
+            ownership_hold.unavailable(store, con, job, 'controller', 'worker.lock', time.monotonic())
+            return
+        if locked:
+            ownership_hold.recovered(store, con, job, 'controller')
+            return
     # Starting may be between intent commit and worker registration. A grace
     # period blocks the slot but never authorizes relaunching this attempt.
     if job["worker"] is None and time.time() - job["claimed_at"] < 5:
@@ -338,75 +359,101 @@ def worker(store, job_id, claim):
         except OSError as exc:
             finish(store, job_id, claim, "Fail", None, f"Launch failed: {exc}")
             return
-        group = identity(leader.pid)
         try:
-            before = store.snapshot()
-            pending_ids = [(j['id'], j['order'], j['status']) for j in before['jobs'] if j['status'] in PENDING]
-            if before.get('scheduler', {}).get('mode') == 'bounded-sharing':
-                guard, evidence = sharing.AdmissionSampler().collect(store, source='supervisor-admission', wait=True)
-            else:
-                guard = activity.DEFAULT_OBSERVER.scan(store, before, source='supervisor-admission')
-                evidence = None
-            # Byte/provenance checks run once at actual admission, never on a UI poll.
-            final_blocker = launch_blocker(job, final=True) if (job.get('molecular_submission')
-                or job.get('node_submission', {}).get('successor')
-                or job.get('node_submission', {}).get('study')) else None
-            with store.transaction() as con:
-                record_guard(store, con, guard)
-                job = store.get(con, job_id)
-                control = store.control(con)
-                pending_now = [(j['id'], j['order'], j['status']) for j in store.rows(con) if j['status'] in PENDING]
-                decision_state = {'jobs': store.rows(con), 'scheduler': control.get('scheduler', {}),
-                                  'controller': {**control, 'online': dispatch_authority(store, control), 'stale': False}}
-                decision = sharing.evaluate(decision_state, guard, evidence, candidate_id=job_id, final=True)
-                admitted = (job['claim'] == claim and job['status'] == 'Starting' and
-                            not job['cancel_requested'] and dispatch_authority(store, control) and
-                            pending_ids == pending_now and decision['permitted'] and not final_blocker)
-                if not admitted:
-                    # Closing GO pipe ends only our not-yet-admitted shell. No
-                    # payload or external process has been launched/signalled.
-                    leader.stdin.close()
-                    leader.wait(timeout=5)
-                    if group_exists(leader.pid):
-                        raise JobsError('Unadmitted payload helper has not exited')
-                    if job['claim'] != claim or job['status'] not in {'Starting', 'Cancelling'}:
-                        # Reconciliation/another identity remains authoritative;
-                        # refusal must not erase Unknown or a changed claim.
+            # Popen retains our unreaped direct child. An unavailable initial
+            # start token delays GO; it never permits adopting another PID.
+            delay = .25
+            while True:
+                try:
+                    group = identity(leader.pid)
+                    break
+                except Exception as exc:
+                    if leader.poll() is not None:
+                        raise JobsError('Payload helper exited before GO') from exc
+                    with store.transaction(create=False) as con:
+                        current = store.get(con, job_id)
+                        ownership_hold.unavailable(store, con, current, 'guardian', 'anchor.capture', time.monotonic())
+                    time.sleep(delay)
+                    delay = min(delay*2, ownership_hold.MAX_RETRY)
+            authority = ownership_hold.WorkerAuthority(store, job, group, leader)
+            while True:
+                generation = authority.generation
+                before = store.snapshot()
+                pending_ids = [(j['id'], j['order'], j['status']) for j in before['jobs'] if j['status'] in PENDING]
+                if before.get('scheduler', {}).get('mode') == 'bounded-sharing':
+                    guard, evidence = sharing.AdmissionSampler().collect(store, source='supervisor-admission', wait=True)
+                else:
+                    guard = activity.DEFAULT_OBSERVER.scan(store, before, source='supervisor-admission')
+                    evidence = None
+                # Byte/provenance checks run once at actual admission, never on a UI poll.
+                final_blocker = launch_blocker(job, final=True) if (job.get('molecular_submission')
+                    or job.get('node_submission', {}).get('successor')
+                    or job.get('node_submission', {}).get('study')) else None
+                authority.wait(before_admission=True)
+                if authority.generation != generation:
+                    continue
+                with store.transaction() as con:
+                    record_guard(store, con, guard)
+                    job = store.get(con, job_id)
+                    control = store.control(con)
+                    pending_now = [(j['id'], j['order'], j['status']) for j in store.rows(con) if j['status'] in PENDING]
+                    decision_state = {'jobs': store.rows(con), 'scheduler': control.get('scheduler', {}),
+                                      'controller': {**control, 'online': dispatch_authority(store, control), 'stale': False}}
+                    decision = sharing.evaluate(decision_state, guard, evidence, candidate_id=job_id, final=True)
+                    admitted = (job['claim'] == claim and job['status'] == 'Starting' and
+                                not job['cancel_requested'] and dispatch_authority(store, control) and
+                                pending_ids == pending_now and decision['permitted'] and not final_blocker)
+                    if not admitted:
+                        # Closing GO pipe ends only our not-yet-admitted shell. No
+                        # payload or external process has been launched/signalled.
+                        if coordinator:
+                            coordinator.discard_before_go()
+                        leader.stdin.close()
+                        leader.wait(timeout=5)
+                        if group_exists(leader.pid):
+                            raise JobsError('Unadmitted payload helper has not exited')
+                        if job['claim'] != claim or job['status'] not in {'Starting', 'Cancelling'}:
+                            # Reconciliation/another identity remains authoritative;
+                            # refusal must not erase Unknown or a changed claim.
+                            return
+                        if job['cancel_requested']:
+                            job.update(status='Cancelled', finished_at=time.time(), reason='Cancelled before payload admission')
+                        else:
+                            pending = sorted((j for j in store.rows(con) if j['status'] in PENDING), key=lambda j: j['order'])
+                            position = min(job.get('admission_order', 1), len(pending)+1)
+                            # Auxiliary bypass never moves a refused candidate ahead
+                            # of primaries that preceded it in the persistent queue.
+                            for item in pending:
+                                if item['order'] >= position:
+                                    item['order'] += 1
+                                    store.save(con, item)
+                            job.update(status='Hold' if final_blocker else 'Queue', order=position,
+                                       reason=final_blocker or (decision['reason'] if not decision['permitted'] else 'Admission controls/order changed'))
+                        job.update(worker=None, group=None, claim=None, claimed_at=None, sharing_anchor=None)
+                        store.save(con, job)
+                        store.normalize(con)
                         return
-                    if job['cancel_requested']:
-                        job.update(status='Cancelled', finished_at=time.time(), reason='Cancelled before payload admission')
-                    else:
-                        pending = sorted((j for j in store.rows(con) if j['status'] in PENDING), key=lambda j: j['order'])
-                        position = min(job.get('admission_order', 1), len(pending)+1)
-                        # Auxiliary bypass never moves a refused candidate ahead
-                        # of primaries that preceded it in the persistent queue.
-                        for item in pending:
-                            if item['order'] >= position:
-                                item['order'] += 1
-                                store.save(con, item)
-                        job.update(status='Hold' if final_blocker else 'Queue', order=position,
-                                   reason=final_blocker or (decision['reason'] if not decision['permitted'] else 'Admission controls/order changed'))
-                    job.update(worker=None, group=None, claim=None, claimed_at=None, sharing_anchor=None)
-                    store.save(con, job)
-                    store.normalize(con)
-                    return
-                job.update(group=group, started_at=time.time(), reason="")
-                if not job["cancel_requested"]:
-                    job["status"] = "Run"
-                store.save(con, job)
-                store.event(con, job["id"], "Execution started; group ownership persisted")
-            if job.get('suspension'):
+                    if not job.get('suspension') or coordinator is not None:
+                        job.update(group=group, started_at=time.time(), reason="", status="Run")
+                        store.save(con, job)
+                        store.event(con, job["id"], "Execution started; group ownership persisted")
+                        break
                 from .suspension import Coordinator
                 coordinator = Coordinator(store, job, group)
+                coordinator.authority = authority
+                # Preparing the channel may take time. Recheck admission and both
+                # owners after preparation and before committing the GO decision.
             leader.stdin.write(b"GO\n")
             leader.stdin.flush()
             cancel_at = None
             code = None
             session = job.get('env', {}).get('CMW_JOBS_OWN_SESSION') == '1'
+            def members():
+                return group_members(leader.pid, session=True) if session else group_members(leader.pid)
+
             while True:
-                with store.transaction() as con:
-                    job = store.get(con, job_id)
-                members = group_members(leader.pid, session=True) if session else group_members(leader.pid)
+                job = authority.wait()
+                observed_members = authority.read_domain(members)
                 if coordinator and not job.get('cancel_requested') and not job.get('termination_requested'):
                     coordinator.tick(job)
                     job = coordinator.current()
@@ -421,18 +468,16 @@ def worker(store, job_id, claim):
                     # The unreaped direct child pins this PID/group; birth identity
                     # additionally protects signalling from corrupted stale metadata.
                     if cancel_at is None:
-                        if not owner_alive(group):
-                            raise JobsError("Group leader lost before cancellation; no signal sent")
+                        authority.wait()
                         if session:
-                            signal_session(group, signal.SIGTERM)
+                            signal_session(group, signal.SIGTERM, check_authority=authority.wait, read_domain=authority.read_domain)
                         else:
                             os.killpg(leader.pid, signal.SIGTERM)
                         cancel_at = time.monotonic()
-                    elif time.monotonic() - cancel_at > CANCEL_GRACE and members:
-                        if not owner_alive(group):
-                            raise JobsError("Group ownership lost during cancellation")
+                    elif time.monotonic() - cancel_at > CANCEL_GRACE and observed_members:
+                        authority.wait()
                         if session:
-                            signal_session(group, signal.SIGKILL)
+                            signal_session(group, signal.SIGKILL, check_authority=authority.wait, read_domain=authority.read_domain)
                         else:
                             os.killpg(leader.pid, signal.SIGKILL)
                         leader.wait(timeout=5)
@@ -443,10 +488,13 @@ def worker(store, job_id, claim):
                 if receipt.exists():
                     evidence = json.loads(receipt.read_text())
                     code = int(evidence["exit_code"])
-                    drained = coordinator.ready_to_release() if coordinator else set(members) == {leader.pid}
+                    generation = authority.generation
+                    drained = (coordinator.ready_to_release() if coordinator
+                               else set(authority.read_domain(members)) == {leader.pid})
                     if drained:
-                        if coordinator:
-                            job = coordinator.current()
+                        job = authority.wait()
+                        if authority.generation != generation:
+                            continue  # Drainage evidence predates an observation gap.
                         leader.stdin.write(b"RELEASE\n")
                         leader.stdin.flush()
                         if leader.wait(timeout=5) != 0 and coordinator:
@@ -464,12 +512,15 @@ def worker(store, job_id, claim):
                             finish(store, job_id, claim, "Done" if code == 0 else "Fail", code,
                                    "Execution contract completed; scientific checks not evaluated" if code == 0 else f"Exit code {code}")
                         return
-                if not owner_alive(group):
-                    raise JobsError("Group leader disappeared without a verified complete process tree")
                 time.sleep(INTERVAL)
         except Exception as exc:
             with store.transaction() as con:
-                mark_unknown(store, con, store.get(con, job_id), str(exc))
+                current = store.get(con, job_id)
+                if current['claim'] == claim and current['status'] in ACTIVE:
+                    if current['status'] == 'Unknown' and not current.get('ownership_resume_status'):
+                        store.event(con, current['id'], str(exc))
+                    else:
+                        mark_unknown(store, con, current, str(exc))
             # Do not terminate uncertain computations or fabricate completion.
         finally:
             if leader.stdin:

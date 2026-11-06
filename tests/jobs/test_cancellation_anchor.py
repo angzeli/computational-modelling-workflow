@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 import psutil
 
 from cmw.jobs import ownership, runtime, suspension
-from cmw.jobs.store import Store
+from cmw.jobs.store import JobsError, Store
 
 
 class WorkerCancellationModel:
@@ -32,6 +32,9 @@ class WorkerCancellationModel:
         self.alive = {self.anchor, self.runner, self.compute, self.sentinel, 99}
         self.receipt = self.store.root/'attempts'/self.job['attempt_id']/'payload-exit.json'
         self.released = False
+        self.held_states = []
+        self.armed = False
+        self.release_checks = 0
         with self.store.transaction() as con:
             job = self.store.get(con, self.job['id'])
             job.update(status='Starting', claim=self.claim, claimed_at=1, order=None)
@@ -42,6 +45,7 @@ class WorkerCancellationModel:
         self.leader = Mock(pid=self.anchor)
         self.leader.stdin.write.side_effect = self.pipe
         self.leader.wait.side_effect = self.wait
+        self.leader.poll.side_effect = lambda: None if self.anchor in self.alive else 125
         self.coordinator = None
 
     def make_coordinator(self, store, job, anchor):
@@ -68,6 +72,19 @@ class WorkerCancellationModel:
             return result
         coordinator.prepare_cancel = prepare
         self.coordinator = coordinator
+        self.events.append('channel-ready')
+        if self.mode == 'late-go':
+            self.armed = True
+        if self.mode == 'late-release':
+            ready = coordinator.ready_to_release
+            def at_release():
+                drained = ready()
+                if drained:
+                    self.release_checks += 1
+                    if self.release_checks == 2:
+                        self.armed = True
+                return drained
+            coordinator.ready_to_release = at_release
         return coordinator
 
     def process(self, pid):
@@ -116,9 +133,14 @@ class WorkerCancellationModel:
         if data == b'GO\n':
             with self.store.transaction() as con:
                 job = self.store.get(con, self.job['id'])
-                job.update(status='Cancelling', cancel_requested=True)
+                if self.mode == 'independent-unknown':
+                    runtime.mark_unknown(self.store, con, job, 'Independent reconciliation required')
+                elif self.mode == 'members-unreadable':
+                    self.armed = True
+                else:
+                    job.update(status='Cancelling', cancel_requested=True)
                 self.store.save(con, job)
-            if self.mode == 'receipt-first':
+            if self.mode in {'receipt-first', 'late-release', 'independent-unknown', 'members-unreadable'}:
                 self.alive.difference_update((self.runner, self.compute))
                 self.write_receipt()
         elif data == b'RELEASE\n':
@@ -147,6 +169,16 @@ class WorkerCancellationModel:
         self.checked.append(owner['pid'])
         return owner == self.owners.get(owner['pid']) and owner['pid'] in self.alive
 
+    def observe(self, owner):
+        if self.armed and self.mode in {'late-go', 'late-release'} and owner['pid'] == self.anchor:
+            return Mock(status='UNVERIFIABLE', deciding_check='boot_session')
+        if self.mode.startswith('unavailable-') and owner['pid'] == self.anchor and 'GO' in self.events:
+            if self.clock < 66:
+                return Mock(status='UNVERIFIABLE', deciding_check='start_token')
+            if self.mode == 'unavailable-then-gone':
+                return Mock(status='GONE', deciding_check='start_token')
+        return Mock(status='VERIFIED' if self.owner_alive(owner) else 'GONE', deciding_check='pid')
+
     def sid(self, pid):
         if pid not in self.alive:
             raise ProcessLookupError()
@@ -157,6 +189,8 @@ class WorkerCancellationModel:
         return self.compute if pid == self.compute else self.sentinel if pid == self.sentinel else self.anchor
 
     def members(self, pgid, *, session=False):
+        if self.armed and self.mode == 'members-unreadable':
+            raise ownership.OwnershipUnavailable('group_members', 'Managed process group is not fully observable')
         return sorted(pid for pid in self.alive if pid != 99 and
                       (self.sid(pid) if session else self.pgid(pid)) == pgid)
 
@@ -182,7 +216,26 @@ class WorkerCancellationModel:
 
     def sleep(self, interval):
         self.clock += interval
-        if self.clock > 10:
+        if self.mode.startswith('unavailable-') and self.clock-interval < 66:
+            job = self.current()
+            assert not self.signals and not self.released
+            assert not self.leader.stdin.close.called
+            assert job['ownership_holds']['guardian']['check'] == 'anchor.start_token'
+            self.held_states.append((job['status'], interval))
+        if self.mode == 'independent-unknown':
+            assert self.current()['status'] == 'Unknown'
+            assert not self.released and not self.leader.stdin.close.called
+            assert not self.signals
+            self.events.append('held-independent-unknown')
+            self.alive.discard(self.anchor)
+        if self.armed and self.mode in {'late-go', 'late-release', 'members-unreadable'}:
+            assert not self.released and not self.leader.stdin.close.called
+            assert not self.signals
+            if self.mode == 'late-go':
+                assert 'GO' not in self.events
+            self.events.append('observed-hold')
+            self.armed = False
+        if self.clock > (80 if self.mode.startswith('unavailable-') else 10):
             raise AssertionError('Modeled cancellation exceeded its bounded lifecycle')
         if self.writer in self.alive:
             self.alive.remove(self.writer)
@@ -190,21 +243,27 @@ class WorkerCancellationModel:
 
     def run(self):
         guard = dict(state='NO_MATCH', observations=[], reason='', observed_at=1)
+        def scan(*args, **kwargs):
+            self.events.append('admission-scan')
+            return guard
         self.coordinator_type = suspension.Coordinator
         with ExitStack() as stack:
             for target, value in (
                 ('cmw.jobs.runtime.subprocess.Popen', self.leader),
-                ('cmw.jobs.runtime.activity.DEFAULT_OBSERVER.scan', guard),
                 ('cmw.jobs.runtime.sharing.evaluate', {'permitted': True}),
                 ('cmw.jobs.runtime.dispatch_authority', True),
             ):
                 stack.enter_context(patch(target, return_value=value))
+            stack.enter_context(patch('cmw.jobs.runtime.activity.DEFAULT_OBSERVER.scan', side_effect=scan))
             stack.enter_context(patch('cmw.jobs.suspension.Coordinator', side_effect=self.make_coordinator))
             stack.enter_context(patch.object(self.store, 'snapshot', side_effect=lambda: {'jobs': [self.current()]}))
             stack.enter_context(patch('cmw.jobs.runtime.record_guard'))
+            stack.enter_context(patch.object(ownership, '_legacy_identity', side_effect=self.identify))
             stack.enter_context(patch('cmw.jobs.runtime.signal.signal'))
+            stack.enter_context(patch('cmw.jobs.ownership_hold.observe_owner', side_effect=self.observe))
             for module in (runtime, ownership, suspension):
-                stack.enter_context(patch.object(module, 'identity', side_effect=self.identify))
+                if module is not suspension:
+                    stack.enter_context(patch.object(module, 'identity', side_effect=self.identify))
                 stack.enter_context(patch.object(module, 'owner_alive', side_effect=self.owner_alive))
                 stack.enter_context(patch.object(module, 'group_members', side_effect=self.members))
             stack.enter_context(patch('os.getsid', side_effect=self.sid))
@@ -252,6 +311,79 @@ class CancellationAnchorTests(unittest.TestCase):
         self.assertLess(model.events.index('receipt'), model.events.index('RELEASE'))
         self.assertEqual(job['attempt_id'], model.job['attempt_id'])
         self.assertFalse(model.alive & {model.anchor, model.runner, model.compute, model.writer})
+
+    def test_hold_after_channel_setup_requires_fresh_admission_before_go(self):
+        model = self.model('late-go')
+        self.assertEqual(model.run()['status'], 'Cancelled')
+        held = model.events.index('observed-hold')
+        self.assertLess(model.events.index('channel-ready'), held)
+        self.assertIn('admission-scan', model.events[held+1:model.events.index('GO')])
+
+    def test_hold_after_final_drainage_rechecks_drainage_before_release(self):
+        model = self.model('late-release')
+        self.assertEqual(model.run()['status'], 'Cancelled')
+        self.assertIn('observed-hold', model.events)
+        self.assertGreater(model.release_checks, 2)
+        self.assertTrue(model.released)
+
+    def test_unrelated_unknown_keeps_pipe_and_does_not_authorize_release(self):
+        model = self.model('independent-unknown')
+        job = model.run()
+        self.assertIn('held-independent-unknown', model.events)
+        self.assertEqual((job['status'], job['reason']), ('Unknown', 'Independent reconciliation required'))
+        self.assertFalse(model.released)
+
+    def test_ordinary_worker_retries_unreadable_members_without_closing_pipe(self):
+        model = self.model('members-unreadable')
+        with model.store.transaction() as con:
+            job = model.store.get(con, model.job['id'])
+            job['suspension'] = None
+            model.store.save(con, job)
+        self.assertEqual(model.run()['status'], 'Fail')  # synthetic exit receipt is 143
+        self.assertIn('observed-hold', model.events)
+        self.assertTrue(model.released)
+
+    def test_controller_uncertainty_blocks_dispatch_and_preserves_operator_pause_on_recovery(self):
+        model = self.model('controller-hold')
+        store, job_id = model.store, model.job['id']
+        with store.transaction() as con:
+            job = store.get(con, job_id)
+            job.update(status='Run', worker=model.owners[99], group=model.owners[model.anchor])
+            store.save(con, job)
+            with patch.object(runtime, 'observe_owner', return_value=Mock(status='UNVERIFIABLE', deciding_check='boot')):
+                runtime.reconcile(store, con, job)
+            self.assertEqual(job['status'], 'Run')
+            self.assertEqual(job['ownership_holds']['controller']['check'], 'worker.boot')
+            with self.assertRaises(JobsError):
+                store._dispatch(con, True)
+            store._dispatch(con, False)
+            with patch.object(runtime, 'observe_owner', return_value=Mock(status='VERIFIED')), \
+                    patch.object(runtime, 'lock_held', return_value=True):
+                runtime.reconcile(store, con, job)
+            self.assertNotIn('ownership_holds', job)
+            self.assertFalse(store.control(con)['dispatch'])
+
+    def test_unverifiable_anchor_retains_pipe_retries_and_resumes_after_unknown(self):
+        model = self.model('unavailable-then-verified')
+        job = model.run()
+        self.assertTrue(model.released)
+        self.assertEqual(job['status'], 'Cancelled')
+        self.assertNotIn('ownership_holds', job)
+        self.assertIn('Unknown', [state for state, _ in model.held_states])
+        self.assertEqual([delay for _, delay in model.held_states[:6]], [.25, .5, 1, 2, 4, 5])
+        with model.store.transaction() as con:
+            messages = [row[0] for row in con.execute('SELECT message FROM events ORDER BY id')]
+        self.assertTrue(any('guardian cannot verify anchor.start_token' in msg for msg in messages))
+        self.assertTrue(any('guardian control hold cleared' in msg for msg in messages))
+
+    def test_unverifiable_then_gone_never_signals_or_releases(self):
+        model = self.model('unavailable-then-gone')
+        job = model.run()
+        self.assertEqual(job['status'], 'Unknown')
+        self.assertIn('Group leader disappeared', job['reason'])
+        self.assertEqual(model.signals, [])
+        self.assertFalse(model.released)
+        self.assertIn('Unknown', [state for state, _ in model.held_states])
 
     def test_unexpected_anchor_loss_retains_unknown_and_commitment(self):
         model = self.model('anchor-lost')

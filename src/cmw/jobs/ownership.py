@@ -37,8 +37,7 @@ class OwnershipObservation:
 
 
 def identity(pid=None):
-    # Switch new attempts after every control path handles all three outcomes.
-    return _legacy_identity(os.getpid() if pid is None else pid)
+    return process_identity.capture(pid)
 
 
 def _legacy_identity(pid):
@@ -52,8 +51,6 @@ def identity_for(record, pid=None):
     pid = record['pid'] if pid is None else pid
     if record.get('version', 1) == 1 and 'boot' in record:
         return _legacy_identity(pid)
-    if record.get('version') == 2:
-        return process_identity.capture(pid)
     return identity(pid)
 
 
@@ -205,30 +202,73 @@ def lock_held(path, *, strict=False):
         return True  # Inaccessible ownership must not authorize dispatch.
 
 
+class OwnershipUnavailable(JobsError):
+    """A read-only session observation can be retried without replaying control."""
+
+    def __init__(self, deciding_check, message):
+        super().__init__(message)
+        self.deciding_check = deciding_check
+
+
+def _session_read(check, observe):
+    try:
+        return observe()
+    except JobsError:
+        raise
+    except Exception as exc:
+        raise OwnershipUnavailable(check, 'Managed process group is not fully observable') from exc
+
+
 def group_members(pgid, *, pids=None, process_factory=psutil.Process, session=False):
     """Only inspect membership of the group we created. No engine-name discovery."""
-    members = []
     membership = os.getsid if session else os.getpgid
-    for pid in psutil.pids() if pids is None else pids:
-        # POSIX PID 0 means the caller to getsid/getpgid, not the kernel row.
-        if pid <= 0:
-            continue
-        try:
-            if membership(pid) == pgid and process_factory(pid).status() != psutil.STATUS_ZOMBIE:
-                members.append(pid)
-        except (ProcessLookupError, psutil.NoSuchProcess):
-            continue
-        except (PermissionError, psutil.AccessDenied) as exc:
-            # A group member whose state is unreadable cannot be declared ended.
+
+    def scan():
+        members = []
+        for pid in psutil.pids() if pids is None else pids:
+            # POSIX PID 0 means the caller to getsid/getpgid, not the kernel row.
+            if pid <= 0:
+                continue
             try:
-                if membership(pid) == pgid:
-                    raise JobsError("Managed process group is not fully observable") from exc
-            except ProcessLookupError:
-                pass
-    return members
+                if membership(pid) == pgid and process_factory(pid).status() != psutil.STATUS_ZOMBIE:
+                    members.append(pid)
+            except psutil.ZombieProcess as exc:
+                raise OwnershipUnavailable('group_members', 'Member state is unreadable') from exc
+            except (ProcessLookupError, psutil.NoSuchProcess):
+                continue
+            except (PermissionError, psutil.AccessDenied) as exc:
+                # An unreadable member cannot be declared ended. The PID may
+                # have changed groups or disappeared since the first read.
+                try:
+                    if membership(pid) == pgid:
+                        raise OwnershipUnavailable('group_members', 'Managed process group is not fully observable') from exc
+                except ProcessLookupError:
+                    pass
+        return members
+
+    return _session_read('group_members', scan)
+
+
+def _require_same_member(record, current, message):
+    if current == record:
+        return
+    for field in ('host', 'boot', 'birth'):
+        if field in record and record[field] != current.get(field):
+            # A v1 mismatch or foreign host cannot establish a lost owner.
+            raise OwnershipUnavailable(field, message)
+    raise JobsError(message)
 
 
 def snapshot_owned_session(owner, known=()):
+    try:
+        return _snapshot_owned_session(owner, known)
+    except JobsError:
+        raise
+    except Exception as exc:
+        raise OwnershipUnavailable('session_observation', 'Session evidence cannot be read') from exc
+
+
+def _snapshot_owned_session(owner, known):
     """Observe an anchored session without equating exit races with drainage.
 
     ``known`` contains original birth identities retained by the cancellation
@@ -248,14 +288,16 @@ def snapshot_owned_session(owner, known=()):
 
     def verify_anchor():
         try:
-            if (identity_for(owner) != owner or os.getsid(sid) != sid or os.getpgid(sid) != sid
-                    or psutil.Process(sid).status() in
-                    {psutil.STATUS_STOPPED, psutil.STATUS_TRACING_STOP,
-                     psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}
-                    or identity_for(owner) != owner):
-                raise JobsError('Protected session authority is unavailable')
+            message = 'Protected session authority is unavailable'
+            _require_same_member(owner, identity_for(owner), message)
+            if os.getsid(sid) != sid or os.getpgid(sid) != sid:
+                raise JobsError(message)
+            if psutil.Process(sid).status() in {
+                    psutil.STATUS_STOPPED, psutil.STATUS_TRACING_STOP, psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
+                raise OwnershipUnavailable('process_status', message)
+            _require_same_member(owner, identity_for(owner), message)
         except (OSError, psutil.Error) as exc:
-            raise JobsError('Protected session authority is unavailable') from exc
+            raise OwnershipUnavailable('anchor', 'Protected session authority is unavailable') from exc
 
     def pending(member, reason):
         result['pending'].append({'identity': member, 'reason': reason})
@@ -272,10 +314,9 @@ def snapshot_owned_session(owner, known=()):
         except ProcessLookupError:
             pending(member, 'Original identity query returned ESRCH without independent absence')
         except (PermissionError, psutil.AccessDenied) as exc:
-            raise JobsError('Original session member is not fully observable') from exc
+            raise OwnershipUnavailable('session_member', 'Original session member is not fully observable') from exc
         else:
-            if current != member:
-                raise JobsError('Original session member identity changed')
+            _require_same_member(member, current, 'Original session member identity changed')
             pending(member, 'Original birth identity remains readable while topology is unavailable')
 
     verify_anchor()
@@ -292,32 +333,31 @@ def snapshot_owned_session(owner, known=()):
             except ProcessLookupError:
                 continue
             except PermissionError as exc:
-                raise JobsError('Session membership is not fully observable') from exc
+                raise OwnershipUnavailable('session_id', 'Session membership is not fully observable') from exc
         member = original
         try:
             current = identity_for(original or owner, pid)
-            if original is not None and current != original:
-                raise JobsError('Original session member identity changed')
+            if original is not None:
+                _require_same_member(original, current, 'Original session member identity changed')
             member = current
             if os.getsid(pid) != sid:
                 raise JobsError('Original session member escaped its owned session')
             pgid = os.getpgid(pid)
             process = psutil.Process(pid)
             status, ppid = process.status(), process.ppid()
-            if identity_for(member) != member:
-                raise JobsError('Session member identity changed during observation')
+            _require_same_member(member, identity_for(member), 'Session member identity changed during observation')
             if os.getsid(pid) != sid or os.getpgid(pid) != pgid:
                 raise JobsError('Session member topology changed during observation')
         except psutil.ZombieProcess:
             if member is None:
-                raise JobsError('Session zombie identity cannot be verified')
+                raise OwnershipUnavailable('session_member', 'Session zombie identity cannot be verified')
             pending(member, 'Original process has unreadable zombie metadata')
         except (ProcessLookupError, psutil.NoSuchProcess):
             if member is None:
                 continue
             disappearance(pid, member)
         except (PermissionError, psutil.AccessDenied) as exc:
-            raise JobsError('Original session member is not fully observable') from exc
+            raise OwnershipUnavailable('session_member', 'Original session member is not fully observable') from exc
         else:
             result['members'].append({'identity': member, 'pgid': pgid,
                                       'status': status, 'ppid': ppid})
@@ -325,7 +365,7 @@ def snapshot_owned_session(owner, known=()):
     return result
 
 
-def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
+def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check_authority=None, read_domain=None):
     """Signal birth-verified groups in an explicitly owned session.
 
     A trusted sole foreground payload may exclude the protected leader group
@@ -334,9 +374,27 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
     """
     sid = owner['pid']
 
+    def read(check, observation):
+        if read_domain is None:
+            return observation()
+        return read_domain(lambda: _session_read(check, observation))
+
+    def live(member):
+        if read_domain is None:
+            return owner_alive(member)
+        outcome = observe_owner(member)
+        if outcome.status == OwnershipStatus.UNVERIFIABLE:
+            raise OwnershipUnavailable(outcome.deciding_check, 'Session member ownership cannot be verified')
+        return outcome.status == OwnershipStatus.VERIFIED
+
+    def require_anchor():
+        if not live(owner) or os.getsid(sid) != sid or os.getpgid(sid) != sid:
+            raise JobsError('Dedicated session ownership lost or unverified; no signal sent')
+
     def verify_owner():
-        if not owner_alive(owner) or os.getsid(sid) != sid or os.getpgid(sid) != sid:
-            raise JobsError('Dedicated session ownership lost; no signal sent')
+        if check_authority is not None:
+            check_authority()
+        read('anchor_topology', require_anchor)
 
     def await_absence(pgid):
         # Observation only: a reaping group can briefly be positive or denied.
@@ -368,29 +426,49 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0):
         except (PermissionError, psutil.AccessDenied):
             return False
 
-    verify_owner()
-    groups = {sid: [owner]}
-    for pid in group_members(sid, session=True):
+    def collect_groups():
+        groups = {sid: [owner]}
+        if read_domain is not None:
+            require_anchor()
+        for pid in group_members(sid, session=True):
+            try:
+                member = identity_for(owner, pid)
+                pgid = os.getpgid(pid)
+                if os.getsid(pid) != sid:
+                    raise JobsError('Session subgroup identity cannot be verified')
+                groups.setdefault(pgid, []).append(member)
+            except psutil.ZombieProcess as exc:
+                raise OwnershipUnavailable('session_member', 'Session member evidence is unavailable') from exc
+            except (ProcessLookupError, psutil.NoSuchProcess):
+                continue
+        return groups
+
+    def witness(member, pgid):
         try:
-            member = identity_for(owner, pid)
-            pgid = os.getpgid(pid)
-            if os.getsid(pid) != sid:
+            if not live(member):
+                return False
+            if os.getsid(member['pid']) != sid or os.getpgid(member['pid']) != pgid:
                 raise JobsError('Session subgroup identity cannot be verified')
-            groups.setdefault(pgid, []).append(member)
+            return live(member)
         except (ProcessLookupError, psutil.NoSuchProcess):
-            continue
+            return False
+
+    def final_witness(member, pgid):
+        # A suspended observation may have waited. Rebuild both the anchor
+        # authority and the witness topology before addressing a numeric PGID.
+        if read_domain is not None:
+            require_anchor()
+        return witness(member, pgid)
+
+    verify_owner()
+    groups = read('session_groups', collect_groups)
     for pgid in sorted(groups.keys() - {sid}) + ([sid] if include_leader else []):
         verify_owner()
         for member in groups[pgid]:
-            if not owner_alive(member):
+            if not read('session_member', lambda: witness(member, pgid)):
                 continue
-            try:
-                if os.getsid(member['pid']) != sid or os.getpgid(member['pid']) != pgid:
-                    raise JobsError('Session subgroup identity cannot be verified')
-                verify_owner()
-                if not owner_alive(member):
-                    continue
-            except ProcessLookupError:
+            verify_owner()
+            if not read('session_member', lambda: final_witness(member, pgid)):
                 continue
             # A current birth-verified member witnesses a leaderless group.
             # Numeric PGID alone never authorizes a signal.

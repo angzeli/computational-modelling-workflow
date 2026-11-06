@@ -9,7 +9,7 @@ import re
 import sys
 from uuid import uuid4
 
-from cmw.jobs.ownership import owner_alive
+from cmw.jobs.ownership import owner_alive, valid_owner_record
 from cmw.jobs.suspension_protocol import (BINDING_FIELDS, PROTOCOL, SuspensionProtocolError,
     _directory_identity, _private_info, _read_fd, clock_descriptor, controlled_driver,
     file_identity, mpi_runtime_identity)
@@ -135,10 +135,9 @@ def verify_completion(path, *, process_status, runner_pid):
            or registration.get(key) != context[key] for key in BINDING_FIELDS):
         raise SuspensionProtocolError('Completion attempt/authority binding differs')
     runner = registration.get('runner')
-    if (not isinstance(runner, dict) or not {'pid', 'birth', 'host', 'boot'} <= runner.keys()
+    if (not valid_owner_record(runner)
             or value.get('runner') != runner or runner.get('pid') != runner_pid
-            or not isinstance(registration.get('root'), dict)
-            or not {'pid', 'birth', 'host', 'boot'} <= registration['root'].keys()
+            or not valid_owner_record(registration.get('root'))
             or value.get('root') != registration['root']):
         raise SuspensionProtocolError('Completion source is not the registered child runner')
     if (value.get('source') != 'cmw-controlled-driver-drained-v1'

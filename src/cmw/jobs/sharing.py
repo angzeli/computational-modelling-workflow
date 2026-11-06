@@ -193,6 +193,8 @@ then charged once through the same candidate admission calculation.
         return refuse('Controller stale')
     if not control.get('dispatch') or control.get('stop'):
         return refuse(control.get('reason') or 'Dispatch intent paused')
+    if any(j.get('ownership_holds') for j in active_all):
+        return refuse('Control suspended: ownership verification pending')
     if any(j['status'] in {'Unknown', 'Cancelling'} for j in active_all):
         return refuse('Unknown or Cancelling attempt blocks new admission')
     if any((j.get('suspension') or {}).get('inhibited') for j in active_all):

@@ -214,7 +214,7 @@ class StateTests(unittest.TestCase):
         for phase in ('Run', 'Suspending', 'Suspended', 'Resuming', 'Unverified'):
             self.phase(phase, inhibited=True)
             self.change(status='Run')
-            with patch('cmw.jobs.runtime.owner_alive', return_value=False), \
+            with patch('cmw.jobs.runtime.observe_owner', return_value=Mock(status='GONE', deciding_check='pid')), \
                     patch('cmw.jobs.runtime.lock_held', return_value=False):
                 with self.store.transaction() as con:
                     reconcile(self.store, con, self.store.get(con, self.job['id']))
@@ -311,7 +311,7 @@ class StateTests(unittest.TestCase):
                           'denied': control.psutil.AccessDenied(MEMBER['pid'])}
                 observed = {**MEMBER, 'birth': MEMBER['birth']+1} if observation == 'reused' else MEMBER
                 with patch.object(control, 'owner_alive', side_effect=alive), \
-                        patch.object(control, 'identity', return_value=observed, side_effect=errors.get(observation)), \
+                        patch('cmw.jobs.ownership._legacy_identity', return_value=observed, side_effect=errors.get(observation)), \
                         patch.object(control.os, 'getsid', side_effect=session), \
                         patch.object(control.psutil, 'Process') as process, \
                         patch.object(control, '_stopped', return_value=False), \
@@ -363,7 +363,7 @@ class StateTests(unittest.TestCase):
                           else control.psutil.NoSuchProcess(MEMBER['pid']))
                 topology = ProcessLookupError() if boundary == 'zombie-topology-gone' else None
                 with patch.object(control, 'owner_alive', side_effect=alive), \
-                        patch.object(control, 'identity', return_value=MEMBER, side_effect=identify), \
+                        patch('cmw.jobs.ownership._legacy_identity', return_value=MEMBER, side_effect=identify), \
                         patch.object(control.os, 'getsid', return_value=ANCHOR['pid'], side_effect=topology), \
                         patch.object(control.psutil, 'Process') as process, \
                         patch.object(control.time, 'monotonic', return_value=1):
@@ -414,7 +414,7 @@ class StateTests(unittest.TestCase):
                 topology = (PermissionError() if observation == 'topology-denied' else
                             ProcessLookupError() if observation == 'live-topology-gone' else None)
                 with patch.object(control, 'owner_alive', side_effect=alive), \
-                        patch.object(control, 'identity', return_value=observed, side_effect=errors.get(observation)), \
+                        patch('cmw.jobs.ownership._legacy_identity', return_value=observed, side_effect=errors.get(observation)), \
                         patch.object(control.os, 'getsid', return_value=OTHER['pid'], side_effect=topology), \
                         patch.object(control.psutil, 'Process') as process, \
                         patch.object(control.time, 'monotonic', return_value=1):
@@ -616,6 +616,7 @@ class StateTests(unittest.TestCase):
                                  evidence={'checked_clock': 100, 'computational': [MEMBER]})
                 coordinator = self.coordinator()
                 with patch.object(control, 'owner_alive', side_effect=lambda item: item != MEMBER), \
+                        patch('cmw.jobs.ownership._legacy_identity', side_effect=control.psutil.NoSuchProcess(MEMBER['pid'])), \
                         patch.object(control.time, 'monotonic', return_value=10):
                     coordinator.tick(job)
                 waiting = self.current()
@@ -627,6 +628,7 @@ class StateTests(unittest.TestCase):
                 coordinator._validate.assert_not_called()
                 coordinator.channel.write.assert_not_called()
                 with patch.object(control, 'owner_alive', side_effect=lambda item: item != MEMBER), \
+                        patch('cmw.jobs.ownership._legacy_identity', side_effect=control.psutil.NoSuchProcess(MEMBER['pid'])), \
                         patch.object(control.time, 'monotonic', return_value=10+control.TRANSITION_TIMEOUT):
                     coordinator.tick(waiting)
                 value = self.current()['suspension']
@@ -709,7 +711,7 @@ class DomainTests(unittest.TestCase):
         self.sid = self.stack.enter_context(patch.object(control.os, 'getsid', return_value=ANCHOR['pid']))
         self.pgid = self.stack.enter_context(patch.object(control.os, 'getpgid', return_value=MEMBER['pid']))
         self.stack.enter_context(patch.object(control, 'group_members', side_effect=lambda *a, **k: self.members))
-        self.stack.enter_context(patch.object(control, 'identity', side_effect=lambda pid: self.records[pid]))
+        self.stack.enter_context(patch('cmw.jobs.ownership._legacy_identity', side_effect=lambda pid: self.records[pid]))
         self.stack.enter_context(patch.object(control, '_descends', side_effect=lambda pid, ancestor: pid == ancestor or ancestor in self.parents.get(pid, [])))
         self.process = self.stack.enter_context(patch.object(control.psutil, 'Process'))
         self.process.return_value.children.side_effect = lambda **kwargs: self.children
@@ -741,7 +743,7 @@ class DomainTests(unittest.TestCase):
 
         self.sid.side_effect = session
         self.process.return_value.status.return_value = control.psutil.STATUS_RUNNING
-        with patch.object(control, 'identity', side_effect=observed):
+        with patch('cmw.jobs.ownership._legacy_identity', side_effect=observed):
             with self.assertRaisesRegex(control.DomainPending, 'runner and computation exited'):
                 control.bind_domain(self.registration, ANCHOR)
         self.signal.assert_not_called()
@@ -767,7 +769,7 @@ class DomainTests(unittest.TestCase):
                 self.process.return_value.status.return_value = (
                     control.psutil.STATUS_STOPPED if outcome == 'anchor-stopped'
                     else control.psutil.STATUS_RUNNING)
-                with patch.object(control, 'identity', side_effect=observed), \
+                with patch('cmw.jobs.ownership._legacy_identity', side_effect=observed), \
                      patch.object(control, 'owner_alive', side_effect=lambda member:
                                   member != RUNNER and not (outcome == 'anchor-lost' and member == ANCHOR)):
                     with self.assertRaises(JobsError) as raised:
@@ -781,7 +783,7 @@ class DomainTests(unittest.TestCase):
             for outcome in ('absent', 'zombie'):
                 with self.subTest(member=member['pid'], outcome=outcome), \
                         patch.object(control, 'owner_alive', side_effect=lambda item: item != member), \
-                        patch.object(control, 'identity') as identify:
+                        patch('cmw.jobs.ownership._legacy_identity') as identify:
                     def observed(pid):
                         if pid == member['pid'] and outcome == 'absent':
                             raise control.psutil.NoSuchProcess(pid)
@@ -794,7 +796,7 @@ class DomainTests(unittest.TestCase):
 
     def test_root_exit_between_identity_and_group_observation_is_pending(self):
         for outcome in ('absent', 'zombie', 'zombie-topology-gone'):
-            with self.subTest(outcome=outcome), patch.object(control, 'identity') as identify:
+            with self.subTest(outcome=outcome), patch('cmw.jobs.ownership._legacy_identity') as identify:
                 root_sessions = 0
 
                 def session(pid):
@@ -820,7 +822,7 @@ class DomainTests(unittest.TestCase):
     def test_group_observation_loss_requires_positive_root_exit_proof(self):
         for outcome in ('live', 'reused', 'denied', 'unreadable-zombie',
                         'unreadable-status', 'escaped-session', 'topology-denied'):
-            with self.subTest(outcome=outcome), patch.object(control, 'identity') as identify:
+            with self.subTest(outcome=outcome), patch('cmw.jobs.ownership._legacy_identity') as identify:
                 root_sessions = 0
 
                 def session(pid):
@@ -866,7 +868,7 @@ class DomainTests(unittest.TestCase):
                                 (RUNNER, 'absent'), (ANCHOR, 'absent')):
             with self.subTest(member=member['pid'], outcome=outcome), \
                     patch.object(control, 'owner_alive', side_effect=lambda item: item != member), \
-                    patch.object(control, 'identity') as identify:
+                    patch('cmw.jobs.ownership._legacy_identity') as identify:
                 if outcome == 'denied':
                     identify.side_effect = control.psutil.AccessDenied(member['pid'])
                 elif outcome == 'unreadable-zombie':

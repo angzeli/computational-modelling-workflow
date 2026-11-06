@@ -71,7 +71,7 @@ class CancellationCoordinatorTests(unittest.TestCase):
         row = self.table.row(pid)
         self.assertEqual(row['sid'], 10)
         self.assertNotEqual(row['pgid'], 10)
-        self.assertEqual(ownership.identity(pid), self.coordinator.observed[pid])
+        self.assertEqual(ownership.identity_for(self.table.anchor, pid), self.coordinator.observed[pid])
         self.sent.append((pid, signum))
         if self.on_signal:
             self.on_signal(pid, signum)

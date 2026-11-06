@@ -17,9 +17,11 @@ from uuid import uuid4
 
 import psutil
 
-from .ownership import (identity, owner_alive, lock_held, group_members,
+from .ownership import (identity_for, owner_alive, observe_owner, OwnershipStatus, OwnershipUnavailable, lock_held, group_members,
                         snapshot_owned_session, group_exists)
 from .store import ACTIVE, JobsError, validate_note
+from .ownership_hold import blocks_replacement
+from .process_identity import ConfirmedProcessAbsence
 
 BACKENDS = ('local-command-v1', 'vasp-port-v1', 'orca-local-v1')
 PROTOCOL = 1
@@ -50,7 +52,7 @@ def enroll_state(store, con):
     control = store.control(con)
     if control['schema'] >= 3:
         return
-    if (lock_held(store.root/'controller.lock') or owner_alive(control.get('owner'))):
+    if (lock_held(store.root/'controller.lock') or blocks_replacement(control.get('owner'))):
         if control.get('runtime_protocol') != 3:
             raise JobsError('Legacy controller still owns this state; stop it with its original runtime before enrollment')
     if any(j['status'] in ACTIVE and j.get('worker_protocol') != 3 for j in store.rows(con)):
@@ -69,7 +71,7 @@ def _authority(job):
 
 
 def _alive_authority(store, job):
-    return (job.get('worker_protocol') == 3 and owner_alive(job.get('worker'))
+    return (not job.get('ownership_holds') and job.get('worker_protocol') == 3 and owner_alive(job.get('worker'))
             and lock_held(store.root/'attempts'/job['attempt_id']/'worker.lock')
             and owner_alive(job.get('group')))
 
@@ -125,7 +127,7 @@ def readiness(store, job_id, action=None):
             if not isinstance(evidence.get('checked_clock'), (int, float)) or not 0 <= now_clock()-evidence['checked_clock'] <= 3:
                 raise JobsError('Fresh worker verification is required')
             if not owner_alive(capability.get('runner')):
-                raise JobsError('Coordinated runner no longer exists')
+                raise JobsError('Coordinated runner ownership cannot be verified')
         except (JobsError, OSError, KeyError, ValueError) as exc:
             reasons.append(str(exc))
     return dict(supported=supported, ready=not reasons, reasons=reasons,
@@ -320,6 +322,10 @@ class Domain:
                     launchers=list(self.launchers))
 
 
+def _domain_members(records):
+    return {record['pid']: record for record in records}
+
+
 def _descends(pid, ancestor):
     try:
         return pid == ancestor or any(p.pid == ancestor for p in psutil.Process(pid).parents())
@@ -330,7 +336,7 @@ def _descends(pid, ancestor):
 def _observed_exit(pid, expected=None, anchor=None, *, allow_zombie_topology_loss=False):
     """Distinguish absence or an owned matching zombie from lost visibility."""
     try:
-        current = identity(pid)
+        current = identity_for(expected or anchor, pid)
         if expected is None or current != expected:
             return False
         try:
@@ -342,15 +348,15 @@ def _observed_exit(pid, expected=None, anchor=None, *, allow_zombie_topology_los
             # A previously verified Run member can retain its original zombie
             # identity after macOS drops its SID. This permits pending, not drain.
         return (psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
-                and identity(pid) == expected)
+                and identity_for(expected, pid) == expected)
     except psutil.ZombieProcess:
         return False  # An unreadable birth identity is not verified absence.
     except (psutil.NoSuchProcess, ProcessLookupError):
         try:
-            identity(pid)
+            identity_for(expected or anchor, pid)
         except psutil.ZombieProcess:
             return False
-        except psutil.NoSuchProcess:
+        except (ConfirmedProcessAbsence, psutil.NoSuchProcess):
             return True
         except (psutil.Error, OSError):
             return False
@@ -364,6 +370,9 @@ def _check_identity(member, anchor, *, allow_exit=False):
         if allow_exit and _observed_exit(
                 member['pid'], member, anchor, allow_zombie_topology_loss=True):
             raise DomainPending('Computational member exited during domain observation')
+        result = observe_owner(member)
+        if result.status != OwnershipStatus.GONE:
+            raise OwnershipUnavailable(result.deciding_check, 'Computational identity lost or escaped its owned session')
         raise JobsError('Computational identity lost or escaped its owned session')
     try:
         session = os.getsid(member['pid'])
@@ -404,8 +413,13 @@ def _check_runner(registration, anchor, *, check_stopped=False):
 
 def bind_domain(registration, anchor):
     """Classify only descendants of an enrolled runner in the pinned session."""
-    if not owner_alive(anchor) or os.getsid(anchor['pid']) != anchor['pid']:
+    if not owner_alive(anchor):
+        result = observe_owner(anchor)
+        if result.status != OwnershipStatus.GONE:
+            raise OwnershipUnavailable(result.deciding_check, 'Protected ownership anchor is unavailable')
         raise JobsError('Protected ownership anchor is unavailable')
+    if os.getsid(anchor['pid']) != anchor['pid']:
+        raise JobsError('Protected ownership anchor is outside its owned session')
     runner, root = registration['runner'], registration['root']
     _check_runner(registration, anchor); _check_identity(root, anchor, allow_exit=True)
     if not _descends(runner['pid'], anchor['pid']) or not _descends(root['pid'], runner['pid']):
@@ -434,11 +448,11 @@ def bind_domain(registration, anchor):
             raise JobsError('Registered runtime executable was replaced')
     try:
         descendants = psutil.Process(root['pid']).children(recursive=True)
-        members = [root, *(identity(p.pid) for p in descendants if p.status() != psutil.STATUS_ZOMBIE)]
+        members = [root, *(identity_for(anchor, p.pid) for p in descendants if p.status() != psutil.STATUS_ZOMBIE)]
     except psutil.ZombieProcess:
         raise
     except psutil.NoSuchProcess as exc:
-        if _observed_exit(exc.pid):
+        if _observed_exit(exc.pid, anchor=anchor):
             raise DomainPending('Computational member exited during domain enumeration') from exc
         raise
     protected = [anchor, runner, *registration.get('protected', [])]
@@ -475,7 +489,7 @@ def bind_domain(registration, anchor):
             # Classify the new descendant now; the bounded stopped-domain loop
             # must subsequently observe an unchanged identity set twice.
             if _descends(pid, root['pid']):
-                member = identity(pid)
+                member = identity_for(anchor, pid)
                 _check_identity(member, anchor, allow_exit=True)
                 if launcher_record and _executable_matches(pid, launcher_records):
                     launchers.append(member); protected.append(member)
@@ -484,7 +498,7 @@ def bind_domain(registration, anchor):
                 else:
                     computational.append(member)
             elif _descends(runner['pid'], pid):
-                protected.append(identity(pid))
+                protected.append(identity_for(anchor, pid))
             else:
                 raise JobsError('Unregistered member in the owned session')
     if len(launchers) > 1:
@@ -498,8 +512,11 @@ def bind_domain(registration, anchor):
     return Domain(tuple(computational), tuple(protected), tuple(launchers))
 
 
-def _send(member, anchor, signum):
-    _check_identity(member, anchor)
+def _send(member, anchor, signum, *, authority=None):
+    if authority:
+        authority.read_domain(lambda: _check_identity(member, anchor))
+    else:
+        _check_identity(member, anchor)
     os.kill(member['pid'], signum)
 
 
@@ -508,7 +525,7 @@ def _stopped(member, *, exit_anchor=None):
         if exit_anchor is not None and _observed_exit(
                 member['pid'], member, exit_anchor, allow_zombie_topology_loss=True):
             raise DomainPending('Computational member exited during stop-state observation')
-        raise JobsError('Computational member disappeared')
+        raise JobsError('Computational member cannot be verified')
     try:
         return psutil.Process(member['pid']).status() == psutil.STATUS_STOPPED
     except psutil.Error as exc:
@@ -520,6 +537,8 @@ def _stopped(member, *, exit_anchor=None):
 
 class Coordinator:
     """One instance owned by the existing worker; no adoption or background daemon."""
+    authority = None
+
     def __init__(self, store, job, anchor):
         from .suspension_protocol import clock_descriptor, now_clock
         self.store, self.job_id, self.claim, self.anchor = store, job['id'], job['claim'], anchor
@@ -549,6 +568,18 @@ class Coordinator:
         self.cancellation_escalated = False
         self.denied_signals = []
 
+    def discard_before_go(self):
+        # Only this worker created the channel and GO has never been sent.
+        if self.channel.read('context.json') != self.context:
+            raise JobsError('Unstarted suspension channel changed; refusing reuse')
+        descriptor = self.channel._open_directory()
+        try:
+            os.unlink('context.json', dir_fd=descriptor)
+            self.channel._check()
+            self.directory.rmdir()
+        finally:
+            os.close(descriptor)
+
     @property
     def context_path(self):
         return str(self.directory/'context.json')
@@ -575,6 +606,11 @@ class Coordinator:
             self.store.save(con, latest)
 
     def command(self, job, operation, boundary=None):
+        if self.authority:
+            latest = self.authority.wait()
+            if (latest['suspension']['revision'] != job['suspension']['revision']
+                    or (operation != 'cancel' and latest['status'] == 'Cancelling')):
+                raise RequestSuperseded('Control request changed before command delivery')
         value = job['suspension']
         request = value.get('request') or {}
         self.channel.write('command.json', {**self.context, 'revision': value['revision'],
@@ -606,7 +642,9 @@ class Coordinator:
         if not record.get('deadline', {}).get('known'):
             raise JobsError('Runner has not declared every timeout owner')
         _storage(record.get('storage'))
-        domain = bind_domain(record, self.anchor)
+        def read():
+            return bind_domain(record, self.anchor)
+        domain = self.authority.read_domain(read) if self.authority else read()
         self.registration = record
         self.last_domain = domain
         self.observe_session()
@@ -633,6 +671,9 @@ class Coordinator:
                 'stopped': stopped}
 
     def _validate(self):
+        return self.authority.read_domain(self._observe_domain) if self.authority else self._observe_domain()
+
+    def _observe_domain(self):
         from .suspension_protocol import clock_descriptor
         if clock_descriptor() != self.context['clock']:
             raise JobsError('Clock/boot discontinuity; retained state is unverified')
@@ -647,6 +688,15 @@ class Coordinator:
         job = self.current()
         return job.get('cancel_requested') or job.get('termination_requested')
 
+    def _deliver(self, job, member, signum):
+        if self.authority:
+            latest = self.authority.wait()
+            if latest['suspension']['revision'] != job['suspension']['revision'] or latest['status'] != 'Run':
+                raise RequestSuperseded('Control request changed before signal delivery')
+            _send(member, self.anchor, signum, authority=self.authority)
+        else:
+            _send(member, self.anchor, signum)
+
     def _suspend(self, job):
         from .suspension_protocol import now_clock
         previous = None
@@ -654,7 +704,7 @@ class Coordinator:
         limit = time.monotonic()+TRANSITION_TIMEOUT
         signalled = []
         def deliver(member, signum):
-            _send(member, self.anchor, signum)
+            self._deliver(job, member, signum)
             signalled.append({'identity': member, 'signal': int(signum), 'delivered': True})
             current = self.current()
             previous_evidence = dict(current['suspension'].get('evidence') or {})
@@ -683,7 +733,7 @@ class Coordinator:
                         pass
                 time.sleep(0.05)
                 check = self._validate()
-                signature = sorted((m['pid'], m['birth']) for m in check.computational)
+                signature = _domain_members(check.computational)
                 stopped = all(_stopped(m) for m in check.computational)
                 stable = stable+1 if stopped and signature == previous else 0
                 previous = signature
@@ -731,7 +781,9 @@ class Coordinator:
     def observe_session(self):
         """Retain original identities across launcher exit and reparenting."""
         self.current()
-        snapshot = snapshot_owned_session(self.anchor, self.observed.values())
+        def read_snapshot():
+            return snapshot_owned_session(self.anchor, self.observed.values())
+        snapshot = self.authority.read_domain(read_snapshot) if self.authority else read_snapshot()
         previous = set(self.observed)
         rows = {row['identity']['pid']: row for row in snapshot['members']}
         for pid, row in rows.items():
@@ -770,6 +822,8 @@ class Coordinator:
                 and self._groups_absent())
 
     def _cancel_send(self, member, signum):
+        if self.authority:
+            self.authority.wait()
         snapshot = self.observe_session()
         rows = {row['identity']['pid']: row for row in snapshot['members']}
         row = rows.get(member['pid'])
@@ -788,8 +842,28 @@ class Coordinator:
                  'operation': 'identity-verification'}
         try:
             # Individual identities avoid signalling co-grouped runner controls.
-            if identity(member['pid']) != member or os.getsid(member['pid']) != self.anchor['pid'] or os.getpgid(member['pid']) != row['pgid']:
-                raise JobsError('Termination target changed before signal delivery')
+            def target_read():
+                try:
+                    if identity_for(member) != member:
+                        result = observe_owner(member)
+                        if result.status != OwnershipStatus.GONE:
+                            raise OwnershipUnavailable(result.deciding_check, 'Termination target identity is unreadable')
+                        raise JobsError('Termination target changed before signal delivery')
+                    if os.getsid(member['pid']) != self.anchor['pid'] or os.getpgid(member['pid']) != row['pgid']:
+                        raise JobsError('Termination target changed before signal delivery')
+                except (PermissionError, psutil.AccessDenied) as exc:
+                    raise OwnershipUnavailable('termination_target', 'Termination identity cannot be read') from exc
+            if self.authority:
+                self.authority.read_domain(target_read)
+            else:
+                # Outside an owned worker, denial is retained as an unsent
+                # operation for the existing read-only absence checks.
+                try:
+                    target_read()
+                except OwnershipUnavailable as exc:
+                    if isinstance(exc.__cause__, (PermissionError, psutil.AccessDenied)):
+                        raise exc.__cause__
+                    raise
             event['operation'] = 'signal-delivery'
             os.kill(member['pid'], signum)
             event['delivered'] = True
@@ -867,7 +941,7 @@ class Coordinator:
             protected = [self.registration['runner'], *self.registration.get('protected', [])]
             for row in snapshot['members']:
                 member = row['identity']
-                key = (member['pid'], member['birth'])
+                key = tuple(sorted(member.items()))
                 if (row['pgid'] != self.anchor['pid'] and member not in protected
                         and key not in self.fallback_signalled):
                     if self._cancel_send(member, signal.SIGKILL):
@@ -886,10 +960,10 @@ class Coordinator:
             pending = False
             for member in self.observed.values():
                 try:
-                    current = identity(member['pid'])
+                    current = identity_for(member)
                 except psutil.ZombieProcess:
                     pending = True
-                except psutil.NoSuchProcess:
+                except (ConfirmedProcessAbsence, psutil.NoSuchProcess):
                     continue
                 except ProcessLookupError:
                     pending = True
@@ -941,6 +1015,9 @@ class Coordinator:
                         self.store.save(con, latest)
                 return
             if phase in {'Run', 'Suspending', 'Resuming'} and not owner_alive(self.registration['root']):
+                root = self.registration['root']
+                if not _observed_exit(root['pid'], root, self.anchor, allow_zombie_topology_loss=True):
+                    raise JobsError('Computational root ownership cannot be verified')
                 # A genuine root exit can precede the shell receipt. Keep the
                 # active commitment while the coordinated runner drains modules
                 # and finalizes; an exit race is never a successful suspension.
@@ -975,7 +1052,7 @@ class Coordinator:
                 self.last_check = now
                 domain = self._validate()
                 old = job['suspension']['evidence']['computational']
-                if set((p['pid'],p['birth']) for p in old) != set((p['pid'],p['birth']) for p in domain.computational) or not all(_stopped(m) for m in domain.computational):
+                if _domain_members(old) != _domain_members(domain.computational) or not all(_stopped(m) for m in domain.computational):
                     raise JobsError('Suspended membership lost, changed, or externally continued')
                 ack = self.ack(job, 'suspended', 'paused')
                 # The runner can refresh its acknowledgement during validation.
@@ -1019,21 +1096,21 @@ class Coordinator:
                             unsuspended_elapsed=prepared.get('unsuspended_elapsed'))
                 domain = self._validate()
                 old = job['suspension']['evidence']['computational']
-                if sorted((p['pid'],p['birth']) for p in old) != sorted((p['pid'],p['birth']) for p in domain.computational) or not all(_stopped(m) for m in domain.computational):
+                if _domain_members(old) != _domain_members(domain.computational) or not all(_stopped(m) for m in domain.computational):
                     raise JobsError('Continue requires the same stopped computational identities')
                 if self._cancel_pending():
                     return
                 # Release MPI ranks before serial driver, preserving the held
                 # runner until runnable-state verification has completed.
                 for launcher in domain.launchers:
-                    _send(launcher, self.anchor, signal.SIGCONT)
+                    self._deliver(job, launcher, signal.SIGCONT)
                 for member in reversed(domain.computational):
-                    _send(member, self.anchor, signal.SIGCONT)
+                    self._deliver(job, member, signal.SIGCONT)
                 self.pending.update(stage='verify_continue', domain=domain)
             elif stage == 'verify_continue':
                 domain = self._validate()
                 prior = self.pending['domain'].computational
-                if sorted((p['pid'],p['birth']) for p in prior) != sorted((p['pid'],p['birth']) for p in domain.computational):
+                if _domain_members(prior) != _domain_members(domain.computational):
                     raise JobsError('Computational identities changed during Continue verification')
                 if any(_stopped(m) for m in domain.computational):
                     return
@@ -1044,7 +1121,7 @@ class Coordinator:
                 if ack:
                     domain = self._validate()
                     prior = self.pending['domain'].computational
-                    if sorted((p['pid'],p['birth']) for p in prior) != sorted((p['pid'],p['birth']) for p in domain.computational) or any(_stopped(m) for m in domain.computational):
+                    if _domain_members(prior) != _domain_members(domain.computational) or any(_stopped(m) for m in domain.computational):
                         raise JobsError('Continue acknowledgement lost original computational domain')
                     self.update(job, phase='Run', inhibited=False, evidence=self._evidence(domain), verified_at=time.time(),
                                 intervals=ack.get('intervals', []), suspended_seconds=ack.get('suspended_seconds'),

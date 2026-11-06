@@ -205,7 +205,7 @@ class QueueTests(unittest.TestCase):
         with self.store.transaction() as con:
             job = self.store.get(con,first['id'])
             stale = identity()
-            stale['birth'] -= 100
+            stale['start_token'] -= 100
             self.assertFalse(owner_alive(stale))
             job.update(status='Starting', order=None, claimed_at=time.time()-20, worker=stale, claim='crash')
             self.store.save(con,job)
@@ -332,6 +332,15 @@ runtime.worker(Store(state),1,'test-claim')
                     self.assertIn(process.wait(timeout=10), (91,92,93,94))
                     authority.__exit__(None, None, None)
                     authority = None
+                    # The synthetic controller is this still-live test process.
+                    # Releasing its lock alone cannot prove that identity gone.
+                    with self.assertRaisesRegex(JobsError, 'ownership is uncertain'):
+                        start(store)
+                    with store.transaction() as con:
+                        control = store.control(con)
+                        self.assertEqual(control['owner'], identity())
+                        control.update(owner=None, dispatch=False)
+                        store.set_control(con, control)
                     start(store)
                     wait_for(lambda: store.snapshot()['jobs'][0]['status']=='Unknown')
                     self.assertIsNone(store.snapshot()['jobs'][1]['started_at'])

@@ -166,9 +166,10 @@ class Store:
             if raw_control['schema'] == 1:
                 # Old supervisors reject schema 2 on their next receipt/finalize
                 # transaction. Keep their state readable until they are done.
-                from .ownership import lock_held, owner_alive
+                from .ownership import lock_held
+                from .ownership_hold import blocks_replacement
                 if (any(job['status'] in ACTIVE for job in self.rows(con)) or
-                        lock_held(self.root/'controller.lock') or owner_alive(raw_control.get('owner'))):
+                        lock_held(self.root/'controller.lock') or blocks_replacement(raw_control.get('owner'))):
                     raise JobsError('Legacy Jobs runtime still active or unresolved; let legacy attempts finish '
                                     'and stop the legacy controller with its original installation before migration')
                 control = self.control(con)
@@ -275,9 +276,10 @@ class Store:
                 if (existing['node_id'], existing['host_id']) != (node_id, host_id):
                     raise JobsError('Queue is already enrolled to another node or host identity')
                 return existing
-            from .ownership import lock_held, owner_alive
+            from .ownership import lock_held
+            from .ownership_hold import blocks_replacement
             if (any(job['status'] in ACTIVE for job in self.rows(con))
-                    or lock_held(self.root / 'controller.lock') or owner_alive(control.get('owner'))):
+                    or lock_held(self.root / 'controller.lock') or blocks_replacement(control.get('owner'))):
                 raise JobsError('Queue enrollment requires no active or unresolved attempts and an offline controller')
             root_info, database_info = self.root.stat(), self.path.stat()
             record = {'schema': 1, 'node_id': node_id, 'host_id': host_id,
@@ -409,7 +411,7 @@ class Store:
         keys = ('id', 'attempt_id', 'display_id', 'name', 'engine', 'argv', 'cwd', 'env',
                 'status', 'order', 'claim', 'claimed_at', 'worker', 'worker_protocol', 'group',
                 'started_at', 'finished_at', 'cancel_requested', 'termination_requested',
-                'resources', 'scheduling', 'sharing_anchor', 'on_failure')
+                'resources', 'scheduling', 'sharing_anchor', 'on_failure', 'ownership_holds')
         result = {key: job.get(key) for key in keys}
         suspension = job.get('suspension') or {}
         result['suspension'] = {key: suspension.get(key) for key in
@@ -755,7 +757,7 @@ class Store:
 
     def _dispatch(self, con, enabled):
         control = self.control(con)
-        if enabled and any(j["status"] in {"Unknown", "Cancelling"} for j in self.rows(con)):
+        if enabled and any(j.get("ownership_holds") or j["status"] in {"Unknown", "Cancelling"} for j in self.rows(con)):
             raise JobsError("Needs attention or cancellation is unresolved; dispatch remains paused")
         control.update(dispatch=bool(enabled), reason="" if enabled else "User pause")
         self.set_control(con, control)
