@@ -19,6 +19,7 @@ from uuid import uuid4
 from cmw.core.provenance import atomic_write_json
 from .ownership import exclusive, group_exists, group_members, identity, lock_held, owner_alive, signal_session
 from .freshness import age_seconds, clock_stamp
+from .guard_history import record_guard
 from .store import ACTIVE, PENDING, JobsError, Store, private_opener
 from . import activity, ownership_hold, sharing
 from .ownership import OwnershipStatus, observe_owner
@@ -176,18 +177,6 @@ def launch_blocker(job, *, final=False):
         if shutil.which(command, path=search_path) is None:
             return f"Executable not found: {command}"
     return ""
-
-
-def record_guard(store, con, guard):
-    control = store.control(con)
-    previous = control.get('external_guard', {})
-    control['external_guard'] = guard
-    store.set_control(con, control)
-    if previous.get('state') != guard['state'] or previous.get('reason') != guard['reason']:
-        store.event(con, None, 'External guard: ' + guard['state'] + ': ' + guard['reason'])
-        # Bound guard transition history without pruning managed lifecycle events.
-        con.execute("DELETE FROM events WHERE job_id IS NULL AND message LIKE 'External guard:%' "
-                    "AND id NOT IN (SELECT id FROM events WHERE job_id IS NULL AND message LIKE 'External guard:%' ORDER BY id DESC LIMIT 100)")
 
 
 def dispatch_authority(store, control):

@@ -843,7 +843,12 @@ class Store:
                     control, jobs = self.control(con), self.rows(con)
                     if control['schema'] == 4:
                         queue_identity = self._queue_identity(con, control['schema'])
-                    events = [dict(zip(("id", "time", "job_id", "message"), row)) for row in con.execute("SELECT * FROM events ORDER BY id DESC LIMIT 30")][::-1]
+                    from .guard_history import GUARD_ROWS
+                    # Keep recent queue and job history visible during a flood of guard observations.
+                    recent = (f"SELECT * FROM (SELECT * FROM events WHERE {GUARD_ROWS} ORDER BY id DESC LIMIT 30) "
+                              f"UNION ALL SELECT * FROM (SELECT * FROM events WHERE NOT ({GUARD_ROWS}) "
+                              "ORDER BY id DESC LIMIT 30) ORDER BY id")
+                    events = [dict(zip(("id", "time", "job_id", "message"), row)) for row in con.execute(recent)]
             except sqlite3.Error as exc:
                 raise JobsError(f"Queue database unavailable: {exc}") from exc
             finally:
