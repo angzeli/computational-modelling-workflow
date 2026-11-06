@@ -16,11 +16,35 @@ could recover on the explicit birth read after a denied construction read.
 Omitting sleeps also limits how far exception cleanup can advance into a
 recovering observation window. No retry starts after a 100 ms monotonic
 deadline. A kernel call already in progress can finish later. The adapter
-only reads evidence. A final false
-result can mean either confirmed loss or exhausted retries. Callers that need
+only reads evidence. A final false result can mean either confirmed loss or exhausted retries. Callers that need
 to distinguish these outcomes use `observe_owner` and own their retry policy.
 
+## Historical-runner parity
+
+At a stable clock, CMW must match or improve on both historical revisions. Across a wall-clock step, it must behave as the historical revisions do at a stable clock. A permanent refusal caused by the old boot timestamp cannot be the reference for legitimate cleanup.
+
+| Historical runner scenario | 0e22fdc and 31616be | 06b5af4 |
+|---|---|---|
+| Ordinary MPI exit across clock step | Generic refusal, no signal | Completed, status 0, no signal |
+| Real timeout across clock step | Generic refusal, no signal | Timeout, status 124, intended subgroup TERM |
+| Persistent denied exit probe compared with PID reuse | Same generic refusal for both, no signal | Same runner defect |
+| Persistent denied probe during timeout cleanup | Generic exception, no signal | Same runner defect |
+| Whole Boolean check fails, then recovers during ordinary drainage | Stable clock: unsolicited TERM. Stepped clock: boot mismatch masks the defect | Unsolicited TERM with either clock |
+| One denied kernel read, then ordinary drainage | Stable clock: completed, status 0, no signal. Stepped clock: boot mismatch | Completed, status 0, no signal with either clock |
+
+The matched synthetic comparison used psutil 7.2.2 on Python 3.11 and 3.14. It recorded signal requests without delivering them. The final adapter makes at most two complete observations, with zero backoff and a 100 ms monotonic deadline to start the second observation. In the 15 ms outage control, the earlier 10 ms sleep in b845df8 placed the second cleanup check after recovery and caused an unsolicited TERM. Removing the sleep restored the historical outcome (no signal) for that control.
+
+The [pinned compatibility test](../../tests/jobs/test_historical_vasp_runner.py)
+exercises this runner without MPI or signal delivery. Four expected failures
+track the two persistent-denial outcomes and recovery during ordinary
+drainage at stable and stepped clocks.
+
 ## Separate port change based on 51d8209
+
+[Cutover prerequisite #19](https://github.com/angzeli/computational-modelling-workflow/issues/19)
+tracks this change in the port. Resume the original drainage observation
+after recovery. Only an actual termination intent may start signalling
+cleanup. A failed identity lookup cannot supply that intent.
 
 1. Require the qualified CMW v2 identity and tri-state API at managed launch.
    Capture the leader once. Verify the session, protected group membership and
