@@ -112,9 +112,11 @@ def projection_clock():
 
 
 def scenario_projection(state, scenario):
+    with projection_clock():
+        stamp = clock_stamp()
     usage = dict(cpu_cores=2.35, rss_bytes=2 * 1024**3, cpu_quality='fresh', memory_quality='fresh',
                  cpu_members=3, memory_members=3, total_members=3,
-                 observed_at=NOW, age_seconds=0, stale=False, reason='Synthetic telemetry')
+                 observed_at=NOW, observed_clock=stamp, age_seconds=0, stale=False, reason='Synthetic telemetry')
     guard = dict(state='NO_MATCH', reason='No recognized external computation observed',
                  source='client', observed_at=NOW, age_seconds=0, stale=False,
                  scope='Current local user; recognized executables; accessible process metadata',
@@ -132,12 +134,12 @@ def scenario_projection(state, scenario):
         guard.update(state='UNCERTAIN', reason='Synthetic recognized identity cannot be verified')
         guard['coverage'] = {'complete': False, 'warnings': ['Synthetic payload ownership unresolved']}
     with projection_clock():
-        guard['observed_clock'] = clock_stamp()
+        guard['observed_clock'] = stamp
         decision = admission(state, guard)
     return {'external_activity': guard, 'admission': decision,
             'machine_usage': dict(cpu_percent=43.0, ram_used_bytes=7 * 1024**3,
                                   ram_total_bytes=24 * 1024**3, cpu_quality='fresh', memory_quality='fresh',
-                                  observed_at=NOW, age_seconds=0, stale=False, reason='Synthetic telemetry'),
+                                  observed_at=NOW, observed_clock=stamp, age_seconds=0, stale=False, reason='Synthetic telemetry'),
             'job_usage': {job['attempt_id']: deepcopy(usage) for job in state['jobs'] if job['status'] == 'Run'}}
 
 

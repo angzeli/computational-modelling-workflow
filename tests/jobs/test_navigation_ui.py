@@ -67,7 +67,7 @@ class SyntheticSampler:
         machine = Sampler._empty_machine()
         machine.update(cpu_percent=22, ram_used_bytes=4 * 2**30,
                        ram_total_bytes=36 * 2**30, cpu_quality='complete',
-                       memory_quality='complete', observed_at=time.time(), age_seconds=0)
+                       memory_quality='complete', observed_at=time.time(), observed_clock=clock_stamp(), age_seconds=0)
         return {'machine_usage': machine, 'jobs': {}, 'external': {}}
 
     def close(self):
