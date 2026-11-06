@@ -19,7 +19,7 @@ from uuid import uuid4
 from cmw.core.provenance import atomic_write_json
 from .ownership import exclusive, group_exists, group_members, identity, lock_held, owner_alive, signal_session
 from .freshness import age_seconds, clock_stamp
-from .guard_history import record_guard
+from .guard_history import configure_recovery, record_guard
 from .store import ACTIVE, PENDING, JobsError, Store, private_opener
 from . import activity, ownership_hold, sharing
 from .ownership import OwnershipStatus, observe_owner
@@ -138,9 +138,23 @@ def reconcile(store, con, job):
             return
     # Starting may be between intent commit and worker registration. A grace
     # period blocks the slot but never authorizes relaunching this attempt.
-    claim_age = age_seconds(job.get("claim_clock"), clock_stamp())
-    if job["worker"] is None and claim_age is not None and claim_age < 5:
-        return
+    if job["worker"] is None:
+        claim_clock = job.get("claim_clock")
+        current_clock = clock_stamp()
+        claim_age = age_seconds(claim_clock, current_clock)
+        if claim_age is not None and claim_age < 5:
+            return
+        if claim_age is None and job["status"] == "Starting":
+            reason = "Workerless Starting: launch grace cannot be established"
+            if claim_clock is None:
+                reason += " from a legacy or previous-boot stamp (claim stamp missing)"
+            elif (isinstance(claim_clock, dict) and claim_clock.get("boot_session_id")
+                  and current_clock and claim_clock["boot_session_id"] != current_clock["boot_session_id"]):
+                reason += " from a legacy or previous-boot stamp (boot session differs)"
+            else:
+                reason += " because the recorded and current monotonic clocks are incomparable"
+            mark_unknown(store, con, job, reason)
+            return
     mark_unknown(store, con, job, "Worker ownership/completion cannot be verified; automatic progression stopped")
 
 
@@ -273,6 +287,7 @@ def controller(store):
         with store.transaction() as con:
             control = store.control(con)
             control.update(owner=identity(), heartbeat=time.time(), heartbeat_clock=clock_stamp(), runtime_protocol=3)
+            configure_recovery(store, con, control)
             store.set_control(con, control)
             store.event(con, None, "Controller online")
         print("CMW Jobs controller online", flush=True)

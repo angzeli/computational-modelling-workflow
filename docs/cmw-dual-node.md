@@ -186,8 +186,10 @@ cmw jobs --nodes-config FRONTEND_CONFIG --node mini start
 cmw jobs --nodes-config FRONTEND_CONFIG --node mini cancel J1.1 --yes
 ```
 
-The preview binds the node/queue/attempt, current boot clock and monotonic
-control-relevant job/queue revisions. The frontend records that exact intent
+The preview binds the node/queue/attempt, the host's kernel boot session UUID
+and monotonic control-relevant job/queue revisions. A wall-clock adjustment
+preserves that binding. A reboot invalidates it, and an unreadable boot
+session refuses the operation. The frontend records that exact intent
 before sending it. Same-ID retries return the original durable receipt; changed
 semantics conflict. Relevant state transitions invalidate stale previews even
 when the state later returns to its old value. Heartbeats and telemetry do not

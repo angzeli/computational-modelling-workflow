@@ -39,10 +39,10 @@ class BackendObservationTests(unittest.TestCase):
         self.observer.clock_id = 'fixed-test-observer-clock'
         self.backend = self.make_backend(observer=self.observer)
 
-    def make_backend(self, **kwargs):
+    def make_backend(self, *, boot_provider=lambda: 10., **kwargs):
         backend = LocalBackend(self.root / 'node-config', 'research', clock=lambda: 100.,
             identity_loader=lambda _: deepcopy(self.config), identity_checker=lambda _: deepcopy(self.readiness),
-            activity_projector=lambda store: store.snapshot(now=100.), boot_provider=lambda: 10., **kwargs)
+            activity_projector=lambda store: store.snapshot(now=100.), boot_provider=boot_provider, **kwargs)
         self.addCleanup(backend.close)
         return backend
 
@@ -101,6 +101,31 @@ class BackendObservationTests(unittest.TestCase):
         self.backend._boot_provider = lambda: 11.
         with self.assertRaisesRegex(NodeError, 'identity changed'):
             self.call('capabilities')
+
+    def test_control_session_survives_wall_clock_step_and_refuses_changed_boot_session(self):
+        job = self.job()
+        with patch('cmw.jobs.process_identity.boot_session_id', return_value=str(uuid4())) as boot, \
+                patch('psutil.boot_time', return_value=1793633892.) as adjusted_boot:
+            backend = self.make_backend(boot_provider=None)
+            target = backend.target(job)
+            preview = backend.call('control.preview', {'action': 'release'}, target)['result']
+            adjusted_boot.return_value = 1793662684.
+            params = {key: preview[key] for key in ('action', 'expected_clock_id', 'expected_revision')}
+            params.update(confirm=True, reason='', _endpoint={
+                'node_id': self.config['node_id'], 'queue_id': backend.queue['queue_id'],
+                'host_id': self.config['host_id'], 'runtime_id': self.config['runtime']['fingerprint'],
+                'clock_id': preview['expected_clock_id']})
+            receipt = backend.call('control', params, target, request_id=uuid4().hex)['result']
+            self.assertEqual(receipt['expected_clock_id'], preview['expected_clock_id'])
+            self.assertEqual(self.store.snapshot()['jobs'][0]['status'], 'Queue')
+            adjusted_boot.assert_not_called()
+            boot.side_effect = PermissionError('unreadable boot session')
+            with self.assertRaisesRegex(NodeError, 'Cannot verify endpoint boot session'):
+                backend.call('capabilities')
+            boot.side_effect = None
+            boot.return_value = str(uuid4())
+            with self.assertRaisesRegex(NodeError, 'identity changed'):
+                backend.call('capabilities')
 
     def test_queue_replacement_fails_read_only(self):
         original = self.store.path.read_bytes()

@@ -817,6 +817,21 @@ situation manually. There is deliberately no “force Done”, blind retry, or
 unsafe override for Unknown. In particular, do not erase state to resume a queue
 while an old execution might still be alive.
 
+A workerless `Starting` attempt has a five-second grace period on its original
+boot. If its legacy claim lacks a monotonic stamp or the stamp belongs to a
+previous boot, Jobs immediately records `Unknown` and pauses dispatch. The
+job reason in `cmw jobs status` and its event say “launch grace cannot be
+established from a legacy or previous-boot stamp”. This path sends no signal.
+
+Keep dispatch paused. Inspect `cmw jobs show JOB --json`, `cmw jobs observe JOB
+--json`, the controller log and the original attempt's receipt and payload
+logs. Establish whether the original execution is still running and which
+supervisor, if any, can supply closure. Use `cmw jobs reconcile JOB --preview`
+to inspect the supported recovery evidence. If ownership or completion remains
+unresolved, retain the original state and give the evidence to the queue
+operator for a separately authorized recovery. This release has no supported
+command to adopt a workerless claim or clear its `Unknown` state.
+
 For an Unknown job, `cmw jobs show J1.1` adds an ephemeral
 `ownership_observation`: the worker identity is matched, gone, unavailable,
 or missing, and its attempt lock is held, unheld, missing, or

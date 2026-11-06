@@ -61,6 +61,36 @@ class GuardHistoryTests(unittest.TestCase):
             with self.record({'state': 'NO_MATCH', 'reason': 'clear'}, 3) as con:
                 self.assertEqual(con.execute('SELECT COUNT(*) FROM events').fetchone()[0], 2)
 
+    def test_recovery_window_range_and_invalid_setting_warning(self):
+        for setting, expected, invalid in [
+                ('0', 0., False), ('1.5', 1.5, False), ('60', 60., False),
+                ('', 5., True), ('five', 5., True), ('-1', 5., True),
+                ('60.1', 5., True), ('1e308', 5., True), ('nan', 5., True), ('inf', 5., True)]:
+            with self.subTest(setting=setting), self.store.transaction() as con, \
+                    patch.dict(os.environ, {'CMW_JOBS_GUARD_RECOVERY_SECONDS': setting}):
+                control = self.store.control(con)
+                before = con.execute('SELECT COUNT(*) FROM events').fetchone()[0]
+                guard_history.configure_recovery(self.store, con, control)
+                self.assertEqual(control['guard_recovery_seconds'], expected)
+                after = con.execute('SELECT COUNT(*) FROM events').fetchone()[0]
+                self.assertEqual(after - before, int(invalid))
+                if invalid:
+                    warning = con.execute('SELECT message FROM events ORDER BY id DESC LIMIT 1').fetchone()[0]
+                    self.assertIn('CMW_JOBS_GUARD_RECOVERY_SECONDS', warning)
+                    self.assertIn('using 5 seconds', warning)
+
+    def test_workers_use_controller_window_and_snapshot_reports_effective_setting(self):
+        with self.store.transaction() as con, patch.dict(os.environ, {'CMW_JOBS_GUARD_RECOVERY_SECONDS': '1'}):
+            control = self.store.control(con)
+            guard_history.configure_recovery(self.store, con, control)
+            self.store.set_control(con, control)
+        with patch.dict(os.environ, {'CMW_JOBS_GUARD_RECOVERY_SECONDS': '60'}):
+            with self.record({'state': 'UNAVAILABLE', 'reason': 'timeout'}, 2):
+                pass
+            with self.record({'state': 'NO_MATCH', 'reason': 'clear'}, 4) as con:
+                self.assertEqual(con.execute('SELECT COUNT(*) FROM events').fetchone()[0], 2)
+        self.assertEqual(self.store.snapshot()['controller']['guard_recovery_seconds'], 1.)
+
     def test_flood_preserves_lifecycle_and_queue_events_on_disk_and_in_snapshot(self):
         with self.store.transaction() as con:
             self.store.event(con, 1, 'Execution started')

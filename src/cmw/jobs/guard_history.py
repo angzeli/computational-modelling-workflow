@@ -6,19 +6,27 @@ import time
 from .freshness import age_seconds, clock_stamp
 
 DEFAULT_RECOVERY_SECONDS = 5.0
+MAX_RECOVERY_SECONDS = 60.0
 GUARD_ROWS = "job_id IS NULL AND message LIKE 'External guard:%'"
 
 
-def recovery_seconds():
+def configure_recovery(store, con, control):
+    """Pin the controller's policy so its workers coalesce with the same window."""
     try:
         value = float(os.environ.get('CMW_JOBS_GUARD_RECOVERY_SECONDS', DEFAULT_RECOVERY_SECONDS))
     except ValueError:
-        return DEFAULT_RECOVERY_SECONDS
-    return value if math.isfinite(value) and value >= 0 else DEFAULT_RECOVERY_SECONDS
+        value = math.nan
+    if not 0 <= value <= MAX_RECOVERY_SECONDS:
+        value = DEFAULT_RECOVERY_SECONDS
+        store.event(con, None, f'Controller warning: CMW_JOBS_GUARD_RECOVERY_SECONDS must be a number '
+                    f'from 0 to {MAX_RECOVERY_SECONDS:g}; using {value:g} seconds')
+    control['guard_recovery_seconds'] = value
 
 
 def record_guard(store, con, guard):
     control = store.control(con)
+    if 'guard_recovery_seconds' not in control:
+        configure_recovery(store, con, control)
     previous = control.get('external_guard', {})
     control['external_guard'] = guard  # Admission sees every observation, including each failed scan.
     window = control.get('guard_event_window')
@@ -33,7 +41,7 @@ def record_guard(store, con, guard):
     duration = age_seconds(window['clock'], stamp) if window else None
     # Update the same event only inside a short, same-boot episode. Never join
     # an outage to a recovery seen across a boot boundary or a long gap.
-    if window and duration is not None and duration < recovery_seconds():
+    if window and duration is not None and duration < control['guard_recovery_seconds']:
         if state == 'UNAVAILABLE':
             window['count'] += 1
             window['last_reason'] = reason

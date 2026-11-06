@@ -1,9 +1,12 @@
 """Control freshness across a wall-clock step, restart and missing evidence."""
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
 from cmw.jobs import activity, freshness, ownership_hold, runtime, sharing
+from cmw.jobs.cli import status_text
+from cmw.jobs.store import Store
 from cmw.jobs.suspension_protocol import clock_descriptor
 
 
@@ -75,3 +78,30 @@ class ClockFreshnessTests(TestCase):
         with patch('cmw.jobs.suspension_protocol.boot_session_id', return_value='session'), \
                 patch('psutil.boot_time', side_effect=AssertionError('Adjusted wall time used')):
             self.assertEqual(clock_descriptor()['boot_session_id'], 'session')
+
+    def test_legacy_or_previous_boot_start_pauses_dispatch_and_explains_why(self):
+        for claim_clock, detail in ((None, 'claim stamp missing'), (stamp(1., 'prior'), 'boot session differs')):
+            with self.subTest(detail=detail), TemporaryDirectory() as directory:
+                store = Store(Path(directory) / 'queue')
+                job = store.add(argv=['/bin/true'], cwd=directory, name='Legacy claim')
+                with store.transaction() as con:
+                    control = store.control(con)
+                    control['dispatch'] = True
+                    store.set_control(con, control)
+                    job.update(status='Starting', claim='claimed')
+                    if claim_clock:
+                        job['claim_clock'] = claim_clock
+                    store.save(con, job)
+                    with patch.object(runtime, 'clock_stamp', return_value=stamp(100.)), \
+                            patch.object(runtime, 'signal_session') as send, patch.object(runtime, 'detached') as spawn:
+                        runtime.reconcile(store, con, store.get(con, job['id']))
+                    send.assert_not_called()
+                    spawn.assert_not_called()
+                state = store.snapshot()
+                reason = state['jobs'][0]['reason']
+                self.assertEqual(state['jobs'][0]['status'], 'Unknown')
+                self.assertFalse(state['controller']['dispatch'])
+                self.assertIn('launch grace cannot be established from a legacy or previous-boot stamp', reason)
+                self.assertIn(detail, reason)
+                self.assertIn(reason, [event['message'] for event in state['events']])
+                self.assertIn(reason, status_text(state))

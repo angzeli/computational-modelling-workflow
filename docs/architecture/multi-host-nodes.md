@@ -132,6 +132,11 @@ not a sequence of competing production enrollments or deployments. This
 specification does not establish that the research job has finished or that the
 cutover is authorized to run now.
 
+Before upgrading each node, pause dispatch and inspect the original queue.
+Cutover qualification requires zero `Starting` and zero `Run` records.
+Reconcile any active or unresolved execution against its original evidence
+before proceeding. Retain the original queue and its attempt records.
+
 Retain protocol integer 1, JSON-lines control framing, the response/error shape,
 capability negotiation, observer sessions and host-key pinning. Feature versions
 belong in negotiated `capabilities`, not a new MAJOR.MINOR envelope or `hello`
@@ -890,15 +895,23 @@ Heartbeat, launch grace and admission samples carry a boot session and
 monotonic timestamp alongside their wall time. Missing, future or different-boot
 evidence cannot authorize work. A change greater than two seconds in the wall
 minus monotonic offset between controller ticks records a clock-step event.
-This observation has no effect on ownership.
+The endpoint's control-session clock binds the host identity and kernel boot
+session UUID. Wall-clock steps preserve existing control previews. If a
+workerless `Starting` claim lacks a comparable stamp, the controller records
+the reason, marks it `Unknown` and pauses dispatch without sending a signal.
+See the [operator recovery steps](../cmw-jobs.md#persistence-lifecycle-and-recovery).
 
 Guard samples always take effect immediately. A scan that becomes available
 within five seconds updates the same event with its unavailable sample count,
 wall-time range, monotonic duration and observed reasons. Set
-`CMW_JOBS_GUARD_RECOVERY_SECONDS` in the controller environment to change the
-window (zero disables grouping). Events 109–208 on `mm_m5pro` showed 1–2 second
-recoveries separated by 20–40 minutes; five seconds groups each brief outage
-without joining those episodes. Only the latest 100 guard events are retained.
+`CMW_JOBS_GUARD_RECOVERY_SECONDS` in the controller environment before startup.
+It accepts a finite number from 0 through 60 seconds. Zero disables grouping.
+Invalid settings generate a controller warning event and select five seconds.
+The controller pins the effective value in `controller.guard_recovery_seconds`
+in the status snapshot and workers use that same value. Events 109–208 on
+`mm_m5pro` showed 1–2 second recoveries separated by 20–40 minutes. The
+default covers these short recoveries and the one-minute maximum keeps
+distinct outages on that cadence separate. Only the latest 100 guard events are retained.
 The status snapshot shows up to 30 recent guard and 30 recent non-guard events.
 
 **Deferred cutover measurement.** After J4.1 finishes, use the D32 sandbox on
