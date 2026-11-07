@@ -810,6 +810,19 @@ and 75 means UNVERIFIABLE. A held or never-started job may have no anchor yet.
 The command reads the selected queue without taking control or writing to it.
 [Identity rules, legacy records and supervision recovery](architecture/multi-host-nodes.md#39-process-identity-and-supervision-d34).
 
+An ordinary session worker retains supervision when signal delivery is denied
+or its outcome is unreadable. It records a control hold and retries passive
+group-absence observations with backoff. It sends no further control while the
+group remains present or unreadable, and reports Unknown after 60 seconds while
+keeping the pipe. Confirmed absence permits fresh checks of the remaining
+operation. Confirmed anchor loss follows the loss path. A persistently live
+group needs operator attention; a readable identity alone cannot establish
+that signal permission recovered. The original failed send is never replayed.
+
+After payload exit, the shell ignores group TERM and INT while its receipt
+writer publishes the genuine exit status durably. It retains that protection
+until the worker verifies drainage and sends RELEASE.
+
 Restart acquires the controller kernel lock and reconciles active attempts by
 worker lock, recorded process identity and persisted launch claims. A live
 verified supervisor remains responsible for completion; the same attempt is not

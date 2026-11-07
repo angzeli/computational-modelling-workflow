@@ -137,6 +137,11 @@ Cutover qualification requires zero `Starting` and zero `Run` records.
 Reconcile any active or unresolved execution against its original evidence
 before proceeding. Retain the original queue and its attempt records.
 
+The [deployed-runtime parity audit](deployed-runtime-parity.md) is also required
+before cutover. Compare every recorded deployment and active process runtime
+with the candidate, review unmatched patches and integration near-matches, and
+qualify equivalent behavior under the candidate's ownership semantics.
+
 Retain protocol integer 1, JSON-lines control framing, the response/error shape,
 capability negotiation, observer sessions and host-key pinning. Feature versions
 belong in negotiated `capabilities`, not a new MAJOR.MINOR envelope or `hello`
@@ -890,6 +895,21 @@ subsequent failed check cannot place the persisted hold on the current clock
 worker keeps the pipe open. VERIFIED permits normal supervision of the original claim;
 confirmed loss follows the conservative Unknown path. An unrelated Unknown
 or explicit dispatch pause requires separate operator attention.
+
+In ordinary session cancellation, a denied or unreadable group send enters the
+same ownership hold. Only group-absence observations are retried. The worker
+retains its original pipe, and remaining delivery requires fresh intent and
+ownership checks after recovery. A still-present or unreadable group stays
+held, even if its original witness has exited. A failed send is never replayed.
+The existing 0.25 s exponential backoff, capped at 5 s, and 60 s attention
+threshold replace a separate two-second absence deadline for managed workers.
+Historical callers without a read domain retain the optional bounded grace.
+Confirmed anchor loss follows the existing loss path.
+
+After the payload exits, its anchor ignores TERM and INT before launching the
+receipt writer. The writer inherits that protection through durable atomic
+publication, and the anchor keeps it while awaiting RELEASE. During execution
+the anchor's original traps continue to allow the payload to receive signals.
 
 Heartbeat, launch grace and admission samples carry a boot session and
 monotonic timestamp alongside their wall time. Missing, future or different-boot
