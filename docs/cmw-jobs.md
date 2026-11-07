@@ -819,6 +819,11 @@ operation. Confirmed anchor loss follows the loss path. A persistently live
 group needs operator attention; a readable identity alone cannot establish
 that signal permission recovered. The original failed send is never replayed.
 
+If delivery to the anchor's own group is uncertain, a genuine receipt and
+complete session drainage can resolve the hold while the anchor stays alive.
+The worker then rechecks the ordinary receipt, drainage and intent gates before
+RELEASE. It never substitutes a successful KILL outcome for that receipt.
+
 After payload exit, the shell ignores group TERM and INT while its receipt
 writer publishes the genuine exit status durably. It retains that protection
 until the worker verifies drainage and sends RELEASE.

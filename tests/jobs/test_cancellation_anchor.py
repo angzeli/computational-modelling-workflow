@@ -556,6 +556,48 @@ class CancellationAnchorTests(unittest.TestCase):
                 self.assertEqual(set(probes), {0})
                 self.assertNotIn('ownership_holds', result)
 
+    def test_denied_anchor_send_resumes_only_after_receipt_and_session_drainage(self):
+        for denied_signal in (signal.SIGTERM, signal.SIGKILL):
+            with self.subTest(signal=denied_signal):
+                model = self.ordinary('no-receipt-escalation', session=True)
+                original_send, original_sleep = model.send_group, model.sleep
+                denied, held = [], []
+
+                def send(pgid, signum):
+                    if pgid == model.anchor and signum == denied_signal:
+                        denied.append(signum)
+                        raise PermissionError(errno.EPERM, 'anchor group send denied')
+                    return original_send(pgid, signum)
+
+                def sleep(interval):
+                    if not denied:
+                        return original_sleep(interval)
+                    self.assertFalse(model.leader.stdin.close.called)
+                    self.assertFalse(model.released)
+                    self.assertIn('domain', model.current()['ownership_holds'])
+                    held.append(interval)
+                    model.clock += interval
+                    if len(held) == 1:
+                        model.write_receipt()  # Surviving session members still prevent release.
+                    elif len(held) == 2:
+                        model.alive.difference_update((model.runner, model.compute))
+                        model.receipt.unlink()  # Drainage alone also cannot permit release.
+                    elif len(held) == 3:
+                        model.write_receipt()
+                    elif len(held) > 4:
+                        raise AssertionError('Receipt and drainage failed to resolve anchor hold')
+
+                model.send_group, model.sleep = send, sleep
+                with patch.object(ownership, 'observe_owner', side_effect=model.observe):
+                    result = model.run()
+                self.assertEqual(result['status'], 'Cancelled', model.events)
+                self.assertEqual(result['exit_code'], 143)  # Genuine receipt, including after denied KILL.
+                self.assertEqual(denied, [denied_signal])
+                self.assertEqual(len(held), 3)
+                self.assertEqual(model.events.count('RELEASE'), 1)
+                self.assertTrue(model.released)
+                self.assertNotIn('ownership_holds', result)
+
     def test_denied_session_send_hold_ends_only_on_confirmed_anchor_loss(self):
         model = self.ordinary('no-receipt-escalation', session=True)
         original_send = model.send_group

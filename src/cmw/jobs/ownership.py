@@ -374,7 +374,7 @@ def _snapshot_owned_session(owner, known):
 
 
 def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check_authority=None,
-                   read_domain=None, send_group=None):
+                   read_domain=None, send_group=None, anchor_ready_for_release=None):
     """Signal birth-verified groups in an explicitly owned session.
 
     A trusted sole foreground payload may exclude the protected leader group
@@ -382,6 +382,8 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
     topology before launching children; this option grants no new ownership.
     Managed callers keep an unreadable send in their ownership hold, observing
     only group absence. Historical callers retain the optional bounded grace.
+    Return False when a refused anchor send resolves through receipt/drainage
+    evidence instead; the caller must then use its normal verified RELEASE path.
     """
     sid = owner['pid']
 
@@ -417,6 +419,8 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
                 # Do not enter check_authority while its domain hold is active.
                 # The read domain verifies the worker and anchor across retries.
                 require_anchor()
+                if pgid == sid and anchor_ready_for_release is not None and anchor_ready_for_release():
+                    return
                 try:
                     present = group_exists(pgid)
                 except JobsError as exc:
@@ -518,6 +522,8 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
                     failure = OwnershipUnavailable('session_send',
                                                    f'Session signal delivery is unverifiable: {exc}')
                     await_absence(pgid, first_failure=failure)
+                    if pgid == sid:
+                        return False
                 else:
                     if (not isinstance(exc, PermissionError) or exc.errno != errno.EPERM
                             or absence_grace <= 0 or not witness_exited(member)):

@@ -906,6 +906,11 @@ threshold replace a separate two-second absence deadline for managed workers.
 Historical callers without a read domain retain the optional bounded grace.
 Confirmed anchor loss follows the existing loss path.
 
+If delivery to the anchor's own group is uncertain, a genuine receipt and
+complete session drainage can resolve the hold while the anchor stays alive.
+The worker then rechecks the ordinary receipt, drainage and intent gates before
+RELEASE. It never substitutes a successful KILL outcome for that receipt.
+
 After the payload exits, its anchor ignores TERM and INT before launching the
 receipt writer. The writer inherits that protection through durable atomic
 publication, and the anchor keeps it while awaiting RELEASE. During execution
