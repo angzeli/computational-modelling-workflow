@@ -63,6 +63,9 @@ UNOBSERVED_REASON = 'process domain never observed; receipt present; manual veri
 
 class SweepBoundExceeded(BaseException):
     """Escape even a production Exception retry when a fixture cannot progress."""
+    def __init__(self, message, *, kind, observed, limit):
+        super().__init__(message)
+        self.kind, self.observed, self.limit = kind, observed, limit
 
 
 class PendingObserved(BaseException):
@@ -125,7 +128,8 @@ class SingleFault:
         def read(*args, **kwargs):
             self.calls += 1
             if self.calls > 50000:
-                raise SweepBoundExceeded('read operation count exceeded fixture bound')
+                raise SweepBoundExceeded('read operation count exceeded fixture bound',
+                                         kind='read_operations', observed=self.calls, limit=50000)
             site = self.caller(api)
             if site is not None and (predicate is None or predicate(args, kwargs)):
                 self.counts[site] += 1
@@ -412,7 +416,9 @@ class LifecycleModel(WorkerCancellationModel):
                 prior_domain=self.coordinator.last_domain)
             raise PendingObserved()
         if self.clock + interval > (75 if unobserved else 30):
-            raise SweepBoundExceeded('single transient fault exceeded 30 virtual seconds')
+            raise SweepBoundExceeded('single transient fault exceeded virtual-time budget',
+                                     kind='virtual', observed=self.clock + interval,
+                                     limit=75 if unobserved else 30)
         if self.finish_normal:
             self.finish_normal = False
             self.alive.difference_update((self.runner, self.compute, self.descendant))
@@ -423,12 +429,14 @@ class LifecycleModel(WorkerCancellationModel):
             self.write_receipt()
 
 
-def run_lifecycle(outcome, route='group', point=None, fault=None, *, identity_version=2):
+def run_lifecycle(outcome, route='group', point=None, fault=None, *, identity_version=2, diagnostics=None):
     if route == 'legacy_session':
         route, identity_version = 'session', 1
     injector = SingleFault(point, fault)
     with tempfile.TemporaryDirectory(prefix='cmw-single-fault-') as directory:
         model = LifecycleModel(Path(directory), outcome, route, identity_version)
+        if diagnostics is not None:
+            diagnostics(model, injector)
         original_worker = runtime.worker
         save, event = model.store.save, model.store.event
 
