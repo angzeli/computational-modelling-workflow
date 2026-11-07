@@ -19,6 +19,7 @@ from cmw.jobs.ownership import identity, owner_alive
 from cmw.jobs.store import Store
 from tests.jobs.isolated_runtime import install
 from tests.jobs.lifecycle_evidence import bounded_tail, retain_lifecycle_evidence
+from tests.runtime.owned_process_cleanup import OwnedProcessCleanup
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -38,24 +39,38 @@ class OrcaSuspendLifecycleTests(unittest.TestCase):
         self.isolation = install()
         self.addCleanup(self.isolation.close)
         self.temporary = tempfile.TemporaryDirectory(prefix='cmw controlled orca ')
+        self.addCleanup(self.cleanup_directory)
         self.root = Path(self.temporary.name).resolve()
         self.store = Store(self.root / 'state')
+        self.process_cleanup = OwnedProcessCleanup(self.store, self.root)
+        self.addCleanup(self.process_cleanup.close)
+        # Register each controller as soon as Popen returns, including a
+        # controller whose subsequent startup/readiness check raises.
+        detached = runtime.detached
+        def acquire(*args, **kwargs):
+            return self.process_cleanup.acquired(detached(*args, **kwargs))
+        launch = patch.object(runtime, 'detached', acquire)
+        launch.start()
+        self.addCleanup(launch.stop)
         self.module = self.root / 'module.py'
         self.module.write_text('''import json,os,pathlib,sys,time
+from cmw.jobs.ownership import identity
 stage=int(sys.argv[1]); root=pathlib.Path(sys.argv[2]); sequence=0
 sentinel='same-memory-'+str(os.getpid())
+owner=identity()
 while not (root/f'release-{stage}').exists():
     sequence+=1
     target=root/f'module-{stage}.json'; temporary=target.with_suffix('.tmp')
-    temporary.write_text(json.dumps({'pid':os.getpid(),'sequence':sequence,'sentinel':sentinel}))
+    temporary.write_text(json.dumps({'pid':os.getpid(),'owner':owner,'sequence':sequence,'sentinel':sentinel}))
     temporary.replace(target)
     time.sleep(.025)
 ''')
         self.fake = self.root / 'benign-orca-driver'
         self.fake.write_text(f'''#!{sys.executable}
 import json,os,pathlib,subprocess,sys
+from cmw.jobs.ownership import identity
 root=pathlib.Path({str(self.root)!r})
-(root/'driver.json').write_text(json.dumps({{'pid':os.getpid()}}))
+(root/'driver.json').write_text(json.dumps({{'pid':os.getpid(),'owner':identity()}}))
 for stage in range(2):
     child=subprocess.Popen([sys.executable,{str(self.module)!r},str(stage),str(root)])
     code=child.wait()
@@ -83,21 +98,13 @@ print('ORCA TERMINATED NORMALLY')
             'NPROCS': '1', 'MAXCORE_MB': '64', 'CMW_CAFFEINATE': '0'})
         self.recorded = []
 
-    def tearDown(self):
-        if self.store.path.exists():
-            owner = self.store.snapshot()['controller']['owner']
-            job = self.current()
-            if job['status'] in {'Starting', 'Run', 'Unknown'}:
-                self.store.change(job['id'], 'cancel', confirm=True)
-            wait_for(lambda: self.current()['status'] in {'Done', 'Fail', 'Cancelled'}, timeout=12)
-            runtime.stop(self.store)
-            wait_for(lambda: not self.store.snapshot()['controller']['online'])
-            for process in runtime._CHILDREN:
-                if owner and process.pid == owner['pid']:
-                    process.wait(timeout=5)
-            runtime.reap_detached()
-            self.assertFalse(any(owner_alive(item) for item in self.recorded))
-        self.temporary.cleanup()
+    def cleanup_directory(self):
+        cleanup = getattr(self, 'process_cleanup', None)
+        if cleanup is None or cleanup.complete:
+            self.temporary.cleanup()
+        else:
+            # Keep identity/queue evidence if a native read prevents cleanup.
+            self.temporary._finalizer.detach()
 
     def current(self):
         return next(job for job in self.store.snapshot()['jobs'] if job['id'] == self.job['id'])
@@ -280,8 +287,9 @@ os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
     def test_surviving_module_delays_copyback_and_finalization_after_driver_exit(self):
         self.fake.write_text(f"""#!{sys.executable}
 import json,os,pathlib,subprocess,sys,time
+from cmw.jobs.ownership import identity
 root=pathlib.Path({str(self.root)!r})
-(root/'driver.json').write_text(json.dumps({{'pid':os.getpid()}}))
+(root/'driver.json').write_text(json.dumps({{'pid':os.getpid(),'owner':identity()}}))
 subprocess.Popen([sys.executable,{str(self.module)!r},'0',str(root)])
 while not (root/'driver-may-exit').exists(): time.sleep(.025)
 print('Program Version 1.0.0')
