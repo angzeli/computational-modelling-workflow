@@ -176,7 +176,11 @@ class Inspect(ModalScreen):
 
     def on_mount(self):
         self.refresh_content()
-        self.set_interval(1 if self.logs else 0.5, self.refresh_content)
+        self.refresh_timer = self.set_interval(1 if self.logs else 0.5, self.refresh_content)
+
+    def on_unmount(self):
+        if timer := getattr(self, 'refresh_timer', None):
+            timer.stop()
 
     def action_select_text(self):
         self.app.push_screen(FrozenText(str(self.query_one("#body", Static).render())))
@@ -195,6 +199,8 @@ class Inspect(ModalScreen):
                                          loader=inspect))
 
     def refresh_content(self):
+        if not self.is_attached or self not in self.app.screen_stack or not self.query('#body'):
+            return
         if getattr(self.query_one("#body", Static), "_copy_selected", False):
             return
         job = (self.job_provider(self.job_id) if self.job_provider and not self.logs else
@@ -334,9 +340,15 @@ class ExternalInspect(ModalScreen):
             yield Label("Esc / Q: back · No managed controls or logs")
 
     def on_mount(self):
-        self.set_interval(0.5, self.refresh_content)
+        self.refresh_timer = self.set_interval(0.5, self.refresh_content)
+
+    def on_unmount(self):
+        if timer := getattr(self, 'refresh_timer', None):
+            timer.stop()
 
     def refresh_content(self):
+        if not self.is_attached or self not in self.app.screen_stack or not self.query('#external-body'):
+            return
         observation = self.provider(self.observation['id']) if self.provider else self.observation
         self.query_one("#external-body", Static).update(literal(
             external_detail(observation) if observation else "External process no longer observed; outcome is not known."))
@@ -359,9 +371,15 @@ class SharingInspect(ModalScreen):
 
     def on_mount(self):
         self.refresh_content()
-        self.set_interval(0.5, self.refresh_content)
+        self.refresh_timer = self.set_interval(0.5, self.refresh_content)
+
+    def on_unmount(self):
+        if timer := getattr(self, 'refresh_timer', None):
+            timer.stop()
 
     def refresh_content(self):
+        if not self.is_attached or self not in self.app.screen_stack or not self.query('#sharing-body'):
+            return
         state = self.provider()
         text = scheduling_detail(state)
         self.query_one("#sharing-body", Static).update(literal(text))
@@ -534,6 +552,7 @@ class JobsApp(LocalCatalogue, NavigationApp):
         self.progress_resolver = progress_resolver
         self.progress_busy = False
         self.progress_closed = False
+        self.progress_retry_timer = None
         self.progress_generation = 0
         self.progress_selection = None
         self.progress_snapshot = None
@@ -620,13 +639,17 @@ class JobsApp(LocalCatalogue, NavigationApp):
     def on_mount(self):
         self.refresh_state()
         self.query_one(DataTable).focus()
-        self.set_interval(0.5, self.refresh_state)
+        self.refresh_timers = [self.set_interval(0.5, self.refresh_state)]
         self.collect_activity()
-        self.set_interval(2, self.collect_activity)
-        self.set_interval(4, self.collect_progress)
-        self.set_interval(4, self.collect_execution)
+        self.refresh_timers.extend((self.set_interval(2, self.collect_activity),
+                                    self.set_interval(4, self.collect_progress),
+                                    self.set_interval(4, self.collect_execution)))
 
     async def on_unmount(self):
+        for timer in getattr(self, 'refresh_timers', ()):
+            timer.stop()
+        if self.progress_retry_timer is not None:
+            self.progress_retry_timer.stop()
         self.files_generation += 1
         self.catalogue_cancel.set()
         self.catalogue_generation += 1
@@ -700,7 +723,7 @@ class JobsApp(LocalCatalogue, NavigationApp):
 
     def accept_execution(self, selection, generation, observation, error):
         self.execution_busy = False
-        if self.execution_closed:
+        if not self.refresh_available():
             return
         if generation != self.execution_generation or selection != self.execution_identity():
             self.sync_execution_selection()
@@ -721,7 +744,7 @@ class JobsApp(LocalCatalogue, NavigationApp):
         return self.execution_observation.to_dict(now=self.clock() if self.clock else None)
 
     def render_execution(self):
-        if not self.is_mounted or self.execution_closed:
+        if not self.is_mounted or not self.refresh_available():
             return
         widget = self.query_one('#execution', Static)
         job = self.selected()
@@ -823,6 +846,8 @@ class JobsApp(LocalCatalogue, NavigationApp):
 
     async def accept_sources(self, request, selection, generation, result, error):
         self.progress_busy = False
+        if not self.refresh_available():
+            return
         view, kind, _, request_generation = request
         current = (not self.progress_closed and not view.closed and not view.expired
                    and generation == self.progress_generation and selection == self.progress_identity()
@@ -839,7 +864,7 @@ class JobsApp(LocalCatalogue, NavigationApp):
         if self.sources_request is not None:
             self.collect_progress()
         elif not self.progress_closed:
-            self.set_timer(.05, self.collect_progress)
+            self.schedule_progress()
 
     def clear_session_source(self, view):
         if view.selection != self.progress_identity() or view.expired:
@@ -868,8 +893,14 @@ class JobsApp(LocalCatalogue, NavigationApp):
                 self.collect_progress()
         self.render_progress()
 
+    def schedule_progress(self):
+        if self.progress_retry_timer is not None:
+            self.progress_retry_timer.stop()
+        if not self.progress_closed:
+            self.progress_retry_timer = self.set_timer(.05, self.collect_progress)
+
     def collect_progress(self):
-        if self.progress_busy or self.progress_closed:
+        if self.progress_busy or self.progress_closed or not self.refresh_available():
             return
         selection = self.progress_identity()
         if selection != self.progress_selection:
@@ -937,6 +968,10 @@ class JobsApp(LocalCatalogue, NavigationApp):
 
     def accept_progress(self, selection, generation, snapshot, error, history_request=None, history_page=None, invalid_session=None, database_changed=False):
         self.progress_busy = False
+        if not self.refresh_available():
+            if self.progress_service is not None:
+                self.progress_service.retain(())
+            return
         if self.progress_closed or generation != self.progress_generation or selection != self.progress_identity():
             # No replacement starts while an earlier underlying read is blocked.
             if self.progress_service is not None:
@@ -981,7 +1016,7 @@ class JobsApp(LocalCatalogue, NavigationApp):
                                 or history_page is not None and history_page.status == 'LOADING'))
         if history_pending or snapshot is not None and (snapshot.completeness == 'CATCHING_UP' or any(source.has_more for source in snapshot.sources)):
             # Catch up once in bounded background slices, then return to 4s polls.
-            self.set_timer(0.05, self.collect_progress)
+            self.schedule_progress()
 
     def selected_progress(self, job):
         snapshot = self.progress_snapshot
@@ -1016,7 +1051,7 @@ class JobsApp(LocalCatalogue, NavigationApp):
         return max(3, self.size.height - reserved)
 
     def render_progress(self):
-        if not self.is_mounted:
+        if not self.is_mounted or not self.refresh_available():
             return
         widget = self.query_one('#progress', Static)
         widget.display = self.progress_selection is not None
@@ -1106,6 +1141,8 @@ class JobsApp(LocalCatalogue, NavigationApp):
         self.run_worker(collect, thread=True, group="external-observation", exit_on_error=False)
 
     def accept_activity(self, projection):
+        if self.execution_closed:
+            return
         self.activity_projection = deepcopy(projection)
         self.job_usage = self.activity_projection.get("job_usage", {})
         self.collecting = False
@@ -1245,8 +1282,8 @@ class JobsApp(LocalCatalogue, NavigationApp):
 
     def on_resize(self):
         self.files_generation += 1
-        if self.is_mounted:
-            self.call_after_refresh(self.refresh_state)
+        if self.is_mounted and not self.execution_closed and self.screen_stack:
+            self.screen_stack[0].call_after_refresh(self.refresh_state)
 
     def selected(self):
         if self._selected_label != self.selected_id:
@@ -1278,13 +1315,24 @@ class JobsApp(LocalCatalogue, NavigationApp):
             self.files_generation += 1
             self.suspension_selection_generation += 1
 
+    def refresh_available(self):
+        if self.execution_closed or not self.screen_stack:
+            return False
+        origin = self.screen_stack[0]
+        # The base screen can lose children before the App's Unmount handler.
+        # Check the entire refresh surface, not just the surviving tables.
+        if not origin.is_attached or any(not origin.query(selector) for selector in (
+                '#table', '#external', '#machine', '#controller', '#events', '#message',
+                '#guard', '#selected', '#sharing', '#execution', '#progress',
+                '#heading', '#external-heading', '#execution-controls', '#shortcuts',
+                '#suspension-action', '#suspension-summary')):
+            return False
+        return True
+
     def refresh_state(self):
-        if not self.screen_stack:
+        if not self.refresh_available():
             return
         origin = self.screen_stack[0]
-        # A pending timer can run while the base screen is being unmounted.
-        if not origin.query('#table') or not origin.query('#external'):
-            return
         self._adopt_navigation_cursors(origin)
         view = self.capture_view(origin)
         before = (self.columns_mode, tuple(self._row_targets.items()),
@@ -1754,8 +1802,10 @@ class JobsApp(LocalCatalogue, NavigationApp):
 
     def accept_copy(self, result, view):
         self.copy_busy = False
+        if not self.refresh_available():
+            return
         self.copy_result = result
-        if isinstance(view, FrozenText) and view.is_mounted:
+        if isinstance(view, FrozenText) and view in self.screen_stack and view.query('#copy-status'):
             view.query_one('#copy-status', Static).update(result.message)
         else:
             self.notify(result.message)

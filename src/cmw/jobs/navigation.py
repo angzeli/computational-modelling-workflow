@@ -106,6 +106,11 @@ class NavigationApp(App):
             self._navigation_inputs[screen] = self._navigation_inputs.get(screen, 0) + 1
             self._navigation_restores.pop(screen, None)
 
+    def on_unmount(self):
+        self._navigation_restores.clear()
+        self._navigation_frames.clear()
+        self._navigation_inputs.clear()
+
     def navigation_context(self, screen):
         return (screen, getattr(screen, 'selection', None))
 
@@ -211,7 +216,7 @@ class NavigationApp(App):
 
     def _restore_valid(self, restore):
         view = restore.view
-        return (self._navigation_restores.get(view.screen) is restore
+        return (bool(self.screen_stack) and self._navigation_restores.get(view.screen) is restore
                 and view.screen is self.screen and view.screen.is_attached
                 and self.navigation_context(view.screen) == view.context
                 and self._navigation_inputs.get(view.screen, 0) == view.input_generation)

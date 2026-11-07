@@ -44,7 +44,8 @@ class StudyScreen(ModalScreen):
 
     def on_mount(self):
         def accepted(record, error, receipt=None):
-            if not self.is_mounted:
+            if (not self.is_mounted or self not in self.app.screen_stack
+                    or not self.query('#study-status') or not self.query('#study-body')):
                 return
             if error is not None:
                 self.query_one('#study-status', Static).update(safe_snapshot_text('Study unavailable / incomplete owner coverage: '+str(error)))

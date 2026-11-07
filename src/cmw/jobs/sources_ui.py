@@ -109,8 +109,14 @@ class Sources(ModalScreen):
         self.update_controls()
         self.app.request_sources(self, kind, payload)
 
+    def refresh_available(self):
+        return (not self.closed and self.is_attached and self in self.app.screen_stack
+                and all(self.query('#sources-' + name) for name in (
+                    'inspection', 'fields', 'validation', 'confirm', 'details', 'edit', 'clear', 'validate', 'use')))
+
     async def accept_result(self, kind, result, error, generation):
-        if self.closed or self.expired or generation != self.request_generation:
+        if (self.closed or self.expired or generation != self.request_generation
+                or not self.refresh_available()):
             return
         self.busy = False
         if error:
@@ -121,6 +127,9 @@ class Sources(ModalScreen):
             self.plans = result.plans
             self.render_inspection()
             await self.build_fields()
+            if (self.closed or self.expired or generation != self.request_generation
+                    or not self.refresh_available()):
+                return
             if result.context.binding_status == 'SOURCE_UNRESOLVED' and self.plans:
                 self.configuring = True
                 self.render_inspection()
@@ -178,8 +187,14 @@ class Sources(ModalScreen):
         self.query_one('#sources-inspection', Static).update(literal('\n\n'.join(rows)))
 
     async def build_fields(self):
+        if not self.refresh_available():
+            return
+        generation = self.request_generation
         fields = self.query_one('#sources-fields', Vertical)
         await fields.remove_children()
+        if (self.closed or self.expired or generation != self.request_generation
+                or not self.refresh_available() or not fields.is_attached):
+            return
         if not self.plans:
             return
         widgets = []
@@ -215,9 +230,13 @@ class Sources(ModalScreen):
                      for plan, (path, stage) in zip(self.plans, self.field_values()) if path)
 
     def update_controls(self):
-        if not self.is_mounted:
+        if not self.is_mounted or not self.refresh_available():
             return
         ready = self.inspection is not None and not self.expired
+        if self.configuring and ready and any(not self.query(selector)
+                for index, plan in enumerate(self.plans)
+                for selector in (f'#source-path-{index}', *((f'#source-stage-{index}',) if plan.stages else ()))):
+            return
         self.query_one('#sources-fields').display = self.configuring and ready
         for name in ('details', 'edit', 'clear'):
             button = self.query_one('#sources-' + name, Button)

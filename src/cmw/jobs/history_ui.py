@@ -48,12 +48,18 @@ class HistoryDetails(ModalScreen):
 
     def on_mount(self):
         self.refresh_content()
-        self.set_interval(.5, self.refresh_content)
+        self.refresh_timer = self.set_interval(.5, self.refresh_content)
+
+    def on_unmount(self):
+        if timer := getattr(self, 'refresh_timer', None):
+            timer.stop()
 
     def action_select_text(self):
         self.app.push_screen(FrozenText(str(self.query_one('#history-detail', Static).render())))
 
     def refresh_content(self):
+        if not self.is_attached or self not in self.app.screen_stack or not self.query('#history-detail'):
+            return
         if getattr(self.query_one('#history-detail', Static), '_copy_selected', False):
             return
         entry = self.history.entries.get(self.entry_id)
@@ -157,7 +163,8 @@ class ProgressHistory(ModalScreen):
     def invalidate(self):
         self.expired = True
         self.request_generation += 1
-        self.query_one('#history-state', Static).update('Selected attempt or source declarations changed. Reopen history for the current binding.')
+        if self.query('#history-state'):
+            self.query_one('#history-state', Static).update('Selected attempt or source declarations changed. Reopen history for the current binding.')
         if self.context is not None and self.app.progress_service is not None:
             self.app.progress_service.release_history(self.context)
 
@@ -166,7 +173,9 @@ class ProgressHistory(ModalScreen):
             self._accept_page(context, page, generation)
 
     def _accept_page(self, context, page, generation):
-        if self.closed or self.expired or generation != self.request_generation:
+        if (self.closed or self.expired or generation != self.request_generation
+                or self not in self.app.screen_stack or any(not self.query(selector) for selector in (
+                    '#history-table', '#history-scope', '#history-state', '#history-selected'))):
             return
         if self.page is not None and self.page.source_revision and page.source_revision and self.page.source_revision != page.source_revision:
             # Retained rows and selected IDs must never migrate to a new source generation.
@@ -224,6 +233,8 @@ class ProgressHistory(ModalScreen):
         self.refresh_selected()
 
     def refresh_selected(self):
+        if self.closed or not self.query('#history-table') or not self.query('#history-selected'):
+            return
         entry = self.selected_entry()
         self.query_one('#history-selected', Static).update(literal(
             f'{entry.kind.replace("-", " ")} · {entry.state} · {context_text(entry.context) if entry.context else entry.native_label}\n{entry.coverage}; D shows source and timing qualifications.' if entry else 'No entry selected.'))

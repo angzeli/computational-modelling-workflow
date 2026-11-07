@@ -64,7 +64,11 @@ class ReviewScreen(ModalScreen):
         self.render_record()
         self.query_one('#review-scroll').focus()
         self.refresh_node_observation()
-        self.set_interval(.5, self.poll)
+        self.refresh_timer = self.set_interval(.5, self.poll)
+
+    def on_unmount(self):
+        if timer := getattr(self, 'refresh_timer', None):
+            timer.stop()
 
     def refresh_node_observation(self):
         # Re-read current owner metadata, including after a session loses its handle.
@@ -83,6 +87,9 @@ class ReviewScreen(ModalScreen):
         return True
 
     def render_record(self):
+        if not self.is_attached or self not in self.app.screen_stack or any(not self.query(selector) for selector in (
+                '#review-body', '#review-inspect', '#review-cancel', '#review-copy')):
+            return
         text = ('\n'.join(f'{domain.name.replace("_", " ").upper()}: {domain.status}' for domain in self.record.domains)
                 + '\n\n' + review_text(self.record)) if self.record is not None else 'No cached review. Owner metadata is being requested.'
         self.query_one('#review-body', Static).update(safe_snapshot_text(text))
@@ -91,12 +98,13 @@ class ReviewScreen(ModalScreen):
         self.query_one('#review-copy', Button).disabled = self.record is None
 
     def send(self, operation, params):
-        if self.busy or (not self.commands_allowed and operation != 'review.preview'):
+        if (not self.is_attached or self not in self.app.screen_stack or not self.query('#review-body') or self.busy
+                or (not self.commands_allowed and operation != 'review.preview')):
             return
         self.busy = True
         self.render_record()
         def accepted(record, error):
-            if not self.is_mounted:
+            if not self.is_mounted or not self.query('#review-status'):
                 return
             self.busy = False
             if error is not None:
@@ -111,7 +119,8 @@ class ReviewScreen(ModalScreen):
         self.request(operation, params, accepted)
 
     def poll(self):
-        if not self.busy and not self.unavailable and self.record is not None and self.record.status == 'PENDING':
+        if (self.is_mounted and not self.busy and not self.unavailable
+                and self.record is not None and self.record.status == 'PENDING'):
             self.send('review.poll', {'review_id':self.record.review_id})
 
     def action_inspect(self):

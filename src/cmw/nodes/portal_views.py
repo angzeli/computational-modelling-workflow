@@ -60,6 +60,8 @@ class FetchDialog(ModalScreen):
                 yield Button('Back', id='fetch-back')
 
     def node_commands_changed(self, allowed):
+        if not self.query('#fetch-confirm'):
+            return
         self.query_one('#fetch-confirm', Button).disabled = self.busy or not allowed
 
     def on_button_pressed(self, event):
@@ -117,6 +119,8 @@ class NodeFiles(ModalScreen):
         return self.locations.get(table.ordered_rows[table.cursor_row].key.value) if table.row_count else None
 
     def render_location(self):
+        if not self.query('#node-files-table') or not self.query('#node-files-detail'):
+            return
         item = self.selected_location()
         text = ('No declared locations.' if item is None else
                 f"{self.label}\n{item.get('node_path') or item.get('declared_path')}\n"
@@ -131,6 +135,9 @@ class NodeFiles(ModalScreen):
         self.render_location()
 
     def node_commands_changed(self, allowed):
+        if (not self.query('#node-files-fetch')
+                or (self.local and not self.query('#node-files-open'))):
+            return
         self.query_one('#node-files-fetch', Button).disabled = not allowed
         if self.local:
             self.query_one('#node-files-open', Button).disabled = not allowed
@@ -181,6 +188,8 @@ class NodeControlConfirm(ModalScreen):
                 yield Button('Back', id='node-control-back')
 
     def node_commands_changed(self, allowed):
+        if not self.query('#node-control-confirm') or not self.query('#node-control-check'):
+            return
         self.query_one('#node-control-confirm', Button).disabled = self.busy or not allowed
         self.query_one('#node-control-check', Button).disabled = not self.request_id or not allowed
 
@@ -198,6 +207,8 @@ class NodeControlConfirm(ModalScreen):
 
 class NodeOrderPrompt(Prompt):
     def node_commands_changed(self, allowed):
+        if not self.query('#apply') or not self.query('#answer'):
+            return
         self.query_one('#apply', Button).disabled = not allowed
         self.query_one('#answer', Input).disabled = not allowed
 

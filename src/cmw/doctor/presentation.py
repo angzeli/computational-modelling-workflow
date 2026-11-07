@@ -67,7 +67,7 @@ class DoctorReport(FrozenText):
         if not self.is_mounted:
             self.loader = loader  # A fast endpoint reply can precede Mount.
             return
-        if self not in self.app.screen_stack:
+        if self not in self.app.screen_stack or not self.query(TextArea):
             return
         self.started = True
         app = self.app
@@ -88,7 +88,8 @@ class DoctorReport(FrozenText):
         self.run_worker(collect, thread=True, exit_on_error=False)
 
     def accept(self, report, text, error=None):
-        if not self.is_mounted or self not in self.app.screen_stack:
+        if (not self.is_mounted or self not in self.app.screen_stack
+                or not self.query(TextArea)):
             return
         self.pending = False
         self.report = report
