@@ -3,12 +3,12 @@ from collections import Counter
 import json
 import os
 from pathlib import Path
-import time
 import unittest
 
 from tests.jobs.ownership_fault_sweep import (
-    FAULTS, OUTCOMES, assert_terminal, run_lifecycle, selected_points, summarize)
+    FAULTS, OUTCOMES, SweepBoundExceeded, assert_terminal, run_lifecycle, selected_points, summarize)
 from tests.jobs.ownership_read_manifest import CONTRACT_TESTS, LIMITS, coverage_manifest, read_sites
+from tests.jobs.ownership_sweep_reporting import WALL_SECONDS, RowWatchdog, RowWatchdogExpired, clock, emit
 
 
 ROUTES = ('group', 'session', 'legacy_session', 'controlled', 'orca')
@@ -28,8 +28,9 @@ class OwnershipFaultSweepTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.representative = os.environ.get('CMW_FAULT_SWEEP') == 'representative'
-        cls.rows, cls.manifest = [], []
-        cls.started = time.perf_counter()
+        cls.rows, cls.manifest, cls.timings = [], [], []
+        cls.completed_rows = 0
+        cls.started = clock()
 
     @classmethod
     def tearDownClass(cls):
@@ -43,8 +44,9 @@ class OwnershipFaultSweepTests(unittest.TestCase):
                        pending_never_observed_domain_rows=outcomes['pending_never_observed_domain'],
                        reached_source_reads=sum(row['reached_in_fault_free_baseline'] for row in source_manifest),
                        inventoried_source_calls=len(source_manifest),
-                       elapsed_seconds=time.perf_counter()-cls.started)
-        print('OWNERSHIP_FAULT_SWEEP ' + json.dumps(summary), flush=True)
+                       completed=all(item['completed'] for item in cls.timings), scenario_timings=cls.timings,
+                       elapsed_seconds=clock()-cls.started)
+        emit('SWEEP', **summary)
         evidence = os.environ.get('CMW_TEST_EVIDENCE_DIR')
         if evidence:
             output = Path(evidence)/'ownership-fault-sweep.json'
@@ -53,9 +55,57 @@ class OwnershipFaultSweepTests(unittest.TestCase):
                 dynamic_manifest=cls.manifest, source_manifest=source_manifest, limits=LIMITS),
                 indent=2) + '\n')
 
+    def observe(self, route, outcome, point=None, fault=None, baseline=None):
+        identity = dict(route=route, outcome=outcome,
+                        point=point.label() if point else '<baseline>', fault=fault)
+        started = clock()
+        emit('ROW', event='START', **identity, rows_completed=self.completed_rows,
+             elapsed_seconds=started-self.started, wall_budget_seconds=WALL_SECONDS)
+        result = None
+        try:
+            with RowWatchdog(identity) as watchdog:
+                try:
+                    result = run_lifecycle(outcome, route, point, fault, diagnostics=watchdog.capture)
+                    if point is not None:
+                        self.rows[-1]['injected_count'] = result['fired']
+                    outcome_class = assert_terminal(self, result, outcome, baseline)
+                except SweepBoundExceeded as exc:
+                    watchdog.fail(exc.kind, str(exc), observed=exc.observed, limit=exc.limit)
+            return result, outcome_class
+        finally:
+            emit('ROW', event='END', **identity, elapsed_seconds=clock()-self.started,
+                 row_elapsed_seconds=clock()-started,
+                 virtual_elapsed_seconds=result['clock'] if result is not None else None,
+                 returned=result is not None)
+
     def matrix(self, route, outcome):
-        baseline = run_lifecycle(outcome, route)
-        assert_terminal(self, baseline, outcome)
+        started, offset = clock(), len(self.rows)
+        completed = False
+        emit('SCENARIO', event='START', route=route, outcome=outcome,
+             rows_completed=offset, elapsed_seconds=started-self.started)
+        try:
+            self.run_matrix(route, outcome)
+            completed = True
+        except RowWatchdogExpired as exc:
+            counts = Counter(row['result'] for row in self.rows)
+            emit('SWEEP', completed=False, stopped_row=json.loads(str(exc)),
+                 attempted_rows=len(self.rows), completed_rows=self.completed_rows,
+                 passed_rows=counts['passed'], failed_rows=counts['failed'],
+                 elapsed_seconds=clock()-self.started)
+            raise
+        finally:
+            rows = self.rows[offset:]
+            counts = Counter(row['result'] for row in rows)
+            summary = dict(route=route, outcome=outcome, attempted_rows=len(rows),
+                           completed=completed,
+                           completed_rows=sum(row.get('completed', False) for row in rows),
+                           passed_rows=counts['passed'], failed_rows=counts['failed'],
+                           elapsed_seconds=clock()-started)
+            self.timings.append(summary)
+            emit('SCENARIO', event='END', **summary)
+
+    def run_matrix(self, route, outcome):
+        baseline, _ = self.observe(route, outcome)
         if route in {'controlled', 'orca'}:
             self.assertTrue({'process_identity._parent', 'process_identity._children'} <=
                             {point.api for point in baseline['points']},
@@ -67,17 +117,27 @@ class OwnershipFaultSweepTests(unittest.TestCase):
         for point in points:
             for fault in FAULTS:
                 row = dict(route=route, outcome=outcome, point=point.label(), fault=fault,
-                           result='failed')
+                           result='failed', completed=False)
                 self.rows.append(row)
                 with self.subTest(route=route, outcome=outcome, point=point.label(), fault=fault):
+                    started = clock()
                     try:
-                        result = run_lifecycle(outcome, route, point, fault)
+                        result, outcome_class = self.observe(route, outcome, point, fault, baseline)
                         row['injected_count'] = result['fired']
-                        row['outcome_class'] = assert_terminal(self, result, outcome, baseline)
-                    except BaseException as exc:
+                        row['outcome_class'] = outcome_class
+                    except RowWatchdogExpired as exc:
                         row['error'] = f'{type(exc).__name__}: {exc}'
                         raise
+                    except BaseException as exc:
+                        row['error'] = f'{type(exc).__name__}: {exc}'
+                        row['completed'] = True
+                        type(self).completed_rows += 1
+                        raise
+                    finally:
+                        row['wall_elapsed_seconds'] = clock()-started
                     row['result'] = 'passed'
+                    row['completed'] = True
+                    type(self).completed_rows += 1
 
 
 def lifecycle_test(route, outcome):

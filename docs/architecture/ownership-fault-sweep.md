@@ -80,6 +80,29 @@ accepted.
 
 ## Running and reporting
 
+The diagnostic runner streams a start/end record for each row, including its
+scenario, exact read occurrence and fault, completed-row count and real elapsed
+time. Each scenario and test module also emits a timing/count summary as soon as
+it finishes; it does not wait for unrelated modules. Complete sweep output,
+including watchdog stack traces, is retained and streamed by the existing CI
+runner. A missing final summary means incomplete evidence, never zero tests or
+a pass.
+
+Every baseline and injected row has a 10-second real-wall watchdog, covering
+fixture setup, execution, assertions and cleanup. This is deliberately generous
+against ordinary rows taking well under a second. A native 20-second hard-stop
+fallback covers a blocked C call or stuck cleanup. The already-existing
+30-second virtual limit (75 seconds for the accepted never-observed-domain case)
+and 50,000-read-operation bound remain unchanged. Exceeding any bound reports
+the exact row, last observed read, elapsed time and budget, then stops the sweep;
+it is a liveness failure, not a row to skip or retry. The watchdog uses real
+clock/signal functions outside the fixture's patched observations. Its signals
+target only the synthetic test interpreter, never a worker or calculation.
+
+This instrumentation changes neither the selected rows nor their assertions,
+CI parallelism or the 45-minute suite limit. CI restructuring requires evidence
+that the aggregate duration, rather than a hanging row, caused the limit.
+
 Full discovery uses the complete matrix by default; no CI-specific skip or
 new workflow is needed. For proportionate sequential local checks:
 
