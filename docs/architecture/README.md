@@ -7,6 +7,10 @@ The [multi-host nodes delta specification](multi-host-nodes.md) records the
 existing `cmw nodes` baseline, approved decisions and phased changes. Its new
 pure helpers are Phase 0 contracts and are not wired into runtime commands.
 
+The [durable completion proposal](durable-completion-proposal.md) records deferred
+worker-death recovery. It is post-cutover work to reassess after the slimming
+audit, not an implemented queue schema or runtime protocol.
+
 This document describes the architecture the repository implements
 progressively. The first reusable molecular foundation now exists; other
 branches in the diagrams remain targets rather than implementation claims.
