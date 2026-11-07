@@ -1,6 +1,7 @@
 """One-shot, identity-aware view restoration across modal navigation."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from weakref import WeakKeyDictionary
 
@@ -58,6 +59,17 @@ class _Restore:
     remaining_tables: int = 0
 
 
+class NavigationTable(DataTable):
+    """Make cursor movement observable before its queued highlight is delivered."""
+
+    def watch_cursor_coordinate(self, old_coordinate, new_coordinate):
+        if old_coordinate != new_coordinate and self.is_mounted:
+            app = self.app
+            if isinstance(app, NavigationApp):
+                app.navigation_cursor_moved(self)
+        super().watch_cursor_coordinate(old_coordinate, new_coordinate)
+
+
 class NavigationApp(App):
     """Preserve each actual parent view without changing modal result semantics.
 
@@ -77,6 +89,22 @@ class NavigationApp(App):
         self._navigation_frames: list[_ReturnFrame] = []
         self._navigation_inputs = WeakKeyDictionary()
         self._navigation_restores = WeakKeyDictionary()
+        self._navigation_updates = 0
+
+    @contextmanager
+    def navigation_update(self):
+        """Rebuilds and restoration repairs are not newer user movement."""
+        self._navigation_updates += 1
+        try:
+            yield
+        finally:
+            self._navigation_updates -= 1
+
+    def navigation_cursor_moved(self, table):
+        if not self._navigation_updates:
+            screen = table.screen
+            self._navigation_inputs[screen] = self._navigation_inputs.get(screen, 0) + 1
+            self._navigation_restores.pop(screen, None)
 
     def navigation_context(self, screen):
         return (screen, getattr(screen, 'selection', None))
@@ -218,8 +246,8 @@ class NavigationApp(App):
             column = columns.index(saved.column_key) if saved.column_key in columns else min(saved.column_index, max(0, len(columns) - 1))
             if (table.cursor_row, table.cursor_column) != (index, column):
                 # Suppress only this programmatic cursor repair's notifications.
-                with table.prevent(DataTable.RowHighlighted, DataTable.CellHighlighted,
-                                   DataTable.ColumnHighlighted):
+                with self.navigation_update(), table.prevent(
+                        DataTable.RowHighlighted, DataTable.CellHighlighted, DataTable.ColumnHighlighted):
                     table.move_cursor(row=index, column=column, animate=False, scroll=False)
         if view.focus is not None and view.focus.is_attached and view.focus.screen is view.screen:
             view.screen.set_focus(view.focus, scroll_visible=False)

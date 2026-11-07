@@ -24,7 +24,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Label, Static, Tex
 from .cli import elapsed, safe_text, name_text, tail, guard_text, external_detail, usage_cells, usage_detail, usage_summary, machine_text, machine_detail, sharing_text, job_sharing_detail, observation_sharing
 from .store import ACTIVE, PENDING, JobsError, Store
 from .status_presentation import admission_presentation, scheduling_detail
-from .navigation import NavigationApp
+from .navigation import NavigationApp, NavigationTable
 from .locations import discover
 from .folder_opener import OpenResult, open_location, request_open
 from .history_ui import HistoryDetails, ProgressHistory
@@ -416,7 +416,7 @@ class FilesChooser(ModalScreen):
         self.app.start_file_open(self.request, self.result, self.result.locations[index], chooser=self)
 
 
-class JobsTable(DataTable):
+class JobsTable(NavigationTable):
     BINDINGS = [Binding("enter", "select_cursor", "Details")]
 
     async def _on_click(self, event):
@@ -1206,17 +1206,6 @@ class JobsApp(LocalCatalogue, NavigationApp):
         sharing.styles.max_height = 1 if compact else 4
         sharing.update(literal(sharing_text(display_state, compact=compact)))
         table = self.query_one("#external", DataTable)
-        origin = self.screen_stack[0]
-        # A key moves the cursor before its queued highlight updates selection.
-        # Read its old row identity before the refresh can rebuild or reset it.
-        if (table.has_focus and not self.navigation_pending(origin)
-                and not self.navigation_origin_covered(origin)
-                and self.external_selected() is not None
-                and 0 <= table.cursor_row < len(self.external_rows)):
-            key = self.external_rows[table.cursor_row]
-            if key != self.external_selected_id and self.external_observation(key) is not None:
-                self.external_selected_id = key
-                self.suspension_selection_generation += 1
         observations = (guard or {}).get("observations", [])
         table.styles.height = min(4, len(observations) + 1) if compact else 5
         external_heading = self.query_one("#external-heading", Static)
@@ -1267,6 +1256,28 @@ class JobsApp(LocalCatalogue, NavigationApp):
             return None
         return job if job and self.job_target(job) == self._selected_target else None
 
+    def _adopt_navigation_cursors(self, origin):
+        # Movement invalidates pending restoration synchronously. Adopt its old
+        # row identity before either snapshotting selection or rebuilding rows.
+        if self.navigation_pending(origin) or self.navigation_origin_covered(origin):
+            return
+        previous = self.selected_id, self.external_selected_id
+        table = origin.query_one('#table', DataTable)
+        if table.has_focus and 0 <= table.cursor_row < len(self.row_ids):
+            key = self.row_ids[table.cursor_row]
+            if key != self.selected_id and self.selected() is not None:
+                self.selected_id = key
+                self.pin_selection()
+        external = origin.query_one('#external', DataTable)
+        if (external.has_focus and self.external_selected() is not None
+                and 0 <= external.cursor_row < len(self.external_rows)):
+            key = self.external_rows[external.cursor_row]
+            if key != self.external_selected_id and self.external_observation(key) is not None:
+                self.external_selected_id = key
+        if previous != (self.selected_id, self.external_selected_id):
+            self.files_generation += 1
+            self.suspension_selection_generation += 1
+
     def refresh_state(self):
         if not self.screen_stack:
             return
@@ -1274,13 +1285,14 @@ class JobsApp(LocalCatalogue, NavigationApp):
         # A pending timer can run while the base screen is being unmounted.
         if not origin.query('#table') or not origin.query('#external'):
             return
+        self._adopt_navigation_cursors(origin)
         view = self.capture_view(origin)
         before = (self.columns_mode, tuple(self._row_targets.items()),
                   self.external_columns_mode, tuple(self.external_rows))
         # Rebuild highlights are implementation effects, not a new selection.
         table = origin.query_one('#table', DataTable)
         external = origin.query_one('#external', DataTable)
-        with table.prevent(DataTable.RowHighlighted), external.prevent(DataTable.RowHighlighted):
+        with self.navigation_update(), table.prevent(DataTable.RowHighlighted), external.prevent(DataTable.RowHighlighted):
             self._refresh_state()
         after = (self.columns_mode, tuple(self._row_targets.items()),
                  self.external_columns_mode, tuple(self.external_rows))
@@ -1292,13 +1304,6 @@ class JobsApp(LocalCatalogue, NavigationApp):
         previous_job = self.selected()
         previous_files_context = self.files_context(previous_job) if previous_job else None
         table = self.query_one(DataTable)
-        # Cursor movement precedes its queued highlight event; preserve that newer identity.
-        if (table.has_focus and not self.navigation_pending(self.screen_stack[0])
-                and 0 <= table.cursor_row < len(self.row_ids)):
-            key = self.row_ids[table.cursor_row]
-            if key != self.selected_id and self.selected() is not None:
-                self.selected_id = key
-                self.pin_selection()
         try:
             self.state = self.store.snapshot(now=self.clock() if self.clock else None)
         except (ValueError, OSError) as exc:

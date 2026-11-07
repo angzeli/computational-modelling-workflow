@@ -7,6 +7,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Static
 
 from cmw.jobs.copy_ui import CopyPreview
+from cmw.jobs.navigation import NavigationTable
 from cmw.jobs.snapshot import render_snapshot
 from cmw.jobs.tui import Prompt, literal
 
@@ -92,7 +93,7 @@ class NodeFiles(ModalScreen):
     def compose(self):
         with Vertical():
             yield Static('DECLARED FILE LOCATIONS · ' + self.label, markup=False)
-            yield DataTable(id='node-files-table', cursor_type='row', zebra_stripes=True)
+            yield NavigationTable(id='node-files-table', cursor_type='row', zebra_stripes=True)
             yield Static('', id='node-files-detail', markup=False)
             yield Static('Locations are reported by the execution node; scientific validity is not assessed.', id='node-files-status', markup=False)
             with Horizontal():
@@ -103,10 +104,11 @@ class NodeFiles(ModalScreen):
 
     def on_mount(self):
         table = self.query_one(DataTable)
-        table.add_columns('ROLE', 'ACCESS', 'NODE PATH')
-        for key, item in self.locations.items():
-            table.add_row(literal(item['role']), literal(item['accessibility']),
-                          literal(item.get('node_path') or item.get('declared_path') or 'unavailable'), key=key)
+        with self.app.navigation_update():
+            table.add_columns('ROLE', 'ACCESS', 'NODE PATH')
+            for key, item in self.locations.items():
+                table.add_row(literal(item['role']), literal(item['accessibility']),
+                              literal(item.get('node_path') or item.get('declared_path') or 'unavailable'), key=key)
         table.focus()
         self.render_location()
 

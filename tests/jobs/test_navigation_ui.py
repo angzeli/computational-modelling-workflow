@@ -21,6 +21,7 @@ from cmw.progress.service import ObservationService
 from tests.jobs.test_history_cli import FictionalHistoryAdapter
 
 try:
+    from textual import events
     from textual.containers import VerticalScroll
     from textual.widgets import DataTable, Static, TextArea
     from cmw.jobs.copy_ui import CopyPreview, FrozenText
@@ -550,6 +551,104 @@ class NavigationUiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(table_view(table), newer)
             self.assertEqual(app.selected_id, 'J24.1')
+
+    async def test_layout_restore_rearmed_after_raw_key_cannot_undo_actual_movement(self):
+        app = self.app()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.ready(app, pilot)
+            table = await self.position(app, pilot, 24)
+            base = app.screen
+            await self.wait(pilot, lambda: not app.navigation_pending(base))
+            forwarded, pending = [], []
+            original_schedule = app.call_after_refresh
+
+            def schedule(callback, *args, **kwargs):
+                if callback == app._restore_cursor:
+                    pending.append(args[0])
+                    return True
+                return original_schedule(callback, *args, **kwargs)
+
+            with patch.object(table, '_forward_event', side_effect=forwarded.append), \
+                    patch.object(app, 'call_after_refresh', side_effect=schedule):
+                # Raw input cancels an older restore, but its binding is queued.
+                app.restore_view(app.capture_view(base))
+                await app.on_event(events.Key('down', None))
+                self.assertEqual(len(forwarded), 1)
+                self.assertFalse(app.navigation_pending(base))
+                # A layout change can rearm restoration before the binding runs.
+                app.restore_view(app.capture_view(base))
+                self.assertTrue(app.navigation_pending(base))
+                table.action_cursor_down()
+                self.assertEqual(table.cursor_row, 24)
+                self.assertEqual(app.selected_id, 'J24.1')  # Highlight is still queued.
+                self.assertFalse(app.navigation_pending(base))
+                app.refresh_state()  # Poll before that highlight is delivered.
+                self.assertEqual(app.selected_id, 'J25.1')
+                for token in pending:
+                    app._restore_cursor(token)
+                    app._restore_offsets(token)
+                self.assertEqual(table.cursor_row, 24)
+                self.assertEqual(app.selected_id, 'J25.1')
+            await pilot.pause()
+            self.assertEqual(app.selected_id, 'J25.1')
+
+    async def test_direct_cursor_request_wins_over_pending_restore_and_rebuild(self):
+        app = self.app()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.ready(app, pilot)
+            table = await self.position(app, pilot, 24)
+            base = app.screen
+            await self.wait(pilot, lambda: not app.navigation_pending(base))
+            callbacks = []
+            original_schedule = app.call_after_refresh
+
+            def schedule(callback, *args, **kwargs):
+                if callback == app._restore_cursor:
+                    callbacks.append(args[0])
+                    return True
+                return original_schedule(callback, *args, **kwargs)
+
+            with patch.object(app, 'call_after_refresh', side_effect=schedule):
+                app.restore_view(app.capture_view(base))
+                table.move_cursor(row=5, animate=False, scroll=False)
+                self.assertFalse(app.navigation_pending(base))
+                self.store.reverse_projection = True
+                app.refresh_state()
+                self.assertEqual(app.selected_id, 'J6.1')
+                # The internal rebuild must retain its own valid restoration.
+                self.assertTrue(app.navigation_pending(base))
+                self.assertEqual(len(callbacks), 2)
+                for token in callbacks:
+                    app._restore_cursor(token)
+                    app._restore_offsets(token)
+                self.assertEqual(table.ordered_rows[table.cursor_row].key.value, 'J6.1')
+                self.assertEqual(app.selected_id, 'J6.1')
+            await pilot.pause()
+            self.assertEqual(app.selected_id, 'J6.1')
+
+    async def test_history_cursor_movement_invalidates_pending_parent_return(self):
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.ready(app, pilot)
+            await pilot.press('g')
+            await self.wait(pilot, lambda: isinstance(app.screen, ProgressHistory)
+                            and app.screen.page is not None and not app.progress_busy)
+            history = app.screen
+            table = history.query_one(DataTable)
+            self.assertGreaterEqual(table.row_count, 2)
+            table.move_cursor(row=0, animate=False)
+            callbacks = []
+            with patch.object(app, 'call_after_refresh', side_effect=lambda callback, token: callbacks.append(token)):
+                app.restore_view(app.capture_view(history))
+                self.assertTrue(app.navigation_pending(history))
+                table.action_cursor_down()
+                self.assertFalse(app.navigation_pending(history))
+                for token in callbacks:
+                    app._restore_cursor(token)
+                    app._restore_offsets(token)
+                self.assertEqual(table.cursor_row, 1)
+            await pilot.pause()
+            self.assertEqual(table.cursor_row, 1)
 
 
 if __name__ == '__main__':

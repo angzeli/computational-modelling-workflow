@@ -17,7 +17,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Input, Static, TextArea
 
-from cmw.jobs.navigation import NavigationApp
+from cmw.jobs.navigation import NavigationApp, NavigationTable
 from cmw.jobs.cli import elapsed, machine_text, machine_detail, usage_summary
 from cmw.jobs.copy_ui import FrozenText, SelectableStatic
 from cmw.jobs.history_ui import ProgressHistory
@@ -49,7 +49,7 @@ def row_key(target):
     return '/'.join(map(str, target_key(target)))
 
 
-class NodesTable(DataTable):
+class NodesTable(NavigationTable):
     BINDINGS = [Binding('enter', 'select_cursor', 'Details')]
 
     async def _on_click(self, event):
@@ -482,7 +482,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
                 self.select(key)
         view = self.capture_view(origin)
         before = (self.columns, tuple(self.row_keys), self.card_height, self.viewport)
-        with table.prevent(DataTable.RowHighlighted):
+        with self.navigation_update(), table.prevent(DataTable.RowHighlighted):
             self._render_state()
         after = (self.columns, tuple(self.row_keys), self.card_height, self.viewport)
         if (before != after and not self.navigation_origin_covered(origin)

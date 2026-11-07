@@ -9,6 +9,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Label, Static
 
 from .copy_ui import FrozenText, SelectableStatic
+from .navigation import NavigationTable
 
 from cmw.progress.formatting import (context_text, history_cell, history_columns,
                                      history_entry_text)
@@ -109,7 +110,7 @@ class ProgressHistory(ModalScreen):
         with Vertical():
             yield Static('PROGRESS HISTORY · ' + self.display_id, id='history-title', markup=False)
             yield Static('All stages · all segments · root contexts', id='history-scope', markup=False)
-            yield DataTable(id='history-table', cursor_type='row', zebra_stripes=True)
+            yield NavigationTable(id='history-table', cursor_type='row', zebra_stripes=True)
             yield Static('Loading bounded native observations…', id='history-state', markup=False)
             yield Static(id='history-selected', markup=False)
             yield Static('Enter Children · D Details · Backspace Parent\n[ Older · ] Newer · S Stage · V Segment · Esc Back\nCtrl-C Detach', id='history-help', markup=False)
@@ -161,6 +162,10 @@ class ProgressHistory(ModalScreen):
             self.app.progress_service.release_history(self.context)
 
     def accept_page(self, context, page, generation):
+        with self.app.navigation_update():
+            self._accept_page(context, page, generation)
+
+    def _accept_page(self, context, page, generation):
         if self.closed or self.expired or generation != self.request_generation:
             return
         if self.page is not None and self.page.source_revision and page.source_revision and self.page.source_revision != page.source_revision:
