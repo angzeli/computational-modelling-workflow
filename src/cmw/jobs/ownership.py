@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import time
 from uuid import UUID
 
@@ -194,8 +195,6 @@ def exclusive(path):
 
 
 def lock_held(path, *, strict=False):
-    if not path.exists():
-        return False
     try:
         with path.open("r") as handle:
             try:
@@ -203,6 +202,8 @@ def lock_held(path, *, strict=False):
             except BlockingIOError:
                 return True
             fcntl.flock(handle, fcntl.LOCK_UN)
+        return False
+    except FileNotFoundError:
         return False
     except OSError:
         if strict:
@@ -216,6 +217,33 @@ class OwnershipUnavailable(JobsError):
     def __init__(self, deciding_check, message):
         super().__init__(message)
         self.deciding_check = deciding_check
+
+
+class OwnershipContradiction(JobsError):
+    """Readable evidence contradicts the recorded control identity or intent."""
+
+
+class ObservationFinished(JobsError):
+    """This observation ended; its caller owns the next phase or fresh intent."""
+
+
+def is_unavailable(error):
+    """Recognise read failures even when a queue/API boundary wraps their cause."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, (OwnershipContradiction, ObservationFinished)):
+            return False
+        if isinstance(error, OwnershipUnavailable):
+            return True
+        if isinstance(error, psutil.ZombieProcess):
+            return True
+        if isinstance(error, (ProcessLookupError, psutil.NoSuchProcess)):
+            return False  # The observing call site must classify confirmed absence.
+        if isinstance(error, (OSError, psutil.Error, sqlite3.Error)):
+            return True
+        error = error.__cause__
+    return False
 
 
 def _session_read(check, observe):
@@ -264,7 +292,7 @@ def _require_same_member(record, current, message):
         if field in record and record[field] != current.get(field):
             # A v1 mismatch or foreign host cannot establish a lost owner.
             raise OwnershipUnavailable(field, message)
-    raise JobsError(message)
+    raise OwnershipContradiction(message)
 
 
 def snapshot_owned_session(owner, known=()):
@@ -287,10 +315,10 @@ def _snapshot_owned_session(owner, known):
     originals = {}
     for member in known:
         if member['pid'] in originals and originals[member['pid']] != member:
-            raise JobsError('Conflicting original session identities')
+            raise OwnershipContradiction('Conflicting original session identities')
         originals[member['pid']] = member
     if sid in originals and originals[sid] != owner:
-        raise JobsError('Protected session identity differs from original evidence')
+        raise OwnershipContradiction('Protected session identity differs from original evidence')
     originals[sid] = owner
     result = {'members': [], 'absent': [], 'pending': []}
 
@@ -299,7 +327,7 @@ def _snapshot_owned_session(owner, known):
             message = 'Protected session authority is unavailable'
             _require_same_member(owner, identity_for(owner), message)
             if os.getsid(sid) != sid or os.getpgid(sid) != sid:
-                raise JobsError(message)
+                raise OwnershipContradiction(message)
             if psutil.Process(sid).status() in {
                     psutil.STATUS_STOPPED, psutil.STATUS_TRACING_STOP, psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD}:
                 raise OwnershipUnavailable('process_status', message)
@@ -349,13 +377,13 @@ def _snapshot_owned_session(owner, known):
                 _require_same_member(original, current, 'Original session member identity changed')
             member = current
             if os.getsid(pid) != sid:
-                raise JobsError('Original session member escaped its owned session')
+                raise OwnershipContradiction('Original session member escaped its owned session')
             pgid = os.getpgid(pid)
             process = psutil.Process(pid)
             status, ppid = process.status(), process.ppid()
             _require_same_member(member, identity_for(member), 'Session member identity changed during observation')
             if os.getsid(pid) != sid or os.getpgid(pid) != pgid:
-                raise JobsError('Session member topology changed during observation')
+                raise OwnershipUnavailable('session_topology', 'Session member topology changed during observation')
         except psutil.ZombieProcess:
             if member is None:
                 raise OwnershipUnavailable('session_member', 'Session zombie identity cannot be verified')
@@ -403,10 +431,10 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
     def require_anchor():
         if not live(owner):
             if read_domain is not None:
-                raise JobsError('Group leader disappeared: session anchor loss confirmed')
+                raise OwnershipContradiction('Group leader disappeared: session anchor loss confirmed')
             raise JobsError('Dedicated session ownership lost or unverified; no signal sent')
         if os.getsid(sid) != sid or os.getpgid(sid) != sid:
-            raise JobsError('Dedicated session ownership lost or unverified; no signal sent')
+            raise OwnershipContradiction('Dedicated session ownership lost or unverified; no signal sent')
 
     def verify_owner():
         if check_authority is not None:
@@ -469,7 +497,7 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
                 member = identity_for(owner, pid)
                 pgid = os.getpgid(pid)
                 if os.getsid(pid) != sid:
-                    raise JobsError('Session subgroup identity cannot be verified')
+                    raise OwnershipContradiction('Session subgroup identity cannot be verified')
                 groups.setdefault(pgid, []).append(member)
             except psutil.ZombieProcess as exc:
                 raise OwnershipUnavailable('session_member', 'Session member evidence is unavailable') from exc
@@ -482,7 +510,7 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
             if not live(member):
                 return False
             if os.getsid(member['pid']) != sid or os.getpgid(member['pid']) != pgid:
-                raise JobsError('Session subgroup identity cannot be verified')
+                raise OwnershipContradiction('Session subgroup identity cannot be verified')
             return live(member)
         except (ProcessLookupError, psutil.NoSuchProcess):
             return False
@@ -535,15 +563,35 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
 
 
 
-def group_exists(pgid):
-    """Kernel-level final gate after reaping our leader; enumeration can race fork."""
+class GroupPresence(StrEnum):
+    PRESENT = 'PRESENT'
+    ABSENT = 'ABSENT'
+    UNAVAILABLE = 'UNAVAILABLE'
+
+
+@dataclass(frozen=True)
+class GroupObservation:
+    status: GroupPresence
+    error: Exception | None = None
+
+
+def observe_group(pgid):
+    """A null signal is an observation; an unreadable group is never absent."""
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
-        return False
-    except PermissionError as exc:
-        raise JobsError("Process group absence cannot be verified") from exc
-    return True
+        return GroupObservation(GroupPresence.ABSENT)
+    except Exception as exc:
+        return GroupObservation(GroupPresence.UNAVAILABLE, exc)
+    return GroupObservation(GroupPresence.PRESENT)
+
+
+def group_exists(pgid):
+    """Compatibility projection of the complete group-presence observation."""
+    observed = observe_group(pgid)
+    if observed.status == GroupPresence.UNAVAILABLE:
+        raise OwnershipUnavailable('group_absence', 'Process group absence cannot be verified') from observed.error
+    return observed.status == GroupPresence.PRESENT
 
 
 def observed_group_members(store, job, pids, *, process_factory=psutil.Process, identity_provider=identity):

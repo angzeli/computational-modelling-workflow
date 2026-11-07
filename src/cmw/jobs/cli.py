@@ -838,6 +838,8 @@ def handle(args):
                 raise JobsError(f"No such job: {args.job_id}")
             result = candidates[0]
             if operation == "show":
+                if 'completion' in result.get('ownership_holds', {}):
+                    result = {**result, 'completion_state': 'PENDING'}
                 if result.get('molecular_submission'):
                     from .molecular import inspect_result
                     result = {**result, 'scientific_result': inspect_result(result)}

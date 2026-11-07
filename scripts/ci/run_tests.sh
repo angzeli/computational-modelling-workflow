@@ -29,6 +29,9 @@ run_module() {
   tests=$(sed -n 's/^Ran \([0-9]*\) tests\{0,1\} in .*/\1/p' "$work/log")
   printf '%s %s tests=%s seconds=%s log=%s\n' "$([[ $status == 0 ]] && echo PASS || echo FAIL)" \
     "$relative" "${tests:-0}" "$((SECONDS - started))" "$work/log" >> "$work_root/results.txt"
+  # Matrix subtests are not unittest methods. Keep their separate accounting
+  # visible even when the module passes and its detailed log stays private.
+  sed -n '/^OWNERSHIP_FAULT_SWEEP /p' "$work/log"
 }
 export -f run_module
 export source_root work_root python_exe

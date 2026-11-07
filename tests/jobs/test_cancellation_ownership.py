@@ -320,6 +320,23 @@ class SessionSnapshotRaceTests(unittest.TestCase):
         self.assertEqual(error.exception.deciding_check, 'birth')
         self.assertEqual(self.table.signals(), [])
 
+    def test_topology_changed_during_snapshot_is_unavailable_then_recoverable(self):
+        reads = []
+        def pgid(pid):
+            value = self.table.pgid(pid)
+            if pid == 20:
+                reads.append(1)
+                if len(reads) == 2:
+                    return 21
+            return value
+        with patch.object(ownership.os, 'getpgid', side_effect=pgid):
+            with self.assertRaises(ownership.OwnershipUnavailable) as error:
+                self.snapshot()
+            self.assertEqual(error.exception.deciding_check, 'session_topology')
+            recovered = self.snapshot()
+        self.assertIn(20, {row['identity']['pid'] for row in recovered['members']})
+        self.assertEqual(self.table.signals(), [])
+
     def test_reused_known_identity_and_escape_cannot_be_adopted(self):
         for change in ({'birth': 999.0}, {'sid': 90}):
             with self.subTest(change=change):

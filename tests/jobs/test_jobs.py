@@ -243,7 +243,8 @@ class QueueTests(unittest.TestCase):
         child = (f"import time; from pathlib import Path; gate=Path({str(release)!r})\n"
                  "while not gate.exists(): time.sleep(.05)\n"
                  f"Path({str(marker)!r}).touch()")
-        first = self.add(f"import subprocess,sys; subprocess.Popen([sys.executable,'-c',{child!r}])")
+        first = self.add(f"import subprocess,sys; subprocess.Popen([sys.executable,'-c',{child!r}])",
+                         cpus=1, memory_gib=.125)
         self.add()
         with self.store.transaction() as con:
             job = self.store.get(con, first['id'])
@@ -258,22 +259,46 @@ isolation = install()
 runtime.group_members = lambda pid: [pid]
 runtime.worker(Store(sys.argv[1]),1,'enumeration-race')
 """
-        try:
-            authority = exclusive(self.store.root / 'controller.lock')
-            authority.__enter__()
+        worker = None
+        with exclusive(self.store.root / 'controller.lock'):
             with self.store.transaction() as con:
                 control = self.store.control(con)
                 control.update(owner=identity(), dispatch=True, stop=False)
                 self.store.set_control(con, control)
-            subprocess.run([sys.executable,'-c',program,str(self.store.root)],check=True,timeout=10,
-                env=environment())
-            self.assertEqual(self.jobs()[0]['status'],'Unknown')
-            self.assertIn('still contains live members',self.jobs()[0]['reason'])
-            self.assertIsNone(self.jobs()[1]['started_at'])
-        finally:
-            authority.__exit__(None, None, None)
-            release.touch()
-            wait_for(marker.exists)
+            try:
+                worker = subprocess.Popen([sys.executable,'-c',program,str(self.store.root)], env=environment())
+                wait_for(lambda: 'completion' in self.jobs()[0].get('ownership_holds', {})
+                         and 'final absence observation' in self.jobs()[0]['reason'])
+                pending = self.jobs()[0]
+                self.assertIsNone(worker.poll())
+                self.assertEqual(pending['status'], 'Run')
+                self.assertIn('Completion pending', pending['reason'])
+                self.assertEqual(pending['resources'], first['resources'])
+                self.assertIsNone(pending['finished_at'])
+                self.assertIsNone(pending['exit_code'])
+                self.assertFalse(marker.exists())
+                self.assertIsNone(self.jobs()[1]['started_at'])
+            finally:
+                # Release this test's external child even when an assertion
+                # fails; never leave the observation waiter behind in teardown.
+                release.touch()
+                if worker is not None:
+                    try:
+                        worker.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        owned = self.jobs()[0].get('group')
+                        if owned and owner_alive(owned):
+                            os.killpg(owned['pid'], signal.SIGKILL)
+                        if worker.poll() is None:
+                            worker.terminate()
+                        worker.wait(timeout=5)
+                        raise
+        self.assertEqual(worker.returncode, 0)
+        self.assertTrue(marker.exists())
+        self.assertEqual(self.jobs()[0]['status'], 'Done')
+        self.assertEqual(self.jobs()[0]['exit_code'], 0)
+        self.assertNotIn('ownership_holds', self.jobs()[0])
+        self.assertIsNone(self.jobs()[1]['started_at'])
         from cmw.jobs.ownership import group_exists
         wait_for(lambda: not group_exists(self.jobs()[0]['group']['pid']))
 
