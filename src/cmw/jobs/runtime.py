@@ -1003,12 +1003,12 @@ def worker(store, job_id, claim):
                     failure = exc if is_unavailable(exc) else OwnershipUnavailable('worker.read', str(exc))
                     authority.read_domain(lambda: _read_job(store, job_id), first_failure=failure)
         except OwnershipContradiction as exc:
-            def record_contradiction():
+            def record_contradiction(reason=str(exc)):
                 with store.transaction(create=False, wait=time.sleep) as con:
                     current = store.get(con, job_id)
                     if current['claim'] == claim and current['status'] in ACTIVE:
                         if current['status'] != 'Unknown':
-                            mark_unknown(store, con, current, str(exc))
+                            mark_unknown(store, con, current, reason)
             ownership_hold.retry_read(record_contradiction)
         except Exception as exc:
             # This is an invariant/programming failure outside the retryable

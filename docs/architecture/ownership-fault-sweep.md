@@ -96,11 +96,19 @@ injected rows, and splits terminal rows from the accepted pending class. With
 inventory, limitations and each row's result. Assertions also detect an injection
 that never fired or fired more than once.
 
-An initial Python 3.14 representative checkpoint passed **16 unittest tests** in
-**37.819 s**, with **1,149 injected rows**: 1,107 terminal and 42 pending. Its
-fifteen baseline traces contained 9,389 occurrences, projecting 28,167 full
-rows. Those are checkpoint counts from before the additional native readlink
-and flock wrappers; final runs report their own exact counts. Native path depth
-and interpreter layout can change those counts across platforms. At the
-checkpoint's average pace, the full matrix was estimated at about fifteen
-minutes, not measured. No full-matrix or CI pass is asserted by this document.
+The representative checks passed on both local interpreters:
+
+| Interpreter | Unittest count | Injected rows | Terminal / pending | Elapsed |
+|---|---:|---:|---:|---:|
+| Python 3.14 | 16 | 1,275 | 1,217 / 58 | 45.642 s |
+| Python 3.11 | 16 | 1,275 | 1,217 / 58 | 60.576 s |
+
+The Python 3.14 baseline contains 10,460 read occurrences, projecting **31,380
+full rows**, including 120 native parent reads and 24 native child-list reads.
+The source inventory has 365 candidate calls; 156 were reached by the fault-free
+baselines. That distinction is intentional: inventory entries include composite
+calls and the explicitly excluded scenarios above. Native path depth and
+interpreter layout can change the full row count across platforms. The estimated
+full Python 3.14 runtime is about nineteen minutes at the representative average;
+this is not a full-run measurement. Full-matrix and CI results belong in the PR
+validation report; this document asserts only the local representative results.
