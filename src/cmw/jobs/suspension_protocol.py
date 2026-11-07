@@ -22,8 +22,9 @@ from uuid import uuid4
 
 import psutil
 
-from .ownership import (OwnershipStatus, OwnershipUnavailable, boot_session_id, group_exists,
+from .ownership import (OwnershipStatus, OwnershipUnavailable, OwnershipContradiction, boot_session_id, group_exists,
                         identity, observe_owner, snapshot_owned_session, valid_owner_record)
+from .ownership_hold import retry_read
 from .process_identity import ConfirmedProcessAbsence, ancestor_pids
 
 PROTOCOL = 1
@@ -32,7 +33,7 @@ BINDING_FIELDS = ('protocol', 'backend', 'job_id', 'attempt_id', 'claim', 'worke
 MAX_RECORD_BYTES = 262144
 
 
-class SuspensionProtocolError(ValueError):
+class SuspensionProtocolError(OwnershipContradiction):
     """A private runner capability or acknowledgement cannot be trusted."""
 
 
@@ -71,7 +72,7 @@ def now_clock():
         base = Timebase()
         library.mach_timebase_info.argtypes = [ctypes.POINTER(Timebase)]
         if library.mach_timebase_info(ctypes.byref(base)) != 0 or not base.denom:
-            raise SuspensionProtocolError('Continuous clock timebase unavailable')
+            raise OwnershipUnavailable('clock', 'Continuous clock timebase unavailable')
         library.mach_continuous_time.restype = ctypes.c_uint64
         return library.mach_continuous_time() * base.numer / base.denom / 1_000_000_000
     if sys.platform.startswith('linux') and hasattr(time, 'CLOCK_BOOTTIME'):
@@ -104,8 +105,11 @@ def _read_fd(fd):
     _private_info(info)
     if info.st_size > MAX_RECORD_BYTES:
         raise SuspensionProtocolError('Suspension IPC record is oversized')
-    with os.fdopen(os.dup(fd), 'r', encoding='utf-8') as handle:
-        value = json.load(handle)
+    try:
+        with os.fdopen(os.dup(fd), 'r', encoding='utf-8') as handle:
+            value = json.load(handle)
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise SuspensionProtocolError('Suspension IPC record is malformed') from exc
     if not isinstance(value, dict):
         raise SuspensionProtocolError('Suspension IPC record must be an object')
     return value
@@ -122,16 +126,18 @@ class RunnerControl:
         return cls(Path(value), backend=backend, deadline=deadline, storage=storage, runtime=runtime)
 
     def __init__(self, path, *, backend, deadline, storage, runtime):
+        self.last_error = ''
         path = Path(path)
         if not path.is_absolute() or path.name != 'context.json' or path.is_symlink():
             raise SuspensionProtocolError('Invalid suspension context path')
         self.path = path
         self.directory = path.parent
-        self.fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.fd = self._wait_for_owner_read(lambda: os.open(
+            self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
         self.lock_fd = None
         try:
-            _private_info(os.fstat(self.fd), directory=True)
-            self.context = self._read('context.json')
+            self._wait_for_owner_read(lambda: _private_info(os.fstat(self.fd), directory=True))
+            self.context = self._wait_for_owner_read(lambda: self._read('context.json'))
             if self.context.get('protocol') != PROTOCOL or self.context.get('backend') != backend:
                 raise SuspensionProtocolError('Suspension backend/protocol mismatch')
             for key in BINDING_FIELDS:
@@ -144,16 +150,17 @@ class RunnerControl:
             if isinstance(job_id, bool) or not isinstance(job_id, (str, int)) or not job_id or (isinstance(job_id, int) and job_id < 1):
                 raise SuspensionProtocolError('Invalid immutable job identity')
             self.binding = {key: self.context[key] for key in BINDING_FIELDS}
-            self.clock = clock_descriptor()
+            self.clock = self._wait_for_owner_read(clock_descriptor)
             if self.context.get('clock') != self.clock:
                 raise SuspensionProtocolError('Suspension clock/boot mismatch')
-            self.runner = identity()
+            self.runner = self._wait_for_owner_read(identity)
             self.deadline = dict(deadline)
-            self.storage = [_directory_identity(value) for value in dict.fromkeys(storage)]
+            self.storage = [self._wait_for_owner_read(lambda: _directory_identity(value))
+                            for value in dict.fromkeys(storage)]
             self.runtime = dict(runtime)
             self.intervals = []
             self.clock_started = None
-            self._last_clock = now_clock()
+            self._last_clock = self._wait_for_owner_read(now_clock)
             self._last_command = None
             self._last_ack_clock = None
             self._last_ack_status = None
@@ -165,12 +172,12 @@ class RunnerControl:
             self._wait_for_owner_read(self._check_authority)
             self.lock_fd = os.open('runner.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
                                    0o600, dir_fd=self.fd)
-            _private_info(os.fstat(self.lock_fd))
+            self._wait_for_owner_read(lambda: _private_info(os.fstat(self.lock_fd)))
             try:
                 fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise SuspensionProtocolError('A runner already owns this attempt') from exc
-            if self._read('registration.json', optional=True) is not None:
+            if self._wait_for_owner_read(lambda: self._read('registration.json', optional=True)) is not None:
                 raise SuspensionProtocolError('This attempt already has a runner registration')
         except BaseException:
             self.close()
@@ -197,7 +204,7 @@ class RunnerControl:
             os.close(fd)
 
     def _write(self, name, value, *, before_publish=None):
-        self._check_directory()
+        self._wait_for_owner_read(self._check_directory)
         temporary = f'.{name}.{uuid4().hex}'
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                      0o600, dir_fd=self.fd)
@@ -253,7 +260,7 @@ class RunnerControl:
         self._wait_for_owner_read(self._check_authority)
         known = {item['path'] for item in self.storage}
         for path in paths:
-            value = _directory_identity(path)
+            value = self._wait_for_owner_read(lambda: _directory_identity(path))
             if value['path'] not in known:
                 self.storage.append(value)
                 known.add(value['path'])
@@ -261,7 +268,7 @@ class RunnerControl:
     def _wait_for_owner_read(self, read):
         # Never replay an IPC write. Keep any identities already captured while
         # a later read is temporarily unavailable.
-        delay = .05
+        delay = .25
         while True:
             try:
                 return read()
@@ -269,10 +276,14 @@ class RunnerControl:
                 raise SuspensionProtocolError('Registered process is confirmed absent') from exc
             except (FileNotFoundError, NotADirectoryError):
                 raise
+            except (SuspensionProtocolError, psutil.NoSuchProcess):
+                raise
             except (OwnershipUnavailable, OSError, psutil.AccessDenied) as exc:
                 self.last_error = str(exc)
+            except Exception as exc:
+                self.last_error = f'Observation temporarily unavailable: {exc}'
             time.sleep(delay)
-            delay = min(1., 2 * delay)
+            delay = min(5., 2 * delay)
 
     def register(self, root_pid, strategy='direct-tree', protected_pids=()):
         if self._registered or strategy not in {'direct-tree', 'openmpi', 'orca-tree'}:
@@ -494,9 +505,14 @@ class RunnerControl:
         except (OwnershipUnavailable, OSError, psutil.AccessDenied) as exc:
             self.last_error = str(exc)
             return 'hold'
-        except (ValueError, psutil.Error) as exc:
+        except SuspensionProtocolError as exc:
             self._mark_uncertain()
             self.last_error = str(exc)
+            return 'hold'
+        except Exception as exc:
+            # An unexpected observation exception is not contradictory evidence.
+            # The caller's next poll is the driver; retain accounting and intent.
+            self.last_error = f'Observation temporarily unavailable: {exc}'
             return 'hold'
 
     def request_termination(self, reason, exit_code=124):
@@ -608,15 +624,15 @@ def controlled_driver(command, *, backend, execution_budget=None, hard_timeout=N
                       mpi_launcher=None, mpi_ranks=2, storage=(), runtime=None, strategy=None,
                       completion_details=False):
     """Launch one foreground domain; only its bound worker can stop or cancel it."""
-    deadline = {'protocol': PROTOCOL, 'clock': clock_descriptor(),
+    deadline = {'protocol': PROTOCOL, 'clock': retry_read(clock_descriptor),
                 'execution_budget_seconds': execution_budget, 'hard_timeout_seconds': hard_timeout,
                 'external_watchdogs': 'none-declared', 'owner': 'runner', 'known': True}
     details = {'local_only': True, **dict(runtime or {})}
-    workload_executable = shutil.which(command[0]) or command[0]
-    runtime_storage = [str(Path(workload_executable).resolve(strict=True).parent)]
+    workload_executable = retry_read(lambda: shutil.which(command[0])) or command[0]
+    runtime_storage = [str(retry_read(lambda: Path(workload_executable).resolve(strict=True)).parent)]
     child_environment = dict(os.environ)
     if mpi_launcher:
-        details.update(mpi_runtime_identity(mpi_launcher, mpi_ranks))
+        details.update(retry_read(lambda: mpi_runtime_identity(mpi_launcher, mpi_ranks)))
         runtime_storage.extend(str(Path(item['path']).parent) for item in
                                [*details['launcher_executables'], *details['control_executables']])
         launcher = details['mpi_launcher']['path']
@@ -625,13 +641,13 @@ def controlled_driver(command, *, backend, execution_budget=None, hard_timeout=N
                       ['--forward-signals', 'SIGTSTP,SIGCONT'])
         topology = []
         if sys.platform == 'darwin' and '5.0.9' in details['mpi_launcher']['version']:
-            cores = int(subprocess.check_output(['/usr/sbin/sysctl', '-n', 'hw.physicalcpu'], text=True))
+            cores = retry_read(lambda: int(subprocess.check_output(['/usr/sbin/sysctl', '-n', 'hw.physicalcpu'], text=True)))
             child_environment['HWLOC_SYNTHETIC'] = f'Package:1 Core:{cores} PU:1'
             details['topology'] = {'mode': 'synthetic-local', 'hwloc': child_environment['HWLOC_SYNTHETIC']}
             topology = ['--bind-to', 'none', '--map-by', 'slot']
         command = [launcher, '--host', f'localhost:{mpi_ranks}', *forwarding, *topology, '-n', str(mpi_ranks), *command]
     control = RunnerControl.from_environment(backend, deadline=deadline,
-                                            storage=[str(Path.cwd()), *runtime_storage, *storage], runtime=details)
+                                            storage=[str(retry_read(Path.cwd)), *runtime_storage, *storage], runtime=details)
     if control is None:
         raise SuspensionProtocolError('Controlled execution requires an enrolled Jobs attempt')
     child = None
@@ -645,7 +661,7 @@ def controlled_driver(command, *, backend, execution_budget=None, hard_timeout=N
         terminating = False
         while True:
             state = control.poll()
-            result = child.poll()  # Popen waits for termination, never WUNTRACED stops.
+            result = control._wait_for_owner_read(child.poll)  # Popen retains any reaped result.
             if result is not None and control.domain_drained():
                 exit_code = result if result >= 0 else 128 - result
                 if completion_details:
@@ -654,11 +670,12 @@ def controlled_driver(command, *, backend, execution_budget=None, hard_timeout=N
                             'source': 'cmw-controlled-driver-drained-v1',
                             'disposition': 'cancelled' if control.cancel_requested else 'completed'}
                 return exit_code
-            if not terminating and ((hard_timeout is not None and control.elapsed >= hard_timeout) or
-                                    control.execution_budget_exhausted(execution_budget)):
+            expired = control._wait_for_owner_read(lambda: (
+                hard_timeout is not None and control.elapsed >= hard_timeout,
+                control.execution_budget_exhausted(execution_budget)))
+            if not terminating and any(expired):
                 try:
-                    control.request_termination('hard wall deadline expired' if hard_timeout is not None and
-                                                control.elapsed >= hard_timeout else 'execution budget expired')
+                    control.request_termination('hard wall deadline expired' if expired[0] else 'execution budget expired')
                     terminating = True
                 except (OSError, ValueError, psutil.Error) as exc:
                     # Lost authority cannot turn a deadline into wrapper exit or

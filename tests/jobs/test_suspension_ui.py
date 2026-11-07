@@ -73,6 +73,34 @@ class SuspensionCliTests(unittest.TestCase):
             self.assertIn('UNAVAILABLE', output)
         self.assertFalse(self.store.root.exists())
 
+    def test_completion_pending_reason_is_visible_in_status_show_and_portal_detail(self):
+        from cmw.jobs.tui import detail
+        from types import SimpleNamespace
+        reason = 'process domain never observed; receipt present; manual verification required'
+        added = self.store.add(argv=['/bin/true'], cwd=self.root, name='pending completion', cpus=2)
+        with self.store.transaction() as con:
+            job = self.store.get(con, added['id'])
+            job.update(status='Run', order=None, reason=reason,
+                       ownership_holds={'completion': {'check': 'completion.domain_never_observed'}})
+            self.store.save(con, job)
+        state = self.store.snapshot()
+        job = state['jobs'][0]
+        with patch('cmw.jobs.activity.project', return_value=state), \
+                patch('cmw.jobs.lifecycle.observe_execution', return_value=SimpleNamespace(to_dict=lambda: {})):
+            for command in ('status', 'show'):
+                arguments = (command, job['display_id']) if command == 'show' else (command,)
+                code, output = self.call(*arguments)
+                self.assertEqual(code, 0, output)
+                self.assertIn(reason, output)
+                self.assertIn('PENDING' if command == 'show' else 'Completion pending', output)
+        for narrow in (False, True):
+            text = detail(job, narrow=narrow)
+            self.assertIn('Completion pending', text)
+            self.assertIn(reason, text)
+            self.assertIn('Status: Run', text)
+            self.assertIn('Resources retained', text)
+        self.assertEqual(self.store.snapshot()['jobs'][0]['status'], 'Run')
+
     def test_explicit_action_literal_reason_and_async_result(self):
         with patch('cmw.jobs.suspension.submit', return_value=dict(result='ACCEPTED', phase='Suspending')) as submit:
             code, output = self.call('suspend', 'J1.1', '--reason', '[bold] u/c/p/x',

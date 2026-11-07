@@ -19,6 +19,10 @@ from cmw.jobs import ownership, runtime, suspension
 from cmw.jobs.store import JobsError, Store
 
 
+class ModeledLifecycleLimit(BaseException):
+    """Stop a broken model without treating its test budget as an unreadable probe."""
+
+
 class WorkerCancellationModel:
     """A bounded process model around the real worker and private Store."""
     def __init__(self, root, mode):
@@ -246,7 +250,7 @@ class WorkerCancellationModel:
             self.events.append('observed-hold')
             self.armed = False
         if self.clock > (80 if self.mode.startswith('unavailable-') else 10):
-            raise AssertionError('Modeled cancellation exceeded its bounded lifecycle')
+            raise ModeledLifecycleLimit('Modeled cancellation exceeded its bounded lifecycle')
         if self.writer in self.alive:
             self.alive.remove(self.writer)
             self.write_receipt()
@@ -343,7 +347,7 @@ class CancellationAnchorTests(unittest.TestCase):
         self.assertEqual(job['status'], 'Cancelled', job['reason'])
         self.assertLess(model.events.index('nested preflight'), model.events.index('GO'))
 
-    def test_failed_run_commit_cannot_launch_the_payload(self):
+    def test_transient_run_commit_failure_waits_for_commit_before_launching_once(self):
         model = self.ordinary('receipt-first')
         connect = sqlite3.connect
         failures = []
@@ -351,14 +355,16 @@ class CancellationAnchorTests(unittest.TestCase):
             def commit(connection):
                 row = connection.execute('SELECT data FROM jobs WHERE id=?', (model.job['id'],)).fetchone()
                 if not failures and json.loads(row[0])['status'] == 'Run':
+                    self.assertNotIn('GO', model.events)
+                    self.assertEqual(model.signals, [])
                     failures.append(True)
                     raise sqlite3.OperationalError('database or disk is full')
                 super().commit()
         with patch.object(sqlite3, 'connect', side_effect=lambda *a, **kw: connect(*a, **kw, factory=Full)):
-            self.assertEqual(model.run()['status'], 'Unknown')
+            self.assertEqual(model.run()['status'], 'Cancelled')
         self.assertEqual(failures, [True])
-        self.assertNotIn('GO', model.events)
-        self.assertEqual(model.signals, [])
+        self.assertEqual(model.events.count('GO'), 1)
+        self.assertEqual(model.events.count('RELEASE'), 1)
         model.leader.stdin.close.assert_called_once()
 
     def test_delivery_gate_excludes_writers_allows_readers_and_disallows_sql_writes(self):
@@ -383,7 +389,7 @@ class CancellationAnchorTests(unittest.TestCase):
         original = runtime._worker_intent
         retries = []
         @contextmanager
-        def disputed(store, job, coordinator, wait):
+        def disputed(store, job, coordinator, wait, **options):
             if not retries:
                 peer.execute('BEGIN IMMEDIATE')
                 def release_writer(delay):
@@ -392,18 +398,13 @@ class CancellationAnchorTests(unittest.TestCase):
                     retries.append(delay)
                     peer.rollback()
                     wait(delay)
-                with original(store, job, coordinator, release_writer):
-                    yield
+                with original(store, job, coordinator, release_writer, **options) as gate:
+                    yield gate
                 self.assertFalse(model.released)  # Pre-wait drainage was discarded.
             else:
-                peer.execute('BEGIN')
-                self.assertEqual(peer.execute('SELECT count(*) FROM jobs').fetchone(), (1,))
-                try:
-                    with original(store, job, coordinator, wait):
-                        yield
-                    self.assertTrue(model.released)  # RELEASE coexists with a reader.
-                finally:
-                    peer.rollback()
+                with original(store, job, coordinator, wait, **options) as gate:
+                    yield gate
+                self.assertTrue(model.released)
         with patch.object(runtime, '_worker_intent', disputed):
             job = model.run()
         self.assertEqual(retries, [.05])
@@ -504,9 +505,13 @@ class CancellationAnchorTests(unittest.TestCase):
                 yield
         with patch.object(runtime, '_worker_intent', acquiring), \
                 patch.object(ownership, 'observe_owner', side_effect=model.observe):
-            self.assertEqual(model.run()['status'], 'Unknown', model.events)
+            with self.assertRaises(ModeledLifecycleLimit):
+                model.run()
+        self.assertEqual(model.current()['status'], 'Cancelling')
+        self.assertIn('domain', model.current()['ownership_holds'])
         self.assertEqual(replaced, [True])
         self.assertEqual(model.signals, [])
+        self.assertFalse(model.released)
 
     def test_denied_session_send_after_witness_exit_retains_pipe_until_absence(self):
         for failure in (PermissionError(errno.EPERM, 'send raced with witness exit'),
@@ -549,7 +554,7 @@ class CancellationAnchorTests(unittest.TestCase):
                     result = model.run()
                 self.assertEqual(result['status'], 'Cancelled', model.events)
                 self.assertIn('Cancelling', held)
-                self.assertIn('Unknown', held)
+                self.assertEqual(set(held), {'Cancelling'})
                 self.assertTrue(model.released)
                 self.assertEqual(attempts, [(model.compute, signal.SIGTERM)])
                 self.assertTrue(probes)
@@ -787,17 +792,18 @@ class CancellationAnchorTests(unittest.TestCase):
             self.assertNotIn('ownership_holds', job)
             self.assertFalse(store.control(con)['dispatch'])
 
-    def test_unverifiable_anchor_retains_pipe_retries_and_resumes_after_unknown(self):
+    def test_unverifiable_anchor_retains_pipe_retries_and_resumes_after_attention(self):
         model = self.model('unavailable-then-verified')
         job = model.run()
         self.assertTrue(model.released)
         self.assertEqual(job['status'], 'Cancelled')
         self.assertNotIn('ownership_holds', job)
-        self.assertIn('Unknown', [state for state, _ in model.held_states])
+        self.assertEqual({state for state, _ in model.held_states}, {'Cancelling'})
         self.assertEqual([delay for _, delay in model.held_states[:6]], [.25, .5, 1, 2, 4, 5])
         with model.store.transaction() as con:
             messages = [row[0] for row in con.execute('SELECT message FROM events ORDER BY id')]
         self.assertTrue(any('guardian cannot verify anchor.start_token' in msg for msg in messages))
+        self.assertEqual(sum('attention required' in msg for msg in messages), 1)
         self.assertTrue(any('guardian control hold cleared' in msg for msg in messages))
 
     def test_unverifiable_then_gone_never_signals_or_releases(self):
@@ -807,7 +813,7 @@ class CancellationAnchorTests(unittest.TestCase):
         self.assertIn('Group leader disappeared', job['reason'])
         self.assertEqual(model.signals, [])
         self.assertFalse(model.released)
-        self.assertIn('Unknown', [state for state, _ in model.held_states])
+        self.assertEqual({state for state, _ in model.held_states}, {'Cancelling'})
 
     def test_unexpected_anchor_loss_retains_unknown_and_commitment(self):
         model = self.model('anchor-lost')
@@ -831,8 +837,15 @@ class CancellationAnchorTests(unittest.TestCase):
 
     def test_escalation_cannot_claim_cancelled_without_genuine_payload_receipt(self):
         model = self.model('no-receipt-escalation')
-        job = model.run()
-        self.assertEqual(job['status'], 'Unknown', model.events)
+        original_sleep = model.sleep
+        def sleep(interval):
+            self.assertFalse(model.leader.stdin.close.called)
+            original_sleep(interval)
+        model.sleep = sleep
+        with self.assertRaises(ModeledLifecycleLimit):
+            model.run()
+        job = model.current()
+        self.assertEqual(job['status'], 'Cancelling', model.events)
         self.assertFalse(model.receipt.exists())
         self.assertIsNone(job['finished_at'])
         self.assertFalse(model.released)

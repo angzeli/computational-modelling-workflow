@@ -813,8 +813,9 @@ The command reads the selected queue without taking control or writing to it.
 An ordinary session worker retains supervision when signal delivery is denied
 or its outcome is unreadable. It records a control hold and retries passive
 group-absence observations with backoff. It sends no further control while the
-group remains present or unreadable, and reports Unknown after 60 seconds while
-keeping the pipe. Confirmed absence permits fresh checks of the remaining
+group remains present or unreadable. After 60 seconds it records a coalesced
+attention event while keeping the job's state, pipe and commitments. Elapsed
+time or an unreadable probe never establishes a contradiction. Confirmed absence permits fresh checks of the remaining
 operation. Confirmed anchor loss follows the loss path. A persistently live
 group needs operator attention; a readable identity alone cannot establish
 that signal permission recovered. The original failed send is never replayed.
@@ -827,6 +828,118 @@ RELEASE. It never substitutes a successful KILL outcome for that receipt.
 After payload exit, the shell ignores group TERM and INT while its receipt
 writer publishes the genuine exit status durably. It retains that protection
 until the worker verifies drainage and sends RELEASE.
+
+Every ownership hold has a re-evaluation driver. A read that returns, changes
+phase (`DomainPending`), or discovers superseding intent resolves or transfers
+its hold before returning. Unexpected read exceptions remain visible and
+retryable; an orphaned hold is an immediate runtime invariant error. A single
+transient read fault must not prevent eventual progress once the process domain
+has been verified, or close the worker's control pipe. The never-observed-domain
+exception below retains evidence and requires manual verification. The final absence observation distinguishes PRESENT, ABSENT and
+UNAVAILABLE; EPERM and EAGAIN are both unavailable evidence.
+
+After RELEASE, the original worker keeps completion evidence in memory and
+retries receipt verification, absence observations and the completion transaction
+with the same 0.25–5 second backoff. This phase needs no live anchor and is shown
+as **completion pending**. Controls remain refused and resource commitments stay
+reserved until completion commits. The transaction identifies the original
+attempt and claim, reads back an uncertain COMMIT before any repeated mutation,
+and records the terminal event only once. Operational timing is frozen from
+completion evidence, not the later database publication time. The ordinary hard
+cancellation path still requires confirmed reap/absence and does not invent a
+payload receipt or a RELEASE.
+
+These retries belong to the original worker. Worker death, restart recovery,
+durable completion records and release acknowledgement are not implemented by
+this change; see the post-cutover [durable completion proposal](architecture/durable-completion-proposal.md).
+
+### Process domain never observed
+
+A coordinated runner can register and finish before the worker verifies its
+first live process domain. A receipt proves payload exit, not the missing
+historical domain or complete drainage. The attempt stays resource-committed
+in its existing Run/Cancelling state, with this exact reason in its event,
+`cmw jobs status`/`show`, and the portal's selected-job details:
+
+> process domain never observed; receipt present; manual verification required
+
+The worker retains its pipe, refuses controls, and never signals or sends RELEASE
+in this phase. It continues checking the attempt's binding and reporting the
+hold; after 60 seconds it emits one attention event without changing to Unknown.
+No amount of waiting reconstructs the missing live observation. This is the
+explicit exception to the bounded-completion guarantee, separately counted in
+the fault-injection sweep. It is not a successful or failed scientific result.
+
+There is **no positive minimum affected job duration**. The runner does not wait
+for the worker's census; arbitrarily short workloads can disappear before it.
+The worker normally polls every 150 ms. One failed read adds an initial 250 ms
+backoff, so a workload with at most 250 ms of life remaining at that observation
+can finish inside that delay, plus scan/scheduling time. This is an exposure
+window, not a measured production frequency or a maximum total job duration.
+Fast controlled commands, smoke fixtures, quick ORCA failures and short serial
+jobs are realistic examples. Long ORCA/VASP computations are normally observed
+early, but early launch failures can still fit the window. The same constraint
+applies to any enrolled VASP controlled runner; ordinary uncoordinated/raw-shell
+workers do not use this coordinated-domain gate. The guaranteed-first-census
+handshake is [post-cutover issue #24](https://github.com/angzeli/computational-modelling-workflow/issues/24),
+linked to [durable completion, #23](https://github.com/angzeli/computational-modelling-workflow/issues/23).
+
+#### Operator procedure for the never-observed-domain hold
+
+This is a separately authorized manual recovery, not `reconcile --apply` or an
+automatic release. Do not clear the hold just to resume dispatch.
+
+1. On the owning node, select the exact state directory with `cmw jobs --state
+   STATE`. Pause dispatch (`pause`), then stop its controller (`stop`) while
+   leaving the original worker and anchor alone. Confirm the recorded controller
+   is GONE and its lock is free before proceeding. Archive the queue, attempt
+   records and logs without changing originals; use a consistent SQLite backup,
+   not a copy of a live database alone.
+2. Capture `show JOB --json`, `ownership JOB --role worker --json`, `ownership
+   JOB --role group --json`, `observe JOB --json` and `reconcile JOB --preview
+   --json`. Inspect the receipt's exact bytes and hash, registration, original
+   worker/anchor identities, attempt and claim. Check the queue's node/storage
+   identities as applicable. A refused/unreadable check means stop and retain
+   the pending attempt, not assume absence.
+3. Inspect all original session and process groups, the registered runner/root
+   and any recorded descendants or launchers, including reparented and separately
+   grouped MPI processes. Compare raw start tokens and boot-session identities;
+   names or numeric PIDs alone are insufficient. Check for surviving ORCA/MPI
+   children or escaped/detached work. A current census cannot prove the absence
+   of an unrecorded detached child: if the launch contract, process evidence and
+   operator investigation cannot rule that out, retain the hold and escalate.
+4. If any computation remains, do not complete the attempt or release resources.
+   Investigate it under a separately approved, identity-checked termination or
+   completion plan. If all computation is conclusively gone and the genuine
+   receipt is consistent, document that evidence and approve control-only cleanup.
+5. There is no existing CLI command to inject RELEASE into the original anonymous
+   pipe. Do not attach a replacement writer or edit a registration to fabricate
+   proof. For manual closure, freshly verify and stop only the original worker;
+   then freshly verify and terminate only the now-childless original anchor.
+   The receipt-phase anchor ignores TERM/INT, so an explicitly authorized KILL
+   of that verified control shell may be necessary. Never use a broad group KILL
+   in place of the census. Confirm both original identities and all original
+   groups are absent; unreadability is not absence.
+6. With the controller still stopped and worker lock free, an operator-reviewed
+   offline transaction may record the closure using the existing `runtime.finish`
+   function, bound to the unchanged job, attempt and claim. Supply the genuine
+   receipt disposition (Cancelled if cancellation was accepted, Fail/124 for an
+   established timeout, otherwise Done/Fail from the receipt), an explicit manual
+   verification reason, and evidence-derived timing. If exact duration is not
+   established, preserve accounting uncertainty rather than using recovery time
+   as execution duration. Re-read all bindings and receipt hash immediately
+   before this transaction; refuse any contradiction or independent Unknown.
+   Keep the evidence, manual rationale and approval in the archive and a job
+   note; Cancelled retains the existing standard terminal reason rather than
+   the supplied free-text reason. This is a
+   reviewed use of an internal API, **not a supported force-completion CLI**.
+7. Read back the terminal record/event and confirm absence again before an
+   explicit controller start/resume. Operational closure does not confer
+   scientific acceptance or authorize artifact reuse without its normal checks.
+
+Normal RELEASE remains available only to the original worker when its proof
+requirements were met. The handshake/durable-completion proposals must provide
+a supported recovery path before these manual steps can become automatic.
 
 Restart acquires the controller kernel lock and reconciles active attempts by
 worker lock, recorded process identity and persisted launch claims. A live

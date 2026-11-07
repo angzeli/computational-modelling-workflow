@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import errno
 import os
 from pathlib import Path
 import tempfile
@@ -77,6 +78,75 @@ class RunnerProtocolTests(unittest.TestCase):
         self.make()
         with self.assertRaisesRegex(SuspensionProtocolError, 'already owns'):
             self.make()
+
+    def test_startup_context_read_retries_without_recreating_runner(self):
+        from cmw.jobs import suspension_protocol as protocol
+        original = protocol._read_fd
+        calls = []
+        def read(fd):
+            calls.append(fd)
+            if len(calls) == 1:
+                raise OSError(errno.EAGAIN, 'one startup read failed')
+            return original(fd)
+        with patch.object(protocol, '_read_fd', side_effect=read), patch.object(protocol.time, 'sleep') as sleep:
+            control = self.make()
+        self.assertEqual(control.context, self.context)
+        self.assertFalse(control.accounting_uncertain)
+        sleep.assert_called_once_with(.25)
+
+    def test_unexpected_poll_read_error_preserves_timing_and_recovers(self):
+        control = self.make()
+        control.intervals = [{'start': control.clock_started + 1, 'end': None}]
+        intervals = [dict(item) for item in control.intervals]
+        original = control._check_authority
+        calls = []
+        def read(**options):
+            calls.append(options)
+            if len(calls) == 1:
+                raise RuntimeError('one unreadable observation')
+            return original(**options)
+        with patch.object(control, '_check_authority', side_effect=read):
+            self.assertEqual(control.poll(), 'hold')
+            self.assertIn('temporarily unavailable', control.last_error)
+            self.assertEqual(control.intervals, intervals)
+            self.assertFalse(control.accounting_uncertain)
+            self.assertEqual(control.poll(), 'run')
+        self.assertFalse(control.accounting_uncertain)
+        self.assertEqual(control.intervals, intervals)
+
+    def test_ack_publication_read_retry_does_not_repeat_interval(self):
+        control = self.make()
+        self.command(1, 'prepare_suspend')
+        self.assertEqual(control.poll(), 'hold')
+        boundary = now_clock() - 2
+        self.command(1, 'suspended', boundary=boundary)
+        original = control._write
+        calls = []
+        def write(*args, **options):
+            calls.append(args)
+            if len(calls) == 1:
+                raise OSError(errno.EPERM, 'one pre-publication directory read denied')
+            return original(*args, **options)
+        with patch.object(control, '_write', side_effect=write):
+            self.assertEqual(control.poll(), 'hold')
+            self.assertEqual(len(control.intervals), 1)
+            self.assertEqual(control.poll(), 'hold')
+        self.assertEqual(len(control.intervals), 1)
+        self.assertEqual(control.intervals[0]['start'], boundary)
+        self.assertFalse(control.accounting_uncertain)
+        self.assertEqual(json.loads((self.root/'ack.json').read_text())['status'], 'paused')
+
+    def test_publication_directory_read_retries_before_creating_one_temporary(self):
+        from cmw.jobs import suspension_protocol as protocol
+        control = self.make()
+        with patch.object(control, '_check_directory', side_effect=[
+                OwnershipUnavailable('directory', 'one denied directory read'), None]), \
+                patch.object(protocol.os, 'open', wraps=os.open) as create, \
+                patch.object(protocol.time, 'sleep') as sleep:
+            control._write('ack.json', {'one': 'publication'})
+        self.assertEqual(json.loads((self.root/'ack.json').read_text()), {'one': 'publication'})
+        create.assert_called_once()
+        sleep.assert_called_once_with(.25)
 
     def test_nonprivate_and_redirected_context_refuse(self):
         (self.root / 'context.json').chmod(0o644)
@@ -361,8 +431,10 @@ class ControlledDriverTests(unittest.TestCase):
         from unittest.mock import Mock
         from cmw.jobs.suspension_protocol import controlled_driver
         control = Mock()
+        control._wait_for_owner_read.side_effect = lambda read: read()
         control.poll.return_value = 'hold'
         control.elapsed = 10
+        control.execution_budget_exhausted.return_value = False
         control.request_termination.side_effect = SuspensionProtocolError('Worker authority lost')
         child = Mock(pid=123)
         child.poll.side_effect = [None, None, 0]
@@ -381,6 +453,7 @@ class ControlledDriverTests(unittest.TestCase):
         from unittest.mock import Mock
         from cmw.jobs.suspension_protocol import controlled_driver
         control = Mock()
+        control._wait_for_owner_read.side_effect = lambda read: read()
         control.poll.return_value = 'hold'
         control.elapsed = 1
         control.execution_budget_exhausted.return_value = False

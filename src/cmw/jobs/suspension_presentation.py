@@ -29,6 +29,8 @@ def intended_action(job):
 
 
 def suspension_summary(job, *, compact=False):
+    if 'completion' in job.get('ownership_holds', {}):
+        return 'Completion pending · Resources retained · Controls unavailable'
     record = job.get('suspension') or {}
     phase = effective_status(job)
     if not record:
