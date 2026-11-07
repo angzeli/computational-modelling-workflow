@@ -104,12 +104,9 @@ The representative checks passed on both local interpreters:
 | Python 3.14 | 16 | 1,275 | 1,217 / 58 | 40.407 s |
 | Python 3.11 | 16 | 1,275 | 1,217 / 58 | 44.666 s |
 
-The Python 3.14 baseline contains 10,460 read occurrences, projecting **31,380
-full rows**, including 120 native parent reads and 24 native child-list reads.
 The source inventory has 366 candidate calls; 156 were reached by the fault-free
 baselines. That distinction is intentional: inventory entries include composite
 calls and the explicitly excluded scenarios above. Native path depth and
-interpreter layout can change the full row count across platforms. The estimated
-full Python 3.14 runtime is about nineteen minutes at the representative average;
-this is not a full-run measurement. Full-matrix and CI results belong in the PR
-validation report; this document asserts only the local representative results.
+interpreter layout can change the full row count across platforms. Full-matrix
+and CI results belong in the PR validation report; this document asserts only
+the local representative results.
