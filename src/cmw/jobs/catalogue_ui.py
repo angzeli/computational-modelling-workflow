@@ -68,6 +68,8 @@ class CatalogueSearch(ModalScreen):
         self.query_one('#catalogue-text', Input).focus()
 
     def show_other_receipts(self, captions):
+        if not self.query('#catalogue-other-receipts'):
+            return
         widget = self.query_one('#catalogue-other-receipts', Static)
         widget.display = bool(captions)
         widget.update('\n'.join(captions))
@@ -79,7 +81,8 @@ class CatalogueSearch(ModalScreen):
     def node_commands_changed(self, allowed):
         owners = self.eligible_owners()
         self.commands_allowed = bool(owners)
-        if self.is_mounted:
+        if self.is_mounted and all(self.query(selector) for selector in (
+                '#catalogue-apply', '#catalogue-owner', '#catalogue-next')):
             self.query_one('#catalogue-apply', Button).disabled = not owners
             selected = self.query_one('#catalogue-owner', Select).value
             self.query_one('#catalogue-next', Button).disabled = (
@@ -173,12 +176,15 @@ class CatalogueDetails(ModalScreen):
 
     def on_mount(self):
         def accepted(record,relations,error,receipt=None):
-            if not self.is_mounted:
+            if not self.is_mounted or self not in self.app.screen_stack:
                 return
             if error is not None:
-                self.query_one('#catalogue-detail-status',Static).update(safe_snapshot_text('Catalogue unavailable: '+str(error)))
+                if self.query('#catalogue-detail-status'):
+                    self.query_one('#catalogue-detail-status',Static).update(safe_snapshot_text('Catalogue unavailable: '+str(error)))
                 return
             self.record,self.relations = record,relations
+            if not self.query('#catalogue-body'):
+                return
             self.query_one('#catalogue-body',Static).update(catalogue_text(record,relations))
             if self.owner is not None:
                 self.app.view_received(self, self.owner, receipt)
@@ -188,7 +194,7 @@ class CatalogueDetails(ModalScreen):
 
     def node_commands_changed(self, allowed):
         self.commands_allowed = allowed
-        if self.is_mounted:
+        if self.is_mounted and self.query('#catalogue-members') and self.query('#catalogue-study'):
             self.query_one('#catalogue-members', Button).disabled = not (allowed and self.record and self.record.series)
             self.query_one('#catalogue-study', Button).disabled = not allowed or self.study_request is None
 

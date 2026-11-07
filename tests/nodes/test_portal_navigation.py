@@ -162,6 +162,64 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.selected_key, new_key)
             self.assertEqual(app.selection_generation, generation + 1)
 
+    async def test_new_cursor_movement_invalidates_pending_portal_restoration(self):
+        app, backends = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.position(app, backends, pilot, 24)
+            table = app.query_one('#table', DataTable)
+            before = app.selected_key
+            target = row_key(backends['MINI'].jobs[24]['target'])
+            callbacks = []
+            original_schedule = app.call_after_refresh
+
+            def schedule(callback, *args, **kwargs):
+                if callback == app._restore_cursor:
+                    callbacks.append(args[0])
+                    return True
+                return original_schedule(callback, *args, **kwargs)
+
+            with patch.object(app, 'call_after_refresh', side_effect=schedule):
+                app.restore_view(app.capture_view())
+                self.assertTrue(app.navigation_pending())
+                table.action_cursor_down()
+                self.assertEqual(app.selected_key, before)
+                self.assertFalse(app.navigation_pending())
+                app.render_state()
+                self.assertEqual(app.selected_key, target)
+                for token in callbacks:
+                    app._restore_cursor(token)
+                    app._restore_offsets(token)
+                self.assertEqual(table.ordered_rows[table.cursor_row].key.value, target)
+                self.assertEqual(app.selected_key, target)
+            await pilot.pause()
+            self.assertEqual(app.selected_key, target)
+
+    async def test_files_cursor_movement_invalidates_pending_parent_return(self):
+        app, backends = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.position(app, backends, pilot, 24)
+            target = app.selected()[1]['target']
+            result = {'locations': [
+                {'location_id': role, 'role': role, 'accessibility': 'AVAILABLE',
+                 'kind': 'directory', 'node_path': '/unopened/' + role}
+                for role in ('input', 'output')]}
+            files = NodeFiles('MINI', target, 'Synthetic locations', result)
+            app.push_screen(files)
+            await self.until(pilot, lambda: files.is_mounted, 'synthetic Files mounted')
+            table = files.query_one(DataTable)
+            callbacks = []
+            with patch.object(app, 'call_after_refresh', side_effect=lambda callback, token: callbacks.append(token)):
+                app.restore_view(app.capture_view(files))
+                self.assertTrue(app.navigation_pending(files))
+                table.action_cursor_down()
+                self.assertFalse(app.navigation_pending(files))
+                for token in callbacks:
+                    app._restore_cursor(token)
+                    app._restore_offsets(token)
+                self.assertEqual(table.cursor_row, 1)
+            await pilot.pause()
+            self.assertEqual(table.cursor_row, 1)
+
     async def test_mouse_keyboard_j25_j24_repeat_at_required_geometries(self):
         for size in ((77, 24), (80, 24), (100, 30), (140, 40)):
             with self.subTest(size=size):

@@ -44,17 +44,22 @@ class StudyScreen(ModalScreen):
 
     def on_mount(self):
         def accepted(record, error, receipt=None):
-            if not self.is_mounted:
+            if not self.is_mounted or self not in self.app.screen_stack:
                 return
             if error is not None:
-                self.query_one('#study-status', Static).update(safe_snapshot_text('Study unavailable / incomplete owner coverage: '+str(error)))
-                self.query_one('#study-body', Static).update('No fresh series evidence. No comparison or convergence verdict is available.')
+                if self.query('#study-status'):
+                    self.query_one('#study-status', Static).update(safe_snapshot_text('Study unavailable / incomplete owner coverage: '+str(error)))
+                if self.query('#study-body'):
+                    self.query_one('#study-body', Static).update('No fresh series evidence. No comparison or convergence verdict is available.')
                 return
             self.record = record
+            if not self.query('#study-body'):
+                return
             if self.owner is not None:
                 self.app.view_received(self, self.owner, receipt)
             self.query_one('#study-body', Static).update(study_text(record))
-            self.query_one('#study-status', Static).update('Recorded study bindings only; use explicit study compare for fresh scientific qualification.')
+            if self.query('#study-status'):
+                self.query_one('#study-status', Static).update('Recorded study bindings only; use explicit study compare for fresh scientific qualification.')
         self.request(accepted)
         self.query_one('#study-scroll').focus()
 

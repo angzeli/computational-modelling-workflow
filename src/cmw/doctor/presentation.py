@@ -93,10 +93,18 @@ class DoctorReport(FrozenText):
         self.pending = False
         self.report = report
         body = ('Doctor unavailable: ' + error) if error else text
-        self.query_one(TextArea).load_text(safe_snapshot_text(self.header() + '\n\n' + body))
+        self.text = safe_snapshot_text(self.header() + '\n\n' + body)
+        self.render_report()
 
-        if report is not None and self.on_report_displayed is not None:
-            self.on_report_displayed()
+    def render_report(self):
+        if (self.pending or self not in self.app.screen_stack
+                or not self.query(TextArea)):
+            return
+        self.query_one(TextArea).load_text(self.text)
+
+        if self.report is not None and self.on_report_displayed is not None:
+            displayed, self.on_report_displayed = self.on_report_displayed, None
+            displayed()
 
     def unavailable(self, reason):
         self.accept(None, None, str(reason))

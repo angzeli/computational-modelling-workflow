@@ -17,7 +17,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Input, Static, TextArea
 
-from cmw.jobs.navigation import NavigationApp
+from cmw.jobs.navigation import NavigationApp, NavigationTable
 from cmw.jobs.cli import elapsed, machine_text, machine_detail, usage_summary
 from cmw.jobs.copy_ui import FrozenText, SelectableStatic
 from cmw.jobs.history_ui import ProgressHistory
@@ -49,7 +49,7 @@ def row_key(target):
     return '/'.join(map(str, target_key(target)))
 
 
-class NodesTable(DataTable):
+class NodesTable(NavigationTable):
     BINDINGS = [Binding('enter', 'select_cursor', 'Details')]
 
     async def _on_click(self, event):
@@ -179,10 +179,14 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
     def on_mount(self):
         self.query_one(DataTable).focus()
         self.tick()
-        self.set_interval(.25, self.tick)
+        self.refresh_timer = self.set_interval(.25, self.tick)
 
     async def on_unmount(self):
         self.closed = True
+        if timer := getattr(self, 'refresh_timer', None):
+            timer.stop()
+        for screen in self.screen_stack:
+            self.unbind_node_view(screen)
         self.catalogue_generation += 1
         self.catalogue_cancel.set()
         for lane in self.lanes.values():
@@ -190,9 +194,9 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         await asyncio.gather(*(asyncio.to_thread(lane.backend.close) for lane in self.lanes.values()))
 
     def on_resize(self):
-        if self.is_mounted:
+        if self.is_mounted and not self.closed and self.screen_stack:
             # Resize reaches the app before its refreshed size is installed.
-            self.call_after_refresh(self.render_state)
+            self.screen_stack[0].call_after_refresh(self.render_state)
 
     def action_detach(self):
         self.exit()
@@ -245,7 +249,9 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         return True
 
     def tick(self):
-        if self.closed or not self.is_running or not list(self.query('#node-summary')):
+        # Observation lanes outlive individual render surfaces. A missing
+        # widget must not stop expiry, recovery, or queued request dispatch.
+        if self.closed or not self.is_running:
             return
         now = self.clock()
         for owner, lane in self.lanes.items():
@@ -341,6 +347,8 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         return failure
 
     def accept(self, owner, request, envelope, error):
+        if self.closed:
+            return
         lane = self.lanes[owner]
         lane.busy = False
         lane.active_request = None
@@ -466,10 +474,21 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         return observed_machine_usage(lane.status_envelope, lane.received, self.clock(),
             connected=lane.fresh(self.clock()), transport_age=lane.status_transport_age)
 
+    def render_available(self):
+        if self.closed or not self.screen_stack:
+            return False
+        origin = self.screen_stack[0]
+        if not origin.is_attached or any(not origin.query(selector) for selector in (
+                '#node-summary', '#table', '#selected', '#execution', '#progress', '#message', '#shortcuts')):
+            return False
+        return True
+
     def render_state(self):
-        if not self.is_mounted or not list(self.query('#node-summary')):
+        if self.closed:
             return
         self.sync_node_views()
+        if not self.render_available():
+            return
         origin = self.screen_stack[0]
         table = origin.query_one('#table', DataTable)
         # Keyboard movement precedes its queued highlight. Preserve that current
@@ -482,7 +501,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
                 self.select(key)
         view = self.capture_view(origin)
         before = (self.columns, tuple(self.row_keys), self.card_height, self.viewport)
-        with table.prevent(DataTable.RowHighlighted):
+        with self.navigation_update(), table.prevent(DataTable.RowHighlighted):
             self._render_state()
         after = (self.columns, tuple(self.row_keys), self.card_height, self.viewport)
         if (before != after and not self.navigation_origin_covered(origin)
@@ -1060,9 +1079,11 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
 
     def accept_copy(self, result, view):
         self.copy_busy = False
-        if isinstance(view, FrozenText) and view.is_mounted:
+        if self.closed:
+            return
+        if isinstance(view, FrozenText) and view in self.screen_stack and view.query('#copy-status'):
             view.query_one('#copy-status', Static).update(result.message)
-        elif isinstance(view, NodeFiles) and view.is_mounted:
+        elif isinstance(view, NodeFiles) and view in self.screen_stack and view.query('#node-files-status'):
             view.query_one('#node-files-status', Static).update(result.message)
         else:
             self.message(result.message)
@@ -1088,7 +1109,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         self.request_copy(text, view=self.screen)
 
     def message(self, text):
-        if self.is_mounted:
+        if not self.closed and self.is_mounted and self.query('#message'):
             self.query_one('#message', Static).update(literal(text))
 
     def new_backend(self, owner):

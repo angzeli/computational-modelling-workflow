@@ -160,7 +160,11 @@ class RunnerProtocolTests(unittest.TestCase):
             self.assertIn('clock/boot', control.last_error)
 
     def test_budget_excludes_only_confirmed_interval(self):
-        control = self.make()
+        # Binary-exact origins keep these exact interval assertions independent
+        # of the host clock's floating-point subtraction error (issue #16).
+        with patch('cmw.jobs.suspension_protocol.now_clock', return_value=256.0), \
+                patch(__name__ + '.now_clock', return_value=256.0):
+            control = self.make()
         start = control.clock_started
         with patch('cmw.jobs.suspension_protocol.now_clock', return_value=start + 20):
             self.assertTrue(control.execution_budget_exhausted(15))

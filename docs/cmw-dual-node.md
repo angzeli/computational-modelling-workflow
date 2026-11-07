@@ -572,6 +572,11 @@ measured only by the portal monotonic clock; older or future receipts cannot
 authorize controls. Stale/disconnected rows are labelled last reported. Unknown
 Jobs states keep their existing display and refusal semantics.
 
+Lane expiry, polling, handshake and reconnect continue while the portal is
+running, even when a screen or one of its widgets is absent. Each view skips
+only its unavailable presentation; restoring it renders the current lane state.
+Closing the portal stops scheduling and closes its observation connections.
+
 Each selected node has its own reachability state. Connection loss disables
 controls immediately and qualifies retained rows as last reported. The first two
 transport failures preserve the prior state; the third marks UNREACHABLE.

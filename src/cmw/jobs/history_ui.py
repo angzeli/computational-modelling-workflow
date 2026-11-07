@@ -9,6 +9,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Label, Static
 
 from .copy_ui import FrozenText, SelectableStatic
+from .navigation import NavigationTable
 
 from cmw.progress.formatting import (context_text, history_cell, history_columns,
                                      history_entry_text)
@@ -47,12 +48,18 @@ class HistoryDetails(ModalScreen):
 
     def on_mount(self):
         self.refresh_content()
-        self.set_interval(.5, self.refresh_content)
+        self.refresh_timer = self.set_interval(.5, self.refresh_content)
+
+    def on_unmount(self):
+        if timer := getattr(self, 'refresh_timer', None):
+            timer.stop()
 
     def action_select_text(self):
         self.app.push_screen(FrozenText(str(self.query_one('#history-detail', Static).render())))
 
     def refresh_content(self):
+        if not self.is_attached or self not in self.app.screen_stack or not self.query('#history-detail'):
+            return
         if getattr(self.query_one('#history-detail', Static), '_copy_selected', False):
             return
         entry = self.history.entries.get(self.entry_id)
@@ -104,12 +111,13 @@ class ProgressHistory(ModalScreen):
         self.closed = False
         self.boundaries = ()
         self.commands_allowed = True
+        self.clear_rows = False
 
     def compose(self):
         with Vertical():
             yield Static('PROGRESS HISTORY · ' + self.display_id, id='history-title', markup=False)
             yield Static('All stages · all segments · root contexts', id='history-scope', markup=False)
-            yield DataTable(id='history-table', cursor_type='row', zebra_stripes=True)
+            yield NavigationTable(id='history-table', cursor_type='row', zebra_stripes=True)
             yield Static('Loading bounded native observations…', id='history-state', markup=False)
             yield Static(id='history-selected', markup=False)
             yield Static('Enter Children · D Details · Backspace Parent\n[ Older · ] Newer · S Stage · V Segment · Esc Back\nCtrl-C Detach', id='history-help', markup=False)
@@ -156,12 +164,18 @@ class ProgressHistory(ModalScreen):
     def invalidate(self):
         self.expired = True
         self.request_generation += 1
-        self.query_one('#history-state', Static).update('Selected attempt or source declarations changed. Reopen history for the current binding.')
+        if self.query('#history-state'):
+            self.query_one('#history-state', Static).update('Selected attempt or source declarations changed. Reopen history for the current binding.')
         if self.context is not None and self.app.progress_service is not None:
             self.app.progress_service.release_history(self.context)
 
     def accept_page(self, context, page, generation):
-        if self.closed or self.expired or generation != self.request_generation:
+        with self.app.navigation_update():
+            self._accept_page(context, page, generation)
+
+    def _accept_page(self, context, page, generation):
+        if (self.closed or self.expired or generation != self.request_generation
+                or self not in self.app.screen_stack):
             return
         if self.page is not None and self.page.source_revision and page.source_revision and self.page.source_revision != page.source_revision:
             # Retained rows and selected IDs must never migrate to a new source generation.
@@ -171,17 +185,29 @@ class ProgressHistory(ModalScreen):
             self.request_generation += 1
             self.parent_id = self.cursor = None
             self.parent_label = 'root contexts'
-            self.query_one('#history-table', DataTable).clear()
+            self.clear_rows = True
             page = replace(page, status='LOADING', messages=('Source generation changed; reconstructing the new root contexts.',))
         self.context, self.page = context, page
         self.boundaries = tuple(dict.fromkeys((*self.boundaries, *page.boundaries)))[-64:]
         self.cursor = page.cursor or self.cursor
+        self.entries = {entry.entry_id: entry for entry in page.entries}
+        self.render_page()
+
+    def render_page(self):
+        if self.closed or self not in self.app.screen_stack or self.page is None or any(
+                not self.query(selector) for selector in (
+                    '#history-table', '#history-scope', '#history-state', '#history-selected')):
+            return
+        page = self.page
         table = self.query_one('#history-table', DataTable)
+        if self.clear_rows:
+            table.clear()
+            self.clear_rows = False
         selected = table.ordered_rows[table.cursor_row].key.value if table.row_count else None
         position = table.scroll_offset
         columns = history_columns(page)
         query = (self.cursor, self.parent_id, self.stage, self.segment)
-        if columns != self.columns or query != self.display_query:
+        if columns != self.columns or query != self.display_query or not table.columns:
             table.clear(columns=True)
             for column in columns:
                 table.add_column(column.label, key=column.key)
@@ -197,7 +223,6 @@ class ProgressHistory(ModalScreen):
             for entry in page.entries:
                 for column in columns:
                     table.update_cell(entry.entry_id, column.key, literal(history_cell(entry, column)))
-        self.entries = {entry.entry_id: entry for entry in page.entries}
         if self.restore_entry_id in self.entries:
             selected = self.restore_entry_id
             self.restore_entry_id = None
@@ -219,11 +244,15 @@ class ProgressHistory(ModalScreen):
         self.refresh_selected()
 
     def refresh_selected(self):
+        if self.closed or not self.query('#history-table') or not self.query('#history-selected'):
+            return
         entry = self.selected_entry()
         self.query_one('#history-selected', Static).update(literal(
             f'{entry.kind.replace("-", " ")} · {entry.state} · {context_text(entry.context) if entry.context else entry.native_label}\n{entry.coverage}; D shows source and timing qualifications.' if entry else 'No entry selected.'))
 
     def selected_entry(self):
+        if not self.query('#history-table'):
+            return None
         table = self.query_one('#history-table', DataTable)
         return self.entries.get(table.ordered_rows[table.cursor_row].key.value) if table.row_count else None
 
