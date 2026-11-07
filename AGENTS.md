@@ -226,6 +226,16 @@ repeat CI.
   time.
 - Each worktree uses its own environment installed from that worktree, so
   comparisons between commits test the intended code.
+- Ordinary CI test methods have a 300 s native watchdog; a positive finite
+  `CMW_TEST_TIMEOUT_SECONDS` overrides the budget for test fixtures. The fault
+  sweep lifecycle methods retain their stricter row watchdog; manifest checks
+  use the ordinary guard. The method budget covers setUp, the body, tearDown
+  and instance cleanups, not module/class fixtures. A native timeout prints the active
+  test and stack, aborts only that isolated module process, and may bypass its
+  cleanup; partial counts are incomplete, never a passing suite. It does not
+  signal other processes. Intentional indefinite `UNVERIFIABLE` holds mean a
+  stale mock of an old ownership API can now hang instead of producing a quick
+  failure: audit the mock against the actual caller before changing assertions.
 - Pushing and opening a PR may proceed while local targeted diagnosis runs;
   merging waits for both.
 - Before reporting a PR as ready, read every review comment, including
