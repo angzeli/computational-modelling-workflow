@@ -15,7 +15,7 @@ try:
     from textual.selection import Selection
     from textual.widgets import DataTable, Select, Static, TextArea
     from cmw.jobs.copy_ui import CopyPreview, FrozenText, SelectableStatic
-    from cmw.jobs.tui import JobsApp, NoteEditor
+    from cmw.jobs.tui import JobsApp, JobsTable, NoteEditor
 except ImportError:
     JobsApp = None
 
@@ -96,6 +96,60 @@ class CopyUiTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('/synthetic private/output.log', area.text)
             await pilot.press('escape', 'q')
         self.assertEqual(self.store.snapshot()['jobs'], before)
+
+    async def test_covered_cursor_change_survives_refresh_before_highlight(self):
+        original_move = JobsTable.move_cursor
+        forced = []
+        refreshing = False
+
+        def move_then_refresh(table, *args, **kwargs):
+            nonlocal refreshing
+            old_row = table.cursor_row
+            result = original_move(table, *args, **kwargs)
+            if refreshing or forced or not table.is_mounted or table.id != 'table':
+                return result
+            app = table.app
+            if (len(app.screen_stack) > 1 and isinstance(app.screen, CopyPreview)
+                    and table.screen is app.screen_stack[0] and table.cursor_row != old_row):
+                forced.append((app.selected_id, app.row_ids[table.cursor_row]))
+                refreshing = True
+                try:
+                    # Deliver the periodic refresh before the newer cursor's
+                    # queued highlight can update the selected attempt.
+                    app.refresh_state()
+                finally:
+                    refreshing = False
+            return result
+
+        with patch.object(JobsTable, 'move_cursor', new=move_then_refresh):
+            # Keep every original frozen-preview, binding, cache, and clipboard
+            # assertion under the forced ordering that failed on main.
+            await self.test_preview_freezes_attempt_refresh_is_explicit_and_copy_is_complete()
+        self.assertEqual(forced, [(self.jobs[0]['display_id'], self.jobs[1]['display_id'])])
+
+    async def test_modal_return_cannot_restore_over_newer_covered_cursor(self):
+        app = self.app()
+        async with app.run_test(size=(77, 24)) as pilot:
+            table = app.query_one('#table', DataTable)
+            origin = app.screen
+            await pilot.press('y')
+            self.assertIsInstance(app.screen, CopyPreview)
+            original_view = app._navigation_frames[-1].view
+            job = self.jobs[1]
+            table.move_cursor(row=app.row_ids.index(job['display_id']), animate=False)
+            app.refresh_state()
+            self.assertEqual(app.selected_id, job['display_id'])
+            self.assertEqual(app.row_ids[table.cursor_row], job['display_id'])
+            self.assertNotEqual(app._navigation_inputs[origin], original_view.input_generation)
+            await app.pop_screen()
+            # Force delivery even if Textual already drained the return callback.
+            app.restore_view(original_view)
+            app._restore_cursor(app._navigation_restores[origin])
+            self.assertFalse(app.navigation_pending(origin))
+            self.assertEqual(app.selected_id, job['display_id'])
+            self.assertEqual(app.row_ids[table.cursor_row], job['display_id'])
+            self.assertEqual(app.progress_selection, app.progress_identity())
+            self.assertEqual(app.progress_selection[1:3], (job['id'], job['attempt_id']))
 
     async def test_ctrl_c_selected_text_failure_consumes_event_and_editor_literals_survive(self):
         self.backend.side_effect = OSError('synthetic backend failure')

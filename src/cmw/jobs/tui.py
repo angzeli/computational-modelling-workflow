@@ -1296,17 +1296,20 @@ class JobsApp(LocalCatalogue, NavigationApp):
     def _adopt_navigation_cursors(self, origin):
         # Movement invalidates pending restoration synchronously. Adopt its old
         # row identity before either snapshotting selection or rebuilding rows.
-        if self.navigation_pending(origin) or self.navigation_origin_covered(origin):
+        if self.navigation_pending(origin):
             return
         previous = self.selected_id, self.external_selected_id
         table = origin.query_one('#table', DataTable)
+        # A covered parent can retain table focus. Its newer cursor still wins;
+        # the input generation invalidates the older modal-return snapshot.
         if table.has_focus and 0 <= table.cursor_row < len(self.row_ids):
             key = self.row_ids[table.cursor_row]
             if key != self.selected_id and self.selected() is not None:
                 self.selected_id = key
                 self.pin_selection()
         external = origin.query_one('#external', DataTable)
-        if (external.has_focus and self.external_selected() is not None
+        if (external.has_focus and not self.navigation_origin_covered(origin)
+                and self.external_selected() is not None
                 and 0 <= external.cursor_row < len(self.external_rows)):
             key = self.external_rows[external.cursor_row]
             if key != self.external_selected_id and self.external_observation(key) is not None:
