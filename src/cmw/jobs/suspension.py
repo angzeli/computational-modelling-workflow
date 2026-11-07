@@ -8,6 +8,7 @@ from __future__ import annotations
 from contextlib import ExitStack, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
+import errno
 import json
 import os
 from pathlib import Path
@@ -327,9 +328,9 @@ class Channel:
         finally:
             os.close(directory_fd)
 
-    def write(self, name, value, *, publication=None):
-        directory_fd = retry_read(self._open_directory)
+    def write(self, name, value, *, publication=None, exclusive=False):
         temporary = '.'+name+'.'+secrets.token_hex(8)
+        directory_fd = retry_read(self._open_directory)
         try:
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
             with os.fdopen(fd, 'w') as stream:
@@ -341,14 +342,22 @@ class Channel:
                     retry_read(self._check)
                 else:
                     self._check()
-                os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+                if exclusive:
+                    os.link(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                            follow_symlinks=False)
+                else:
+                    os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
             os.fsync(directory_fd)
         finally:
+            def discard_temporary():
+                try:
+                    os.unlink(temporary, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    pass
             try:
-                os.unlink(temporary, dir_fd=directory_fd)
-            except FileNotFoundError:
-                pass
-            os.close(directory_fd)
+                retry_read(discard_temporary)
+            finally:
+                os.close(directory_fd)
 
 
 @dataclass(frozen=True)
@@ -629,13 +638,14 @@ class Coordinator:
         from .suspension_protocol import clock_descriptor, now_clock
         self.store, self.job_id, self.claim, self.anchor = store, job['id'], job['claim'], anchor
         self.directory = store.root/'attempts'/job['attempt_id']/'suspension'
+        nonce = secrets.token_hex(32)
         self.directory.mkdir(mode=0o700)
         self.context = dict(protocol=PROTOCOL, backend=job['suspension']['backend'], job_id=job['id'],
             attempt_id=job['attempt_id'], claim=job['claim'], worker=job['worker'], anchor=anchor,
-            state_identity=retry_read(lambda: _file_identity(store.path)), nonce=secrets.token_hex(32),
+            state_identity=retry_read(lambda: _file_identity(store.path)), nonce=nonce,
             directory_identity=retry_read(lambda: _file_identity(self.directory)), clock=retry_read(clock_descriptor))
         self.channel = Channel(self.directory, self.context)
-        self.channel.write('context.json', self.context)
+        self._initialize_context()
         self.registration = None
         self.registered_identity = None
         self.last_check = 0.0
@@ -658,6 +668,48 @@ class Coordinator:
         self.pending_updates = []
         self.pending_command = None
         self.delivered_signals = set()
+
+    def _initialize_context(self):
+        """Resume this instance's publication without recreating its directory.
+
+        Before publication a failed private temporary write can be retried.
+        After publication, exact readback resolves the outcome; only directory
+        durability is retried. A different context is never overwritten.
+        """
+        def read_context():
+            try:
+                return self.channel.read('context.json')
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise OwnershipContradiction('Initial suspension context is redirected') from exc
+                raise
+            except (json.JSONDecodeError, UnicodeError) as exc:
+                raise OwnershipContradiction('Malformed initial suspension context') from exc
+
+        def durable():
+            descriptor = self.channel._open_directory()
+            try:
+                os.fsync(descriptor)
+                self.channel._check()
+            finally:
+                os.close(descriptor)
+
+        delay = .25
+        while True:
+            existing = retry_read(read_context)
+            if existing is not None:
+                if existing != self.context:
+                    raise OwnershipContradiction('Initial suspension context changed; refusing overwrite')
+                retry_read(durable)
+                return
+            try:
+                self.channel.write('context.json', self.context, exclusive=True)
+                return
+            except Exception as exc:
+                if not is_unavailable(exc):
+                    raise
+            time.sleep(delay)
+            delay = min(5., delay * 2)
 
     def discard_before_go(self):
         # Only this worker created the channel and GO has never been sent.

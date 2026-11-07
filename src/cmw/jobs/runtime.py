@@ -179,11 +179,17 @@ def launch_blocker(job, *, final=False):
         blocker = molecular_launch_blocker(job, final=final)
         if blocker:
             return blocker
-    def mode(path):
+    def mode(path, *, path_candidate=False):
         try:
             return path.stat().st_mode
         except (FileNotFoundError, NotADirectoryError):
             return 0
+        except PermissionError:
+            # Like exec/which, an inaccessible PATH entry does not mask a later
+            # executable. Explicit paths and cwd remain unavailable evidence.
+            if path_candidate:
+                return 0
+            raise
     if not stat.S_ISDIR(mode(Path(job['cwd']))):
         return "Working directory no longer exists"
     command = job["argv"][0]
@@ -200,7 +206,7 @@ def launch_blocker(job, *, final=False):
             str(Path(entry) if Path(entry).is_absolute() else Path(job["cwd"]) / entry)
             for entry in path.split(os.pathsep)
         )
-        if not any(stat.S_ISREG(mode(Path(entry)/command)) and os.access(Path(entry)/command, os.X_OK)
+        if not any(stat.S_ISREG(mode(Path(entry)/command, path_candidate=True)) and os.access(Path(entry)/command, os.X_OK)
                    for entry in search_path.split(os.pathsep)):
             return f"Executable not found: {command}"
     return ""

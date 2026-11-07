@@ -194,11 +194,11 @@ class StateTests(unittest.TestCase):
                     return native_open(path, *args, **options)
                 with patch.object(Path, 'mkdir', new=create), \
                         patch.object(control.os, 'open', side_effect=open_directory), \
-                        patch.object(control.os, 'replace', wraps=control.os.replace) as publish, \
+                        patch.object(control.os, 'link', wraps=control.os.link) as publish, \
                         patch.object(control.time, 'sleep') as sleep:
                     coordinator = control.Coordinator(self.store, job, ANCHOR)
                 self.assertEqual(creations, [directory])
-                self.assertEqual(len(opened), 2)
+                self.assertEqual(len(opened), 3)
                 publish.assert_called_once()
                 sleep.assert_called_once_with(.25)
                 self.assertEqual(coordinator.channel.read('context.json'), coordinator.context)

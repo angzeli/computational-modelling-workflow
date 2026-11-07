@@ -63,6 +63,7 @@ would not exercise those native error classifiers.
 | Controller start, reconciliation, enrollment, UI readiness and observation-only entrypoints | Separate lifecycle/clock/state tests. They do not themselves own a normal/cancel/timeout worker completion. |
 | ORCA scientific preparation, MPI qualification and external driver startup | Existing ORCA/protocol contract tests. The sweep exercises the ORCA completion handoff, without launching or qualifying an engine. |
 | Ambiguous COMMIT and committed-write readback | `test_completion_retry.py` covers idempotence directly; these are not native read rows discovered from a fault-free lifecycle. |
+| Executable PATH search and initial context publication failures | Dedicated preflight and constructor tests cover these boundaries. The read matrix does not inject write, fsync or publication failures; terminal-write uniqueness does not establish idempotence for every setup mutation. |
 | Raw zero-argument `time.time()` / `time.monotonic()` | Their supported CPython calls do not expose EAGAIN/EPERM. The first-boundary clock/timestamp failure robustness cases are separate tests in `test_completion_retry.py`; the matrix injects into the typed `now_clock`/clock-descriptor evidence boundaries. |
 | Worker death and controller takeover | Explicitly outside this change; see the durable proposal. |
 
@@ -100,12 +101,12 @@ The representative checks passed on both local interpreters:
 
 | Interpreter | Unittest count | Injected rows | Terminal / pending | Elapsed |
 |---|---:|---:|---:|---:|
-| Python 3.14 | 16 | 1,275 | 1,217 / 58 | 45.642 s |
-| Python 3.11 | 16 | 1,275 | 1,217 / 58 | 60.576 s |
+| Python 3.14 | 16 | 1,275 | 1,217 / 58 | 40.407 s |
+| Python 3.11 | 16 | 1,275 | 1,217 / 58 | 44.666 s |
 
 The Python 3.14 baseline contains 10,460 read occurrences, projecting **31,380
 full rows**, including 120 native parent reads and 24 native child-list reads.
-The source inventory has 365 candidate calls; 156 were reached by the fault-free
+The source inventory has 366 candidate calls; 156 were reached by the fault-free
 baselines. That distinction is intentional: inventory entries include composite
 calls and the explicitly excluded scenarios above. Native path depth and
 interpreter layout can change the full row count across platforms. The estimated
