@@ -8,9 +8,10 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 from uuid import uuid4
 
-from cmw.jobs.ownership import OwnershipUnavailable, valid_owner_record
+from cmw.jobs.ownership import OwnershipUnavailable, is_unavailable, valid_owner_record
 from cmw.jobs.suspension_protocol import (BINDING_FIELDS, PROTOCOL, SuspensionProtocolError,
     _directory_identity, _private_info, _read_fd, clock_descriptor, controlled_driver,
     file_identity, mpi_runtime_identity, require_control_session)
@@ -26,6 +27,19 @@ ORDINARY_KEYWORDS = frozenset('HF RHF UHF RKS UKS PBE PBE0 B3LYP BP86 BLYP TPSS 
     'TightOpt LooseOpt NormalOpt SP Opt'.casefold().split())
 BASIS = re.compile(r'(?:def2-(?:sv(?:p|\(p\))|(?:t|q)zv(?:p|pp))(?:d)?(?:/(?:j|jk|c))?|sto-3g|'
                    r'(?:aug-)?cc-pv[dtq]z(?:/(?:j|jk|c))?|6-31(?:1)?\+?g(?:\*{1,2})?)', re.I)
+
+
+def _read_preparation(read):
+    """Keep an enrolled pre-launch runner alive while its inputs are unreadable."""
+    delay = .25
+    while True:
+        try:
+            return read()
+        except Exception as exc:
+            if not is_unavailable(exc):
+                raise
+        time.sleep(delay)
+        delay = min(5., 2 * delay)
 
 
 def describe(input_path, target_path, *, nprocs, orca_exe, runtime_path=None):
@@ -92,12 +106,12 @@ def _read_private_record(path):
 def write_completion(path, value):
     """Publish the registered runner's drained outcome once in shell-owned scratch."""
     path = Path(path)
-    if not path.is_absolute() or path.parent.resolve() != Path(os.environ['TMPDIR']).resolve():
+    if not path.is_absolute() or _read_preparation(path.parent.resolve) != _read_preparation(Path(os.environ['TMPDIR']).resolve):
         raise SuspensionProtocolError('Completion record must use the shell private scratch directory')
-    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory = _read_preparation(lambda: os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
     temporary = '.' + path.name + '.' + uuid4().hex
     try:
-        _private_info(os.fstat(directory), directory=True)
+        _read_preparation(lambda: _private_info(os.fstat(directory), directory=True))
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                      0o600, dir_fd=directory)
         with os.fdopen(fd, 'w', encoding='utf-8') as handle:
@@ -193,8 +207,9 @@ def main(argv=None):
             print(verify_completion(args.completion_record, process_status=args.process_status,
                                     runner_pid=args.runner_pid))
             return 0
-        runtime = describe(args.input, args.target, nprocs=args.nprocs,
-                           orca_exe=args.orca_exe, runtime_path=args.runtime_contract)
+        prepare = lambda: describe(args.input, args.target, nprocs=args.nprocs,
+                                   orca_exe=args.orca_exe, runtime_path=args.runtime_contract)
+        runtime = _read_preparation(prepare) if args.operation == 'run' else prepare()
         if args.operation == 'describe':
             print(json.dumps({'protocol': 1, 'backend': 'orca-local-v1', 'runtime': runtime,
                               'deadline': 'no execution timeout configured in this supported runner',

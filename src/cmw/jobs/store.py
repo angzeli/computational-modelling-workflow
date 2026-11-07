@@ -832,6 +832,8 @@ class Store:
         if expected is not None and job["status"] != expected:
             raise JobsError("Job changed since selection; refresh and try again")
         status = job["status"]
+        if 'completion' in job.get('ownership_holds', {}):
+            raise JobsError('Completion pending; the original worker is recording completion evidence; controls unavailable')
         if action in {"hold", "release", "move"} and status not in PENDING:
             raise JobsError("Only pending jobs can be held, released or reordered")
         if action == "hold":
@@ -907,7 +909,9 @@ class Store:
         current = [j for j in jobs if j["status"] in ACTIVE]
         pending = sorted((j for j in jobs if j["status"] in PENDING), key=lambda j: j["order"])
         for job in jobs:
-            job["elapsed"] = None if job["started_at"] is None else max(0, (job["finished_at"] or now) - job["started_at"])
+            job["elapsed"] = (None if job["started_at"] is None or (
+                job["status"] in TERMINAL and job["finished_at"] is None)
+                else max(0, (job["finished_at"] if job["finished_at"] is not None else now) - job["started_at"]))
             if job["status"] in PENDING:
                 if job["status"] == "Hold":
                     job["reason"] = "User hold"

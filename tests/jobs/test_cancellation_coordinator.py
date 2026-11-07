@@ -209,9 +209,26 @@ class CancellationCoordinatorTests(unittest.TestCase):
         self.step()
         self.assertEqual(self.sent, [(11, signal.SIGTERM)])
         self.table.clock = .6
-        with self.assertRaisesRegex(JobsError, 'Denied termination signal'):
-            self.step()
+        self.step()
+        self.assertEqual(len(self.coordinator.denied_signals), 1)
         self.assertEqual(self.sent, [(11, signal.SIGTERM)])
+        self.assert_retained()
+
+    def test_history_read_failure_resumes_remaining_primary_without_repeating_term(self):
+        original = self.coordinator._apply_update
+        failed = []
+        def update(job, changes):
+            if changes.get('signal_history') and not failed:
+                failed.append(True)
+                raise suspension.OwnershipUnavailable('queue', 'one signal-history read failed')
+            return original(job, changes)
+        with patch.object(self.coordinator, '_apply_update', side_effect=update):
+            self.step()
+            self.assertEqual(self.sent, [(11, signal.SIGTERM)])
+            self.step()
+        self.assertEqual(self.sent, [(11, signal.SIGTERM), (11, signal.SIGCONT)])
+        history = self.current()['suspension']['signal_history']
+        self.assertEqual([row['signal'] for row in history], [signal.SIGTERM, signal.SIGCONT])
         self.assert_retained()
 
     def test_denied_primary_requires_original_absence_and_group_absence(self):
@@ -229,15 +246,14 @@ class CancellationCoordinatorTests(unittest.TestCase):
         self.assertFalse(self.coordinator.ready_to_release())
         self.assert_retained()
 
-    def test_reused_original_or_inaccessible_rank_blocks_fallback(self):
+    def test_legacy_identity_mismatch_or_inaccessible_rank_keeps_fallback_pending(self):
         self.mpi = True
         self.step()
         self.table.clock = 2.1
         for changes in ({'birth': 999.0}, {'birth': 20.0, 'inaccessible': True}):
             with self.subTest(changes=changes):
                 self.table.rows[20].update(changes)
-                with self.assertRaises(JobsError):
-                    self.step()
+                self.step()
                 self.assertEqual(self.sent, [(11, signal.SIGTERM)])
         self.assert_retained()
 
@@ -370,8 +386,9 @@ class CancellationCoordinatorTests(unittest.TestCase):
         self.step()
         self.assertEqual(self.sent, [(11, signal.SIGTERM), (20, signal.SIGKILL)])
         self.table.clock = 2.7
-        with self.assertRaisesRegex(JobsError, 'Denied termination signal'):
-            self.step()
+        self.step()
+        self.assertEqual(len(self.coordinator.denied_signals), 1)
+        self.assertEqual(self.sent, [(11, signal.SIGTERM), (20, signal.SIGKILL)])
         self.assert_retained()
 
 

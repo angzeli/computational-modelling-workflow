@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import errno
 import os
 from pathlib import Path
 import shutil
@@ -8,12 +9,50 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from cmw.jobs.suspension_protocol import SuspensionProtocolError
 from cmw.molecular.orca.suspension import describe
 
 ROOT = Path(__file__).parents[2]
+
+
+class OrcaReadRecoveryTests(unittest.TestCase):
+    def test_preparation_retries_only_unavailable_reads(self):
+        from cmw.molecular.orca import suspension
+        read = Mock(side_effect=[OSError(errno.EAGAIN, 'one read'), {'ready': True}])
+        with patch.object(suspension.time, 'sleep') as sleep:
+            self.assertEqual(suspension._read_preparation(read), {'ready': True})
+        self.assertEqual(read.call_count, 2)
+        sleep.assert_called_once_with(.25)
+        read = Mock(side_effect=SuspensionProtocolError('Contradictory input identity'))
+        with patch.object(suspension.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(SuspensionProtocolError, 'Contradictory'):
+                suspension._read_preparation(read)
+        read.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_receipt_directory_probe_retries_before_one_publication(self):
+        from cmw.molecular.orca import suspension
+        with tempfile.TemporaryDirectory(prefix='cmw orca read recovery ') as temporary:
+            root = Path(temporary).resolve()
+            root.chmod(0o700)
+            path = root/'completion.json'
+            original = os.fstat
+            calls = []
+            def read(fd):
+                calls.append(fd)
+                if len(calls) == 1:
+                    raise OSError(errno.EPERM, 'one directory probe')
+                return original(fd)
+            with patch.dict(os.environ, {'TMPDIR': str(root)}), \
+                    patch.object(suspension.os, 'fstat', side_effect=read), \
+                    patch.object(suspension.os, 'link', wraps=os.link) as publish, \
+                    patch.object(suspension.time, 'sleep') as sleep:
+                suspension.write_completion(path, {'exit_code': 0})
+            self.assertEqual(json.loads(path.read_text()), {'exit_code': 0})
+            publish.assert_called_once()
+            sleep.assert_called_once_with(.25)
 
 
 class OrcaSuspensionTests(unittest.TestCase):

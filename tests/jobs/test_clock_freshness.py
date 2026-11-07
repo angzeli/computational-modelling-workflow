@@ -46,7 +46,7 @@ class ClockFreshnessTests(TestCase):
         self.assertIs(control['stop'], False)
         self.assertEqual(control['heartbeat_clock'], stamp(1., 'new-boot'))
 
-    def test_persisted_control_hold_with_uncomparable_clock_escalates_and_retains_control(self):
+    def test_persisted_control_hold_with_uncomparable_clock_requests_attention_without_unknown(self):
         # The prior boot may have had a much larger monotonic counter. Waiting
         # for that numeric value to recur could hide uncertainty for days.
         for first, second in ((stamp(10000.), stamp(1., 'new-boot')),
@@ -58,9 +58,11 @@ class ClockFreshnessTests(TestCase):
                     self.assertEqual(job['status'], 'Run')
                     self.assertIn('guardian', job['ownership_holds'])
                     ownership_hold.unavailable(store, None, job, 'guardian', 'boot_session', 1.)
-                self.assertEqual((job['status'], job['ownership_resume_status']), ('Unknown', 'Run'))
+                self.assertEqual(job['status'], 'Run')
+                self.assertNotIn('ownership_resume_status', job)
                 self.assertIn('guardian', job['ownership_holds'])
-                self.assertIn('duration cannot be established', job['reason'])
+                self.assertIs(job['ownership_holds']['guardian']['attention'], True)
+                self.assertIn('duration cannot be established', job['ownership_holds']['guardian']['reason'])
                 ownership_hold.recovered(store, None, job, 'guardian')
                 self.assertEqual(job['status'], 'Run')
 

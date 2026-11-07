@@ -14,21 +14,43 @@ case "$work_root/" in "$source_root/"*) printf 'Test state requires a directory 
 unset PYTHONPATH
 
 run_module() {
-  local relative=${1#"$source_root/"} module work started status tests
+  local relative=${1#"$source_root/"} module work started status tests line
+  local started_at finished_at result pipeline_status
   # Same module names and sys.path as `discover -s tests -t tests`; a short
   # work directory keeps path-length-sensitive tests representative.
   module=${relative#tests/} module=${module%.py} module=${module//\//.}
   work=$(mktemp -d "$work_root/m.XXXXXX")
   mkdir -m 700 "$work/tmp"
   started=$SECONDS
+  started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  printf 'CMW_TEST_MODULE_STARTED module=%q pid=%s started_at=%s log=%q\n' \
+    "$relative" "$$" "$started_at" "$work/log"
   (cd "$source_root" && TMPDIR="$work/tmp" CMW_JOBS_STATE="$work/unused-state" \
     CMW_TEST_EVIDENCE_DIR="$work/evidence" "$python_exe" -c \
     'import sys, unittest; sys.path.insert(0, "tests"); unittest.main(module=None, argv=["python -m unittest", sys.argv[1]])' \
-    "$module") > "$work/log" 2>&1
-  status=$?
+    "$module") 2>&1 | tee "$work/log" | while IFS= read -r line || [[ -n "$line" ]]; do
+      # The sweep watchdog's stack frames have no marker. Keep the entire
+      # sweep stream live; other modules expose only marked diagnostics.
+      if [[ $module == jobs.test_ownership_fault_sweep ]]; then
+        printf '%s\n' "$line"
+      else
+        # Unittest progress may precede a marker on the same line.
+        case "$line" in *OWNERSHIP_FAULT_*) printf '%s\n' "$line";; esac
+      fi
+    done
+  pipeline_status=("${PIPESTATUS[@]}")
+  status=${pipeline_status[0]}
+  if [[ $status == 0 && ( ${pipeline_status[1]} != 0 || ${pipeline_status[2]} != 0 ) ]]; then
+    status=1
+  fi
   tests=$(sed -n 's/^Ran \([0-9]*\) tests\{0,1\} in .*/\1/p' "$work/log")
-  printf '%s %s tests=%s seconds=%s log=%s\n' "$([[ $status == 0 ]] && echo PASS || echo FAIL)" \
+  finished_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  result=$([[ $status == 0 ]] && echo PASS || echo FAIL)
+  printf '%s %s tests=%s seconds=%s log=%s\n' "$result" \
     "$relative" "${tests:-0}" "$((SECONDS - started))" "$work/log" >> "$work_root/results.txt"
+  printf 'CMW_TEST_MODULE_FINISHED module=%q result=%s exit_code=%s tests=%s elapsed_seconds=%s started_at=%s finished_at=%s log=%q\n' \
+    "$relative" "$result" "$status" "${tests:-unknown}" "$((SECONDS - started))" \
+    "$started_at" "$finished_at" "$work/log"
 }
 export -f run_module
 export source_root work_root python_exe
