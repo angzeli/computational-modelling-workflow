@@ -123,6 +123,7 @@ Hashes are exceptional, not a routine coding check.
 - Inspect Git state only as much as needed to protect existing work and review the task diff.
 - Stage or commit only when requested; stage only the intended scope and inspect the staged diff first.
 - Do not amend, rebase, push, create a pull request, tag, or alter remotes unless explicitly requested.
+- Folding a correction into this PR's own unpublished commits is pre-approved; rewriting published history still requires explicit permission.
 
 ## 8. Failure handling
 
@@ -213,9 +214,13 @@ repeat CI.
   them silently.
 
 ### How to run
-- Choose targeted local tests by reverse imports. Include every test module
-  that imports a changed module directly or transitively, and the tests that
-  exercise changed shell, subprocess or other non-import entry points.
+- Choose targeted local tests from the changed modules' tests, adding their
+  direct importers where these are few, and tests of changed shell, subprocess
+  or other non-import entry points. Broad coverage comes from CI; do not expand
+  local selection through transitive reverse imports.
+- A running calculation on the machine takes priority. While one is running,
+  keep local tests sequential at low priority and total local test time to
+  about 10 minutes or less per interpreter; leave broader coverage to CI.
 - Never run two full test suites at the same time on one machine. Run
   lifecycle, profile and other timing-sensitive tests one test process at a
   time.
