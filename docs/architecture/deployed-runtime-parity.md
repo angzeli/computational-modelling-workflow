@@ -86,6 +86,24 @@ MacBook VASP source remain qualification evidence gaps from the inventory.
 The VASP port is a separate repository and requires its
 [own ownership qualification](vasp-runner-ownership-plan.md).
 
+## Remaining historical-runner caller gap
+
+The ordinary CMW session worker now supplies the ownership read domain, which
+retains its pipe across denied delivery. The historical VASP port runner at
+51d8209 calls `signal_session(..., include_leader=False)` during TERM and KILL
+cleanup without that callback or an explicit absence grace. Those calls still
+inherit the historical zero default in the candidate, whereas deployed
+31616be supplied a two-second default to every caller.
+
+This is an additional caller-level qualification gap within the same unmatched
+patch. An EPERM immediately after confirmed witness exit can still interrupt
+historical runner cleanup instead of waiting for group disappearance. This
+finding follows from the source comparison; no new runner reproduction was
+performed in this change. The separate [runner cutover prerequisite, issue 19](https://github.com/angzeli/computational-modelling-workflow/issues/19)
+must also qualify denied-send recovery during intended cleanup, preserving the
+pending operation and termination intent. The ordinary-worker correction does
+not establish parity for that historical runner path.
+
 ## Required cutover procedure
 
 1. During the authorized cutover window, record every installed or registered
