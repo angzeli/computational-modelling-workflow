@@ -380,6 +380,8 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
     A trusted sole foreground payload may exclude the protected leader group
     when draining its child subgroups. The caller must establish that exclusive
     topology before launching children; this option grants no new ownership.
+    Managed callers keep an unreadable send in their ownership hold, observing
+    only group absence. Historical callers retain the optional bounded grace.
     """
     sid = owner['pid']
 
@@ -397,7 +399,11 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
         return outcome.status == OwnershipStatus.VERIFIED
 
     def require_anchor():
-        if not live(owner) or os.getsid(sid) != sid or os.getpgid(sid) != sid:
+        if not live(owner):
+            if read_domain is not None:
+                raise JobsError('Group leader disappeared: session anchor loss confirmed')
+            raise JobsError('Dedicated session ownership lost or unverified; no signal sent')
+        if os.getsid(sid) != sid or os.getpgid(sid) != sid:
             raise JobsError('Dedicated session ownership lost or unverified; no signal sent')
 
     def verify_owner():
@@ -405,7 +411,22 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
             check_authority()
         read('anchor_topology', require_anchor)
 
-    def await_absence(pgid):
+    def await_absence(pgid, first_failure=None):
+        if read_domain is not None:
+            def absent():
+                # Do not enter check_authority while its domain hold is active.
+                # The read domain verifies the worker and anchor across retries.
+                require_anchor()
+                try:
+                    present = group_exists(pgid)
+                except JobsError as exc:
+                    raise OwnershipUnavailable('session_group_absence', str(exc)) from exc
+                if present:
+                    raise OwnershipUnavailable('session_group_absence',
+                                               'Session subgroup absence cannot be established')
+            read_domain(lambda: _session_read('session_group_absence', absent),
+                        first_failure=first_failure)
+            return
         # Observation only: a reaping group can briefly be positive or denied.
         deadline = time.monotonic()+absence_grace
         while True:
@@ -489,12 +510,19 @@ def signal_session(owner, signum, *, include_leader=True, absence_grace=0, check
                     continue
             except ProcessLookupError:
                 continue
-            except PermissionError as exc:
-                if exc.errno != errno.EPERM or absence_grace <= 0 or not witness_exited(member):
-                    raise
-                # A denied send is not retried. Only subsequently proven group
-                # absence permits moving on; live or ambiguous groups refuse.
-                await_absence(pgid)
+            except OSError as exc:
+                if read_domain is not None:
+                    # Delivery was refused or its outcome cannot be established.
+                    # Never replay a send. Keep the original pipe while reading
+                    # for confirmed absence, including a still-present subgroup.
+                    failure = OwnershipUnavailable('session_send',
+                                                   f'Session signal delivery is unverifiable: {exc}')
+                    await_absence(pgid, first_failure=failure)
+                else:
+                    if (not isinstance(exc, PermissionError) or exc.errno != errno.EPERM
+                            or absence_grace <= 0 or not witness_exited(member)):
+                        raise
+                    await_absence(pgid)
             break
         else:
             await_absence(pgid)
