@@ -96,16 +96,21 @@ class NodeViews:
         stale = [(owner, receipt) for owner, receipt in receipts.items()
                  if not self.receipt_current(owner, receipt)]
         allowed = not stale
+        stale_owners = frozenset(owner for owner, _ in stale)
+        if getattr(screen, 'node_stale_owners', None) != stale_owners:
+            screen.node_stale_owners = stale_owners
+            changed = getattr(screen, 'node_commands_changed', None)
+            if changed is not None:
+                changed(allowed)
         frame = getattr(screen, 'node_view_frame', None)
-        if frame is None:
+        if frame is None or not frame.is_attached:
             # The bound dialog's existing outer panel owns all four edges.
             frames = screen.query(Vertical)
             if not frames:
                 return  # The panel has already left a partially unmounted screen.
             frame = screen.node_view_frame = frames.first()
             frame.add_class('node-view-frame')
-        elif not frame.is_attached:
-            return
+            screen.node_frame_captions = None
         # Textual reserves the corners plus two cells on each end of a border title.
         width = max(1, (frame.region.width or self.size.width) - 6)
         captions = tuple(self.receipt_label(owner, receipt, width) for owner, receipt in stale)
@@ -117,12 +122,6 @@ class NodeViews:
             other_receipts = getattr(screen, 'show_other_receipts', None)
             if other_receipts is not None:
                 other_receipts(captions[1:])
-        stale_owners = frozenset(owner for owner, _ in stale)
-        if getattr(screen, 'node_stale_owners', None) != stale_owners:
-            screen.node_stale_owners = stale_owners
-            changed = getattr(screen, 'node_commands_changed', None)
-            if changed is not None:
-                changed(allowed)
 
     def sync_node_views(self):
         for screen in self.screen_stack:

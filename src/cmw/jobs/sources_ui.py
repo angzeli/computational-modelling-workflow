@@ -51,6 +51,7 @@ class Sources(ModalScreen):
         self.details = False
         self.plans = ()
         self.commands_allowed = True
+        self.status_text = ''
 
     def compose(self):
         with Vertical():
@@ -93,8 +94,13 @@ class Sources(ModalScreen):
         self.expired = True
         self.request_generation += 1
         self.validation = None
-        self.query_one('#sources-validation', Static).update('Selected attempt or declarations changed. Reopen Sources for the current job.')
+        self.show_status('Selected attempt or declarations changed. Reopen Sources for the current job.')
         self.update_controls()
+
+    def show_status(self, text):
+        self.status_text = text
+        if self.query('#sources-validation'):
+            self.query_one('#sources-validation', Static).update(literal(text))
 
     def node_commands_changed(self, allowed):
         self.commands_allowed = allowed
@@ -103,9 +109,11 @@ class Sources(ModalScreen):
     def request(self, kind, payload=None):
         if self.closed or self.expired or self.busy or (kind != 'inspect' and not self.commands_allowed):
             return
+        if kind != 'inspect' and (not self.refresh_available() or self.field_values() is None):
+            return
         self.request_generation += 1
         self.busy = True
-        self.query_one('#sources-validation', Static).update('Checking bounded source metadata…')
+        self.show_status('Checking bounded source metadata…')
         self.update_controls()
         self.app.request_sources(self, kind, payload)
 
@@ -116,24 +124,24 @@ class Sources(ModalScreen):
 
     async def accept_result(self, kind, result, error, generation):
         if (self.closed or self.expired or generation != self.request_generation
-                or not self.refresh_available()):
+                or self not in self.app.screen_stack):
             return
         self.busy = False
         if error:
             self.validation = None
-            self.query_one('#sources-validation', Static).update(literal(error))
+            self.show_status(error)
         elif kind == 'inspect':
             self.inspection = result
             self.plans = result.plans
             self.render_inspection()
             await self.build_fields()
             if (self.closed or self.expired or generation != self.request_generation
-                    or not self.refresh_available()):
+                    or self not in self.app.screen_stack):
                 return
             if result.context.binding_status == 'SOURCE_UNRESOLVED' and self.plans:
                 self.configuring = True
                 self.render_inspection()
-            self.query_one('#sources-validation', Static).update('')
+            self.show_status('')
         elif kind == 'validate':
             self.validation = result
             self.validated_fields = self.field_values()
@@ -141,16 +149,19 @@ class Sources(ModalScreen):
             lead = ('Validation failed.' if result.errors else
                     'Validated; confirm the reviewed conflict / override below.' if result.conflict else
                     'Validated; not yet active. Review, then Use This Session.')
-            self.query_one('#sources-validation', Static).update(literal('\n'.join((lead, *messages))))
+            self.show_status('\n'.join((lead, *messages)))
         elif kind == 'activate':
             self.closed = True
             self.dismiss(result)
             return
         self.update_controls()
-        if kind == 'validate' and result is not None and not result.errors and result.conflict:
+        if (kind == 'validate' and result is not None and not result.errors and result.conflict
+                and self.query('#sources-confirm')):
             self.query_one('#sources-confirm', Checkbox).scroll_visible(animate=False)
 
     def render_inspection(self):
+        if not self.query('#sources-inspection'):
+            return
         context = self.inspection.context
         state = context.binding_status
         if get_registration(context.engine) is None:
@@ -220,6 +231,9 @@ class Sources(ModalScreen):
         await fields.mount(*widgets)
 
     def field_values(self):
+        if any(not self.query(selector) for index, plan in enumerate(self.plans)
+               for selector in (f'#source-path-{index}', *((f'#source-stage-{index}',) if plan.stages else ()))):
+            return None
         return tuple((self.query_one(f'#source-path-{index}', Input).value,
                       self.query_one(f'#source-stage-{index}', Input).value if plan.stages else '')
                      for index, plan in enumerate(self.plans))
@@ -230,13 +244,16 @@ class Sources(ModalScreen):
                      for plan, (path, stage) in zip(self.plans, self.field_values()) if path)
 
     def update_controls(self):
-        if not self.is_mounted or not self.refresh_available():
+        if not self.is_mounted or self.closed or self not in self.app.screen_stack:
+            return
+        self.show_status(self.status_text)
+        fields = self.field_values()
+        if not self.refresh_available() or (self.configuring and fields is None):
+            for name in ('clear', 'validate', 'use'):
+                for button in self.query('#sources-' + name):
+                    button.disabled = True
             return
         ready = self.inspection is not None and not self.expired
-        if self.configuring and ready and any(not self.query(selector)
-                for index, plan in enumerate(self.plans)
-                for selector in (f'#source-path-{index}', *((f'#source-stage-{index}',) if plan.stages else ()))):
-            return
         self.query_one('#sources-fields').display = self.configuring and ready
         for name in ('details', 'edit', 'clear'):
             button = self.query_one('#sources-' + name, Button)
@@ -253,7 +270,7 @@ class Sources(ModalScreen):
         confirm = self.query_one('#sources-confirm', Checkbox)
         confirm.display = self.configuring and valid and self.validation.conflict
         self.query_one('#sources-use', Button).disabled = (self.busy or not self.commands_allowed or not valid
-            or self.validated_fields != self.field_values()
+            or self.validated_fields != fields
             or bool(self.validation.conflict and not confirm.value)) if self.configuring and ready else True
 
     def on_input_changed(self, event):
@@ -262,11 +279,12 @@ class Sources(ModalScreen):
         if event.input.id and event.input.id.startswith('source-'):
             self.validation = None
             self.validated_fields = None
-            self.query_one('#sources-confirm', Checkbox).value = False
+            if self.query('#sources-confirm'):
+                self.query_one('#sources-confirm', Checkbox).value = False
             self.request_generation += 1
             # The underlying filesystem worker still owns the shared busy slot.
             self.busy = False
-            self.query_one('#sources-validation', Static).update('Paths changed. Validate before activation.')
+            self.show_status('Paths changed. Validate before activation.')
             self.update_controls()
 
     def on_checkbox_changed(self, event):
@@ -275,6 +293,9 @@ class Sources(ModalScreen):
     def on_button_pressed(self, event):
         event.stop()
         name = event.button.id
+        if name in {'sources-propose', 'sources-validate', 'sources-use'} and (
+                not self.refresh_available() or self.field_values() is None):
+            return
         if name == 'sources-back':
             self.action_back()
         elif name == 'sources-details':
@@ -284,13 +305,14 @@ class Sources(ModalScreen):
             self.configuring = True
             self.render_inspection()
             self.update_controls()
-            self.query_one('#source-path-0', Input).focus()
+            if self.query('#source-path-0'):
+                self.query_one('#source-path-0', Input).focus()
         elif name == 'sources-clear':
             self.app.clear_session_source(self)
         elif name == 'sources-propose':
             directory = self.query_one('#sources-directory', Input).value
             if not Path(directory).is_absolute():
-                self.query_one('#sources-validation', Static).update('Enter an absolute output directory; no path expansion is performed.')
+                self.show_status('Enter an absolute output directory; no path expansion is performed.')
                 return
             for index, plan in enumerate(self.plans):
                 if (plan.location_role == 'output' and plan.filename
@@ -300,6 +322,6 @@ class Sources(ModalScreen):
             self.request('validate', self.descriptors())
         elif name == 'sources-use' and self.validation is not None:
             if self.validated_fields != self.field_values():
-                self.query_one('#sources-validation', Static).update('Paths changed. Validate again.')
+                self.show_status('Paths changed. Validate again.')
                 return
             self.request('activate', (self.validation, self.query_one('#sources-confirm', Checkbox).value))

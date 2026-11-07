@@ -92,6 +92,23 @@ class RefreshLifecycleTests(unittest.IsolatedAsyncioTestCase):
         refresh.assert_not_called()
         catchup.stop.assert_called_once_with()
 
+    async def test_completed_copy_is_retained_without_the_base_surface(self):
+        from cmw.jobs.copy_ui import FrozenText
+        for app, selector in ((JobsApp(self.store), '#machine'),
+                              (NodesApp({'LOCAL': FakeBackend('LOCAL')}), '#node-summary')):
+            with self.subTest(app=type(app).__name__), patch.object(app, 'set_interval'), \
+                    patch.object(NodesApp, 'tick'):
+                async with app.run_test():
+                    view = FrozenText('synthetic copy')
+                    await app.push_screen(view)
+                    await app.screen_stack[0].query_one(selector).remove()
+                    result = SimpleNamespace(message='Copy completed')
+                    app.accept_copy(result, view)
+                    self.assertFalse(app.copy_busy)
+                    self.assertIn('Copy completed', str(view.query_one('#copy-status', Static).render()))
+                    if isinstance(app, JobsApp):
+                        self.assertIs(app.copy_result, result)
+
     async def test_periodic_detail_views_render_on_mount_and_stop_after_removal(self):
         entry = HistoryEntry('entry', 1, native_label='synthetic observation')
         history = SimpleNamespace(entries={'entry': entry}, expired=False,
@@ -164,6 +181,39 @@ class RefreshLifecycleTests(unittest.IsolatedAsyncioTestCase):
         app.accept('LOCAL', ('status', {}, None, callback, False), None, RuntimeError('late reply'))
         callback.assert_not_called()
 
+    async def test_review_poll_and_reply_continue_with_missing_presentation(self):
+        pending = replace(review(self.job), status='PENDING')
+        request = Mock()
+        view = ReviewScreen('synthetic', request, cached=pending)
+        app = App()
+        with patch.object(view, 'set_interval'):
+            async with app.run_test():
+                await app.push_screen(view)
+                await view.query_one('#review-body').remove()
+                await view.query_one('#review-status').remove()
+                request.call_args.args[-1](pending, None)
+                self.assertFalse(view.busy)
+                self.assertIs(view.record, pending)
+                view.poll()
+                self.assertEqual(request.call_args.args[0], 'review.poll')
+                complete = replace(pending, status='COMPLETE')
+                request.call_args.args[-1](complete, None)
+                self.assertIs(view.record, complete)
+                self.assertFalse(view.busy)
+
+    async def test_catalogue_and_study_keep_records_without_body_widgets(self):
+        for view in (CatalogueDetails('synthetic', Mock()), StudyScreen('synthetic', Mock())):
+            with self.subTest(view=type(view).__name__):
+                app = App()
+                async with app.run_test():
+                    await app.push_screen(view)
+                    catalogue = isinstance(view, CatalogueDetails)
+                    await view.query_one('#catalogue-body' if catalogue else '#study-body').remove()
+                    record = object()
+                    args = (record, (), None) if catalogue else (record, None)
+                    view.request.call_args.args[0](*args)
+                    self.assertIs(view.record, record)
+
     async def test_sources_reply_stops_after_field_build_dismisses_the_screen(self):
         app = JobsApp(self.store)
         view = Sources(('fixture', self.job['id'], self.job['attempt_id']), self.job['display_id'])
@@ -206,6 +256,7 @@ class RefreshLifecycleTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test():
             await app.push_screen(view)
             await view.query_one(TextArea).remove()
+            await app.pop_screen()
             loader = Mock(side_effect=AssertionError('late inspection'))
             view.load(loader)
             view.accept(None, None, 'late reply')
@@ -228,6 +279,7 @@ class RefreshLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 history = ProgressHistory(selection, self.job['display_id'])
                 await app.push_screen(history)
                 await history.query_one('#history-state').remove()
+                await app.pop_screen()
                 history.accept_page(None, None, history.request_generation)
                 self.assertIsNone(history.page)
                 history.invalidate()

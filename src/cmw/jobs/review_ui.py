@@ -98,13 +98,13 @@ class ReviewScreen(ModalScreen):
         self.query_one('#review-copy', Button).disabled = self.record is None
 
     def send(self, operation, params):
-        if (not self.is_attached or self not in self.app.screen_stack or not self.query('#review-body') or self.busy
+        if (not self.is_attached or self not in self.app.screen_stack or self.busy
                 or (not self.commands_allowed and operation != 'review.preview')):
             return
         self.busy = True
         self.render_record()
         def accepted(record, error):
-            if not self.is_mounted or not self.query('#review-status'):
+            if not self.is_mounted or self not in self.app.screen_stack:
                 return
             self.busy = False
             if error is not None:
@@ -114,7 +114,8 @@ class ReviewScreen(ModalScreen):
                 self.unavailable = False
                 self.record = record
                 message = record.message
-            self.query_one('#review-status', Static).update(safe_snapshot_text(message))
+            if self.query('#review-status'):
+                self.query_one('#review-status', Static).update(safe_snapshot_text(message))
             self.render_record()
         self.request(operation, params, accepted)
 

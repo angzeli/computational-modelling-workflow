@@ -176,13 +176,15 @@ class CatalogueDetails(ModalScreen):
 
     def on_mount(self):
         def accepted(record,relations,error,receipt=None):
-            if (not self.is_mounted or self not in self.app.screen_stack
-                    or not self.query('#catalogue-detail-status') or not self.query('#catalogue-body')):
+            if not self.is_mounted or self not in self.app.screen_stack:
                 return
             if error is not None:
-                self.query_one('#catalogue-detail-status',Static).update(safe_snapshot_text('Catalogue unavailable: '+str(error)))
+                if self.query('#catalogue-detail-status'):
+                    self.query_one('#catalogue-detail-status',Static).update(safe_snapshot_text('Catalogue unavailable: '+str(error)))
                 return
             self.record,self.relations = record,relations
+            if not self.query('#catalogue-body'):
+                return
             self.query_one('#catalogue-body',Static).update(catalogue_text(record,relations))
             if self.owner is not None:
                 self.app.view_received(self, self.owner, receipt)

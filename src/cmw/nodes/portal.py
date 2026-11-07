@@ -249,7 +249,9 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         return True
 
     def tick(self):
-        if not self.is_running or not self.render_available():
+        # Observation lanes outlive individual render surfaces. A missing
+        # widget must not stop expiry, recovery, or queued request dispatch.
+        if self.closed or not self.is_running:
             return
         now = self.clock()
         for owner, lane in self.lanes.items():
@@ -482,10 +484,12 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         return True
 
     def render_state(self):
+        if self.closed:
+            return
+        self.sync_node_views()
         if not self.render_available():
             return
         origin = self.screen_stack[0]
-        self.sync_node_views()
         table = origin.query_one('#table', DataTable)
         # Keyboard movement precedes its queued highlight. Preserve that current
         # identity before a status/progress refresh can restore the older row.
@@ -1075,7 +1079,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
 
     def accept_copy(self, result, view):
         self.copy_busy = False
-        if not self.render_available():
+        if self.closed:
             return
         if isinstance(view, FrozenText) and view in self.screen_stack and view.query('#copy-status'):
             view.query_one('#copy-status', Static).update(result.message)
@@ -1105,7 +1109,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         self.request_copy(text, view=self.screen)
 
     def message(self, text):
-        if self.is_mounted:
+        if not self.closed and self.is_mounted and self.query('#message'):
             self.query_one('#message', Static).update(literal(text))
 
     def new_backend(self, owner):

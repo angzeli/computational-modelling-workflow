@@ -723,7 +723,7 @@ class JobsApp(LocalCatalogue, NavigationApp):
 
     def accept_execution(self, selection, generation, observation, error):
         self.execution_busy = False
-        if not self.refresh_available():
+        if self.execution_closed:
             return
         if generation != self.execution_generation or selection != self.execution_identity():
             self.sync_execution_selection()
@@ -846,7 +846,7 @@ class JobsApp(LocalCatalogue, NavigationApp):
 
     async def accept_sources(self, request, selection, generation, result, error):
         self.progress_busy = False
-        if not self.refresh_available():
+        if self.progress_closed:
             return
         view, kind, _, request_generation = request
         current = (not self.progress_closed and not view.closed and not view.expired
@@ -900,7 +900,7 @@ class JobsApp(LocalCatalogue, NavigationApp):
             self.progress_retry_timer = self.set_timer(.05, self.collect_progress)
 
     def collect_progress(self):
-        if self.progress_busy or self.progress_closed or not self.refresh_available():
+        if self.progress_busy or self.progress_closed:
             return
         selection = self.progress_identity()
         if selection != self.progress_selection:
@@ -968,11 +968,9 @@ class JobsApp(LocalCatalogue, NavigationApp):
 
     def accept_progress(self, selection, generation, snapshot, error, history_request=None, history_page=None, invalid_session=None, database_changed=False):
         self.progress_busy = False
-        if not self.refresh_available():
-            if self.progress_service is not None:
-                self.progress_service.retain(())
+        if self.progress_closed:
             return
-        if self.progress_closed or generation != self.progress_generation or selection != self.progress_identity():
+        if generation != self.progress_generation or selection != self.progress_identity():
             # No replacement starts while an earlier underlying read is blocked.
             if self.progress_service is not None:
                 self.progress_service.retain(())
@@ -988,12 +986,14 @@ class JobsApp(LocalCatalogue, NavigationApp):
                 self.history_view.invalidate()
             if self.sources_view is not None and not self.sources_view.closed:
                 self.sources_view.invalidate()
-            self.query_one('#message', Static).update('Jobs database changed during observation; earlier source results were discarded.')
+            if self.query('#message'):
+                self.query_one('#message', Static).update('Jobs database changed during observation; earlier source results were discarded.')
             self.sync_progress_selection()
             return
         if invalid_session is not None:
             self.session_sources.pop(invalid_session.identity, None)
-            self.query_one('#message', Static).update(literal('Session sources changed; [S] review Sources. ' + (error or '')))
+            if self.query('#message'):
+                self.query_one('#message', Static).update(literal('Session sources changed; [S] review Sources. ' + (error or '')))
             self.sync_progress_selection()
             return
         if snapshot is not None:
@@ -1802,7 +1802,7 @@ class JobsApp(LocalCatalogue, NavigationApp):
 
     def accept_copy(self, result, view):
         self.copy_busy = False
-        if not self.refresh_available():
+        if self.execution_closed:
             return
         self.copy_result = result
         if isinstance(view, FrozenText) and view in self.screen_stack and view.query('#copy-status'):
