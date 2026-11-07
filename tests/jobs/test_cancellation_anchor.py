@@ -280,7 +280,10 @@ class WorkerCancellationModel:
             for module in (runtime, ownership, suspension):
                 if module is not suspension:
                     stack.enter_context(patch.object(module, 'identity', side_effect=self.identify))
-                stack.enter_context(patch.object(module, 'owner_alive', side_effect=self.owner_alive))
+                if module is runtime:
+                    stack.enter_context(patch.object(module, 'observe_owner', side_effect=self.observe))
+                else:
+                    stack.enter_context(patch.object(module, 'owner_alive', side_effect=self.owner_alive))
                 stack.enter_context(patch.object(module, 'group_members', side_effect=self.members))
             stack.enter_context(patch('os.getsid', side_effect=self.sid))
             stack.enter_context(patch('os.getpgid', side_effect=self.pgid))
