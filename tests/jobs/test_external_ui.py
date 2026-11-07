@@ -87,6 +87,12 @@ except ImportError:
     JobsApp = None
 
 
+async def wait_for_external_publication(app):
+    # Rendering can populate machine_usage before the first observer delivery.
+    while 'external_activity' not in app.activity_projection:
+        await asyncio.sleep(0.01)
+
+
 @unittest.skipIf(JobsApp is None, 'Console tests require optional jobs extra')
 class ExternalTuiTests(unittest.IsolatedAsyncioTestCase):
     async def test_background_observation_is_independent_of_repaints(self):
@@ -99,10 +105,7 @@ class ExternalTuiTests(unittest.IsolatedAsyncioTestCase):
             store = Store(Path(directory) / 'state')
             app = JobsApp(store, observer=Observer(collect))
             async with app.run_test(size=(100, 36)) as pilot:
-                async def observed():
-                    while not app.activity_projection:
-                        await asyncio.sleep(0.01)
-                await asyncio.wait_for(observed(), timeout=2)
+                await asyncio.wait_for(wait_for_external_publication(app), timeout=2)
                 self.assertEqual(app.activity_projection['external_activity']['source'], 'client')
                 for _ in range(10):
                     app.refresh_state()
@@ -110,6 +113,73 @@ class ExternalTuiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(store.snapshot()['controller']['online'])
                 self.assertFalse(store.root.exists())
                 await pilot.press('q')
+
+    async def test_first_publication_waits_through_machine_only_repaints(self):
+        from cmw.jobs.activity import Observer
+
+        class SyntheticSampler:
+            def sample(self, *args, **kwargs):
+                return {'machine_usage': None, 'jobs': {}, 'external': {}}
+
+            def close(self):
+                pass
+
+        calls, deliveries = [], []
+        produced = asyncio.Event()
+        waiting = asyncio.Event()
+
+        def collect(*args):
+            calls.append(True)
+            return projection()['external_activity']
+
+        def hold_delivery(value):
+            deliveries.append(deepcopy(value))
+            produced.set()
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / 'state')
+            app = JobsApp(store, observer=Observer(collect), sampler=SyntheticSampler())
+            accept = app.accept_activity
+            # Startup still launches its one observation. Periodic ticks are
+            # disabled so this test measures only the deliberate repaints.
+            with patch.object(app, 'set_interval'), patch.object(app, 'accept_activity', side_effect=hold_delivery):
+                async with app.run_test(size=(100, 36)) as pilot:
+                    await asyncio.wait_for(produced.wait(), timeout=2)
+                    self.assertTrue(app.activity_projection)
+                    self.assertIn('machine_usage', app.activity_projection)
+                    self.assertNotIn('external_activity', app.activity_projection)
+
+                    async def observe():
+                        waiting.set()
+                        await wait_for_external_publication(app)
+
+                    waiter = asyncio.create_task(observe())
+                    try:
+                        await asyncio.wait_for(waiting.wait(), timeout=2)
+                        self.assertFalse(waiter.done())
+                        for _ in range(10):
+                            app.refresh_state()
+                        self.assertFalse(waiter.done())
+                        self.assertNotIn('external_activity', app.activity_projection)
+                        self.assertEqual(len(calls), 1)
+                        self.assertEqual(len(deliveries), 1)
+
+                        accept(deliveries[0])
+                        await asyncio.wait_for(waiter, timeout=2)
+                        for _ in range(10):
+                            app.refresh_state()
+                        self.assertEqual(app.activity_projection['external_activity']['source'], 'client')
+                        self.assertEqual(app.activity_projection['external_activity']['observations'],
+                                         deliveries[0]['external_activity']['observations'])
+                        self.assertEqual(len(calls), 1)
+                        self.assertFalse(store.snapshot()['controller']['online'])
+                        self.assertFalse(store.root.exists())
+                        await pilot.press('q')
+                    finally:
+                        if not waiter.done():
+                            waiter.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await waiter
 
     async def test_external_read_only_selection_resize_and_disappearance(self):
         with tempfile.TemporaryDirectory() as directory:
