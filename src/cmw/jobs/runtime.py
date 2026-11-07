@@ -840,25 +840,31 @@ def worker(store, job_id, claim):
                     if authority.generation != generation:
                         continue
                     with store.transaction() as con:
-                        record_guard(store, con, guard)
                         job = store.get(con, job_id)
-                        if job.get('ownership_holds'):
-                            continue  # Recheck ownership and admission with the original pipe.
-                        control = store.control(con)
-                        pending_now = [(j['id'], j['order'], j['status']) for j in store.rows(con) if j['status'] in PENDING]
-                        decision_state = {'jobs': store.rows(con), 'scheduler': control.get('scheduler', {}),
-                                          'controller': {**control, 'online': dispatch_authority(store, control), 'stale': False}}
-                        decision = sharing.evaluate(decision_state, guard, evidence, candidate_id=job_id, final=True)
                         bound = (job['claim'] == claim and job['worker'] == authority.worker and job['group'] == group
                                  and job['attempt_id'] == initial['attempt_id'])
-                        admitted = (bound and job['status'] == 'Starting' and not job.get('termination_requested') and
-                                    not job['cancel_requested'] and dispatch_authority(store, control) and
-                                    pending_ids == pending_now and decision['permitted'] and not final_blocker)
+                        eligible = (bound and job['status'] == 'Starting' and not job.get('termination_requested')
+                                    and not job['cancel_requested'])
+                        admitted, refusal_reason = False, 'Admission controls/order changed'
+                        # An already-refused helper needs only its own cleanup;
+                        # unrelated admission reads cannot prevent its reap.
+                        if eligible:
+                            record_guard(store, con, guard)
+                            if job.get('ownership_holds'):
+                                continue  # Recheck ownership and admission with the original pipe.
+                            control = store.control(con)
+                            pending_now = [(j['id'], j['order'], j['status']) for j in store.rows(con) if j['status'] in PENDING]
+                            decision_state = {'jobs': store.rows(con), 'scheduler': control.get('scheduler', {}),
+                                              'controller': {**control, 'online': dispatch_authority(store, control), 'stale': False}}
+                            decision = sharing.evaluate(decision_state, guard, evidence, candidate_id=job_id, final=True)
+                            admitted = (dispatch_authority(store, control) and pending_ids == pending_now
+                                        and decision['permitted'] and not final_blocker)
+                            if not decision['permitted']:
+                                refusal_reason = decision['reason']
                         if not admitted:
                             refusal = _AdmissionRefusal(store, job, authority, leader,
                                 attempt_id=initial['attempt_id'], blocker=final_blocker,
-                                reason=decision['reason'] if not decision['permitted'] else 'Admission controls/order changed',
-                                coordinator=coordinator)
+                                reason=refusal_reason, coordinator=coordinator)
                             refusal.prepare(con, job)
                         elif not job.get('suspension') or coordinator is not None:
                             job.update(group=group, started_at=time.time(), reason="", status="Run")
