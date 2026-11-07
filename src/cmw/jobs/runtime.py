@@ -547,16 +547,20 @@ def worker(store, job_id, claim):
                                     authority.read_domain(witness, first_failure=exc)
                         try:
                             authority.wait()
+                            release_ready = False
                             if session:
-                                signal_session(group, signum, check_authority=authority.wait,
-                                               read_domain=authority.read_domain, send_group=send)
+                                outcome = signal_session(
+                                    group, signum, check_authority=authority.wait,
+                                    read_domain=authority.read_domain, send_group=send,
+                                    anchor_ready_for_release=lambda: receipt.exists() and set(members()) == {leader.pid})
+                                release_ready = outcome is False
                             else:
                                 send(leader.pid, signum)
                         except RequestSuperseded:
                             continue  # Observe the latest intent; retain the pipe.
                         if signum == signal.SIGTERM:
                             cancel_at = time.monotonic()
-                        else:
+                        elif not release_ready:
                             leader.wait(timeout=5)
                             _wait_for_group_end(leader.pid, session=session)
                             finish(store, job_id, claim, "Cancelled" if job['cancel_requested'] else "Fail",

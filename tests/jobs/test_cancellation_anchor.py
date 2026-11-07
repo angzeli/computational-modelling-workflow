@@ -1,5 +1,6 @@
 """Deterministic worker/receipt races; every signalled identity is task-owned."""
 from contextlib import ExitStack, contextmanager
+import errno
 import json
 import os
 from pathlib import Path
@@ -507,6 +508,162 @@ class CancellationAnchorTests(unittest.TestCase):
         self.assertEqual(replaced, [True])
         self.assertEqual(model.signals, [])
 
+    def test_denied_session_send_after_witness_exit_retains_pipe_until_absence(self):
+        for failure in (PermissionError(errno.EPERM, 'send raced with witness exit'),
+                        OSError(errno.EIO, 'delivery outcome unreadable')):
+            with self.subTest(error=type(failure).__name__):
+                model = self.ordinary('no-receipt-escalation', session=True)
+                original_send, original_sleep = model.send_group, model.sleep
+                attempts, held, probes = [], [], []
+
+                def send(pgid, signum):
+                    if pgid == model.compute and signum:
+                        attempts.append((pgid, signum))
+                        model.alive.difference_update((model.compute, model.runner))
+                        raise failure
+                    if pgid == model.compute:
+                        probes.append(signum)
+                        if len(probes) == 1:
+                            return  # Present immediately after the original witness exited.
+                        if model.clock < 66:
+                            raise PermissionError(errno.EPERM, 'group absence temporarily unreadable')
+                        raise ProcessLookupError()
+                    return original_send(pgid, signum)
+
+                def sleep(interval):
+                    if attempts and model.clock < 66:
+                        job = model.current()  # A fresh writer can acquire the queue during the hold.
+                        self.assertIn('domain', job.get('ownership_holds', {}))
+                        self.assertFalse(model.leader.stdin.close.called)
+                        self.assertFalse(model.released)
+                        self.assertEqual(model.signals, [])
+                        held.append(job['status'])
+                        model.clock += interval
+                        if model.clock >= 66:
+                            model.write_receipt()
+                        return
+                    original_sleep(interval)
+
+                model.send_group, model.sleep = send, sleep
+                with patch.object(ownership, 'observe_owner', side_effect=model.observe):
+                    result = model.run()
+                self.assertEqual(result['status'], 'Cancelled', model.events)
+                self.assertIn('Cancelling', held)
+                self.assertIn('Unknown', held)
+                self.assertTrue(model.released)
+                self.assertEqual(attempts, [(model.compute, signal.SIGTERM)])
+                self.assertTrue(probes)
+                self.assertEqual(set(probes), {0})
+                self.assertNotIn('ownership_holds', result)
+
+    def test_denied_anchor_send_resumes_only_after_receipt_and_session_drainage(self):
+        for denied_signal in (signal.SIGTERM, signal.SIGKILL):
+            with self.subTest(signal=denied_signal):
+                model = self.ordinary('no-receipt-escalation', session=True)
+                original_send, original_sleep = model.send_group, model.sleep
+                denied, held = [], []
+
+                def send(pgid, signum):
+                    if pgid == model.anchor and signum == denied_signal:
+                        denied.append(signum)
+                        raise PermissionError(errno.EPERM, 'anchor group send denied')
+                    return original_send(pgid, signum)
+
+                def sleep(interval):
+                    if not denied:
+                        return original_sleep(interval)
+                    self.assertFalse(model.leader.stdin.close.called)
+                    self.assertFalse(model.released)
+                    self.assertIn('domain', model.current()['ownership_holds'])
+                    held.append(interval)
+                    model.clock += interval
+                    if len(held) == 1:
+                        model.write_receipt()  # Surviving session members still prevent release.
+                    elif len(held) == 2:
+                        model.alive.difference_update((model.runner, model.compute))
+                        model.receipt.unlink()  # Drainage alone also cannot permit release.
+                    elif len(held) == 3:
+                        model.write_receipt()
+                    elif len(held) > 4:
+                        raise AssertionError('Receipt and drainage failed to resolve anchor hold')
+
+                model.send_group, model.sleep = send, sleep
+                with patch.object(ownership, 'observe_owner', side_effect=model.observe):
+                    result = model.run()
+                self.assertEqual(result['status'], 'Cancelled', model.events)
+                self.assertEqual(result['exit_code'], 143)  # Genuine receipt, including after denied KILL.
+                self.assertEqual(denied, [denied_signal])
+                self.assertEqual(len(held), 3)
+                self.assertEqual(model.events.count('RELEASE'), 1)
+                self.assertTrue(model.released)
+                self.assertNotIn('ownership_holds', result)
+
+    def test_denied_session_send_hold_ends_only_on_confirmed_anchor_loss(self):
+        model = self.ordinary('no-receipt-escalation', session=True)
+        original_send = model.send_group
+        attempts, held = [], []
+
+        def send(pgid, signum):
+            if pgid == model.compute:
+                if signum:
+                    attempts.append(signum)
+                    model.alive.difference_update((model.compute, model.runner))
+                raise PermissionError(errno.EPERM, 'group outcome unreadable')
+            return original_send(pgid, signum)
+
+        def sleep(interval):
+            self.assertFalse(model.leader.stdin.close.called)
+            self.assertFalse(model.released)
+            self.assertIn('domain', model.current()['ownership_holds'])
+            held.append(interval)
+            model.clock += interval
+            model.alive.remove(model.anchor)
+
+        model.send_group, model.sleep = send, sleep
+        with patch.object(ownership, 'observe_owner', side_effect=model.observe):
+            result = model.run()
+        self.assertEqual(result['status'], 'Unknown')
+        self.assertIn('Group leader disappeared', result['reason'])
+        self.assertEqual(attempts, [signal.SIGTERM])
+        self.assertTrue(held)
+        self.assertFalse(model.released)
+        self.assertTrue(model.leader.stdin.close.called)
+        self.assertEqual(model.signals, [])
+
+    def test_recovered_session_send_hold_rechecks_changed_termination_intent(self):
+        model = self.ordinary('no-receipt-escalation', session=True)
+        original_send = model.send_group
+        attempts, held = [], []
+
+        def send(pgid, signum):
+            if pgid == model.compute and signum:
+                attempts.append(signum)
+                model.alive.difference_update((model.compute, model.runner))
+                raise PermissionError(errno.EPERM, 'witness exited during send')
+            return original_send(pgid, signum)
+
+        def sleep(interval):
+            self.assertFalse(model.leader.stdin.close.called)
+            self.assertFalse(model.released)
+            self.assertEqual(model.signals, [])
+            held.append(interval)
+            model.clock += interval
+            with model.store.transaction() as con:
+                job = model.store.get(con, model.job['id'])
+                job.update(status='Run', cancel_requested=False)
+                model.store.save(con, job)
+            model.write_receipt()
+
+        model.send_group, model.sleep = send, sleep
+        with patch.object(ownership, 'observe_owner', side_effect=model.observe):
+            result = model.run()
+        self.assertEqual(result['status'], 'Fail', model.events)  # Receipt exit143, no cancel intent.
+        self.assertEqual(result['exit_code'], 143)
+        self.assertEqual(attempts, [signal.SIGTERM])
+        self.assertTrue(held)
+        self.assertEqual(model.signals, [])
+        self.assertTrue(model.released)
+
     def test_locked_subgroup_read_denial_releases_queue_before_hold_and_delivery(self):
         model = self.ordinary('no-receipt-escalation', session=True)
         original = ownership._session_read
@@ -684,8 +841,13 @@ class CancellationAnchorTests(unittest.TestCase):
 
 
 class PayloadReceiptTopologyTests(unittest.TestCase):
-    def test_anchor_group_term_can_kill_receipt_writer_before_release(self):
-        """Controlled demonstration of the shell hazard, not historical attribution."""
+    def test_anchor_group_term_preserves_receipt_writer_until_release(self):
+        self.receipt_survives_group_signal(signal.SIGTERM)
+
+    def test_anchor_group_int_preserves_receipt_writer_until_release(self):
+        self.receipt_survives_group_signal(signal.SIGINT)
+
+    def receipt_survives_group_signal(self, signum):
         with tempfile.TemporaryDirectory(prefix='cmw-receipt-topology-') as temporary, \
                 tempfile.TemporaryDirectory(prefix='cmw-socket-', dir='/tmp') as socket_directory:
             root = Path(temporary)
@@ -697,19 +859,25 @@ class PayloadReceiptTopologyTests(unittest.TestCase):
             listener.listen(1)
             listener.settimeout(5)
             executable = root/'receipt-writer'
-            executable.write_text('#!'+sys.executable+'\n'+'''import json,os,socket,sys
-import psutil
-s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+            executable.write_text('#!'+sys.executable+'\n'+'''import json, os, socket, sys
+from cmw.jobs import ownership, runtime
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.connect(os.environ['FIXTURE_RECEIPT_SOCKET'])
-s.sendall(json.dumps({'pid':os.getpid(),'birth':psutil.Process().create_time(),'pgid':os.getpgrp(),'sid':os.getsid(0)}).encode()+b'\\n')
-s.recv(1)
+s.sendall(json.dumps({'identity': ownership.identity(), 'pgid': os.getpgrp(),
+                      'sid': os.getsid(0)}).encode() + b'\\n')
+if s.recv(1) != b'W':
+    raise SystemExit(125)
+# Exercise the real receipt command, including its flush/fsync and atomic rename.
+sys.argv = ['cmw.jobs.runtime', 'receipt', sys.argv[-2], sys.argv[-1]]
+runtime.main()
+s.sendall(b'D')
 raise SystemExit(0)
 ''')
             executable.chmod(0o700)
             receipt = root/'receipt.json'
             helper = Path(runtime.__file__).with_name('payload.sh')
             process = subprocess.Popen(['/bin/bash', str(helper), str(executable), '', str(receipt),
-                                        str(root/'stdout'), str(root/'stderr'), '/bin/true'],
+                                        str(root/'stdout'), str(root/'stderr'), '/bin/sh', '-c', 'exit 0'],
                                        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                        stderr=subprocess.DEVNULL, start_new_session=True,
                                        env={**os.environ, 'FIXTURE_RECEIPT_SOCKET': str(endpoint)})
@@ -717,31 +885,50 @@ raise SystemExit(0)
             connection = None
             child = None
             try:
-                process.stdin.write(b'GO\n'); process.stdin.flush()
-                connection, _ = listener.accept(); connection.settimeout(5)
+                process.stdin.write(b'GO\n')
+                process.stdin.flush()
+                connection, _ = listener.accept()
+                connection.settimeout(5)
                 child = json.loads(connection.recv(4096))
                 self.assertEqual(child['pgid'], process.pid)
                 self.assertEqual(child['sid'], process.pid)
                 self.assertEqual(ownership.identity(process.pid), anchor)
-                self.assertEqual(psutil.Process(child['pid']).create_time(), child['birth'])
-                os.killpg(process.pid, signal.SIGTERM)
-                self.assertEqual(process.wait(timeout=5), 125)
+                self.assertEqual(ownership.observe_owner(child['identity']).status,
+                                 ownership.OwnershipStatus.VERIFIED)
                 self.assertFalse(receipt.exists())
+                # The writer is blocked before publication when the group is signalled.
+                os.killpg(process.pid, signum)
+                connection.sendall(b'W')
+                self.assertEqual(connection.recv(1), b'D', 'Receipt writer died before durable publication')
+                self.assertEqual(json.loads(receipt.read_text())['exit_code'], 0)
+                self.assertIsNone(process.poll())
+                self.assertEqual(ownership.observe_owner(anchor).status, ownership.OwnershipStatus.VERIFIED)
+                process.stdin.write(b'RELEASE\n')
+                process.stdin.flush()
+                self.assertEqual(process.wait(timeout=5), 0)
                 self.assertFalse(ownership.group_exists(process.pid))
             finally:
                 if connection is not None:
-                    connection.close()
+                    connection.close()  # Also unblocks a writer if an assertion failed before W.
                 if process.poll() is None:
-                    # An assertion failure releases only this recorded fixture.
-                    process.stdin.write(b'RELEASE\n'); process.stdin.flush()
-                    process.wait(timeout=5)
+                    try:
+                        process.stdin.write(b'RELEASE\n')
+                        process.stdin.flush()
+                    except BrokenPipeError:
+                        pass
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        # Fixture-only fallback; never signal an unverified or reused identity.
+                        if ownership.observe_owner(anchor).status == ownership.OwnershipStatus.VERIFIED:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=5)
                 process.stdin.close()
+                self.assertEqual(ownership.observe_owner(anchor).status, ownership.OwnershipStatus.GONE)
                 if child is not None:
-                    with self.assertRaises(psutil.NoSuchProcess):
-                        psutil.Process(child['pid']).create_time()
-                    print('Fixture census: '+json.dumps({'anchor': anchor, 'receipt_child': child,
-                        'anchor_exit_code': process.returncode, 'receipt_child_absent': True,
-                        'group_absent': not ownership.group_exists(process.pid)}), flush=True)
+                    self.assertEqual(ownership.observe_owner(child['identity']).status,
+                                     ownership.OwnershipStatus.GONE)
+                self.assertFalse(ownership.group_exists(process.pid))
 
 
 if __name__ == '__main__':
