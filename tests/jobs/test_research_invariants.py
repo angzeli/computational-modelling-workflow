@@ -10,7 +10,6 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from cmw.core.preparation_publication import PublicationError
 from cmw.doctor.service import inspect_local
 from cmw.jobs.catalogue import CatalogueStore
 from cmw.jobs.catalogue_models import CatalogueQuery
@@ -301,10 +300,12 @@ class ResearchSuccessorTests(unittest.TestCase):
         self.assertEqual(list(Path(self.spec['runtime']['run_directory']).iterdir()), [])
         published = {p.name: p.read_bytes() for p in output.iterdir()}
 
-        # Disk space is available again, but the absent successor record cannot authorize replay.
-        with self.assertRaises(PublicationError) as retry:
-            self.materialize(plan)
-        self.assertEqual(str(retry.exception), f'Refusing existing destination: {output}')
+        # Recovery reuses the approved publication after space is available again.
+        self.assertEqual(self.materialize(plan).status, 'MATERIALIZED')
+        self.assertEqual(json.loads(record.read_text())['plan_digest'], plan.plan_digest)
+        self.assertEqual({p.name: p.read_bytes() for p in output.iterdir()}, published)
+        self.assertEqual((record.parent / 'preparation.json').read_bytes(), preparation)
+        self.assertEqual(self.store.path.read_bytes(), before)
 
         # Recover by planning fresh destinations, preserving the first publication as evidence.
         self.spec, self.path = successor_case(self.fixture, uuid4().hex)
@@ -315,8 +316,8 @@ class ResearchSuccessorTests(unittest.TestCase):
         self.assertEqual(self.materialize(recovery).status, 'MATERIALIZED')
         self.assertEqual({p.name: p.read_bytes() for p in output.iterdir()}, published)
         self.assertEqual((record.parent / 'preparation.json').read_bytes(), preparation)
-        self.assertFalse(record.exists())
+        self.assertEqual(json.loads(record.read_text())['status'], 'MATERIALIZED')
         self.assertEqual(self.store.path.read_bytes(), before)
         trace('publication-disk-full', ['plan', 'publish four inputs', 'exclusive successor record create hits ENOSPC',
-                                       'no authoritative record', 'registration refused', 'same destination refused',
+                                       'no authoritative record', 'registration refused', 'same destination recovered',
                                        'fresh destinations and reviewed digest materialized', 'queue unchanged'])

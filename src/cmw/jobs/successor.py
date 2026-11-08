@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import tempfile
 import sqlite3
+import stat
 import time
 
 from cmw.core.provenance import stable_hash
@@ -200,6 +201,9 @@ def _publication_lock(directory):
 
 
 def _save_record(path, value, directory_fd, *, create=False):
+    locked = os.fstat(directory_fd)
+    if _directory_identity(path.parent) != [locked.st_dev, locked.st_ino]:
+        raise JobsError('Successor publication directory identity changed')
     raw = (json.dumps(value, indent=2, allow_nan=False) + '\n').encode()
     if len(raw) > 128 * 1024:
         raise JobsError('Successor record exceeds 128 KiB')
@@ -216,6 +220,72 @@ def _save_record(path, value, directory_fd, *, create=False):
         os.fsync(directory_fd)
     finally:
         Path(name).unlink(missing_ok=True)
+
+
+def _entry(path):
+    """Only ENOENT establishes absence; permission/read errors must refuse."""
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _directory_identity(path):
+    observed = _path(str(path)).lstat()
+    if not stat.S_ISDIR(observed.st_mode):
+        raise JobsError('Successor destination is not a direct directory: ' + str(path))
+    return [observed.st_dev, observed.st_ino]
+
+
+def _recover_publication(path, lock, spec, spec_identity, approved_digest):
+    """Read the durable pre-record evidence; never adopt an unbound directory."""
+    preparation_path = path.parent / 'preparation.json'
+    materialized, _ = _document(preparation_path)
+    materialized = deepcopy(materialized)
+    recovery = materialized.pop('successor_recovery', None)
+    if not isinstance(recovery, dict) or recovery.get('schema') != 1:
+        raise JobsError('Publication lacks approved recovery evidence; use fresh destinations and review a new plan')
+    record = {**recovery, 'schema': 1, 'kind': 'cmw-successor-materialization',
+              'status': 'PENDING_VERIFICATION', 'materialized': materialized}
+    plan = record['plan']
+    if not isinstance(plan, dict):
+        raise JobsError('Malformed successor publication recovery evidence')
+    if (record.get('plan_digest') != approved_digest or stable_hash(plan) != approved_digest
+            or plan.get('spec') != spec or plan.get('specification_source') != spec_identity
+            or record.get('record_path') != str(path)):
+        raise JobsError('Publication recovery evidence does not match this approved request')
+    if plan['spec']['engine'] != 'VASP' or plan.get('status') != 'READY':
+        raise JobsError('Publication recovery requires an approved READY VASP plan')
+    publication = plan['adapter']['publication_plan']
+    expected = {**plan['adapter']['preparation'], 'schema_version': 1,
+                'successor': {'schema_version': 1, 'parent': plan['parent'],
+                    'source': plan['adapter']['source'], 'plan_digest': plan['adapter']['digest'],
+                    'relationship': 'new-input-guess', 'checkpoint_reuse': False}}
+    actual = {key: value for key, value in materialized.items()
+              if key not in {'preparation_id', 'publication'}}
+    location = materialized.get('publication', {})
+    if (actual != expected or location.get('state') != 'complete'
+            or any(location.get(key) != publication[key]
+                   for key in ('kind', 'input_path', 'record_path', 'scratch_root'))):
+        raise JobsError('Preparation evidence differs from the approved complete publication')
+    directory = os.fstat(lock)
+    if record['publication_directory'] != [directory.st_dev, directory.st_ino]:
+        raise JobsError('Successor publication directory identity changed')
+    identities = ((path.parent, record['publication_directory']),
+                  (Path(publication['input_path']), record['input_directory']),
+                  (Path(plan['runtime']['cwd']), record['working_identity']),
+                  (Path(publication['input_path']).parent, publication['input_parent_identity']),
+                  (path.parent.parent, publication['record_parent_identity']))
+    for directory_path, identity in identities:
+        if _directory_identity(directory_path) != identity:
+            raise JobsError('Successor destination directory identity changed: ' + str(directory_path))
+    for directory_path, names in ((path.parent, {'preparation.json'}),
+                                  (Path(plan['runtime']['cwd']), set())):
+        with os.scandir(directory_path) as entries:
+            if {entry.name for entry in entries} != names:
+                raise JobsError('Successor destination contains unexpected entries: ' + str(directory_path))
+    record['prepared'] = _expected_inputs(plan, materialized)
+    return record
 
 
 def _expected_inputs(plan, materialized):
@@ -237,10 +307,20 @@ def _check_published_inputs(record):
         return
     output = _path(plan['spec']['adapter']['output'])
     with os.scandir(output) as entries:
-        if any(entry.name not in expected for entry in entries):
-            raise JobsError('Published VASP input directory contains an unapproved file')
+        names = {entry.name for entry in entries}
+        if names != set(expected):
+            raise JobsError('Published VASP input names differ from approval: missing=' +
+                            str(sorted(set(expected) - names)) + ', extra=' + str(sorted(names - set(expected))))
     for name, identity in expected.items():
-        actual = file_identity(_path(identity['path']), max_bytes=64*1024*1024)
+        path = _path(identity['path'])
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise JobsError('Published VASP input is not a regular file: ' + name)
+        actual = file_identity(path, max_bytes=64*1024*1024)
+        after = path.lstat()
+        if any(getattr(before, field) != getattr(after, field) for field in
+               ('st_dev', 'st_ino', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns')):
+            raise JobsError('Published VASP input changed while reading: ' + name)
         if actual != identity:
             raise JobsError('Published VASP input differs from approved bytes: ' + name)
     work = _path(plan['runtime']['cwd']).stat()
@@ -392,9 +472,16 @@ class SuccessorService:
         value, spec_identity = _document(spec_path)
         spec = _spec(value)
         path = _record_path(spec)
-        if os.path.lexists(path):
+        if _entry(path) is not None or (spec['engine'] == 'VASP' and _entry(path.parent) is not None):
             with _publication_lock(path.parent) as lock:
-                record, _ = _document(path)
+                recovering = _entry(path) is None
+                if recovering:
+                    try:
+                        record = _recover_publication(path, lock, spec, spec_identity, approved_digest)
+                    except (KeyError, TypeError, AttributeError) as exc:
+                        raise JobsError('Malformed successor publication recovery evidence') from exc
+                else:
+                    record, _ = _document(path)
                 if 'parent_selector' not in record:
                     raise JobsError('Existing publication does not support materialization replay; inspect its registration record')
                 plan = record.get('plan') or {}
@@ -428,7 +515,12 @@ class SuccessorService:
                     else:
                         if selected != target:
                             raise JobsError('Current job selector differs from the approved parent')
-                return self._finish_publication(path, record, lock, retry=True, selector_error=selector_error)
+                if recovering:
+                    # Even unavailable parent evidence cannot excuse changed sources.
+                    from .successor_vasp import _verify_sources
+                    _verify_sources(plan['adapter'])
+                return self._finish_publication(path, record, lock, retry=True,
+                                                selector_error=selector_error, create=recovering)
 
         plan = self._build(job_id, spec_path, expected_attempt_id)
         if plan['status'] == 'UNVERIFIABLE':
@@ -462,10 +554,21 @@ class SuccessorService:
                     record.update(status='INCOMPLETE', error=str(exc)[:2048])
                     _save_record(path, record, lock, create=True)
                     raise
+                # Retain approval and created-directory identities before the first
+                # successor record write, so ENOSPC there need not strand inputs.
+                recovery = {key: record[key] for key in ('plan', 'plan_digest', 'record_path',
+                            'parent_selector', 'parent_display_id', 'publication_directory', 'working_identity')}
+                recovery.update(schema=1, input_directory=_directory_identity(Path(spec['adapter']['output'])))
+                preparation_path = path.parent / 'preparation.json'
+                published, _ = _document(preparation_path)
+                if published != materialized:
+                    raise JobsError('Preparation evidence changed before saving successor recovery approval')
+                _save_record(preparation_path,
+                             {**materialized, 'successor_recovery': recovery}, lock)
             _save_record(path, record, lock, create=True)
             return self._finish_publication(path, record, lock, retry=False)
 
-    def _finish_publication(self, path, record, lock, *, retry, selector_error=None):
+    def _finish_publication(self, path, record, lock, *, retry, selector_error=None, create=False):
         plan = record['plan']
         target, spec = plan['parent'], plan['spec']
         completed = record['status'] == 'MATERIALIZED'
@@ -495,16 +598,18 @@ class SuccessorService:
         except SuccessorUnverifiable as exc:
             if completed:
                 raise
+            if create:
+                _save_record(path, record, lock, create=True)
             return self._publication_result(record, reason=str(exc))
         except (OSError, ValueError, TypeError, KeyError) as exc:
-            if not completed:
+            if not completed and not create:
                 record.update(status='INCOMPLETE', error=str(exc)[:2048])
                 _save_record(path, record, lock)
             raise
         if completed:
             return self._publication_result(record, replayed=True)
         record['status'] = 'MATERIALIZED'
-        _save_record(path, record, lock)
+        _save_record(path, record, lock, create=create)
         return self._publication_result(record)
 
     def _publication_result(self, record, *, replayed=False, reason=None):
