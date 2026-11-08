@@ -48,16 +48,16 @@ set -euo pipefail
 BATCH_DIR=$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd -P)
 PYTHON_BIN={shlex.quote(str(python_bin))}
 CMW_ROOT={shlex.quote(str(cmw_root))}
+unset PYTHONHOME
+export PYTHONPATH="$CMW_ROOT/src"
 if [[ ${{1:---status}} != --run || ${{2:-}} != --confirm-expensive ]]; then
-  PYTHONPATH="$CMW_ROOT/src${{PYTHONPATH:+:$PYTHONPATH}}" \
-    "$PYTHON_BIN" -m cmw.adapters.hof.batch_queue_cli verify \
+  "$PYTHON_BIN" -m cmw.adapters.hof.batch_queue_cli verify \
       --batch "$BATCH_DIR/batch-queue.json" \
       --authorization "$BATCH_DIR/batch-authorization.json"
   printf 'Use --run --confirm-expensive only after this exact batch is authorized.\n'
   exit 0
 fi
-PYTHONPATH="$CMW_ROOT/src${{PYTHONPATH:+:$PYTHONPATH}}" \
-  "$PYTHON_BIN" -m cmw.adapters.hof.batch_queue_cli verify \
+"$PYTHON_BIN" -m cmw.adapters.hof.batch_queue_cli verify \
     --batch "$BATCH_DIR/batch-queue.json" \
     --authorization "$BATCH_DIR/batch-authorization.json" --require-authorized
 
@@ -80,7 +80,7 @@ while IFS='|' read -r system_id subqueue_id preflight step_id script; do
       "$system_id" "$step_id" "$conflicts" >&2
     exit 73
   fi
-  export PYTHONPATH="$CMW_ROOT/src:$preflight/python-runtime${{PYTHONPATH:+:$PYTHONPATH}}"
+  export PYTHONPATH="$CMW_ROOT/src:$preflight/python-runtime"
   "$PYTHON_BIN" -m cmw.core.storage_cli --path {shlex.quote(str(project_root))} \
     --minimum-free-gb {minimum_free_gb}
   export CMW_HOF_EXPECTED_TOKEN="$subqueue_id"

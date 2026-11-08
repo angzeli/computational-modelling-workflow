@@ -306,7 +306,8 @@ def _master_script(
 set -euo pipefail
 QUEUE_DIR=$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd -P)
 PYTHON_BIN={_quote(python_bin)}
-export PYTHONPATH={_quote(cmw_root / 'src')}:{_quote(python_runtime)}${{PYTHONPATH:+:$PYTHONPATH}}
+unset PYTHONHOME
+export PYTHONPATH={_quote(cmw_root / 'src')}:{_quote(python_runtime)}
 if [[ ${{1:---status}} != --run || ${{2:-}} != --confirm-expensive ]]; then
   "$PYTHON_BIN" -m cmw.adapters.hof.command_queue_cli verify \
     --queue "$QUEUE_DIR/command-queue.json" \

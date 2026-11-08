@@ -253,7 +253,8 @@ set -euo pipefail
 
 QUEUE_DIR=$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd -P)
 PYTHON_BIN={_quote(python_bin)}
-export PYTHONPATH={_quote(cmw_root / 'src')}${{PYTHONPATH:+:$PYTHONPATH}}
+unset PYTHONHOME
+export PYTHONPATH={_quote(cmw_root / 'src')}
 mode=${{1:---status}}
 
 case "$mode" in
