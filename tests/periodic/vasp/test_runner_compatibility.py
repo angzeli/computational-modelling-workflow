@@ -26,8 +26,9 @@ class RunnerCompatibilityTests(unittest.TestCase):
         self.runner = self.scripts / "run-vasp.sh"
         self.runner.write_text(
             '#!/usr/bin/env bash\nset -euo pipefail\n'
+            'readonly CMW_MANAGED_PYTHON PYTHON_BIN PYTHONPATH PYTHONHOME\n'
             '. "$(dirname -- "$0")/environment.sh"\n'
-            'exec python3 -B "$PORT_ROOT/scripts/run_vasp.py" "$@"\n'
+            'exec "${CMW_MANAGED_PYTHON:?CMW_MANAGED_PYTHON must be pinned}" -B "$PORT_ROOT/scripts/run_vasp.py" "$@"\n'
         )
         self.runner.chmod(0o700)
         (self.scripts / "environment.sh").write_text(
@@ -142,6 +143,84 @@ class RunnerCompatibilityTests(unittest.TestCase):
         self.assertTrue(result["source_combination"])
         self.assertTrue(result["unassessed_properties"])
         self.assertFalse(self.output.exists())
+
+    def test_required_interpreter_wrapper_is_reported_without_execution(self):
+        result = self.check()
+        self.assertEqual(result['interface_compatibility']['status'], 'COMPATIBLE', result)
+        self.assertIs(result['interface_compatibility']['requires_pinned_interpreter'], True)
+
+    def test_historical_path_wrapper_remains_inspectable_but_is_not_a_pin(self):
+        original = self.runner.read_text()
+        self.runner.write_text(original.replace(
+            '"${CMW_MANAGED_PYTHON:?CMW_MANAGED_PYTHON must be pinned}"', 'python3'))
+        result = self.check()
+        self.assertEqual(result['interface_compatibility']['status'], 'COMPATIBLE', result)
+        self.assertIs(result['interface_compatibility']['requires_pinned_interpreter'], False)
+
+    def test_optional_inherited_interpreter_wrapper_does_not_satisfy_pin_contract(self):
+        original = self.runner.read_text()
+        self.runner.write_text(original.replace(
+            '${CMW_MANAGED_PYTHON:?CMW_MANAGED_PYTHON must be pinned}',
+            '${CMW_MANAGED_PYTHON:-python3}'))
+        result = self.check()
+        self.assertEqual(result['interface_compatibility']['status'], 'COMPATIBLE', result)
+        self.assertIs(result['interface_compatibility']['requires_pinned_interpreter'], False)
+
+    def submission_argv(self, profile):
+        from cmw.nodes.submission import _argv
+        return _argv({'engine': 'VASP', 'resources': {'mpi_ranks': 2},
+                      'vasp': {'ncore': 1, 'kpar': 1, 'mpi_mode': 'native',
+                               'timeout': 10, 'stop_before': 0}},
+                     profile, self.root, self.root / 'work', self.output,
+                     input_directory=self.inputs)
+
+    def test_submission_accepts_required_wrapper_with_verified_interpreter_pin(self):
+        from cmw.nodes.runner_profiles import pin_interpreter
+        profile = {'runner': str(self.runner), 'schema': 2,
+                   'runner_interpreter': pin_interpreter(sys.executable)}
+        self.assertEqual(self.submission_argv(profile), [str(self.runner), *self.argv])
+
+    def test_required_wrapper_without_readonly_environment_refuses_submission(self):
+        from cmw.nodes.protocol import NodeError
+        from cmw.nodes.runner_profiles import pin_interpreter
+        self.runner.write_text(self.runner.read_text().replace(
+            'readonly CMW_MANAGED_PYTHON PYTHON_BIN PYTHONPATH PYTHONHOME\n', ''))
+        result = self.check()
+        self.assertEqual(result['interface_compatibility']['status'], 'COMPATIBLE', result)
+        self.assertIs(result['interface_compatibility']['requires_pinned_interpreter'], False)
+        profile = {'runner': str(self.runner), 'schema': 2,
+                   'runner_interpreter': pin_interpreter(sys.executable)}
+        with self.assertRaisesRegex(NodeError, 'must require CMW_MANAGED_PYTHON'):
+            self.submission_argv(profile)
+
+    def test_submission_refuses_path_and_optional_wrappers_despite_valid_pin(self):
+        from cmw.nodes.protocol import NodeError
+        from cmw.nodes.runner_profiles import pin_interpreter
+        profile = {'runner': str(self.runner), 'schema': 2,
+                   'runner_interpreter': pin_interpreter(sys.executable)}
+        original = self.runner.read_text()
+        for selection in ('python3', '"${CMW_MANAGED_PYTHON:-python3}"'):
+            with self.subTest(selection=selection):
+                self.runner.write_text(original.replace(
+                    '"${CMW_MANAGED_PYTHON:?CMW_MANAGED_PYTHON must be pinned}"', selection))
+                with self.assertRaisesRegex(NodeError, 'must require CMW_MANAGED_PYTHON'):
+                    self.submission_argv(profile)
+
+    def test_submission_required_wrapper_refuses_missing_and_replaced_pin(self):
+        from cmw.nodes.runner_profiles import pin_interpreter
+        with self.assertRaisesRegex(ValueError, 'verified schema-2 interpreter pin.*unpinned'):
+            self.submission_argv({'runner': str(self.runner)})
+        executable = self.root / 'selected-python'
+        executable.write_text('#!/bin/sh\nexit 0\n')
+        executable.chmod(0o700)
+        profile = {'runner': str(self.runner), 'schema': 2,
+                   'runner_interpreter': pin_interpreter(str(executable))}
+        replacement = self.root / 'replacement-python'
+        replacement.write_text('#!/bin/sh\nexit 0\n')
+        replacement.chmod(0o700)
+        replacement.replace(executable)
+        with self.assertRaisesRegex(ValueError, 'Pinned runner interpreter identity changed'):
+            self.submission_argv(profile)
 
     def test_absent_managed_argument_has_actionable_incompatibility(self):
         self.write_parser(managed=False)

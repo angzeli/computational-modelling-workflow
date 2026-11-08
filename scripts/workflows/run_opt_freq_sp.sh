@@ -6,7 +6,6 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd -P)
-PYTHON_BIN=${PYTHON_BIN:-python3}
 ORCA_RUNNER=${CMW_ORCA_RUNNER:-$REPO_ROOT/scripts/orca/run_orca.sh}
 source "$REPO_ROOT/scripts/runtime_python.sh"
 

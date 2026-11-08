@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -36,6 +37,7 @@ from cmw.molecular.multiwfn.excited_states import (
 from cmw.molecular.multiwfn.runtime import MENU_CONTRACT
 from cmw.molecular.orca.excited_states import parse_orca_tda_excited_states_file
 from cmw.molecular.stacking.hole_electron import FragmentDefinition
+from tests.python_fixture import python_source
 
 
 FIXTURE_ROOT = Path(__file__).parents[2] / "fixtures"
@@ -362,12 +364,12 @@ class Multiwfn38RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
         )
         executable = self.root / "fake Multiwfn"
         executable.write_text(
-            "#!/usr/bin/env python3\n"
+            python_source("#!/usr/bin/env python3\n"
             "import pathlib, sys\n"
             "lines = sys.stdin.read().splitlines()\n"
             "print('AUX=' + lines[2])\n"
             "print('AUX_EXISTS=' + str(pathlib.Path(lines[2]).is_file()))\n"
-            "print('SOURCE=' + sys.argv[1])\n",
+            "print('SOURCE=' + sys.argv[1])\n"),
             encoding="utf-8",
         )
         executable.chmod(0o755)
@@ -408,7 +410,7 @@ class Multiwfn38RendererTests(MultiwfnFixtureMixin, unittest.TestCase):
                 str(self.wavefunction),
                 str(stdin),
             ),
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHON_BIN": sys.executable},
             capture_output=True,
             text=True,
             check=True,

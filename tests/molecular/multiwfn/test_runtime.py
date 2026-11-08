@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -28,6 +29,7 @@ from cmw.molecular.multiwfn.runtime import (
     resolve_menu_contract,
     resolve_threads,
 )
+from tests.python_fixture import python_source
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -52,7 +54,7 @@ def _execution_profile():
 def _fake(root: Path, name: str = "Multiwfn", version: str = "3.8") -> Path:
     path = root / name
     path.write_text(
-        f"""#!/usr/bin/env python3
+        python_source(f"""#!/usr/bin/env python3
 import os, sys
 if '--version' in sys.argv:
     print('Multiwfn -- synthetic\\nVersion {version}')
@@ -65,7 +67,7 @@ if len(sys.argv) > 1:
     source = sys.argv[1]
     print('SOURCE=' + source)
     print('SOURCE_TEXT=' + open(source, encoding='utf-8').read().strip())
-""",
+"""),
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -267,7 +269,7 @@ class RuntimeTests(unittest.TestCase):
                     str(settings),
                 ),
                 cwd=ROOT,
-                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHON_BIN": sys.executable},
                 capture_output=True,
                 text=True,
                 check=True,
@@ -315,7 +317,7 @@ class RuntimeTests(unittest.TestCase):
                     str(source),
                 ),
                 cwd=ROOT,
-                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHON_BIN": sys.executable},
                 capture_output=True,
                 text=True,
                 check=True,
@@ -378,7 +380,7 @@ class RuntimeTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "CMW_FAKE_PID_FILE": str(pid_file),
-                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONDONTWRITEBYTECODE": "1", "PYTHON_BIN": sys.executable,
                 },
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

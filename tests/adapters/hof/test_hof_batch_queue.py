@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -139,6 +141,21 @@ class HofBatchQueueTests(unittest.TestCase):
                     output_directory=root / "batch",
                     python_bin=Path("/usr/bin/python3"),
                 )
+
+    def test_batch_preserves_selected_python_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            selected_python = root / "selected python"
+            selected_python.symlink_to(sys.executable)
+            output = root / "batch"
+            generate_hof_batch_queue(
+                queue_directories=(self._child(root, "first"), self._child(root, "second")),
+                output_directory=output,
+                python_bin=selected_python,
+            )
+
+            command = (output / "run_both_command_queues.sh").read_text(encoding="utf-8")
+            self.assertIn(f"PYTHON_BIN={shlex.quote(str(selected_python))}\n", command)
 
 
 if __name__ == "__main__":

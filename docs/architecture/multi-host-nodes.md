@@ -4,8 +4,9 @@ Status: **Phase 0 contracts with Phase 1 observation code implemented; not
 deployed.** This specification extends the existing `cmw nodes` implementation.
 It introduces no second jobs protocol, scheduler, manifest, provenance format,
 transport or portal. P1 wires reachability/clock decisions, cheap status and
-independent telemetry, and records interpreter pins; cancellation/plan contracts
-and the deployment cutover remain separate work.
+independent telemetry, and records interpreter pins. Issue #27 brings CMW-side
+interpreter launch enforcement forward; cancellation/plan contracts and the
+deployment cutover remain separate work.
 
 The historical Phase 0 inspected baseline was cached `origin/main` commit `1563c2f`, which includes
 PR #3 and the existing nodes implementation. The local `main` reference was
@@ -80,7 +81,7 @@ updates.
 | D25 | Clock skew: amber at ≥ 5 s, red at ≥ 60 s; no logic depends on clocks agreeing. |
 | D26 | A node-wide permanent journal with node identity and durable per-node sequence numbers (Phase 4). |
 | D29 | On battery, `mbp_m3max` accepts submissions into Hold but refuses release and dispatch. While jobs run, the controller holds a `caffeinate` assertion against idle sleep. This cannot prevent lid-close sleep on battery. |
-| D30 | The runner's Python interpreter is pinned by the runner profile; CMW sets `CMW_MANAGED_PYTHON` explicitly at launch. No reliance on inherited environment or PATH. P1 adds profile data; P3a implements the launch path. |
+| D30 | The runner's Python interpreter is pinned by the runner profile; CMW sets `CMW_MANAGED_PYTHON` explicitly at launch. No reliance on inherited environment or PATH. P1 added profile data; issue #27 brings CMW-side launch enforcement forward from P3a. New VASP execution requires a verified schema-2 pin and a runner that consumes it; legacy profiles remain readable as unpinned. External runner changes and qualification/deployment remain separate. |
 | D31 | The canonical VASP port runner is commit `51d8209`, used in production only after qualification. Runners are deployed only from clean commits as immutable snapshots under `~/.local/share`, each with a source-commit record and a SHA-256 manifest of its binaries; profiles pin them. Registered endpoint executables use an `-I -B` wrapper. Make runtime snapshots read-only after deployment and qualification, before enrollment. The D18 change is based on `51d8209` and deployed as a new snapshot. P1 owns the cutover; P3a owns D18. |
 | D32 | Benchmarks and experiments never use a production queue; they use a separate sandbox namespace. Each node has exactly one production configuration. Effective immediately. |
 | D33 | The Mini is consolidated in a single cutover after its current research job finishes; no new Mini submissions until then. P1 owns the cutover. |
@@ -811,7 +812,7 @@ runner is refused for this new contract. Exact flags/capability spelling are a
 draft interface, not instructions to patch the port here. Current preparation
 and runner migration requirements remain in §5.
 
-**D30 interpreter pin — P1 data implemented, not deployed:** an enrollment
+**D30 interpreter pin — CMW data and launch enforcement implemented, not deployed:** an enrollment
 profile can explicitly opt into `schema: 2` and
 `runner_interpreter: /absolute/path`. Enrollment records the resolved executable
 identity, SHA-256 and complete file/security evidence. Changed evidence refuses
@@ -821,10 +822,19 @@ and report **unpinned**. Capabilities preserve the legacy `profiles` projection
 and add `runner_profiles` schema 2 interpreter metadata. Submission bindings
 still hash the complete actual profile. No existing enrollment is migrated.
 
-This records an interpreter without proving the runner uses it. P3a makes CMW
-set `CMW_MANAGED_PYTHON` explicitly from that pin at launch. The runner must not
-select Python from inherited environment or PATH; that future launch contract
-must refuse missing or mismatched interpreter evidence.
+Issue #27 brings CMW-side launch enforcement forward from P3a. New VASP
+execution requires a verified schema-2 interpreter pin and a checked runner
+wrapper that consumes `CMW_MANAGED_PYTHON`. CMW sets that variable explicitly
+from the pin and excludes inherited Python home and foreign import paths. The
+wrapper makes `CMW_MANAGED_PYTHON`, `PYTHON_BIN`, `PYTHONPATH` and `PYTHONHOME`
+read-only before sourcing its environment, then requires the pin without a
+fallback; environment/toolchain setup cannot replace those settings. The
+selected absolute executable path is retained, including a virtual environment's
+symlink; its resolved target remains part of the verified identity. A legacy
+profile stays readable and reports unpinned, but cannot authorize new VASP
+execution. An older wrapper that ignores the pin is refused even if the profile
+records one. This change does not modify or deploy the external VASP port;
+runner qualification and the remaining P3a changes remain separate.
 
 **D31 runner deployment:** commit `51d8209` is the canonical VASP port baseline,
 eligible for production only after qualification. P1 deploys it from a clean
@@ -1009,9 +1019,9 @@ pipe cannot be restored by upgrading CMW.
 | Immediate operating rules | D32: one production configuration per node; sandbox namespaces for benchmarks/experiments, never production queues. D33: no new Mini submissions until its current research job finishes. | Effective now; no deployment implied |
 | P0 | This delta specification; ported pure logic; local status-cost measurement | — |
 | 3.11 PR | Minimum Python 3.11; CI adjustment | P0 merged |
-| P1 | **Code implemented, not deployed:** cheap status, independent telemetry, 3-failure rule, 5 s polling/15 s freshness and D30 profile data. **Cutover pending:** default registry and aliases; canonical production configuration of both machines in both directions; thermal configuration; D30 interpreter profile pins; D31 qualified `51d8209` immutable snapshot cutover; D33 single Mini consolidation | 3.11 PR merged; runner qualification before production use; Mini cutover only after its current research job finishes |
+| P1 | **Code implemented, not deployed:** cheap status, independent telemetry, 3-failure rule, 5 s polling/15 s freshness and D30 profile data; issue #27 also brings CMW-side interpreter launch enforcement forward. **Cutover pending:** default registry and aliases; canonical production configuration of both machines in both directions; thermal configuration; D30 interpreter profile pins; D31 qualified `51d8209` immutable snapshot cutover; D33 single Mini consolidation | 3.11 PR merged; runner qualification before production use; Mini cutover only after its current research job finishes |
 | P2 | Single entry point: `cmw jobs watch` opens `NodesApp` including the local queue; node tabs; consolidate `JobsTable` and `NodesTable` | P1 |
-| P3a | Cancellation modes and 10 s hard grace; D18 verify-only INCAR and NPAR rejection in the VASP port (separate repository PR based on `51d8209`); D30 explicit `CMW_MANAGED_PYTHON` launch path; D31 newly qualified immutable successor snapshot and profile pins | P2; qualify the changed runner before production deployment |
+| P3a | Cancellation modes and 10 s hard grace; D18 verify-only INCAR and NPAR rejection in the VASP port (separate repository PR based on `51d8209`); D30 external runner qualification (CMW launch enforcement brought forward by issue #27); D31 newly qualified immutable successor snapshot and profile pins | P2; qualify the changed runner before production deployment |
 | P3b | Binary transfer endpoint replacing SFTP; restart-artifact submission; forced-command gate; D23 | P3a; gate after the transfer endpoint |
 | P4 | Node-wide permanent journal | P3b |
 | P5 | File UX: fetch-and-open, selection without hand-written JSON | P3b |
@@ -1091,7 +1101,8 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    diagnostic, staged-input identity and provenance/finalization, and the
    existing variant/restart restrictions. D30/D31 fix the interpreter and runner
    deployment policy. Versioned interpreter profile data is implemented in P1;
-   launch integration, qualified snapshots and deployment remain pending. The separate port PR owns D18 enforcement based on
+   issue #27 implements CMW-side interpreter launch enforcement. Qualified
+   runner snapshots and deployment remain pending. The separate port PR owns D18 enforcement based on
    `51d8209`; P0 changes neither repository's runtime path.
 9. **D20/D22 capability data and rollout:** current host evidence supplies platform
     UUID, not the new physical-core/tier/policy object, and node submission fixes

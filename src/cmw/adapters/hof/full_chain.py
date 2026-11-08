@@ -370,7 +370,7 @@ def generate_hof_full_chain(
     for path in (python_bin, orca_executable, converter, multiwfn_executable, multiwfn_settings):
         if not path.expanduser().resolve().is_file():
             raise FileNotFoundError(f"required executable or settings file is missing: {path}")
-    python_bin = python_bin.expanduser().resolve()
+    python_bin = python_bin.expanduser().absolute()
     orca_executable = orca_executable.expanduser().resolve()
     converter = converter.expanduser().resolve()
     multiwfn_executable = multiwfn_executable.expanduser().resolve()

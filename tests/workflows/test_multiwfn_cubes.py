@@ -12,6 +12,7 @@ from pathlib import Path
 from cmw.core.job import JobTarget
 from cmw.core.provenance import ArtifactRecord, file_hash
 from cmw.structure.xyz import geometry_hash, read_xyz
+from tests.python_fixture import python_source, write_python_script
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +26,7 @@ class MultiwfnCubeHarness(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="cmw cubes space ")
         self.root = Path(self.temporary.name)
+        self.fake = write_python_script(self.root / "fake-Multiwfn", FAKE.read_text())
         self.source_dir = self.root / "validated source"
         self.source_dir.mkdir()
         self.geometry = self.source_dir / "source geometry.xyz"
@@ -40,6 +42,7 @@ class MultiwfnCubeHarness(unittest.TestCase):
         self.env = {
             **os.environ,
             "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHON_BIN": sys.executable,
             "PYTHONPATH": str(ROOT / "src"),
             "FAKE_MULTIWFN_LOG": str(self.log),
         }
@@ -124,7 +127,7 @@ class MultiwfnCubeHarness(unittest.TestCase):
                 "--grid-spacing-bohr",
                 str(spacing),
                 "--multiwfn-exe",
-                str(FAKE),
+                str(self.fake),
                 "--settings-source",
                 str(self.settings),
                 *extra,
@@ -150,7 +153,7 @@ class FmoWorkflowTests(MultiwfnCubeHarness):
         observer = self.root / "observe-python"
         events_path = self.root / "lock-events.jsonl"
         observer.write_text(
-            "#!/usr/bin/env python3\n"
+            python_source("#!/usr/bin/env python3\n"
             "import json, os, subprocess, sys\n"
             "from pathlib import Path\n"
             "args = sys.argv[1:]\n"
@@ -168,7 +171,7 @@ class FmoWorkflowTests(MultiwfnCubeHarness):
             "        handle.write(json.dumps({'action': action, 'before': before, "
             "'after': lock.exists(), 'status': status, 'caller_pid': os.getppid(), "
             "'owner_pid': owner_pid}) + '\\n')\n"
-            "sys.exit(status)\n",
+            "sys.exit(status)\n"),
             encoding="utf-8",
         )
         observer.chmod(0o700)

@@ -165,6 +165,10 @@ def _argv(spec, profile, bundle, work, native, *, input_directory=None):
     reason = ('; '.join(interface['missing_requirements'])
               or str(interface['interface_compatibility'].get('reason', 'unknown interface')))
     _require(interface['exit_code'] == 0, 'Target runner interface is unqualified: ' + reason)
+    _require(interface['interface_compatibility'].get('requires_pinned_interpreter') is True,
+             'VASP runner must require CMW_MANAGED_PYTHON; PATH-selected runners cannot execute')
+    from .runner_profiles import runner_environment
+    runner_environment(profile)
     return argv
 
 
@@ -239,6 +243,9 @@ def register_held(backend, spec, request_id):
     _require(stat.S_IMODE(work.stat().st_mode) & 0o077 == 0, 'Working directory must be private')
     profile = backend.config['profiles'][spec['profile']]
     molecular_binding, environment = None, None
+    if spec['engine'] == 'VASP':
+        from .runner_profiles import runner_environment
+        environment = runner_environment(profile)
     actual_work = work
     if molecular:
         from cmw.jobs.molecular import prepare, binding
@@ -305,6 +312,10 @@ def launch_blocker(job, *, final=False):
         storage = config['storages'][binding['storage_alias']]
         _require(storage['storage_id'] == binding['storage_id'], 'Storage enrollment changed')
         _require(stable_hash(config['profiles'][binding['profile']]) == binding['target_profile_digest'], 'Runtime profile changed')
+        if job['engine'] == 'VASP':
+            from .runner_profiles import runner_environment
+            _require(job['env'] == runner_environment(config['profiles'][binding['profile']]),
+                     'VASP interpreter environment differs from the enrolled pin')
         receipt = lookup_transfer(config, binding['storage_alias'], binding['transfer_request_id'])
         _require(receipt and receipt['status'] == 'PUBLISHED' and receipt['manifest_digest'] == binding['manifest_digest']
                  and receipt['published_root'] == binding['published_root'], 'Published input identity changed')

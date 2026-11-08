@@ -56,7 +56,6 @@ def _fixture(root, profile):
     spec=make_spec(storage/'fixture',profile)
     native=Path(spec['runtime']['executable'])
     original=native.read_text()
-    original='#!'+sys.executable+'\n'+original.split('\n',1)[1]
     gate=(f'\nfrom pathlib import Path as _Path\nprint("Native fixture live",flush=True)\n_Path({str(root/"started")!r}).touch()\n'
           f'_deadline=time.monotonic()+90\nwhile not _Path({str(root/"release")!r}).exists():\n if time.monotonic()>_deadline: raise SystemExit(73)\n time.sleep(.05)\n')
     if profile=='IFCT':
@@ -73,7 +72,7 @@ def _fixture(root, profile):
     if 'from __future__ import annotations\n' in original:
         original=original.replace('from __future__ import annotations\n','from __future__ import annotations\n'+origin_probe,1)
     else:
-        original=original.split('\n',1)[0]+'\n'+origin_probe+original.split('\n',1)[1]
+        original=original.replace("' '''\n", "' '''\n"+origin_probe, 1)
     native.write_text(original);spec['runtime']['sha256']=file_hash(native)
     return storage,spec,{'FMO':'workflows/generate_homo_lumo_cubes.sh','ESP':'workflows/generate_esp_cubes.sh',
                          'IGMH':'workflows/generate_igmh_cubes.sh','IFCT':'multiwfn/run_ifct.sh'}[profile]

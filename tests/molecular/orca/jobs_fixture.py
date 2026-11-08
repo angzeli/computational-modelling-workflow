@@ -8,6 +8,7 @@ import time
 from uuid import uuid4
 
 from cmw.core.provenance import file_hash
+from tests.python_fixture import python_source
 
 
 NATIVE = r'''#!/usr/bin/env python3
@@ -39,7 +40,7 @@ print('ORCA TERMINATED NORMALLY',flush=True)
 
 def make_spec(root, *, profile='sp', workflow=False, fail_stage=None):
     root=Path(root).resolve(); root.mkdir(parents=True,exist_ok=True)
-    native=root/'orca-substitute';native.write_text(NATIVE);native.chmod(0o755)
+    native=root/'orca-substitute';native.write_text(python_source(NATIVE));native.chmod(0o755)
     if fail_stage:
         (root/'fail-stage').write_text(fail_stage)
     spec={'schema':1,'request_id':str(uuid4()),'engine':'ORCA','name':'synthetic ORCA '+profile,

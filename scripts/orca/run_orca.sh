@@ -7,7 +7,6 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd -P)
-PYTHON_BIN=${PYTHON_BIN:-python3}
 ORCA_EXE=${ORCA_EXE:-orca}
 NPROCS=${NPROCS:-1}
 MAXCORE_MB=${MAXCORE_MB:-1000}

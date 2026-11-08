@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +29,10 @@ class StudyServiceTests(unittest.TestCase):
 
     def materialize(self):
         plan = self.service.plan(self.fixture['manifest_path'])
+        for runtime in payload(plan)['runtimes'].values():
+            self.assertEqual(runtime['env'], {'CMW_MANAGED_PYTHON': sys.executable,
+                'PYTHON_BIN': sys.executable, 'PYTHONPATH': '', 'PYTHONHOME': '',
+                'CMW_JOBS_OWN_SESSION': '1', 'OMP_NUM_THREADS': '1'})
         prepared = self.service.materialize(self.fixture['manifest_path'], plan.plan_digest)
         self.assertEqual(prepared.status, 'MATERIALIZED', payload(prepared))
         return plan, payload(prepared)['record_path']
@@ -55,6 +60,10 @@ class StudyServiceTests(unittest.TestCase):
         self.assertEqual(len(self.store.snapshot()['jobs']), 2)
         self.assertEqual(self.service.view(record).status, 'COMPLETE')
         job = self.store.snapshot()['jobs'][0]
+        self.assertIsNone(launch_blocker(job))
+        unpinned = deepcopy(job)
+        unpinned['env'].pop('CMW_MANAGED_PYTHON')
+        self.assertIn('approved runtime', launch_blocker(unpinned))
         selected = self.service.view_for_job(job['id'], job['attempt_id'])
         self.assertEqual(payload(selected)['selected_target']['attempt_id'], job['attempt_id'])
         missing = self.root / 'missing-selection.json'

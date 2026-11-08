@@ -107,7 +107,9 @@ def generate_hof_batch_queue(
     output = output_directory.expanduser().resolve()
     if output.exists():
         raise FileExistsError(f"batch queue output already exists: {output}")
-    python_bin = python_bin.expanduser().resolve(strict=True)
+    python_bin = python_bin.expanduser().absolute()
+    # Validate the target without losing a virtual environment's symlink path.
+    python_bin.resolve(strict=True)
     subqueues: list[dict[str, object]] = []
     steps: list[dict[str, object]] = []
     systems: set[str] = set()

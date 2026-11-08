@@ -22,9 +22,13 @@ from .result_sources import SnapshotReader
 _SOURCE_LIMIT = 512 * 1024
 _PORT_FILES = ('run-vasp.sh', 'run_vasp.py', 'environment.sh', 'launch.py', 'observables.py')
 _WRAPPER_PREFIX = ['set -euo pipefail', '. "$(dirname -- "$0")/environment.sh"']
+_PINNED_WRAPPER_PREFIX = [_WRAPPER_PREFIX[0],
+    'readonly CMW_MANAGED_PYTHON PYTHON_BIN PYTHONPATH PYTHONHOME', _WRAPPER_PREFIX[1]]
+_PINNED_WRAPPER_EXEC = 'exec "${CMW_MANAGED_PYTHON:?CMW_MANAGED_PYTHON must be pinned}" -B "$PORT_ROOT/scripts/run_vasp.py" "$@"'
 _WRAPPER_EXEC = {
     'exec python3 -B "$PORT_ROOT/scripts/run_vasp.py" "$@"',
     'exec "${CMW_MANAGED_PYTHON:-python3}" -B "$PORT_ROOT/scripts/run_vasp.py" "$@"',
+    _PINNED_WRAPPER_EXEC,
 }
 _PORT_ROOT = 'PORT_ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)'
 
@@ -311,12 +315,16 @@ def check_runner(runner, argv, *, project_root=None, allow_planned_input=False):
             if path == runner:
                 interface['entry_point_located'] = True
         lines = [line.strip() for line in contents['run-vasp.sh'].splitlines() if line.strip() and not line.lstrip().startswith('#')]
-        if len(lines) != 3 or lines[:2] != _WRAPPER_PREFIX or lines[2] not in _WRAPPER_EXEC:
+        if lines[:-1] not in (_WRAPPER_PREFIX, _PINNED_WRAPPER_PREFIX) or lines[-1] not in _WRAPPER_EXEC:
             raise ValueError('Shell wrapper is outside the recognized run-vasp.sh delegation; no shell/help probe performed')
         _environment_relationship(contents['environment.sh'])
         for path in toolchain_sources(runner):
             _source(path, 'runner_toolchain:' + path.name, records)
         interface['wrapper_relationship'] = 'run-vasp.sh -> environment.sh -> scripts/run_vasp.py'
+        # Sourced environment/toolchain code must not replace the verified pin
+        # or reintroduce a foreign Python home/import path before exec.
+        interface['requires_pinned_interpreter'] = (lines[:-1] == _PINNED_WRAPPER_PREFIX
+                                                    and lines[-1] == _PINNED_WRAPPER_EXEC)
         options = _parser_options(contents['run_vasp.py'])
         result['observed_capabilities']['argument_declarations'] = options
         # argv has already passed the existing result-association grammar.

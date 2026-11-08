@@ -4,11 +4,13 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from cmw.structure.xyz import geometry_hash, read_xyz
+from tests.python_fixture import write_python_script
 
 
 ROOT = Path(__file__).parents[2]
@@ -24,13 +26,14 @@ def _config(
     opt_keywords: str = "HF STO-3G",
     imaginary_tolerance_cm1: float = 5.0,
 ) -> None:
+    fake = write_python_script(path.parent / "fake-orca", FAKE_ORCA.read_text())
     path.write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "charge": 0,
                 "multiplicity": 1,
-                "orca_exe": str(FAKE_ORCA),
+                "orca_exe": str(fake),
                 "resources": {"nprocs": 1, "maxcore_mb_per_process": 128},
                 "validation": {
                     "require_minimum": True,
@@ -62,6 +65,7 @@ class WorkflowHarness(unittest.TestCase):
         self.env = {
             **os.environ,
             "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHON_BIN": sys.executable,
             "PYTHONPATH": str(ROOT / "src"),
             "FAKE_ORCA_LOG": str(self.log),
         }

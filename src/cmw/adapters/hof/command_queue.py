@@ -338,10 +338,10 @@ def generate_hof_command_queue(
     }
     if not required.issubset(targets):
         raise ValueError("downstream package lacks required materialized targets")
-    resolved_files = [
+    python_bin = python_bin.expanduser().absolute()
+    resolved_files = [python_bin] + [
         path.expanduser().resolve()
         for path in (
-            python_bin,
             orca_executable,
             converter,
             multiwfn_executable,

@@ -556,14 +556,29 @@ New enrollment specs may explicitly set a profile's `schema` to `2` and
 resolved path, file identity, SHA-256 and complete security evidence; a changed
 pin refuses that profile's readiness. Such configurations use node schema 2.
 Existing schema-1 configurations and unversioned profiles stay valid and report
-**unpinned**. There is no automatic migration or rejection for a missing legacy
-pin. `nodes check` exposes pin readiness; capabilities retain the old `profiles`
+**unpinned**. There is no automatic migration or read-time rejection for a missing
+legacy pin. `nodes check` exposes pin readiness; capabilities retain the old `profiles`
 shape and add versioned `runner_profiles` interpreter metadata. A capability's
 `pinned` label describes the record; selected-profile readiness verifies it.
 
-This change adds data and observation only. Runner argv, environment and launch
-selection remain unchanged. P3a will set `CMW_MANAGED_PYTHON` explicitly from the
-profile pin; this Phase 1 record alone does not prove launch use.
+New VASP execution requires a verified schema-2 pin and a checked runner wrapper
+that consumes `CMW_MANAGED_PYTHON`. CMW supplies that variable explicitly from the
+profile, retaining the selected absolute executable path (including a virtual
+environment's symlink), and excludes inherited Python home and foreign import
+paths. Legacy unpinned profiles remain inspectable but cannot authorize a new
+VASP execution. A wrapper that ignores the variable is refused rather than
+falling back to Python from `PATH`.
+
+The checked wrapper declares
+`readonly CMW_MANAGED_PYTHON PYTHON_BIN PYTHONPATH PYTHONHOME` before sourcing
+`environment.sh`, then executes the required `CMW_MANAGED_PYTHON` without a
+fallback. This prevents environment/toolchain setup from replacing the pin or
+introducing foreign Python import settings. Existing external wrappers need
+this contract and separate qualification before they can authorize execution.
+
+Issue #27 brings this CMW-side part of D30 forward from P3a. The external VASP
+port is neither modified nor deployed by it; runner qualification, snapshots and
+the other P3a changes remain separate.
 
 ## Portal reachability and recovery
 

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import shlex
 import shutil
+import subprocess
 import tempfile
 import unittest
+import venv
 
 from cmw.adapters.hof.execution import (
     _reused_attempt_state,
@@ -17,6 +21,51 @@ FIXTURE = ROOT / "tests/fixtures/hof"
 
 
 class HofExecutionMaterializationTests(unittest.TestCase):
+    def test_materialized_command_keeps_selected_virtual_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = root / "selected environment"
+            venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+            selected_python = environment / "bin/python"
+            self.assertTrue(selected_python.is_symlink())
+            project = root / "hof"
+            shutil.copytree(FIXTURE / "config", project / "config")
+            shutil.copytree(FIXTURE / "structure", project / "structure")
+            runtime = root / "orca-runtime.json"
+            runtime.write_text("{}\n", encoding="utf-8")
+
+            result = materialize_hof_orca_node(
+                systems_path=project / "config/systems.yaml",
+                methods_path=project / "config/methods.yaml",
+                protocol_path=project / "config/protocol.yaml",
+                execution_path=project / "config/execution.yaml",
+                system_id="synthetic_hof",
+                project_root=project,
+                node_id="geometry_optimization",
+                runtime_contract_source=runtime,
+                cmw_root=ROOT,
+                python_bin=selected_python,
+                orca_executable=Path("/usr/bin/true"),
+            )
+            command = Path(str(result["command_path"])).read_text(encoding="utf-8")
+            selected = next(
+                word.removeprefix("PYTHON_BIN=")
+                for word in shlex.split(command.splitlines()[-1])
+                if word.startswith("PYTHON_BIN=")
+            )
+            self.assertEqual(selected, str(selected_python))
+            child = subprocess.run(
+                (selected, "-c", "import sys; print(sys.prefix)"),
+                env={
+                    key: value for key, value in os.environ.items()
+                    if key not in {"PYTHONPATH", "PYTHONHOME"}
+                },
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(Path(child.stdout.strip()).resolve(), environment.resolve())
+
     def test_reused_attempt_preserves_operational_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             attempt = Path(temporary) / "target" / "attempts" / "attempt_004"

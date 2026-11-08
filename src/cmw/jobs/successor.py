@@ -388,9 +388,10 @@ class SuccessorService:
             raise JobsError('VASP execution directory must be new and separate from the canonical inputs')
         argv=_argv({'engine':'VASP','vasp':value['vasp'],'resources':spec['resources']},profile,
                    output.parent,run,run/'native',input_directory=output)
+        from cmw.nodes.runner_profiles import runner_environment
         return {'kind':'enrolled-vasp-profile','profile':value['profile'],'profile_record':profile,
                 'runtime_id':config['runtime']['fingerprint'],'argv':argv,'cwd':str(run),
-                'env':{'CMW_JOBS_OWN_SESSION':'1','OMP_NUM_THREADS':'1'}}
+                'env':{**runner_environment(profile),'CMW_JOBS_OWN_SESSION':'1','OMP_NUM_THREADS':'1'}}
 
     def _build(self,job_id,spec_path,expected_attempt_id=None):
         value,spec_identity=_document(spec_path);spec=_spec(value)
@@ -752,6 +753,11 @@ def launch_blocker(job):
             if (not check_node(config)['ready'] or config['node_id']!=binding['node_id']
                     or config['profiles'].get(spec['runtime']['profile'])!=runtime['profile_record']):
                 raise JobsError('VASP successor runtime profile changed')
+            from cmw.nodes.runner_profiles import runner_environment
+            expected_env = {**runner_environment(config['profiles'][runtime['profile']]),
+                            'CMW_JOBS_OWN_SESSION': '1', 'OMP_NUM_THREADS': '1'}
+            if runtime['env'] != expected_env:
+                raise JobsError('VASP successor interpreter environment differs from its profile pin')
             expected=plan['adapter']['preparation']['prepared_inputs']
             for name in ('INCAR','POSCAR','KPOINTS','POTCAR'):
                 path=_path(str(Path(spec['adapter']['output'])/name))

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from cmw.nodes.identity import _profile, _validate_config, check_node, enroll, load_node
 from cmw.nodes.runner_profiles import (interpreter_observation, pin_interpreter,
-                                       profile_capabilities, validate_interpreter)
+                                       profile_capabilities, runner_environment, validate_interpreter)
 from cmw.nodes.storage import check_storage, identify_storage
 from tests.nodes.test_identity import HOST, RUNTIME
 from tests.nodes.test_storage import volume
@@ -198,3 +198,39 @@ class RunnerProfileTests(unittest.TestCase):
                      profile, self.root / 'bundle', self.root / 'work', self.root / 'native')
         self.assertEqual(argv, [str(self.runner), 'synthetic'])
         self.assertEqual(dict(os.environ), before)
+
+    def test_launch_environment_uses_verified_pin_despite_foreign_python_environment(self):
+        profile = _profile(self.pinned_spec()['profiles']['fixture'], RUNTIME)
+        foreign = {'PATH': '/different/interpreter/bin', 'VIRTUAL_ENV': '/different/environment',
+                   'CMW_MANAGED_PYTHON': '/different/python', 'PYTHON_BIN': '/different/python',
+                   'PYTHONPATH': '/different/stdlib', 'PYTHONHOME': '/different/home'}
+        with patch.dict(os.environ, foreign):
+            before = dict(os.environ)
+            result = runner_environment(profile)
+            self.assertEqual(result, {'CMW_MANAGED_PYTHON': str(self.interpreter),
+                'PYTHON_BIN': str(self.interpreter), 'PYTHONPATH': '', 'PYTHONHOME': ''})
+            self.assertEqual(dict(os.environ), before)
+            effective = {**before, **result}
+            self.assertEqual(effective['CMW_MANAGED_PYTHON'], str(self.interpreter))
+            self.assertEqual(effective['PYTHON_BIN'], str(self.interpreter))
+            self.assertEqual(effective['PYTHONPATH'], '')
+            self.assertEqual(effective['PYTHONHOME'], '')
+
+    def test_launch_refuses_legacy_missing_or_replaced_pin(self):
+        legacy = _profile(self.spec['profiles']['fixture'], RUNTIME)
+        with self.assertRaisesRegex(ValueError, 'verified schema-2 interpreter pin.*unpinned'):
+            runner_environment(legacy)
+        for mutation in ('missing', 'replaced'):
+            with self.subTest(mutation=mutation):
+                executable = self.root / (mutation + '-python')
+                executable.write_text('#!/bin/sh\nexit 0\n')
+                executable.chmod(0o700)
+                profile = {'schema': 2, 'runner_interpreter': pin_interpreter(str(executable))}
+                replacement = self.root / (mutation + '-replacement')
+                replacement.write_text('#!/bin/sh\nexit 0\n')
+                replacement.chmod(0o700)
+                executable.unlink()
+                if mutation == 'replaced':
+                    replacement.rename(executable)
+                with self.assertRaisesRegex(ValueError, 'verified schema-2 interpreter pin'):
+                    runner_environment(profile)
