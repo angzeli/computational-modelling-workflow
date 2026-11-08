@@ -64,7 +64,8 @@ class TransportEventTests(unittest.TestCase):
                          operation='status').kind, FailureKind.TRANSPORT)
 
     def test_readiness_refusals_disable_controls_immediately(self):
-        for code in ('NODE_REFUSED', 'NODE_NOT_READY', 'UNKNOWN_QUEUE', 'INVALID_QUEUE', 'HANDSHAKE_REQUIRED'):
+        for code in ('NODE_REFUSED', 'NODE_NOT_READY', 'UNKNOWN_QUEUE', 'INVALID_QUEUE',
+                     'HANDSHAKE_REQUIRED', 'OWNERSHIP_UNVERIFIABLE'):
             with self.subTest(code=code):
                 failure = classify_failure(NodeError(code, 'refused'))
                 self.assertEqual(failure.kind, FailureKind.READINESS)

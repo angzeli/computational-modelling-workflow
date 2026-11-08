@@ -167,6 +167,15 @@ successful result. A node-selected Jobs CLI predating these codes prints the
 code and message and exits 2. Exit 75 requires a client that recognizes the
 retryable code.
 
+Controller-start observation refusals use `OWNERSHIP_UNVERIFIABLE`: ownership
+is temporarily unverifiable, retry with a fresh request (and a fresh preview
+for a node-selected operation). They precede preparation/launch and write no
+receipt or permanent refusal. Current local and node-selected Jobs CLIs return
+`UNVERIFIABLE` with exit 75. A readable, still-live controller is not this case
+and remains a refusal. This adds an error code under D04, not a protocol bump;
+older clients retain their non-success refusal/exit 2 behavior. A committed
+start whose outcome cannot be confirmed is never relabelled safe-to-retry.
+
 Under D04 a new code may ship within protocol 1 only if tests exercise every
 earlier client implementation against the unknown code. Each must return a
 non-success refusal without crashing. A client that recognizes the code can
@@ -889,12 +898,17 @@ fields. A v1 timestamp mismatch suspends control.
 The worker retains its pipe, claim and resource commitments on the first
 unverifiable observation. The worker and controller block admission and
 process control. The worker retries from 250 ms, doubling to a five-second cap.
-A continuous hold escalates to Unknown after 60 seconds on the same boot. If a
-subsequent failed check cannot place the persisted hold on the current clock
-(missing or changed boot, missing or reversed ticks), it also escalates. The
-worker keeps the pipe open. VERIFIED permits normal supervision of the original claim;
-confirmed loss follows the conservative Unknown path. An unrelated Unknown
-or explicit dispatch pause requires separate operator attention.
+A continuous hold records a coalesced attention event after 60 seconds without
+changing the job's state. If its age cannot be placed on the current boot's
+monotonic clock, it requests attention without interpreting missing clock
+evidence as a contradiction. The worker keeps the pipe open. Every hold belongs
+to an observation operation with a re-evaluation driver; a phase change or
+superseding intent resolves or transfers that responsibility. A hold without a
+driver is an immediate invariant error, never an indefinite silent wait.
+VERIFIED permits fresh checks before normal supervision resumes. Only established
+contradictory evidence takes the Unknown path; unavailable evidence remains
+retryable. An unrelated Unknown or explicit dispatch pause requires separate
+operator attention.
 
 In ordinary session cancellation, a denied or unreadable group send enters the
 same ownership hold. Only group-absence observations are retried. The worker
@@ -915,6 +929,40 @@ After the payload exits, its anchor ignores TERM and INT before launching the
 receipt writer. The writer inherits that protection through durable atomic
 publication, and the anchor keeps it while awaiting RELEASE. During execution
 the anchor's original traps continue to allow the payload to receive signals.
+
+After RELEASE, completion is a separate in-memory phase of the original worker.
+It retains the receipt and drainage evidence and retries receipt verification,
+PRESENT/ABSENT/UNAVAILABLE final observations and the attempt/claim-bound terminal
+transaction. EPERM, EAGAIN and other unreadable probes remain UNAVAILABLE; no
+retry deadline converts them to contradiction. Controls report **completion
+pending**, commitments remain reserved, and attention is coalesced after 60
+seconds. Ambiguous COMMIT outcomes are read back before another mutation; signals,
+RELEASE and committed terminal events are never replayed. Timing comes from the
+completion evidence rather than delayed publication. Ordinary hard cancellation
+retains its confirmed-reap/absence completion contract without a fabricated
+receipt. This change adds no queue schema or runtime protocol version.
+
+The bounded-completion guarantee requires a previously verified process domain.
+If a coordinated payload finishes before its first live domain observation, its
+receipt alone cannot supply that missing proof. Retain the original state,
+commitments and pipe with the exact visible reason **process domain never
+observed; receipt present; manual verification required**. Never signal, RELEASE
+or convert this missing evidence to Unknown; coalesce attention after 60 seconds.
+The separate pending-class sweep checks this outcome explicitly. There is no
+positive minimum affected duration: the worker polls at 150 ms and one retry
+adds 250 ms initially, but the runner has no first-census acknowledgement.
+See the [manual operator procedure](../cmw-jobs.md#operator-procedure-for-the-never-observed-domain-hold)
+and [post-cutover handshake issue #24](https://github.com/angzeli/computational-modelling-workflow/issues/24).
+The [read-site manifest and fault-sweep contract](ownership-fault-sweep.md)
+separate terminal rows, accepted pending rows and reads outside the worker
+lifecycle fixtures; unittest counts are reported independently from injected rows.
+
+Recovery after worker death is a distinct post-cutover proposal, to be reassessed
+after the slimming audit: [durable completion](durable-completion-proposal.md).
+It is tracked by [issue #23](https://github.com/angzeli/computational-modelling-workflow/issues/23)
+and linked to #24 because both change the release protocol.
+The proposed schema 5, runtime protocol 4, anchor acknowledgement and controller
+finisher are not implemented by the in-memory retry change.
 
 Heartbeat, launch grace and admission samples carry a boot session and
 monotonic timestamp alongside their wall time. Missing, future or different-boot

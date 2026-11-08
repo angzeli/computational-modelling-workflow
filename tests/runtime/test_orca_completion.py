@@ -152,6 +152,7 @@ class OrcaCompletionTests(unittest.TestCase):
     def test_structured_result_waits_for_drain_and_keeps_cancellation(self):
         control = Mock(binding=self.context, runner=self.runner, cancel_requested=True,
                        _drain_known={12346: self.computation})
+        control._wait_for_owner_read.side_effect = lambda read: read()
         control.poll.return_value = 'hold'  # A later hold cannot erase accepted cancellation.
         control.domain_drained.side_effect = [False, True]
         control.execution_budget_exhausted.return_value = False

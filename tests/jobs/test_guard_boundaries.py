@@ -53,7 +53,8 @@ class GuardBoundaryTests(unittest.TestCase):
             stack.enter_context(patch.object(runtime.subprocess, 'Popen', return_value=leader))
             stack.enter_context(patch.object(runtime, 'identity', side_effect=lambda pid=None: fixtures.owner(pid or 700)))
             stack.enter_context(patch.object(runtime, 'group_exists', return_value=False))
-            stack.enter_context(patch.object(runtime, 'owner_alive', return_value=True))
+            stack.enter_context(patch.object(runtime, 'observe_owner', return_value=Mock(
+                status=runtime.OwnershipStatus.VERIFIED, deciding_check='identity')))
             stack.enter_context(patch('cmw.jobs.ownership_hold.observe_owner', return_value=Mock(status='VERIFIED')))
             # Only dispatch-authority lock evidence is replaced; the worker still
             # acquires/releases its real isolated attempt lock through exclusive.
@@ -61,7 +62,7 @@ class GuardBoundaryTests(unittest.TestCase):
             runtime.worker(self.store, row['id'], 'original')
         leader.stdin.write.assert_not_called()
         leader.stdin.close.assert_called()
-        leader.wait.assert_called_once_with(timeout=5)
+        leader.wait.assert_called_once_with(timeout=.25)
         self.assertFalse(ownership.lock_held(self.store.root / 'attempts' / row['attempt_id'] / 'worker.lock'))
         with self.store.transaction() as con:
             return self.store.get(con, row['id']), preserved
@@ -133,3 +134,42 @@ class GuardBoundaryTests(unittest.TestCase):
         result = activity.admission(state, clear())
         self.assertFalse(result['permitted'])
         self.assertIn('Executable is missing', result['reason'])
+
+    def test_changed_claim_with_unreadable_controller_reaps_unstarted_helper(self):
+        row = self.starting()
+        leader = SimpleNamespace(pid=987654, stdin=Mock(), wait=Mock(return_value=0))
+        preserved = {}
+
+        def collect(store, state, deadline):
+            with store.transaction() as con:
+                current = store.get(con, row['id'])
+                current.update(claim='replacement-identity', reason='Replacement owns this row')
+                store.save(con, current)
+                preserved.update(current)
+            return clear()
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(activity, 'DEFAULT_OBSERVER', activity.Observer(collect)))
+            stack.enter_context(patch.object(runtime.signal, 'signal'))
+            stack.enter_context(patch.object(runtime.subprocess, 'Popen', return_value=leader))
+            stack.enter_context(patch.object(runtime, 'identity', side_effect=lambda pid=None: fixtures.owner(pid or 700)))
+            absent = stack.enter_context(patch.object(runtime, 'group_exists', return_value=False))
+            controller = stack.enter_context(patch.object(runtime, 'observe_owner', return_value=Mock(
+                status=runtime.OwnershipStatus.UNVERIFIABLE, deciding_check='host')))
+            stack.enter_context(patch('cmw.jobs.ownership_hold.observe_owner', return_value=Mock(status='VERIFIED')))
+            stack.enter_context(patch.object(runtime, 'lock_held', return_value=True))
+            session_signal = stack.enter_context(patch.object(runtime, 'signal_session'))
+            group_signal = stack.enter_context(patch.object(runtime.os, 'killpg'))
+            runtime.worker(self.store, row['id'], 'original')
+
+        leader.stdin.write.assert_not_called()
+        leader.stdin.flush.assert_not_called()
+        leader.stdin.close.assert_called()
+        leader.wait.assert_called_once_with(timeout=.25)
+        absent.assert_called_once_with(leader.pid)
+        controller.assert_not_called()
+        session_signal.assert_not_called()
+        group_signal.assert_not_called()
+        self.assertFalse(ownership.lock_held(self.store.root / 'attempts' / row['attempt_id'] / 'worker.lock'))
+        with self.store.transaction() as con:
+            self.assertEqual(self.store.get(con, row['id']), preserved)

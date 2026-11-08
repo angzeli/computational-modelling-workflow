@@ -10,6 +10,25 @@ from cmw.nodes.transport import ProcessTransport, ssh_command
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_endpoint_preserves_retryable_controller_ownership_refusal(self):
+        class Backend:
+            def __init__(self, *_):
+                pass
+            def call(self, *args, **kwargs):
+                raise NodeError('OWNERSHIP_UNVERIFIABLE', 'ownership temporarily unverifiable; retry')
+            def close(self):
+                pass
+        message = request('control.preview', {'action': 'controller.start'})
+        output = io.BytesIO()
+        self.assertEqual(serve('/unused', 'test', input_stream=io.BytesIO(encode(message)),
+                               output_stream=output, backend_factory=Backend), 0)
+        packet = decode(output.getvalue())
+        self.assertEqual(packet['protocol'], 1)
+        self.assertIs(packet['ok'], False)
+        with self.assertRaises(NodeError) as caught:
+            response(packet, message['request_id'])
+        self.assertEqual(caught.exception.code, 'OWNERSHIP_UNVERIFIABLE')
+
     def test_strict_version_target_and_duplicate_keys(self):
         message = request('status')
         self.assertEqual(decode(encode(message)), message)

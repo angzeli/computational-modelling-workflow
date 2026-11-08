@@ -280,7 +280,8 @@ class NodePreflightTests(RegistrationFixture, unittest.TestCase):
             stack.enter_context(patch.object(runtime.subprocess, 'Popen', return_value=leader))
             stack.enter_context(patch.object(runtime, 'identity', side_effect=lambda pid=None: fixtures.owner(pid or 700)))
             stack.enter_context(patch.object(runtime, 'group_exists', return_value=False))
-            stack.enter_context(patch.object(runtime, 'owner_alive', return_value=True))
+            stack.enter_context(patch.object(runtime, 'observe_owner', return_value=Mock(
+                status=runtime.OwnershipStatus.VERIFIED, deciding_check='identity')))
             stack.enter_context(patch('cmw.jobs.ownership_hold.observe_owner', return_value=Mock(status='VERIFIED')))
             stack.enter_context(patch.object(runtime, 'lock_held', return_value=True))
             runtime.worker(self.store, row['id'], 'fixture-claim')

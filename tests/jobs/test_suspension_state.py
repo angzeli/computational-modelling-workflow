@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from contextlib import ExitStack, contextmanager
+import errno
 import json
 from pathlib import Path
 import sqlite3
@@ -98,6 +99,270 @@ class StateTests(unittest.TestCase):
         coordinator.domain_pending_since = None
         coordinator._validate = Mock(return_value=control.Domain((MEMBER,), (ANCHOR, RUNNER), ()))
         return coordinator
+
+    def test_hold_rejected_update_is_retained_until_recovery(self):
+        coordinator = self.coordinator()
+        expected = self.current()
+        self.change(ownership_holds={'domain': {'check': 'descendants'}})
+        with self.assertRaises(control.RequestSuperseded):
+            coordinator.update(expected, reason='Awaiting genuine completion', evidence=None)
+        self.assertEqual(len(coordinator.pending_updates), 1)
+        self.change(ownership_holds={})
+        coordinator._tick = Mock()
+        coordinator.tick(self.current())
+        self.assertEqual(coordinator.pending_updates, [])
+        self.assertEqual(self.current()['suspension']['reason'], 'Awaiting genuine completion')
+        self.assertEqual(self.current()['status'], 'Run')
+        self.send.assert_not_called()
+
+    def test_completion_pending_refuses_readiness_and_requests_explicitly(self):
+        self.change(ownership_holds={'completion': {'check': 'final absence', 'since_monotonic': 1}})
+        before = self.current()
+        for action in ('suspend', 'continue'):
+            with self.subTest(action=action):
+                preview = control.readiness(self.store, self.job['id'], action)
+                self.assertFalse(preview['ready'])
+                self.assertTrue(any(reason.startswith('Completion pending;') for reason in preview['reasons']))
+                with self.assertRaisesRegex(JobsError, 'Completion pending;'):
+                    control.submit(self.store, self.job['id'], action)
+        self.assertEqual(self.current(), before)
+        self.send.assert_not_called()
+
+    def test_unobserved_domain_receipt_is_pending_before_any_control_or_registration(self):
+        job = self.current()
+        coordinator = self.coordinator()
+        coordinator.registration = None
+        coordinator.last_domain = None
+        coordinator._registration = Mock(side_effect=AssertionError('retrospective registration'))
+        reason = 'process domain never observed; receipt present; manual verification required'
+        for action in (lambda: coordinator.tick(job, receipt_present=True), coordinator.ready_to_release):
+            with self.subTest(action=action), self.assertRaises(control.CompletionDomainUnobserved) as caught:
+                action()
+            self.assertEqual(str(caught.exception), reason)
+            self.assertEqual(caught.exception.deciding_check, 'completion.domain_never_observed')
+            self.assertNotIsInstance(caught.exception, control.OwnershipContradiction)
+        coordinator._registration.assert_not_called()
+        coordinator.channel.write.assert_not_called()
+        self.assertEqual(self.current(), job)
+        self.send.assert_not_called()
+
+    def test_runner_exit_before_first_domain_and_receipt_stays_pending(self):
+        job = self.current()
+        coordinator = self.coordinator()
+        coordinator.registration = None
+        coordinator.last_domain = None
+        coordinator.channel.read.return_value = {'runner': RUNNER, 'root': MEMBER}
+        with patch.object(control, 'lock_held', return_value=False), \
+                patch.object(control, '_check_runner', side_effect=control.DomainPending(
+                    'Registered runner and computation exited during observation')):
+            coordinator.tick(job)
+        value = self.current()['suspension']
+        self.assertEqual(value['phase'], 'Run')
+        self.assertFalse(value.get('accounting_uncertain', False))
+        self.assertIsNone(coordinator.last_domain)
+        self.assertIsNone(coordinator.registration)
+        coordinator.channel.write.assert_not_called()
+        self.send.assert_not_called()
+
+    def test_missing_runner_lock_with_live_runner_remains_a_contradiction(self):
+        coordinator = self.coordinator()
+        coordinator.registration = None
+        coordinator.channel.read.return_value = {'runner': RUNNER, 'root': MEMBER}
+        with patch.object(control, 'lock_held', return_value=False), \
+                patch.object(control, '_check_runner', return_value=None), \
+                self.assertRaisesRegex(control.OwnershipContradiction, 'lock is not owned'):
+            coordinator._registration(self.current())
+        self.send.assert_not_called()
+
+    def test_constructor_read_retry_does_not_recreate_directory_or_context(self):
+        job = self.current()
+        directory = self.store.root/'attempts'/job['attempt_id']/'suspension'
+        directory.parent.mkdir(parents=True)
+        mkdir, native_open = Path.mkdir, control.os.open
+        for error in (errno.EAGAIN, errno.EPERM):
+            with self.subTest(errno=error):
+                creations, opened = [], []
+                def create(path, *args, **options):
+                    if path == directory:
+                        creations.append(path)
+                    return mkdir(path, *args, **options)
+                def open_directory(path, *args, **options):
+                    if path == directory:
+                        opened.append(path)
+                        if len(opened) == 1:
+                            raise OSError(error, 'one constructor channel read')
+                    return native_open(path, *args, **options)
+                with patch.object(Path, 'mkdir', new=create), \
+                        patch.object(control.os, 'open', side_effect=open_directory), \
+                        patch.object(control.os, 'link', wraps=control.os.link) as publish, \
+                        patch.object(control.time, 'sleep') as sleep:
+                    coordinator = control.Coordinator(self.store, job, ANCHOR)
+                self.assertEqual(creations, [directory])
+                self.assertEqual(len(opened), 3)
+                publish.assert_called_once()
+                sleep.assert_called_once_with(.25)
+                self.assertEqual(coordinator.channel.read('context.json'), coordinator.context)
+                coordinator.discard_before_go()
+        self.send.assert_not_called()
+
+    def test_constructor_never_reuses_existing_channel_directory(self):
+        job = self.current()
+        directory = self.store.root/'attempts'/job['attempt_id']/'suspension'
+        directory.mkdir(mode=0o700, parents=True)
+        marker = directory/'foreign'
+        marker.write_text('must remain unchanged')
+        with self.assertRaises(FileExistsError):
+            control.Coordinator(self.store, job, ANCHOR)
+        self.assertEqual(marker.read_text(), 'must remain unchanged')
+        self.assertFalse((directory/'context.json').exists())
+
+    def test_discard_before_go_resumes_partial_removal_and_refuses_replacement(self):
+        job = self.current()
+        directory = self.store.root/'attempts'/job['attempt_id']/'suspension'
+        directory.parent.mkdir(parents=True)
+        coordinator = control.Coordinator(self.store, job, ANCHOR)
+        native_rmdir = Path.rmdir
+        attempts = []
+        def remove(path):
+            if path == directory:
+                attempts.append(path)
+                if len(attempts) == 1:
+                    raise OSError(errno.EAGAIN, 'one directory-removal refusal')
+            return native_rmdir(path)
+        with patch.object(Path, 'rmdir', new=remove), \
+                patch.object(control.os, 'unlink', wraps=control.os.unlink) as unlink:
+            with self.assertRaises(OSError):
+                coordinator.discard_before_go()
+            self.assertTrue(directory.is_dir())
+            self.assertFalse((directory/'context.json').exists())
+            coordinator.discard_before_go()
+            coordinator.discard_before_go()
+        self.assertFalse(directory.exists())
+        self.assertEqual([call.args[0] for call in unlink.call_args_list], ['context.json'])
+        directory.mkdir(mode=0o700)
+        with self.assertRaisesRegex(control.OwnershipContradiction, 'replaced'):
+            coordinator.discard_before_go()
+        self.assertTrue(directory.is_dir())
+
+    def test_discard_before_go_refuses_unrecorded_absence(self):
+        job = self.current()
+        directory = self.store.root/'attempts'/job['attempt_id']/'suspension'
+        directory.parent.mkdir(parents=True)
+        coordinator = control.Coordinator(self.store, job, ANCHOR)
+        (directory/'context.json').unlink()
+        directory.rmdir()
+        with self.assertRaisesRegex(control.OwnershipContradiction, 'disappeared'):
+            coordinator.discard_before_go()
+
+    def test_hold_rejected_update_cannot_overwrite_new_cancellation(self):
+        coordinator = self.coordinator()
+        expected = self.current()
+        self.change(ownership_holds={'domain': {'check': 'descendants'}})
+        with self.assertRaises(control.RequestSuperseded):
+            coordinator.update(expected, reason='old request', phase='Run')
+        latest = self.change(ownership_holds={}, status='Cancelling', cancel_requested=True)
+        coordinator._tick = Mock()
+        coordinator.tick(latest)
+        self.assertEqual(coordinator.pending_updates, [])
+        self.assertEqual(self.current()['status'], 'Cancelling')
+        self.assertNotEqual(self.current()['suspension']['reason'], 'old request')
+        self.send.assert_not_called()
+
+    def test_revalidated_exit_keeps_delivered_signal_history_without_stale_evidence(self):
+        coordinator = self.coordinator()
+        job = self.current()
+        history = [{'identity': MEMBER, 'signal': int(control.signal.SIGSTOP), 'delivered': True}]
+        coordinator.pending_updates = [(deepcopy(job), {
+            'evidence': {'computational': [MEMBER], 'signals': history}, 'signal_history': history})]
+        coordinator._validate.side_effect = control.DomainPending('Original member has exited')
+        coordinator._tick = Mock()
+        coordinator.tick(job)
+        current = self.current()['suspension']
+        self.assertEqual(current['signal_history'], history)
+        self.assertEqual(current['evidence'], job['suspension']['evidence'])
+        self.assertEqual(coordinator.pending_updates, [])
+        self.send.assert_not_called()
+
+    def test_command_publication_read_failure_keeps_the_pending_command(self):
+        coordinator = self.coordinator()
+        job = self.phase('Suspending', revision=1, request={'id': 'request', 'action': 'suspend'})
+        published = []
+        attempts = []
+        def publish(name, value, **options):
+            attempts.append(name)
+            if len(attempts) == 1:
+                raise OSError(errno.EAGAIN, 'one metadata read failed before publication')
+            published.append(value)
+        coordinator.channel.write.side_effect = publish
+        with self.assertRaises(OSError):
+            coordinator.command(job, 'prepare_suspend')
+        self.assertIsNotNone(coordinator.pending_command)
+        coordinator._tick = Mock()
+        coordinator.tick(self.current())
+        self.assertIsNone(coordinator.pending_command)
+        self.assertEqual(len(published), 1)
+        self.assertEqual(published[0]['operation'], 'prepare_suspend')
+        self.send.assert_not_called()
+
+    def test_command_already_published_is_not_written_again_after_lost_result(self):
+        coordinator = self.coordinator()
+        job = self.phase('Suspending', revision=1, request={'id': 'request', 'action': 'suspend'})
+        def published(name, value, **options):
+            coordinator.channel.read.return_value = value
+            raise OSError(errno.EAGAIN, 'read failed after publication')
+        coordinator.channel.write.side_effect = published
+        with self.assertRaises(OSError):
+            coordinator.command(job, 'prepare_suspend')
+        coordinator._tick = Mock()
+        coordinator.tick(self.current())
+        self.assertIsNone(coordinator.pending_command)
+        self.assertEqual(coordinator.channel.write.call_count, 1)
+        self.send.assert_not_called()
+
+    def test_signal_is_not_repeated_when_the_same_phase_is_revisited(self):
+        coordinator = self.coordinator()
+        job = self.phase('Resuming', revision=2, request={'id': 'request', 'action': 'continue'})
+        with patch.object(control, '_send') as send:
+            coordinator._deliver(job, MEMBER, control.signal.SIGCONT)
+            coordinator._deliver(job, MEMBER, control.signal.SIGCONT)
+        send.assert_called_once_with(MEMBER, ANCHOR, control.signal.SIGCONT)
+
+    def test_pending_suspended_command_resumes_at_its_ack_stage(self):
+        coordinator = self.coordinator()
+        job = self.phase('Suspending', revision=2, request={'id': 'request', 'action': 'suspend'})
+        coordinator.pending = {'id': 'request', 'stage': 'prepare_suspend', 'started': 0}
+        coordinator.ack = Mock(return_value={'status': 'prepared'})
+        coordinator._suspend = Mock(return_value=(coordinator._validate.return_value, 100))
+        coordinator.channel.write.side_effect = [OSError(errno.EAGAIN, 'one publication read'), None]
+        with patch.object(control, '_stopped', return_value=True), \
+                patch.object(control.time, 'monotonic', return_value=0):
+            coordinator.tick(job)
+            self.assertEqual(coordinator.pending['stage'], 'suspended')
+            coordinator.ack.return_value = {'status': 'paused'}
+            coordinator.tick(self.current())
+        self.assertEqual(self.current()['suspension']['phase'], 'Suspended')
+        coordinator._suspend.assert_called_once()
+        self.assertFalse(self.current()['suspension'].get('accounting_uncertain', False))
+        self.send.assert_not_called()
+
+    def test_post_release_observation_has_no_live_anchor_dependency_or_timeout(self):
+        coordinator = self.coordinator()
+        coordinator.current = Mock(return_value=self.current())
+        coordinator.authority = Mock()
+        coordinator.observed = {MEMBER['pid']: MEMBER}
+        coordinator.observed_groups = {MEMBER['pid']}
+        with patch.object(control, 'identity_for', side_effect=[
+                OSError(errno.EAGAIN, 'one identity read failed'),
+                control.psutil.NoSuchProcess(MEMBER['pid'])]), \
+                patch.object(control, 'group_exists', return_value=False), \
+                patch.object(control.time, 'sleep') as sleep:
+            with self.assertRaises(control.OwnershipUnavailable):
+                coordinator.verify_released()
+            self.assertTrue(coordinator.verify_released())
+        coordinator.authority.wait.assert_not_called()
+        coordinator.authority.read_domain.assert_not_called()
+        sleep.assert_not_called()
+        self.send.assert_not_called()
 
     def test_cancel_during_target_read_supersedes_continue_before_signal(self):
         job = self.phase('Resuming', revision=3, request={'id': 'resume', 'action': 'continue'})
@@ -726,7 +991,7 @@ class StateTests(unittest.TestCase):
         stopped.assert_called_once_with(MEMBER, exit_anchor=ANCHOR)
         self.send.assert_not_called()
 
-    def test_incomplete_running_domain_expires_without_resetting_deadline(self):
+    def test_incomplete_running_domain_keeps_its_driver_without_time_based_invalidation(self):
         job = self.phase('Run', revision=4, request={'id': 'continued', 'action': 'continue'})
         coordinator = self.coordinator()
         coordinator._validate.side_effect = control.DomainPending('Computational member exited during observation')
@@ -744,10 +1009,9 @@ class StateTests(unittest.TestCase):
         current = self.current()
         self.assertEqual(coordinator.domain_pending_since, 1)
         self.assertEqual(current['status'], 'Run')
-        self.assertEqual(current['suspension']['phase'], 'Unverified')
-        self.assertTrue(current['suspension']['inhibited'])
+        self.assertEqual(current['suspension']['phase'], 'Run')
         self.assertEqual(current['resources'], job['resources'])
-        self.assertEqual(coordinator.channel.write.call_args.args[1]['operation'], 'invalidate')
+        coordinator.channel.write.assert_not_called()
         self.send.assert_not_called()
 
     def test_external_continue_or_member_change_invalidates_suspension(self):
@@ -803,13 +1067,14 @@ class StateTests(unittest.TestCase):
                 patch.object(control.time, 'sleep'), \
                 patch.object(control.time, 'monotonic', side_effect=[0, 0, 0, 1, 2, 20]):
             coordinator.tick(job)
-        self.assertEqual(self.current()['suspension']['phase'], 'Unverified')
+        self.assertEqual(self.current()['suspension']['phase'], 'Suspending')
+        self.assertIn('Awaiting computational stop verification', self.current()['suspension']['reason'])
         self.assertTrue(self.current()['suspension']['inhibited'])
         self.assertNotIn(ANCHOR, stopped)
         self.assertNotIn(RUNNER, stopped)
 
-    def test_stale_paused_runner_ack_invalidates_verified_state(self):
-        for observed, expected in ((None, 'Unverified'), (96, 'Unverified'), (101, 'Unverified'), (100, 'Suspended')):
+    def test_stale_paused_runner_ack_waits_without_invalidating_accounting(self):
+        for observed in (None, 96, 101, 100):
             with self.subTest(observed_clock=observed):
                 job = self.phase('Suspended', inhibited=True)
                 coordinator = self.coordinator()
@@ -817,13 +1082,17 @@ class StateTests(unittest.TestCase):
                 with patch.object(control, '_stopped', return_value=True):
                     coordinator.tick(job)
                 value = self.current()['suspension']
-                self.assertEqual(value['phase'], expected)
+                self.assertEqual(value['phase'], 'Suspended')
                 self.assertTrue(value['inhibited'])
+                self.assertFalse(value.get('accounting_uncertain', False))
+                if observed != 100:
+                    self.assertEqual(value.get('verified_at'), job['suspension'].get('verified_at'))
+                coordinator.channel.write.assert_not_called()
 
     def test_paused_ack_freshness_uses_clock_after_read(self):
-        for observed, read_at, expected in ((100.1, 100.2, 'Suspended'),
-                                           (100, 104, 'Unverified'),
-                                           (100.3, 100.2, 'Unverified')):
+        for observed, read_at, fresh in ((100.1, 100.2, True),
+                                        (100, 104, False),
+                                        (100.3, 100.2, False)):
             with self.subTest(observed_clock=observed, read_at=read_at):
                 job = self.phase('Suspended', inhibited=True)
                 coordinator = self.coordinator()
@@ -835,8 +1104,12 @@ class StateTests(unittest.TestCase):
                     coordinator.ack = Mock(side_effect=read_ack)
                     coordinator.tick(job)
                 value = self.current()['suspension']
-                self.assertEqual(value['phase'], expected)
+                self.assertEqual(value['phase'], 'Suspended')
                 self.assertTrue(value['inhibited'])
+                self.assertFalse(value.get('accounting_uncertain', False))
+                if not fresh:
+                    self.assertEqual(value.get('verified_at'), job['suspension'].get('verified_at'))
+                coordinator.channel.write.assert_not_called()
         self.send.assert_not_called()
 
     def test_nonstoppable_member_never_reports_suspended(self):
@@ -849,9 +1122,10 @@ class StateTests(unittest.TestCase):
                 patch.object(control.time, 'monotonic', side_effect=[0, 0, 0, 20]):
             coordinator.tick(job)
         value = self.current()['suspension']
-        self.assertEqual(value['phase'], 'Unverified')
+        self.assertEqual(value['phase'], 'Suspending')
         self.assertTrue(value['inhibited'])
-        self.assertIn('timed out', value['reason'])
+        self.assertIn('Awaiting computational stop verification', value['reason'])
+        self.assertFalse(value.get('accounting_uncertain', False))
 
     def test_partial_signal_failure_retains_delivered_evidence(self):
         coordinator = self.coordinator()
@@ -888,7 +1162,7 @@ class StateTests(unittest.TestCase):
         coordinator.channel.write.assert_called_once()
         self.assertEqual(coordinator.channel.write.call_args.args[1]['operation'], 'invalidate')
 
-    def test_root_exit_waits_bounded_receipt_without_claiming_suspension(self):
+    def test_root_exit_keeps_receipt_driver_without_claiming_suspension(self):
         for phase in ('Run', 'Suspending', 'Resuming'):
             with self.subTest(phase=phase):
                 job = self.phase(phase, revision=1,
@@ -912,10 +1186,11 @@ class StateTests(unittest.TestCase):
                         patch.object(control.time, 'monotonic', return_value=10+control.TRANSITION_TIMEOUT):
                     coordinator.tick(waiting)
                 value = self.current()['suspension']
-                self.assertEqual(value['phase'], 'Unverified')
+                self.assertEqual(value['phase'], phase)
                 self.assertTrue(value['inhibited'])
-                self.assertIn('without a completed runner receipt', value['reason'])
-                self.assertEqual(coordinator.channel.write.call_args.args[1]['operation'], 'invalidate')
+                self.assertIn('Awaiting genuine runner completion', value['reason'])
+                self.assertFalse(value.get('accounting_uncertain', False))
+                coordinator.channel.write.assert_not_called()
         self.send.assert_not_called()
 
     def test_hard_deadline_is_processed_even_after_unverified_transition(self):
@@ -973,6 +1248,21 @@ class ChannelTests(unittest.TestCase):
         self.root.mkdir(mode=0o700)
         with self.assertRaises(JobsError):
             self.channel.write('ack.json', self.context)
+
+    def test_directory_descriptor_is_closed_when_fstat_is_unreadable(self):
+        native_open = control.os.open
+        opened = []
+        def open_directory(*args, **options):
+            fd = native_open(*args, **options)
+            opened.append(fd)
+            return fd
+        with patch.object(control.os, 'open', side_effect=open_directory), \
+                patch.object(control.os, 'fstat', side_effect=OSError(errno.EAGAIN, 'one descriptor read')), \
+                patch.object(control.os, 'close', wraps=control.os.close) as close:
+            with self.assertRaises(OSError):
+                self.channel._open_directory()
+        self.assertEqual(len(opened), 1)
+        close.assert_called_once_with(opened[0])
 
 
 class DomainTests(unittest.TestCase):

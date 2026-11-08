@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "protocol": 1,
+  "extraction": "Verbatim ast.get_source_segment, UTF-8, no appended newline; selected functions only.",
+  "history_base": "d3ad11a0c4de202ac10b86f46e31ebc02c59256d",
+  "history_scope": "Every revision changing these paths on origin/main, plus deployed 032ddbb and 31616be.",
+  "deployed": {
+    "032ddbb": "032ddbbeb432b9c28e281458018692ef3f382b71",
+    "31616be": "31616be474b2e2fd04ab6257c990983d46ddfcde"
+  },
+  "node_error": {
+    "commit": "8084173256044ad3e521ffd9b0d7c3aa94aeeb0b",
+    "path": "src/cmw/nodes/protocol.py",
+    "symbol": "NodeError",
+    "source": "class NodeError(ValueError):\n    \"\"\"A refused or uncertain operation, never an implied lifecycle transition.\"\"\"\n    def __init__(self, code, message):\n        super().__init__(message)\n        self.code = code",
+    "sha256": "402bb1face16dd51a3b5754c9af94174c70fb2e9a5a36680fe12a84031cf8f41"
+  },
+  "readers": [
+    {
+      "commit": "8084173256044ad3e521ffd9b0d7c3aa94aeeb0b",
+      "path": "src/cmw/nodes/protocol.py",
+      "symbol": "response",
+      "source": "def response(value, request_id):\n    if not isinstance(value, dict) or value.get('protocol') != PROTOCOL or type(value.get('protocol')) is not int:\n        raise NodeError('INCOMPATIBLE_PROTOCOL', 'Response protocol differs')\n    if value.get('request_id') != request_id or type(value.get('ok')) is not bool:\n        raise NodeError('INVALID_RESPONSE', 'Response does not match the outstanding request')\n    expected = {'protocol', 'request_id', 'ok', 'result' if value['ok'] else 'error'}\n    if set(value) != expected:\n        raise NodeError('INVALID_RESPONSE', 'Unexpected response fields')\n    if not value['ok']:\n        error = value['error']\n        if not isinstance(error, dict) or set(error) != {'code', 'message'} or any(not isinstance(v, str) for v in error.values()):\n            raise NodeError('INVALID_RESPONSE', 'Malformed endpoint error')\n        raise NodeError(error['code'], error['message'])\n    if not isinstance(value['result'], dict):\n        raise NodeError('INVALID_RESPONSE', 'Endpoint result must be an object')\n    return value['result']",
+      "sha256": "cf6936b5f4b910f1d6fcfcc3f5515445509bf4e458025d964cb832190acda564"
+    }
+  ],
+  "cli_refusal_handlers": [
+    {
+      "commit": "8084173256044ad3e521ffd9b0d7c3aa94aeeb0b",
+      "path": "src/cmw/nodes/jobs_cli.py",
+      "symbol": "handle.except",
+      "source": "except (NodeError, OSError, ValueError) as exc:\n        print(json.dumps({'code': getattr(exc, 'code', 'NODE_REFUSED'), 'message': str(exc)}))\n        return 2",
+      "sha256": "149bc0f28fc492a04e75a54580476a5d471a07d8715520611f88b41651eae7cd"
+    },
+    {
+      "commit": "f0501f3645c70526de151ce0ac6f85f23ebb1edb",
+      "path": "src/cmw/nodes/jobs_cli.py",
+      "symbol": "handle.except",
+      "source": "except (NodeError, OSError, ValueError) as exc:\n        code = getattr(exc, 'code', 'NODE_REFUSED')\n        if (args.jobs_operation in {'plan-next', 'materialize-next', 'register-next'}\n                and code in {'QUEUE_UNAVAILABLE', 'SUCCESSOR_UNVERIFIABLE', 'SUCCESSOR_PENDING_VERIFICATION'}):\n            from cmw.jobs.successor_cli import print_retry\n            return print_retry('SUCCESSOR_UNVERIFIABLE' if code == 'QUEUE_UNAVAILABLE' else code, str(exc), args)\n        print(json.dumps({'code': getattr(exc, 'code', 'NODE_REFUSED'), 'message': str(exc)}))\n        return 2",
+      "sha256": "777c6f9de25c73fd6da8e5829dec39c719b4f158e6f72ee4d96549d63b379e22"
+    }
+  ],
+  "coverage": {
+    "response": {
+      "cf6936b5f4b910f1d6fcfcc3f5515445509bf4e458025d964cb832190acda564": [
+        "ead2a34a06b95ba00ffeaaed711d96216dcc7891",
+        "22bb20c476eab69d8082c999efcbadd553c75d7c",
+        "317a8a1f7b9fd62b0e0b1088dc9d0e000984751d",
+        "86139ccec56c982e2bcf64cf0e259f4617fac03b",
+        "45b5ba64e6e6b75d0727d03e1e1989686f009bd9",
+        "9f9c45276b41b0dea6c544f823c2151ebcb76962",
+        "c952d413646feb96541673440091d26dafe56641",
+        "7c5606fc4b8c7751061b9c22ee3f0feb744bb98d",
+        "17eb9e1dac86560a27875989a65d9fe33fd16562",
+        "551f443daa47a5d4398570f0d5ee22929541e576",
+        "8084173256044ad3e521ffd9b0d7c3aa94aeeb0b",
+        "032ddbbeb432b9c28e281458018692ef3f382b71",
+        "31616be474b2e2fd04ab6257c990983d46ddfcde"
+      ]
+    },
+    "handle": {
+      "777c6f9de25c73fd6da8e5829dec39c719b4f158e6f72ee4d96549d63b379e22": [
+        "33288e876e8d542be5a39ea350104239593ab131",
+        "f0501f3645c70526de151ce0ac6f85f23ebb1edb"
+      ],
+      "149bc0f28fc492a04e75a54580476a5d471a07d8715520611f88b41651eae7cd": [
+        "317a8a1f7b9fd62b0e0b1088dc9d0e000984751d",
+        "45b5ba64e6e6b75d0727d03e1e1989686f009bd9",
+        "c952d413646feb96541673440091d26dafe56641",
+        "7c5606fc4b8c7751061b9c22ee3f0feb744bb98d",
+        "859f2a216d7b3abf074baa3f7dc69d90794c49c1",
+        "17eb9e1dac86560a27875989a65d9fe33fd16562",
+        "4d0610b7b792128469d06cc21684946462f7ecfd",
+        "551f443daa47a5d4398570f0d5ee22929541e576",
+        "4bb8f63a6514fa4b056226a15a089993be931941",
+        "8084173256044ad3e521ffd9b0d7c3aa94aeeb0b",
+        "032ddbbeb432b9c28e281458018692ef3f382b71",
+        "31616be474b2e2fd04ab6257c990983d46ddfcde"
+      ]
+    }
+  }
+}

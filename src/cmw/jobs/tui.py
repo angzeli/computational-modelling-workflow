@@ -95,6 +95,8 @@ def detail(job, *, narrow=False):
     if not job:
         return "No selection. Add a prepared job through cmw jobs add."
     resource = job["resources"]
+    completion = (suspension_summary(job) + '\n'
+                  if 'completion' in job.get('ownership_holds', {}) else '')
     resources = (f"Requested: {resource['cpus'] or '—'} CPUs / {resource['memory_gib'] or '—'} GiB\n"
                  f"MPI: {resource['mpi_ranks'] or '—'} ranks × {resource['threads_per_rank'] or '—'} threads/rank\n" if narrow else
                  f"CPUs requested: {resource['cpus'] or '—'}    MPI ranks: {resource['mpi_ranks'] or '—'}    "
@@ -103,7 +105,7 @@ def detail(job, *, narrow=False):
             f"Status: {effective_status(job)}    Order: {job['order'] or '—'}    Engine: {job['engine']}\n"
             f"{usage_summary(job.get('usage'))}\n"
             f"{resources}"
-            f"Working directory: {job['cwd']}\n{_backend_line(job)}{job['reason'] or '—'}")
+            f"Working directory: {job['cwd']}\n{_backend_line(job)}{completion}{job['reason'] or '—'}")
 
 
 def _backend_line(job):
