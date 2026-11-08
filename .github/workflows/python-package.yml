@@ -42,6 +42,9 @@ jobs:
   tests:
     name: Tests / ${{ matrix.os }} / Python ${{ matrix.python }}
     needs: checks
+    env:
+      # Both platforms must exercise local client/server SFTP upload and fetch.
+      CMW_REQUIRE_SFTP_INTEGRATION: '1'
     strategy:
       fail-fast: false
       matrix:
