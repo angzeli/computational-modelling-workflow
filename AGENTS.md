@@ -232,10 +232,18 @@ repeat CI.
   use the ordinary guard. The method budget covers setUp, the body, tearDown
   and instance cleanups, not module/class fixtures. A native timeout prints the active
   test and stack, aborts only that isolated module process, and may bypass its
-  cleanup; partial counts are incomplete, never a passing suite. It does not
-  signal other processes. Intentional indefinite `UNVERIFIABLE` holds mean a
+  cleanup; partial counts are incomplete, never a passing suite. The external
+  reporter lists registered fixture PIDs and their recorded v2 identities from
+  a private ledger; it does not claim to discover unregistered descendants or
+  signal other processes. Audit those identities after local runs and clean up
+  survivors only after re-verifying ownership. Intentional indefinite `UNVERIFIABLE` holds mean a
   stale mock of an old ownership API can now hang instead of producing a quick
   failure: audit the mock against the actual caller before changing assertions.
+- The ordinary suite runs the representative ownership-fault slice. The full,
+  unchanged matrix runs in a dedicated job in the same workflow, on each
+  qualified platform. Its row-union check requires exactly every unfiltered
+  baseline read occurrence times all fault types, with no missing or duplicate
+  rows. Report unittest methods and injected rows separately.
 - Pushing and opening a PR may proceed while local targeted diagnosis runs;
   merging waits for both.
 - Before reporting a PR as ready, read every review comment, including
