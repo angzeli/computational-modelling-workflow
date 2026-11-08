@@ -109,12 +109,32 @@ If `materialize-next` reports `ENOSPC` while first creating
 `successor.json`, check the approved locations. For VASP, the input directory
 can already contain INCAR, POSCAR, KPOINTS and POTCAR, Scratch can contain a
 complete `preparation.json`, and the wrapper working directory can exist and
-be empty. Registration requires the separate `successor.json`. When it is
-absent, a retry at those locations refuses with `Refusing existing destination`
-and preserves the files.
+be empty. Registration still requires the separate `successor.json`.
 
-Restore sufficient space and retain the first publication for inspection. Copy
-the original successor specification to a new path and choose unused
+Before attempting that first record creation, the owner now saves recovery
+evidence in `preparation.json`: the complete reviewed plan and its digest,
+the original specification identity, and the input, record and working
+directory identities. After restoring space, repeat **the same materialize
+command, specification, approved digest and destination**. Under the publication
+lock, the owner checks that evidence against the approval, checks the complete
+preparation record and parent, and requires exactly the four approved regular
+input files with matching bytes. No symlinks, extra or missing files are
+accepted. The record directory must contain only `preparation.json`, and the
+original working directory must remain empty. Unreadable paths refuse;
+they are never treated as missing.
+
+If all checks pass, the owner creates `successor.json` exclusively. A verified
+parent produces `MATERIALIZED`; temporarily unavailable parent evidence produces
+`PENDING_VERIFICATION` with exit 75, which uses the retry procedure above.
+Registration remains a separate request and cannot proceed while verification
+is pending. Concurrent retries create one record; the other retry observes it.
+A contradicted parent, changed approval, changed directory identity or input
+mismatch refuses without creating a record or changing the retained files.
+
+Older publications without this recovery evidence, or a failure while saving
+the evidence itself, cannot be adopted. Fresh-destination recovery remains
+available: retain the first publication for inspection, copy the original
+successor specification to a new path and choose unused
 `adapter.output`, `adapter.record_directory` and `runtime.run_directory`
 locations. Run `plan-next` against the same parent and attempt, review the
 new locations and digest, then run `materialize-next` with that digest.
