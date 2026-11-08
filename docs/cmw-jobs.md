@@ -81,8 +81,9 @@ job. After shutdown, `start` reconciles that supervisor before dispatching.
 Controller replacement requires confirmed loss of the recorded owner (or an
 empty owner slot) and a free controller lock. A temporarily unreadable identity
 or lock, or a lock still held during shutdown, gets a two-second observation
-retry budget, starting at 50 ms and doubling to a 250 ms cap. The serialized
-start request rechecks both immediately before preparation. A still-verified
+retry budget, starting at 50 ms and doubling to a 250 ms cap. This bounds retry
+scheduling, not an already-blocked native or SQLite read. The serialized start
+request rechecks both immediately before preparation. A still-verified
 controller is never replaced. If evidence remains unavailable, `start` reports
 the deciding check and asks the operator to retry; it launches nothing and
 stores no permanent refusal. Startup confirmation also retries observations

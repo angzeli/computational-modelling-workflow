@@ -7,6 +7,7 @@ import runpy
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,15 +25,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class CiRunnerReportingTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="cmw-ci-report-")
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(tempfile.mkdtemp(prefix="cmw-ci-report-"))
+        self.preserve_evidence = False
+        def remove_directory():
+            if self.preserve_evidence:
+                print(f'Fixture cleanup unresolved; evidence retained: {self.root}', flush=True)
+            else:
+                shutil.rmtree(self.root)
+        self.addCleanup(remove_directory)
         self.source = self.root / "source"
         self.script = self.source / "scripts" / "ci" / "run_tests.sh"
         self.script.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "scripts" / "ci" / "run_tests.sh", self.script)
         shutil.copyfile(ROOT / "scripts" / "ci" / "unittest_guard.py",
                         self.script.parent / "unittest_guard.py")
+        shutil.copyfile(ROOT / "scripts" / "ci" / "run_module.py",
+                        self.script.parent / "run_module.py")
         (self.source / "tests").mkdir()
         shutil.copyfile(ROOT / 'tests' / 'fixture_processes.py',
                         self.source / 'tests' / 'fixture_processes.py')
@@ -76,22 +84,64 @@ class CiRunnerReportingTests(unittest.TestCase):
         def cleanup() -> None:
             # Release the fixture even if an assertion failed. Signals are only
             # a bounded fallback for this test's own, separately grouped runner.
-            self.gate.touch()
             try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGTERM)
+                self.gate.touch()
                 try:
-                    process.wait(timeout=5)
+                    process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=5)
-            reader.join(timeout=5)
-            process.stdout.close()
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=5)
+                self.cleanup_registered()
+            except BaseException:
+                self.preserve_evidence = True
+                raise
+            finally:
+                reader.join(timeout=5)
+                process.stdout.close()
 
         self.addCleanup(cleanup)
         reader.start()
         return process
+
+    def cleanup_registered(self):
+        """Keep the gate and evidence until every registered child is gone."""
+        from tests.fixture_processes import read_records
+        from tests.runtime.owned_process_cleanup import OwnedProcessCleanup
+        owned = OwnedProcessCleanup(None, self.root)
+        incomplete = []
+        try:
+            # Only this runner's directories. Unlike glob/exists, explicit
+            # reads must surface an unreadable inventory on Python 3.14.
+            try:
+                modules = list((self.root / 'results').iterdir())
+            except FileNotFoundError:
+                modules = []
+            for module in modules:
+                if not module.name.startswith('m.'):
+                    continue
+                if not stat.S_ISDIR(module.stat().st_mode):
+                    raise ValueError('Invalid fixture module directory')
+                registry = module / 'evidence' / 'fixture-processes.jsonl'
+                try:
+                    registry.stat()
+                except FileNotFoundError:
+                    continue
+                for record in read_records(registry.parent):
+                    if record['identity'] is None:
+                        incomplete.append(record)
+                    else:
+                        owned.remember(record['identity'])
+            if not owned.wait_gone(2):
+                owned.send(signal.SIGTERM, controller=True)
+                self.assertTrue(owned.wait_gone(3), 'Registered fixture child did not exit; retaining evidence')
+            self.assertFalse(incomplete, 'Incomplete fixture registration; retaining evidence')
+        except BaseException:
+            self.preserve_evidence = True
+            raise
 
     def wait_for(self, predicate) -> str:
         deadline = time.monotonic() + 10
@@ -285,8 +335,7 @@ class CiRunnerReportingTests(unittest.TestCase):
                             'gate=Path(sys.argv[1]); limit=time.monotonic()+15\\n'
                             'while not gate.exists() and time.monotonic()<limit: time.sleep(.01)')
                     child = subprocess.Popen([sys.executable, '-c', code,
-                        os.environ['CMW_REPORTING_GATE']], stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        os.environ['CMW_REPORTING_GATE']], stdin=subprocess.DEVNULL)
                     assert register_process(child, role='timeout regression child') is not None
                     while True:
                         try:
@@ -346,6 +395,25 @@ class CiRunnerReportingTests(unittest.TestCase):
             self.assertEqual(result[0]['deciding_check'], 'observation')
             send.assert_not_called()
 
+    def test_registered_survivor_is_reaped_when_test_assertion_fails(self) -> None:
+        class FailingAfterReceipt(CiRunnerReportingTests):
+            def assertEqual(self, first, second, *args, **kwargs):
+                if second == 'test_registered_retry.RegisteredRetry.test_retry':
+                    self.fail('forced failure before releasing the survivor')
+                return super().assertEqual(first, second, *args, **kwargs)
+        case = FailingAfterReceipt(
+            'test_timeout_retains_registered_survivor_identity_outside_hung_interpreter')
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn('forced failure before releasing the survivor', result.failures[0][1])
+        self.assertEqual(result.errors, [])
+        record = json.loads(next(line.split(' ', 1)[1] for line in case.lines
+                                 if line.startswith('CMW_TEST_FIXTURE_PROCESS ')))
+        from cmw.jobs.ownership import OwnershipStatus, observe_owner
+        self.assertEqual(observe_owner(record['identity']).status, OwnershipStatus.GONE)
+        self.assertFalse(case.root.exists(), 'Directory removal must follow confirmed child exit')
+
     def test_incomplete_registration_is_retained_and_never_reports_clean(self) -> None:
         from tests import fixture_processes
         directory = (self.root / 'incomplete').resolve()
@@ -358,6 +426,33 @@ class CiRunnerReportingTests(unittest.TestCase):
         self.assertFalse(records[0]['registration_complete'])
         self.assertIsNone(records[0]['identity'])
         self.assertEqual(fixture_processes.audit_processes(directory)[0]['status'], 'UNVERIFIABLE')
+
+    def test_unreadable_cleanup_inventory_retains_evidence(self) -> None:
+        for operation in ('enumeration', 'registry_stat'):
+            with self.subTest(operation=operation):
+                case = CiRunnerReportingTests()
+                case.setUp()
+                module = case.root / 'results' / 'm.fixture'
+                evidence = module / 'evidence'
+                evidence.mkdir(parents=True)
+                registry = evidence / 'fixture-processes.jsonl'
+                registry.write_text('')
+                original = Path.stat
+                def denied_stat(path, *args, **kwargs):
+                    if path == registry:
+                        raise PermissionError('unreadable registry')
+                    return original(path, *args, **kwargs)
+                denied = (patch.object(Path, 'iterdir', side_effect=PermissionError('unreadable results'))
+                          if operation == 'enumeration' else patch.object(Path, 'stat', denied_stat))
+                try:
+                    with denied, self.assertRaises(PermissionError):
+                        case.cleanup_registered()
+                    self.assertTrue(case.preserve_evidence)
+                    case.doCleanups()
+                    self.assertTrue(registry.exists(), 'Unreadable cleanup must not delete its evidence')
+                finally:
+                    # The fault is synthetic and no child was started here.
+                    shutil.rmtree(case.root)
 
     def test_failure_log_is_published_before_another_module_finishes(self) -> None:
         self.module(

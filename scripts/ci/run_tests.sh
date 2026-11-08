@@ -27,9 +27,8 @@ run_module() {
   printf 'CMW_TEST_MODULE_STARTED module=%q pid=%s started_at=%s log=%q\n' \
     "$relative" "$$" "$started_at" "$work/log"
   (cd "$source_root" && TMPDIR="$work/tmp" CMW_JOBS_STATE="$work/unused-state" \
-    CMW_TEST_EVIDENCE_DIR="$work/evidence" "$python_exe" -c \
-    'import sys; sys.path.insert(0, "tests"); exec(compile(open("scripts/ci/unittest_guard.py", "rb").read(), "scripts/ci/unittest_guard.py", "exec"))' \
-    "$module") 2>&1 | tee "$work/log" | while IFS= read -r line || [[ -n "$line" ]]; do
+    CMW_TEST_EVIDENCE_DIR="$work/evidence" "$python_exe" scripts/ci/run_module.py \
+    "$work/log" "$module") 2>&1 | while IFS= read -r line || [[ -n "$line" ]]; do
       # The sweep watchdog's stack frames have no marker. Keep the entire
       # sweep stream live; other modules expose only marked diagnostics.
       case "$line" in *CMW_TEST_CASE_STARTED*) active_test_record=${line#*CMW_TEST_CASE_STARTED };; esac
@@ -48,7 +47,7 @@ run_module() {
   pipeline_status=("${PIPESTATUS[@]}")
   status=${pipeline_status[0]}
   "$python_exe" "$source_root/scripts/ci/unittest_guard.py" --report-processes "$work/evidence"
-  if [[ $status == 0 && ( ${pipeline_status[1]} != 0 || ${pipeline_status[2]} != 0 ) ]]; then
+  if [[ $status == 0 && ${pipeline_status[1]} != 0 ]]; then
     status=1
   fi
   tests=$(sed -n 's/^Ran \([0-9]*\) tests\{0,1\} in .*/\1/p' "$work/log")

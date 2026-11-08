@@ -60,7 +60,8 @@ would not exercise those native error classifiers.
 | OS-specific ancestry and descendant evidence | The fixture supplies native parent/children/start evidence. The real edge/token consistency algorithms and suspension descendant classification run, including a child below the computational root. OS readers retain their separate native contract tests. |
 | Denied signal followed by witness exit; recovery-only hold publication/readback; admission refusal; missing-domain pending driver reads | These require an earlier fault, effect or changed scenario. Focused cancellation, hold and completion tests cover them; they are not silently counted as fault-free-baseline occurrences. |
 | Suspend/continue, stopped/running transition and timing-only paths | Separate state/protocol tests; a normal/cancel/timeout fixture does not issue a suspend or continue request. |
-| Controller start, reconciliation, enrollment, UI readiness and observation-only entrypoints | Separate lifecycle/clock/state tests. They do not themselves own a normal/cancel/timeout worker completion. |
+| Controller replacement | `test_controller_start_retry.py` injects each of three faults at every baseline start-read occurrence (10 occurrences / 30 rows). It requires one preparation and one launch, after confirmed GONE and a free lock. Its separate JSON/count summary is not credited as worker completion. |
+| Reconciliation, enrollment, UI readiness and observation-only entrypoints | Separate lifecycle/clock/state tests. They do not themselves own a normal/cancel/timeout worker completion. |
 | ORCA scientific preparation, MPI qualification and external driver startup | Existing ORCA/protocol contract tests. The sweep exercises the ORCA completion handoff, without launching or qualifying an engine. |
 | Ambiguous COMMIT and committed-write readback | `test_completion_retry.py` covers idempotence directly; these are not native read rows discovered from a fault-free lifecycle. |
 | Executable PATH search and initial context publication failures | Dedicated preflight and constructor tests cover these boundaries. The read matrix does not inject write, fsync or publication failures; terminal-write uniqueness does not establish idempotence for every setup mutation. |
@@ -99,12 +100,23 @@ it is a liveness failure, not a row to skip or retry. The watchdog uses real
 clock/signal functions outside the fixture's patched observations. Its signals
 target only the synthetic test interpreter, never a worker or calculation.
 
-This instrumentation changes neither the selected rows nor their assertions,
-CI parallelism or the 45-minute suite limit. CI restructuring requires evidence
-that the aggregate duration, rather than a hanging row, caused the limit.
+Step 1 completed every matrix row in all three CI legs, taking 20–32 minutes;
+the suite's 45-minute timeout instead found an ordinary registration test with a
+stale ownership mock. The corrected ordinary suite now uses the representative
+slice and keeps its 45-minute limit. The existing workflow runs the full,
+unchanged matrix in a separate unsharded job per qualified platform, with a
+60-minute limit. No lifecycle or fault type has been removed.
 
-Full discovery uses the complete matrix by default; no CI-specific skip or
-new workflow is needed. For proportionate sequential local checks:
+`scripts/ci/check_ownership_sweep.py` independently constructs the required row
+set from every unfiltered baseline occurrence across all fifteen scenarios,
+crossed with all three faults. The dedicated job fails unless its row union
+equals that set exactly: no missing, extra or duplicate row, every injection
+fires once, and every row satisfies the original terminal or accepted-pending
+assertions. `OWNERSHIP_FAULT_UNION` reports the proof and counts. With one
+unsharded job, this is a single-part union; there is no cross-shard omission.
+
+Plain unittest discovery still defaults to the complete matrix. For
+proportionate sequential local checks:
 
 ```sh
 CMW_FAULT_SWEEP=representative \
@@ -113,22 +125,23 @@ nice -n 19 .venv/py314/bin/python -B -m unittest tests.jobs.test_ownership_fault
 ```
 
 Representative mode selects the first reached occurrence of every distinct read
-API in each lifecycle. This reduces local cost only; it is not the full matrix.
+API in each lifecycle. This reduces local and ordinary-suite cost; it is not the full matrix.
 The output gives unittest counts separately from attempted, passed and failed
 injected rows, and splits terminal rows from the accepted pending class. With
 `CMW_TEST_EVIDENCE_DIR`, JSON records the dynamic sites/occurrences, source
 inventory, limitations and each row's result. Assertions also detect an injection
 that never fired or fired more than once.
 
-The representative checks passed on both local interpreters:
+The earlier representative checks (before the controller-start follow-up) passed
+on both local interpreters:
 
 | Interpreter | Unittest count | Injected rows | Terminal / pending | Elapsed |
 |---|---:|---:|---:|---:|
 | Python 3.14 | 16 | 1,275 | 1,217 / 58 | 40.407 s |
 | Python 3.11 | 16 | 1,275 | 1,217 / 58 | 44.666 s |
 
-The source inventory has 366 candidate calls; 156 were reached by the fault-free
-baselines. That distinction is intentional: inventory entries include composite
+The report distinguishes candidate source calls from those reached by fault-free
+baselines: inventory entries include composite
 calls and the explicitly excluded scenarios above. Native path depth and
 interpreter layout can change the full row count across platforms. Full-matrix
 and CI results belong in the PR validation report; this document asserts only
