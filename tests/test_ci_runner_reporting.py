@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from contextlib import redirect_stdout, redirect_stderr
+import io
 import json
 import queue
 import runpy
@@ -376,10 +378,14 @@ class CiRunnerReportingTests(unittest.TestCase):
             child.wait(timeout=5)
         self.addCleanup(close)
         directory = (self.root / 'registered').resolve()
+        stdout, stderr = io.StringIO(), io.StringIO()
         with patch.dict(os.environ, {'CMW_TEST_EVIDENCE_DIR': str(directory),
-                                     'CMW_TEST_ACTIVE_TEST': self.id()}):
+                                     'CMW_TEST_ACTIVE_TEST': self.id()}), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
             record = fixture_processes.register_process(child, role='read-only audit regression')
         self.assertIsNotNone(record)
+        self.assertEqual(stdout.getvalue(), '', 'Fixture diagnostics must not corrupt endpoint JSON stdout')
+        self.assertIn('CMW_TEST_CASE_PROCESS_REGISTERED', stderr.getvalue())
         for status in (ownership.OwnershipStatus.GONE, ownership.OwnershipStatus.UNVERIFIABLE):
             with self.subTest(status=status), patch.object(ownership, 'observe_owner',
                     return_value=SimpleNamespace(status=status, deciding_check='start_token')), \

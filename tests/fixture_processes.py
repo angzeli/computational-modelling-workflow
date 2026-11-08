@@ -65,7 +65,9 @@ def register_process(process, *, role):
                   'registered_by': os.getpid(), 'pid': process.pid, 'identity': owner,
                   'registration_complete': True}
         _append_record(directory, record)
-        print('CMW_TEST_CASE_PROCESS_REGISTERED ' + json.dumps(record), flush=True)
+        # The same fixture launcher runs inside a JSON-lines node endpoint.
+        # Diagnostics must never enter that control stream.
+        print('CMW_TEST_CASE_PROCESS_REGISTERED ' + json.dumps(record), file=sys.stderr, flush=True)
         return record
     except Exception as exc:
         # Capturing evidence must not bypass the fixture's existing cleanup.
