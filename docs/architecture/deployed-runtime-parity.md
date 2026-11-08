@@ -17,6 +17,14 @@ configuration and process evidence in their linked raw JSON files. This is a
 dated inventory. Live deployments must be checked again during the authorized
 cutover window.
 
+The current canonical runner is
+`3c438192beb19ff9fc209c3fdcba3f5678a20e6e`, synthetically qualified with CMW
+`f3b052207f3a827636d870d2784db2c32b9f331e`; see the
+[runner qualification record](vasp-runner-ownership-plan.md). This does not
+update the dated inventory or establish parity against a later deployment
+candidate. The fresh deployed-runtime comparison and the Mini's real-VASP
+runner smoke have not been run; both remain cutover qualification steps.
+
 The recorded Mini directories are under `~/.local/share/cmw-benchmarks/runtimes/`,
 except the observer directory under `~/.local/share/cmw-observer/`. MacBook
 runtime directories are under `~/.local/share/cmw/runtimes/`. A short directory
@@ -86,23 +94,29 @@ MacBook VASP source remain qualification evidence gaps from the inventory.
 The VASP port is a separate repository and requires its
 [own ownership qualification](vasp-runner-ownership-plan.md).
 
-## Remaining historical-runner caller gap
+## Historical-runner caller gap and its repair
 
-The ordinary CMW session worker now supplies the ownership read domain, which
-retains its pipe across denied delivery. The historical VASP port runner at
-51d8209 calls `signal_session(..., include_leader=False)` during TERM and KILL
-cleanup without that callback or an explicit absence grace. Those calls still
-inherit the historical zero default in the candidate, whereas deployed
-31616be supplied a two-second default to every caller.
+The ordinary CMW session worker correction supplies the ownership read domain,
+which retains its pipe across denied delivery. In the original audit, the
+historical VASP port runner at `51d8209` called
+`signal_session(..., include_leader=False)` during TERM and KILL cleanup without
+that callback or an explicit absence grace. Those calls inherited the zero
+default in the then-candidate, whereas deployed `31616be` supplied a two-second
+default to every caller.
 
-This is an additional caller-level qualification gap within the same unmatched
+This was an additional caller-level qualification gap within the same unmatched
 patch. An EPERM immediately after confirmed witness exit can still interrupt
 historical runner cleanup instead of waiting for group disappearance. This
-finding follows from the source comparison; no new runner reproduction was
-performed in this change. The separate [runner cutover prerequisite, issue 19](https://github.com/angzeli/computational-modelling-workflow/issues/19)
-must also qualify denied-send recovery during intended cleanup, preserving the
-pending operation and termination intent. The ordinary-worker correction does
-not establish parity for that historical runner path.
+finding followed from the source comparison; the original audit did not perform
+a new runner reproduction. Port [PR #2](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port/pull/2)
+and [PR #5](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port/pull/5) subsequently repaired this caller
+in canonical runner `3c43819`, including denied-send holds, preserved pending
+operation/termination intent, tri-state ownership and the CMW capability guard.
+The [issue #19 qualification](vasp-runner-ownership-plan.md) records the exact
+pair and [CI evidence](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port/actions/runs/42534521961)
+(43 tests and 2,226 cases per platform).
+That closes the synthetic caller gap for the named pair, not for an unchanged
+historical runner or an unqualified deployment combination.
 
 ## Required cutover procedure
 
@@ -116,14 +130,16 @@ not establish parity for that historical runner path.
    labels to installed source evidence. Retain every referenced revision with
    an annotated provenance tag before removing a branch. Keep unverified
    identities pending qualification.
-3. Pin the proposed target to a full commit. For each deployed CMW revision,
+3. Pin the actual proposed CMW deployment target and VASP runner to full commits;
+   do not substitute an earlier qualification target or assume the latest main
+   is the selected deployment. For each deployed CMW revision,
    run the read-only comparisons below. Save command output with the cutover
    evidence. `git cherry` reports patch-equivalent commits with `-` and
    unmatched commits with `+`. Inspect unique merge commits separately because
    their conflict resolutions may carry behavior outside ordinary patch IDs.
 
    ```sh
-   candidate=$(git rev-parse --verify 'origin/main^{commit}')
+   candidate=$(git rev-parse --verify 'FULL_CMW_DEPLOYMENT_CANDIDATE^{commit}')
    deployed=FULL_DEPLOYED_COMMIT
    git merge-base --is-ancestor "$deployed" "$candidate"
    git cherry "$candidate" "$deployed"
@@ -148,3 +164,8 @@ not establish parity for that historical runner path.
    protections and the separate runner prerequisites before deployment.
    Qualification and synthetic execution use the D32 sandbox, after the
    original queue's active and unresolved executions have been reconciled.
+7. After the Mini's research job finishes, qualify the selected CMW/runner pair
+   with a separately authorized real-VASP runner smoke in the Mini's D32
+   sandbox. Record exact commits, interpreter, immutable snapshot identities,
+   inputs and completion evidence. Keep this node-specific result distinct from
+   the synthetic CI qualification; do not deploy on the strength of CI alone.
