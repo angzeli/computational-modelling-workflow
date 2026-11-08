@@ -867,6 +867,10 @@ def handle(args):
             print(safe_text(json.dumps(result, indent=2, ensure_ascii=False)))
         return 0
     except (JobsError, OSError) as exc:
+        if getattr(exc, 'code', None) == 'OWNERSHIP_UNVERIFIABLE':
+            payload = {'status': 'UNVERIFIABLE', 'code': exc.code, 'reason': str(exc), 'exit_code': 75}
+            print(json.dumps(payload, ensure_ascii=True) if args.json else safe_text(f'UNVERIFIABLE: {exc}'))
+            return 75
         payload = {"status": "FAILED", "code": "JOBS_ERROR", "reason": str(exc), "exit_code": 2}
         if getattr(args, "json", False):
             print(json.dumps(payload, ensure_ascii=True))

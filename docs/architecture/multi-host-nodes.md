@@ -167,6 +167,15 @@ successful result. A node-selected Jobs CLI predating these codes prints the
 code and message and exits 2. Exit 75 requires a client that recognizes the
 retryable code.
 
+Controller-start observation refusals use `OWNERSHIP_UNVERIFIABLE`: ownership
+is temporarily unverifiable, retry with a fresh request (and a fresh preview
+for a node-selected operation). They precede preparation/launch and write no
+receipt or permanent refusal. Current local and node-selected Jobs CLIs return
+`UNVERIFIABLE` with exit 75. A readable, still-live controller is not this case
+and remains a refusal. This adds an error code under D04, not a protocol bump;
+older clients retain their non-success refusal/exit 2 behavior. A committed
+start whose outcome cannot be confirmed is never relabelled safe-to-retry.
+
 Under D04 a new code may ship within protocol 1 only if tests exercise every
 earlier client implementation against the unknown code. Each must return a
 non-success refusal without crashing. A client that recognizes the code can

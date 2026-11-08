@@ -36,6 +36,12 @@ _CHILDREN = []
 _ADMISSION_SAMPLERS = {}
 
 
+class ControllerStartUnavailable(OwnershipUnavailable):
+    """Replacement was refused before preparation or launch; a fresh request is safe."""
+
+    code = 'OWNERSHIP_UNVERIFIABLE'
+
+
 def reap_detached():
     _CHILDREN[:] = [process for process in _CHILDREN if process.poll() is None]
 
@@ -80,9 +86,9 @@ def start(store):
             except OwnershipUnavailable as exc:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise OwnershipUnavailable(exc.deciding_check,
-                        f'Controller replacement temporarily unverifiable ({exc.deciding_check}); '
-                        'nothing launched; retry start') from exc
+                    raise ControllerStartUnavailable(exc.deciding_check,
+                        f'Controller ownership temporarily unverifiable; retry start '
+                        f'({exc.deciding_check}); nothing launched') from exc
                 time.sleep(min(delay, remaining))
                 delay = min(.25, delay * 2)
                 continue

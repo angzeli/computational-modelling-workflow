@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from cmw.jobs import runtime
 from cmw.jobs.cli import elapsed, safe_text, status_text, tail
-from cmw.jobs.ownership import exclusive, group_members, identity, owner_alive
+from cmw.jobs.ownership import exclusive, group_members, identity, owner_alive, observe_owner, OwnershipStatus, lock_held
 from cmw.jobs.runtime import launch_blocker, reap_detached, reconcile, start, stop
 from cmw.jobs.store import JobsError, Store
 from tests.jobs.isolated_runtime import environment, install
@@ -175,7 +175,11 @@ class QueueTests(unittest.TestCase):
         owner = self.store.snapshot()['controller']['owner']
         self.assertTrue(owner_alive(owner))
         os.kill(owner['pid'],signal.SIGKILL)
-        wait_for(lambda: not self.store.snapshot()['controller']['online'])
+        def replacement_ready():
+            reap_detached()
+            return (observe_owner(owner).status == OwnershipStatus.GONE
+                    and not lock_held(self.store.root / 'controller.lock', strict=True))
+        wait_for(replacement_ready)
         self.run_queue()
         self.assertEqual(self.jobs()[0]['status'], 'Run')
         release.touch()

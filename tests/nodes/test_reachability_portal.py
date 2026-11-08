@@ -87,7 +87,8 @@ class ReachabilityPortalTests(unittest.TestCase):
         for code, kind in [('SSH_IDENTITY_CHANGED', FailureKind.SECURITY),
                            ('IDENTITY_CHANGED', FailureKind.SECURITY),
                            ('RUNTIME_MISMATCH', FailureKind.SECURITY),
-                           ('NODE_NOT_READY', FailureKind.READINESS)]:
+                           ('NODE_NOT_READY', FailureKind.READINESS),
+                           ('OWNERSHIP_UNVERIFIABLE', FailureKind.READINESS)]:
             with self.subTest(code=code):
                 self.ready()
                 self.reply(error=NodeError(code, 'explicit refusal'))

@@ -148,6 +148,11 @@ def handle(args):
         return 0
     except (NodeError, OSError, ValueError) as exc:
         code = getattr(exc, 'code', 'NODE_REFUSED')
+        if code == 'OWNERSHIP_UNVERIFIABLE':
+            from cmw.jobs.cli import safe_text
+            payload = {'status': 'UNVERIFIABLE', 'code': code, 'reason': str(exc), 'exit_code': 75}
+            print(json.dumps(payload, ensure_ascii=True) if args.json else safe_text(f'UNVERIFIABLE: {exc}'))
+            return 75
         if (args.jobs_operation in {'plan-next', 'materialize-next', 'register-next'}
                 and code in {'QUEUE_UNAVAILABLE', 'SUCCESSOR_UNVERIFIABLE', 'SUCCESSOR_PENDING_VERIFICATION'}):
             from cmw.jobs.successor_cli import print_retry

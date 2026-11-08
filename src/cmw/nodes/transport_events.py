@@ -46,7 +46,8 @@ def classify_failure(error, *, operation=None):
     if (code in {'INCOMPATIBLE_PROTOCOL', 'INCOMPATIBLE_CAPABILITIES'} or
             (operation == 'capabilities' and code in {'INVALID_RESPONSE', 'INVALID_FRAME', 'UNSUPPORTED_OPERATION'})):
         return Failure(FailureKind.INCOMPATIBLE, NodeEvent.INCOMPATIBLE_HANDSHAKE, True, True)
-    if code in {'NODE_REFUSED', 'NODE_NOT_READY', 'QUEUE_UNAVAILABLE', 'UNKNOWN_QUEUE', 'INVALID_QUEUE', 'HANDSHAKE_REQUIRED'}:
+    if code in {'NODE_REFUSED', 'NODE_NOT_READY', 'QUEUE_UNAVAILABLE', 'UNKNOWN_QUEUE', 'INVALID_QUEUE',
+                'HANDSHAKE_REQUIRED', 'OWNERSHIP_UNVERIFIABLE'}:
         return Failure(FailureKind.READINESS, None, True, True)
     if code in {'OUTCOME_UNKNOWN', 'DISCONNECTED', 'UNREACHABLE', 'CLOSED', 'INVALID_RESPONSE', 'INVALID_FRAME', 'TIMEOUT'} or isinstance(error, OSError):
         event = (evidence.event if isinstance(evidence, TransportFailure) else

@@ -11,9 +11,8 @@ import re
 
 from cmw.core.provenance import stable_hash
 from cmw.jobs import runtime, suspension
-from cmw.jobs.ownership import exclusive, lock_held
-from cmw.jobs.ownership_hold import blocks_replacement
-from cmw.jobs.store import PENDING, Store, validate_note
+from cmw.jobs.ownership import exclusive, OwnershipUnavailable
+from cmw.jobs.store import JobsError, PENDING, Store, validate_note
 from .protocol import NodeError, identifier, target_identity
 
 JOB_ACTIONS = frozenset({'hold', 'release', 'move', 'cancel', 'suspend', 'continue'})
@@ -93,6 +92,12 @@ def _revisions(control, job):
             'queue': Store.node_revision(control)}
 
 
+def _start_refusal(exc):
+    return NodeError(runtime.ControllerStartUnavailable.code,
+                     f'Controller ownership temporarily unverifiable; retry with a fresh preview '
+                     f'({exc.deciding_check}); nothing launched')
+
+
 def _preview(backend, params, target):
     params = _action(params, target, preview=True)
     action = params['action']
@@ -125,8 +130,15 @@ def _preview(backend, params, target):
             reasons.append('Needs attention or cancellation is unresolved; dispatch remains paused')
         consequences.append('Dispatch may admit eligible queued jobs when this controller is online.')
     elif action == 'controller.start':
-        if control['online'] or blocks_replacement(control.get('owner')) or lock_held(backend.store.root / 'controller.lock'):
-            reasons.append('Controller is online or ownership is uncertain; inspect status')
+        if control['online']:
+            reasons.append('Controller is online; use resume to enable dispatch')
+        else:
+            try:
+                runtime._require_controller_replacement(backend.store, control.get('owner'))
+            except OwnershipUnavailable as exc:
+                raise _start_refusal(exc) from exc
+            except JobsError as exc:
+                reasons.append(str(exc))
         consequences.append('Start launches a detached controller and enables dispatch unless unresolved work blocks it. Held jobs remain held.')
     elif action == 'controller.stop':
         consequences.append('Stop pauses dispatch and stops the controller; active execution workers continue unchanged.')
@@ -205,10 +217,10 @@ def dispatch(backend, operation, params, *, target=None, request_id=None):
             elif action.startswith('dispatch.'):
                 store._dispatch(con, action == 'dispatch.resume')
             elif action == 'controller.start':
-                _require(not blocks_replacement(store.control(con).get('owner'))
-                         and not lock_held(store.root / 'controller.lock'),
-                         'CONTROL_UNAVAILABLE', 'Controller ownership changed; inspect status')
-                runtime._prepare_start(store, con)
+                try:
+                    runtime._prepare_start(store, con)
+                except OwnershipUnavailable as exc:
+                    raise _start_refusal(exc) from exc
                 status = 'ACCEPTED'
             elif action == 'controller.stop':
                 runtime._stop(store, con)

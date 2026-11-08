@@ -85,9 +85,14 @@ retry budget, starting at 50 ms and doubling to a 250 ms cap. This bounds retry
 scheduling, not an already-blocked native or SQLite read. The serialized start
 request rechecks both immediately before preparation. A still-verified
 controller is never replaced. If evidence remains unavailable, `start` reports
-the deciding check and asks the operator to retry; it launches nothing and
-stores no permanent refusal. Startup confirmation also retries observations
-without launching a second controller.
+`ownership temporarily unverifiable; retry`, the deciding check, and exit 75
+(`UNVERIFIABLE` / `OWNERSHIP_UNVERIFIABLE` in JSON); it launches nothing and
+stores no permanent refusal. A fresh request succeeds once the old owner is
+confirmed GONE and the lock is free. Node-selected starts return the same
+retryable code without an automatic retry: obtain a fresh preview and request.
+Startup confirmation also retries observations without launching a second
+controller; an unconfirmed launched controller still requires status inspection,
+not a blind retry of the launch.
 
 `pause` stops future dispatch and does not pause/kill the active job. Pending
 cancellation does not disturb the active job. Running cancellation requires

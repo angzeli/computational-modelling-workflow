@@ -177,12 +177,16 @@ class ControllerStartRetryTests(unittest.TestCase):
                     model.status = ownership.OwnershipStatus.UNVERIFIABLE
                 else:
                     model.locked = True
-                with self.assertRaisesRegex(ownership.OwnershipUnavailable, 'nothing launched; retry start') as caught:
+                with self.assertRaisesRegex(runtime.ControllerStartUnavailable, 'ownership temporarily unverifiable; retry start') as caught:
                     runtime.start(model)
+                self.assertEqual(caught.exception.code, 'OWNERSHIP_UNVERIFIABLE')
                 self.assertIn('controller.', caught.exception.deciding_check)
                 self.assertEqual(model.now, 2.)
                 self.assertLessEqual(max(model.delays), .25)
                 self.assertEqual((model.mutations, model.launches, model.commits), ([], [], []))
+                model.status, model.locked = ownership.OwnershipStatus.GONE, False
+                runtime.start(model)
+                self.assertEqual((len(model.mutations), len(model.launches), len(model.commits)), (1, 1, 1))
 
     def test_identity_is_revalidated_after_the_transactional_queue_read(self):
         with tempfile.TemporaryDirectory(prefix='cmw-start-retry-') as temporary, ExitStack() as stack:

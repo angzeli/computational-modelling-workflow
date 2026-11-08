@@ -11,7 +11,8 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from cmw.jobs import suspension
+from cmw.jobs import suspension, runtime
+from cmw.jobs.ownership import OwnershipUnavailable
 from cmw.jobs.store import JobsError, Store
 from cmw.nodes.control import dispatch, request_digest
 from cmw.nodes.protocol import NodeError
@@ -80,6 +81,33 @@ class ControlFixture:
 
 
 class ControlTests(ControlFixture, unittest.TestCase):
+    def test_controller_start_unavailable_preview_is_retryable_without_launch(self):
+        before = self.store.path.read_bytes()
+        with patch.object(runtime, '_require_controller_replacement',
+                          side_effect=OwnershipUnavailable('controller.start_token', 'Denied')):
+            with self.assertRaisesRegex(NodeError, 'ownership temporarily unverifiable; retry') as caught:
+                self.preview('controller.start')
+        self.assertEqual(caught.exception.code, 'OWNERSHIP_UNVERIFIABLE')
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.spawn.assert_not_called()
+        self.assertEqual(self.apply(self.preview('controller.start'))['status'], 'ACCEPTED')
+        self.spawn.assert_called_once()
+
+    def test_controller_start_final_read_refusal_rolls_back_then_fresh_request_succeeds(self):
+        preview = self.preview('controller.start')
+        request_id = uuid4().hex
+        before = self.store.snapshot()['controller']
+        with patch.object(runtime, '_require_controller_replacement', side_effect=[
+                None, OwnershipUnavailable('controller.lock', 'Unreadable lock')]):
+            with self.assertRaisesRegex(NodeError, 'ownership temporarily unverifiable; retry') as caught:
+                self.apply(preview, request_id=request_id)
+        self.assertEqual(caught.exception.code, 'OWNERSHIP_UNVERIFIABLE')
+        self.assertEqual(self.store.snapshot()['controller'], before)
+        self.assertIsNone(self.store.request_lookup(request_id))
+        self.spawn.assert_not_called()
+        self.assertEqual(self.apply(self.preview('controller.start'))['status'], 'ACCEPTED')
+        self.spawn.assert_called_once()
+
     def test_selected_internal_target_cannot_be_redirected_by_numeric_display_alias(self):
         other = self.store.add(argv=['/unexecuted/fixture'], cwd=self.root, name='Other held attempt', hold=True)
         with self.store.transaction() as con:
