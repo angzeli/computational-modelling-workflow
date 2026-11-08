@@ -15,6 +15,8 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +34,8 @@ class CiRunnerReportingTests(unittest.TestCase):
         shutil.copyfile(ROOT / "scripts" / "ci" / "unittest_guard.py",
                         self.script.parent / "unittest_guard.py")
         (self.source / "tests").mkdir()
+        shutil.copyfile(ROOT / 'tests' / 'fixture_processes.py',
+                        self.source / 'tests' / 'fixture_processes.py')
         self.gate = self.root / "release"
         self.lines: list[str] = []
         self.output: queue.Queue[str] = queue.Queue()
@@ -261,6 +265,99 @@ class CiRunnerReportingTests(unittest.TestCase):
         fields = self.fields(finished)
         self.assertEqual((fields['result'], fields['tests']), ('FAIL', 'incomplete'))
         self.assertEqual((fields['completed'], fields['started']), ('0', '1'))
+
+    def test_timeout_retains_registered_survivor_identity_outside_hung_interpreter(self) -> None:
+        self.module(
+            'test_registered_retry.py',
+            """
+            import os
+            import subprocess
+            import sys
+            import time
+            import unittest
+            from fixture_processes import register_process
+
+            class RegisteredRetry(unittest.TestCase):
+                def test_retry(self):
+                    # This child survives the parent's native timeout. Its only
+                    # exit gate belongs to the outer reporting regression.
+                    code = ('from pathlib import Path; import sys,time; '
+                            'gate=Path(sys.argv[1]); limit=time.monotonic()+15\\n'
+                            'while not gate.exists() and time.monotonic()<limit: time.sleep(.01)')
+                    child = subprocess.Popen([sys.executable, '-c', code,
+                        os.environ['CMW_REPORTING_GATE']], stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    assert register_process(child, role='timeout regression child') is not None
+                    while True:
+                        try:
+                            raise PermissionError('persistent unavailable fixture')
+                        except Exception:
+                            time.sleep(.005)
+            """,
+        )
+        process = self.start(timeout='1')
+        self.assertNotEqual(process.wait(timeout=10), 0)
+        self.wait_for(lambda line: line.startswith('CMW_TEST_FIXTURE_PROCESS '))
+        record = json.loads(next(line.split(' ', 1)[1] for line in self.lines
+                                 if line.startswith('CMW_TEST_FIXTURE_PROCESS ')))
+        self.assertEqual(record['test'], 'test_registered_retry.RegisteredRetry.test_retry')
+        self.assertEqual(record['pid'], record['identity']['pid'])
+        self.assertEqual(record['identity']['version'], 2)
+        self.assertTrue(record['identity']['boot_session'])
+        self.assertIsInstance(record['identity']['start_token'], int)
+        self.assertEqual(Path(record['registry']).stat().st_mode & 0o777, 0o600)
+        from cmw.jobs.ownership import OwnershipStatus, observe_owner
+        from tests.fixture_processes import audit_processes
+        audit = audit_processes(Path(record['registry']).parent)
+        self.assertEqual(audit[0]['status'], OwnershipStatus.VERIFIED)
+        self.assertFalse(audit[0]['signal_sent'])
+        self.gate.touch()
+        deadline = time.monotonic() + 5
+        while observe_owner(record['identity']).status != OwnershipStatus.GONE and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertEqual(observe_owner(record['identity']).status, OwnershipStatus.GONE)
+
+    def test_process_audit_never_signals_reused_or_unreadable_identity(self) -> None:
+        from cmw.jobs import ownership
+        from tests import fixture_processes
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        def close():
+            if child.poll() is None:
+                child.terminate()
+            child.wait(timeout=5)
+        self.addCleanup(close)
+        directory = (self.root / 'registered').resolve()
+        with patch.dict(os.environ, {'CMW_TEST_EVIDENCE_DIR': str(directory),
+                                     'CMW_TEST_ACTIVE_TEST': self.id()}):
+            record = fixture_processes.register_process(child, role='read-only audit regression')
+        self.assertIsNotNone(record)
+        for status in (ownership.OwnershipStatus.GONE, ownership.OwnershipStatus.UNVERIFIABLE):
+            with self.subTest(status=status), patch.object(ownership, 'observe_owner',
+                    return_value=SimpleNamespace(status=status, deciding_check='start_token')), \
+                    patch.object(os, 'kill') as send:
+                result = fixture_processes.audit_processes(directory)
+                self.assertEqual(result[0]['status'], status)
+                self.assertFalse(result[0]['signal_sent'])
+                send.assert_not_called()
+        with patch.object(ownership, 'observe_owner', side_effect=PermissionError('denied')), \
+                patch.object(os, 'kill') as send:
+            result = fixture_processes.audit_processes(directory)
+            self.assertEqual(result[0]['status'], 'UNVERIFIABLE')
+            self.assertEqual(result[0]['deciding_check'], 'observation')
+            send.assert_not_called()
+
+    def test_incomplete_registration_is_retained_and_never_reports_clean(self) -> None:
+        from tests import fixture_processes
+        directory = (self.root / 'incomplete').resolve()
+        with patch.dict(os.environ, {'CMW_TEST_EVIDENCE_DIR': str(directory),
+                                     'CMW_TEST_ACTIVE_TEST': self.id()}):
+            self.assertIsNone(fixture_processes.register_process(
+                SimpleNamespace(pid=os.getpid()), role='not a real fixture child'))
+        records = fixture_processes.read_records(directory)
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]['registration_complete'])
+        self.assertIsNone(records[0]['identity'])
+        self.assertEqual(fixture_processes.audit_processes(directory)[0]['status'], 'UNVERIFIABLE')
 
     def test_failure_log_is_published_before_another_module_finishes(self) -> None:
         self.module(

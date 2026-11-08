@@ -36,6 +36,7 @@ run_module() {
       if [[ $line == *'Timeout ('*')!'* ]]; then
         stream_timeout=1
         printf 'CMW_TEST_TIMEOUT module=%q active=%s\n' "$relative" "$active_test_record"
+        "$python_exe" "$source_root/scripts/ci/unittest_guard.py" --report-processes "$work/evidence"
       fi
       if [[ $module == jobs.test_ownership_fault_sweep || $stream_timeout == 1 ]]; then
         printf '%s\n' "$line"
@@ -46,6 +47,7 @@ run_module() {
     done
   pipeline_status=("${PIPESTATUS[@]}")
   status=${pipeline_status[0]}
+  "$python_exe" "$source_root/scripts/ci/unittest_guard.py" --report-processes "$work/evidence"
   if [[ $status == 0 && ( ${pipeline_status[1]} != 0 || ${pipeline_status[2]} != 0 ) ]]; then
     status=1
   fi

@@ -215,6 +215,8 @@ def detached(arguments, log):
             stdin=subprocess.DEVNULL, stdout=output, stderr=output,
             start_new_session=True, close_fds=True, env=environment(), cwd='/')
     runtime._CHILDREN.append(process)
+    from tests.fixture_processes import register_process
+    register_process(process, role='isolated-runtime ' + str(arguments[0]))
     return process
 
 

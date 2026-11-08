@@ -10,6 +10,8 @@ import faulthandler
 import json
 import math
 import os
+from pathlib import Path
+import runpy
 import sys
 import unittest
 
@@ -44,14 +46,19 @@ class GuardedResult(unittest.TextTestResult):
         self.budget = budget
         self.guarded = False
         self.completed = 0
+        self.previous_test = None
 
     def startTest(self, test):
         super().startTest(test)
+        self.previous_test = os.environ.get('CMW_TEST_ACTIVE_TEST')
+        os.environ['CMW_TEST_ACTIVE_TEST'] = test.id()
+        evidence = os.environ.get('CMW_TEST_EVIDENCE_DIR')
         self.guarded = not (
             test.__class__.__module__ in {SWEEP_MODULE, 'tests.' + SWEEP_MODULE}
             and test.__class__.__name__ == 'OwnershipFaultSweepTests')
         emit('STARTED', test=test.id(), tests_started=self.testsRun,
              tests_completed=self.completed,
+             fixture_registry=str(Path(evidence) / 'fixture-processes.jsonl') if evidence else None,
              timeout_seconds=self.budget if self.guarded else None,
              watchdog='native-per-test' if self.guarded else 'sweep-per-row')
         if self.guarded:
@@ -63,7 +70,30 @@ class GuardedResult(unittest.TextTestResult):
         self.completed += 1
         emit('FINISHED', test=test.id(), tests_started=self.testsRun,
              tests_completed=self.completed)
+        if self.previous_test is None:
+            os.environ.pop('CMW_TEST_ACTIVE_TEST', None)
+        else:
+            os.environ['CMW_TEST_ACTIVE_TEST'] = self.previous_test
         super().stopTest(test)
+
+
+def report_processes(directory):
+    """Called by the outer shell, never the timed-out Python interpreter."""
+    helper = Path(__file__).resolve().parents[2] / 'tests' / 'fixture_processes.py'
+    registry = str(Path(directory) / 'fixture-processes.jsonl')
+    try:
+        records = runpy.run_path(str(helper))['read_records'](directory)
+        for record in records:
+            print('CMW_TEST_FIXTURE_PROCESS ' + json.dumps({**record, 'registry': registry}), flush=True)
+        print('CMW_TEST_FIXTURE_PROCESS_SUMMARY ' + json.dumps({
+            'registry': registry, 'registered': len(records),
+            'scope': 'registered identities only; current liveness not observed',
+            'complete_census': False}), flush=True)
+    except Exception as exc:
+        print('CMW_TEST_FIXTURE_PROCESS_INCOMPLETE ' + json.dumps({
+            'registry': registry, 'reason': str(exc)}), flush=True)
+        return 1
+    return 0
 
 
 def main(module):
@@ -78,4 +108,6 @@ def main(module):
 
 
 if __name__ == '__main__':
+    if sys.argv[1] == '--report-processes':
+        raise SystemExit(report_processes(sys.argv[2]))
     main(sys.argv[1])
