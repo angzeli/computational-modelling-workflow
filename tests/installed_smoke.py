@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from tests.python_fixture import vasp_environment
 import time
 from unittest.mock import patch
 
@@ -511,8 +512,8 @@ def runner_interface_surface(root, cli):
     scripts = root/'port'/'scripts'
     scripts.mkdir(parents=True)
     runner = scripts/'run-vasp.sh'
-    runner.write_text('#!/usr/bin/env bash\nset -euo pipefail\nreadonly CMW_MANAGED_PYTHON PYTHON_BIN PYTHONPATH PYTHONHOME\n. "$(dirname -- "$0")/environment.sh"\nexec "${CMW_MANAGED_PYTHON:?CMW_MANAGED_PYTHON must be pinned}" -B "$PORT_ROOT/scripts/run_vasp.py" "$@"\n')
-    (scripts/'environment.sh').write_text('PORT_ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)\n')
+    runner.write_text('#!/usr/bin/env bash\nset -euo pipefail\n. "$(dirname -- "$0")/environment.sh"\nexec "${CMW_MANAGED_PYTHON:-python3}" -B "$PORT_ROOT/scripts/run_vasp.py" "$@"\n')
+    (scripts/'environment.sh').write_text(vasp_environment())
     for name in ('launch.py', 'observables.py'):
         (scripts/name).write_text('# Inert synthetic source declaration\n')
     options = ['--input', '--output', '--binary', '--ranks', '--ncore', '--kpar', '--mpi-mode', '--restart', '--timeout', '--stop-before']

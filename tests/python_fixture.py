@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 import shlex
+import re
 import sys
 
 
@@ -30,3 +31,12 @@ def write_python_script(path: Path, source: str, *, executable: str | None = Non
     path.write_text(python_source(source, executable=executable), encoding="utf-8")
     path.chmod(0o700)
     return path
+
+
+def vasp_environment(*, executable=None):
+    """Select Python using the historical checker's non-expanding literal form."""
+    python = sys.executable if executable is None else executable
+    if re.fullmatch(r'/[A-Za-z0-9_./: +\-]+', python) is None:
+        raise ValueError('VASP fixture interpreter must fit the static literal path contract')
+    return ('PORT_ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)\n'
+            f'CMW_MANAGED_PYTHON="{python}"\n')

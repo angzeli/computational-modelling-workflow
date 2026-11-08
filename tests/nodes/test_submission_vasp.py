@@ -3,7 +3,6 @@ from copy import deepcopy
 import hashlib
 import os
 from pathlib import Path
-import sys
 import unittest
 from uuid import uuid4
 
@@ -38,8 +37,7 @@ class VaspSubmissionTests(unittest.TestCase):
         storage.mkdir(mode=0o700)
         spec = {'queues': {'research': str(root / 'queue-research')},
                 'storages': {'scratch': str(storage)},
-                'profiles': {'vasp': {'schema': 2, 'runner_interpreter': sys.executable,
-                                     'engine': 'VASP', 'runner': str(fixture.runner),
+                'profiles': {'vasp': {'engine': 'VASP', 'runner': str(fixture.runner),
                                      'max_cpus': max_ranks, 'max_ranks': max_ranks}}}
         config = enroll(root / 'node', spec)
         node = {'root': root, 'storage': storage, 'runner': fixture.runner,
@@ -74,6 +72,8 @@ class VaspSubmissionTests(unittest.TestCase):
 
     def test_preview_before_transfer_and_held_registration_pin_destination_poscar(self):
         node = self.node()
+        self.assertEqual(node['config']['schema'], 1)
+        self.assertNotIn('runner_interpreter', node['config']['profiles']['vasp'])
         spec, prepared, source = self.prepare(node)
         backend = node['backends']['research']
         preview = backend.call('submit.preview', {'spec': spec})['result']
@@ -83,13 +83,6 @@ class VaspSubmissionTests(unittest.TestCase):
         receipt = self.publish(node, spec, prepared)
         job = self.register(backend, spec)['job']
         self.assertEqual(job['status'], 'Hold')
-        self.assertEqual(job['env'], {'CMW_MANAGED_PYTHON': sys.executable,
-            'PYTHON_BIN': sys.executable, 'PYTHONPATH': '', 'PYTHONHOME': ''})
-        from cmw.nodes.submission import launch_blocker
-        self.assertIsNone(launch_blocker(job))
-        legacy = deepcopy(job)
-        legacy['env'] = {}
-        self.assertIn('interpreter environment', launch_blocker(legacy))
         self.assertNotEqual(job['attempt_id'], spec['request_id'])
         self.assertEqual(job['node_submission']['node_id'], node['config']['node_id'])
         target = Path(receipt['published_root']) / 'inputs' / 'POSCAR'
@@ -108,6 +101,15 @@ class VaspSubmissionTests(unittest.TestCase):
         self.assertIsNone(state['jobs'][0]['worker'])
         self.assertFalse(any(node['root'].rglob('OUTCAR')))
         self.assertFalse(any(node['root'].rglob('RUN_METADATA.txt')))
+        from cmw.nodes.submission import launch_blocker
+        self.assertEqual(job['env'], {})
+        self.assertIsNone(launch_blocker(job))
+        self.store(node).change(job['id'], 'release')
+        queued = self.store(node).snapshot()['jobs'][0]
+        self.assertEqual(queued['status'], 'Queue')
+        self.assertEqual(queued['env'], {})
+        self.assertIsNone(launch_blocker(queued))
+        self.assertFalse(self.store(node).snapshot()['controller']['online'])
 
     def test_explicit_sixteen_rank_preview_and_held_registration(self):
         node = self.node(max_ranks=16, expanded=True)

@@ -20,6 +20,7 @@ fi
   --artifact "$check_root"/dist/*.whl --artifact "$check_root"/dist/*.tar.gz
 cp "$source_root/tests/installed_smoke.py" "$check_root/driver/smoke.py"
 cp "$source_root/tests/fixture_processes.py" "$check_root/driver/tests/"
+cp "$source_root/tests/python_fixture.py" "$check_root/driver/tests/"
 : > "$check_root/driver/tests/__init__.py"
 : > "$check_root/driver/tests/jobs/__init__.py"
 : > "$check_root/driver/tests/nodes/__init__.py"

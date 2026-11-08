@@ -146,10 +146,8 @@ class StudyService:
                 raise JobsError('Study execution directory must be new and outside scientific inputs and Jobs state')
             argv = _argv({'engine': 'VASP', 'vasp': execution['vasp'], 'resources': resources},
                          profile, Path(case['output']).parent, run, run / 'native', input_directory=Path(case['output']))
-            from cmw.nodes.runner_profiles import runner_environment
             runtimes[case['case_id']] = {'argv': argv, 'cwd': case['output'], 'run_directory': str(run),
-                                       'env': {**runner_environment(profile),
-                                               'CMW_JOBS_OWN_SESSION': '1', 'OMP_NUM_THREADS': '1'}}
+                                       'env': {'CMW_JOBS_OWN_SESSION': '1', 'OMP_NUM_THREADS': '1'}}
         plan = {'schema': 1, 'kind': 'cmw-study-plan', 'study_id': spec['study_id'],
                 'node_id': owner['node_id'], 'queue_id': owner['queue_id'], 'state_directory': str(self.store.root),
                 'manifest': spec, 'preparation': prepared, 'runtime_id': config['runtime']['fingerprint'],
@@ -430,11 +428,6 @@ def launch_blocker(job):
                 or job['resources'] != plan['manifest']['execution']['resources']):
             raise JobsError('Study execution differs from immutable case registration')
         runtime = plan['runtimes'][case['case_id']]
-        from cmw.nodes.runner_profiles import runner_environment
-        expected_env = {**runner_environment(plan['profile_record']),
-                        'CMW_JOBS_OWN_SESSION': '1', 'OMP_NUM_THREADS': '1'}
-        if runtime['env'] != expected_env:
-            raise JobsError('Study interpreter environment differs from its profile pin')
         if (job['argv'], job['cwd'], job['env']) != (runtime['argv'], runtime['cwd'], runtime['env']):
             raise JobsError('Study execution differs from the approved runtime')
         info = _path(job['cwd']).stat()

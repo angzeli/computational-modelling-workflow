@@ -62,6 +62,20 @@ print(json.dumps([sys.executable, Path(__file__).name, Path(__file__).with_name(
         self.assertIn("FIXTURE_PYTHON=" + sys.executable, output)
         self.assertIn("ORCA TERMINATED NORMALLY", output)
 
+    def test_vasp_fixture_selects_test_python_without_a_profile_pin(self):
+        from tests.jobs.successor_fixtures import _runner
+        from tests.python_fixture import vasp_environment
+        for unsafe in ('/tmp/$other/python', '/tmp/`command`/python', '/tmp/"quote/python'):
+            with self.assertRaisesRegex(ValueError, 'static literal path contract'):
+                vasp_environment(executable=unsafe)
+        runner = _runner(self.root)
+        runner.with_name('run_vasp.py').write_text(
+            'import json, sys; print(json.dumps([sys.executable, sys.prefix]))\n')
+        environment = {**self.environment,
+                       'CMW_MANAGED_PYTHON': str(self.foreign / 'python3')}
+        self.assertEqual(json.loads(self.run_script(runner, environment=environment)),
+                         [sys.executable, sys.prefix])
+
     def test_static_engine_sources_generate_pinned_executables(self):
         for filename in ("fake_orca.py", "fake_multiwfn.py"):
             with self.subTest(filename=filename):

@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import sys
+from tests.python_fixture import vasp_environment
 from types import SimpleNamespace
 
 from cmw.jobs import runtime
@@ -26,12 +27,11 @@ def _runner(root):
     scripts.mkdir(parents=True)
     runner = scripts / 'run-vasp.sh'
     runner.write_text('#!/usr/bin/env bash\nset -euo pipefail\n'
-                      'readonly CMW_MANAGED_PYTHON PYTHON_BIN PYTHONPATH PYTHONHOME\n'
                       '. "$(dirname -- "$0")/environment.sh"\n'
-                      'exec "${CMW_MANAGED_PYTHON:?CMW_MANAGED_PYTHON must be pinned}" -B "$PORT_ROOT/scripts/run_vasp.py" "$@"\n')
+                      'exec "${CMW_MANAGED_PYTHON:-python3}" -B "$PORT_ROOT/scripts/run_vasp.py" "$@"\n')
     runner.chmod(0o700)
     (scripts / 'environment.sh').write_text(
-        'PORT_ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)\n')
+        vasp_environment())
     for name in ('launch.py', 'observables.py'):
         (scripts / name).write_text('"""Inert source fixture: never executed."""\n')
     RunnerCompatibilityTests.write_parser(SimpleNamespace(entrypoint=scripts / 'run_vasp.py'))
@@ -52,7 +52,7 @@ def make_vasp_fixture(root, *, ionic_stop=False):
     runner = _runner(root)
     config = enroll(root / 'node', {'queues': {'research': str(root / 'state')},
         'storages': {'scratch': str(storage)},
-        'profiles': {'vasp': {'schema': 2, 'runner_interpreter': sys.executable, 'engine': 'VASP', 'runner': str(runner), 'max_cpus': 1, 'max_ranks': 1}}})
+        'profiles': {'vasp': {'engine': 'VASP', 'runner': str(runner), 'max_cpus': 1, 'max_ranks': 1}}})
     store = Store(config['queues']['research']['state'])
     flags = [[True] * 3, [False] * 3]
     texts = native_texts(relaxation=True, evaluations=2)

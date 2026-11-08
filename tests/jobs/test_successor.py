@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 import shutil
 import sqlite3
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -52,9 +51,7 @@ class SuccessorServiceTests(unittest.TestCase):
         self.assertEqual(source, {p: p.read_bytes() for p in self.fixture['run'].iterdir()})
         self.assertFalse(Path(self.spec['adapter']['output']).exists())
         payload = json.loads(first.payload_json)
-        self.assertEqual(payload['runtime']['env'], {'CMW_MANAGED_PYTHON': sys.executable,
-            'PYTHON_BIN': sys.executable, 'PYTHONPATH': '', 'PYTHONHOME': '',
-            'CMW_JOBS_OWN_SESSION': '1', 'OMP_NUM_THREADS': '1'})
+        self.assertEqual(payload['runtime']['env'], {'CMW_JOBS_OWN_SESSION': '1', 'OMP_NUM_THREADS': '1'})
         self.assertTrue(payload['closure']['closed'])
         self.assertEqual(payload['adapter']['source']['scientific_acceptance'], 'not established')
         self.assertEqual(self.fixture['cleanup']['remaining_owned_processes'], [])
@@ -116,10 +113,6 @@ class SuccessorServiceTests(unittest.TestCase):
         child = next(job for job in self.store.snapshot()['jobs'] if job['id'] == a['child']['job_id'])
         self.assertIsNone(successor_launch_blocker(child))
         self.assertEqual(runtime.launch_blocker(child, final=True), '')
-        for environment in ({}, {**child['env'], 'PYTHON_BIN': '/different/python'}):
-            altered = deepcopy(child)
-            altered['env'] = environment
-            self.assertIn('approved VASP runtime', successor_launch_blocker(altered))
         with self.assertRaises(JobsError):
             self.service.register(self.parent['id'], str(record), plan.plan_digest,
                                   uuid4().hex, self.parent['attempt_id'])

@@ -556,29 +556,35 @@ New enrollment specs may explicitly set a profile's `schema` to `2` and
 resolved path, file identity, SHA-256 and complete security evidence; a changed
 pin refuses that profile's readiness. Such configurations use node schema 2.
 Existing schema-1 configurations and unversioned profiles stay valid and report
-**unpinned**. There is no automatic migration or read-time rejection for a missing
-legacy pin. `nodes check` exposes pin readiness; capabilities retain the old `profiles`
+**unpinned**. There is no automatic migration or rejection for a missing legacy
+pin. `nodes check` exposes pin readiness; capabilities retain the old `profiles`
 shape and add versioned `runner_profiles` interpreter metadata. A capability's
 `pinned` label describes the record; selected-profile readiness verifies it.
 
-New VASP execution requires a verified schema-2 pin and a checked runner wrapper
-that consumes `CMW_MANAGED_PYTHON`. CMW supplies that variable explicitly from the
-profile, retaining the selected absolute executable path (including a virtual
-environment's symlink), and excludes inherited Python home and foreign import
-paths. Legacy unpinned profiles remain inspectable but cannot authorize a new
-VASP execution. A wrapper that ignores the variable is refused rather than
-falling back to Python from `PATH`.
+This change adds data and observation only. Runner argv, environment and launch
+selection remain unchanged. P3a will set `CMW_MANAGED_PYTHON` explicitly from the
+profile pin; this Phase 1 record alone does not prove launch use.
 
-The checked wrapper declares
-`readonly CMW_MANAGED_PYTHON PYTHON_BIN PYTHONPATH PYTHONHOME` before sourcing
-`environment.sh`, then executes the required `CMW_MANAGED_PYTHON` without a
-fallback. This prevents environment/toolchain setup from replacing the pin or
-introducing foreign Python import settings. Existing external wrappers need
-this contract and separate qualification before they can authorize execution.
+Until automatic enforcement has a complete operator path ([issue #36](https://github.com/angzeli/computational-modelling-workflow/issues/36),
+post-cutover), the cutover runbook must explicitly select the qualified node-local
+CMW interpreter in the runner/controller launch environment:
 
-Issue #27 brings this CMW-side part of D30 forward from P3a. The external VASP
-port is neither modified nor deployed by it; runner qualification, snapshots and
-the other P3a changes remain separate.
+```sh
+export CMW_MANAGED_PYTHON="/absolute/qualified/environment/bin/python"
+```
+
+The existing VASP port wrapper sources `environment.sh`, then uses
+`exec "${CMW_MANAGED_PYTHON:-python3}" -B "$PORT_ROOT/scripts/run_vasp.py" "$@"`.
+Verify during snapshot qualification that sourcing that environment preserves
+the selected value; cutover must not rely on its `python3` fallback. A local
+trusted-argv submission can record the same value using
+`cmw jobs add ... --env CMW_MANAGED_PYTHON=/absolute/qualified/environment/bin/python -- ...`.
+This is a launch procedure, not a profile update or an arbitrary environment
+field in the portable submission schema. Synthetic tests assign the same variable
+directly in their generated `environment.sh`, using the same accepted wrapper.
+The port's capability guard separately refuses incompatible CMW ownership APIs
+before MPI starts; it does not establish deployment qualification. Missing legacy
+profile pins alone do not refuse submission or queued attempts.
 
 ## Portal reachability and recovery
 

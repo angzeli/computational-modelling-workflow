@@ -3,7 +3,6 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import re
-import sys
 from uuid import uuid4
 
 from cmw.core.provenance import stable_hash
@@ -55,7 +54,7 @@ def make_study(root):
     records.mkdir(mode=0o700)
     config = enroll(root / 'node', {'queues': {'research': str(root / 'state')},
         'storages': {'scratch': str(storage)},
-        'profiles': {'vasp': {'schema': 2, 'runner_interpreter': sys.executable, 'engine': 'VASP', 'runner': str(runner), 'max_cpus': 2, 'max_ranks': 2}}})
+        'profiles': {'vasp': {'engine': 'VASP', 'runner': str(runner), 'max_cpus': 2, 'max_ranks': 2}}})
     store = Store(config['queues']['research']['state'])
     study_id = uuid4().hex
     manifest = {'schema': 1, 'study_id': study_id, 'name': 'Invented static ENCUT study', 'engine': 'VASP',

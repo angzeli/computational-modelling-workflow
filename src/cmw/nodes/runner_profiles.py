@@ -1,4 +1,4 @@
-"""Versioned runner interpreter pins and explicit launch environments."""
+"""Versioned runner interpreter pins; launch integration remains separate."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -64,16 +64,6 @@ def interpreter_observation(profile, *, verify=False):
         except (OSError, ValueError) as exc:
             result.update(status='mismatch', error=str(exc))
     return result
-
-
-def runner_environment(profile):
-    """Require a current profile pin; never inherit another Python environment."""
-    observed = interpreter_observation(profile, verify=True)
-    if observed['status'] != 'pinned':
-        raise ValueError('Runner execution requires a verified schema-2 interpreter pin: ' +
-                         (observed['error'] or observed['status']))
-    return {'CMW_MANAGED_PYTHON': observed['path'], 'PYTHON_BIN': observed['path'],
-            'PYTHONPATH': '', 'PYTHONHOME': ''}
 
 
 def profile_capabilities(profiles, readiness=None):
