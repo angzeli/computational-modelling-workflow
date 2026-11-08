@@ -19,6 +19,7 @@ from cmw.nodes.storage import identify_storage, check_storage
 from cmw.nodes.transfer import (MAX_FILE_BYTES, begin_transfer, cleanup_transfer, lookup_transfer,
     manifest_digest, normalize_manifest, prepare_local_bundle, publish_transfer,
     run_sftp, sftp_command, sftp_quote, upload_local_bundle, upload_sftp)
+from tests.nodes.sftp_case import local_sftp_command
 from tests.nodes.test_storage import volume
 from tests.periodic.vasp.handoff_case import wait_for_fixture_sources
 
@@ -276,11 +277,9 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(list(self.storage.iterdir()), [])
 
     def test_actual_sftp_mechanism_with_generated_names_and_quoted_storage_path(self):
-        if not Path('/usr/bin/sftp').is_file() or not Path('/usr/libexec/sftp-server').is_file():
-            self.skipTest('Installed OpenSSH sftp and local sftp-server unavailable')
+        argv = local_sftp_command(self)
         bundle, receipt = self.started()
-        result = upload_sftp({}, self.spool, receipt,
-            _argv=['/usr/bin/sftp', '-b', '-', '-D', '/usr/libexec/sftp-server'])
+        result = upload_sftp({}, self.spool, receipt, _argv=argv)
         self.assertEqual(result['status'], 'UPLOADED')
         self.assertEqual(publish_transfer(self.config, 'scratch', self.request_id, bundle['manifest_digest'])['status'], 'PUBLISHED')
 
@@ -340,3 +339,31 @@ class TransferTests(unittest.TestCase):
         (Path(result['published_root']) / 'inputs/extra-directory').mkdir(mode=0o700)
         with self.assertRaises(NodeError):
             lookup_transfer(self.config, 'scratch', self.request_id)
+
+
+class LocalSftpResolutionTests(unittest.TestCase):
+    def test_linux_and_macos_use_their_installed_local_server(self):
+        for platform, server in (('linux', '/usr/lib/openssh/sftp-server'),
+                                 ('darwin', '/usr/libexec/sftp-server')):
+            with self.subTest(platform=platform), \
+                    patch('tests.nodes.sftp_case.sys.platform', platform), \
+                    patch('tests.nodes.sftp_case.shutil.which',
+                          side_effect=lambda path: path if path in {'/usr/bin/sftp', server} else None):
+                self.assertEqual(local_sftp_command(self),
+                                 ['/usr/bin/sftp', '-b', '-', '-D', server])
+
+    def test_missing_client_or_server_skip_names_the_executable(self):
+        for missing, present in (('sftp', {'/usr/libexec/sftp-server'}),
+                                 ('sftp-server', {'/usr/bin/sftp'})):
+            with self.subTest(missing=missing), \
+                    patch.dict(os.environ, {'CMW_REQUIRE_SFTP_INTEGRATION': ''}), \
+                    patch('tests.nodes.sftp_case.shutil.which',
+                          side_effect=lambda path: path if path in present else None), \
+                    self.assertRaisesRegex(unittest.SkipTest, rf'integration: {missing} \(searched:'):
+                local_sftp_command(self)
+
+    def test_ci_missing_executable_fails_instead_of_skipping(self):
+        with patch.dict(os.environ, {'CMW_REQUIRE_SFTP_INTEGRATION': '1'}), \
+                patch('tests.nodes.sftp_case.shutil.which', return_value=None), \
+                self.assertRaisesRegex(AssertionError, r'sftp \(searched:.*sftp-server \(searched:'):
+            local_sftp_command(self)

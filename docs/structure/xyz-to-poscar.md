@@ -102,11 +102,13 @@ XYZ composition. Changing the default request from `orthorhombic` to `auto`
 does not change the generated cell for a neutral molecule; existing explicit
 `orthorhombic` and `cubic` selections retain their behavior.
 
-After `uv sync`, run from the repository root (omit `PYTHON_BIN` if the
-environment is already activated):
+After `uv sync`, run from the repository root with an explicit absolute
+`PYTHON_BIN`, even when the environment is activated. Shell entrypoints do not
+find Python through `PATH`. Keep the virtual environment's executable symlink
+path rather than resolving it to the underlying interpreter:
 
 ```sh
-PYTHON_BIN=.venv/bin/python ./scripts/workflows/xyz_to_poscar.sh molecule.xyz \
+PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/workflows/xyz_to_poscar.sh molecule.xyz \
   --output POSCAR \
   --vacuum 10 \
   --net-charge 0
@@ -121,7 +123,7 @@ For example, a user-declared +2 Cu complex is prepared in a cubic cell without
 requiring an explicit cell override:
 
 ```sh
-PYTHON_BIN=.venv/bin/python ./scripts/workflows/xyz_to_poscar.sh cu_complex.xyz \
+PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/workflows/xyz_to_poscar.sh cu_complex.xyz \
   --output POSCAR \
   --vacuum 12 \
   --net-charge 2
@@ -138,7 +140,7 @@ original relative order within each group. Override the complete order when
 needed:
 
 ```sh
-PYTHON_BIN=.venv/bin/python ./scripts/workflows/xyz_to_poscar.sh copper-complex.xyz \
+PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/workflows/xyz_to_poscar.sh copper-complex.xyz \
   --output POSCAR \
   --vacuum 12 \
   --species-order C H N O Cu

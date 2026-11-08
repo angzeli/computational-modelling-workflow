@@ -42,6 +42,9 @@ jobs:
   tests:
     name: Tests / ${{ matrix.os }} / Python ${{ matrix.python }}
     needs: checks
+    env:
+      # Both platforms must exercise local client/server SFTP upload and fetch.
+      CMW_REQUIRE_SFTP_INTEGRATION: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -67,6 +70,12 @@ jobs:
       # status request inventories compare it for changes between boundaries.
       - name: Precompile bytecode
         run: python -m compileall -q src tests
+      # Keep explicit pass/fail evidence for both formerly skipped integrations.
+      - name: Required local SFTP upload and download
+        run: >-
+          python -m unittest -v
+          tests.nodes.test_transfer.TransferTests.test_actual_sftp_mechanism_with_generated_names_and_quoted_storage_path
+          tests.nodes.test_fetch.FetchTests.test_actual_separate_sftp_download_and_literal_source_quoting
       # Full deterministic offline suite (synthetic engines only): one unittest
       # process per module, one per CPU, isolated state. Native engine qualification is separate.
       - name: Offline suite

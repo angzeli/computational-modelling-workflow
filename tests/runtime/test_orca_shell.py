@@ -13,6 +13,7 @@ from pathlib import Path
 from cmw.core.execution_layout import ExecutionLayout
 from cmw.core.locks import acquire_lock, release_lock
 from cmw.core.provenance import atomic_write_json
+from tests.python_fixture import python_source
 
 
 ROOT = Path(__file__).parents[2]
@@ -32,7 +33,7 @@ class OrcaShellTests(unittest.TestCase):
             invocation = root / "invocation.json"
             version_probe = root / "version-probe.txt"
             fake.write_text(
-                textwrap.dedent(
+                python_source(textwrap.dedent(
                     f"""\
                     #!/usr/bin/env python3
                     import json
@@ -62,7 +63,7 @@ class OrcaShellTests(unittest.TestCase):
                     print("FINAL SINGLE POINT ENERGY -4.000000000")
                     print("ORCA TERMINATED NORMALLY")
                     """
-                ),
+                )),
                 encoding="utf-8",
             )
             fake.chmod(0o755)
@@ -241,7 +242,7 @@ class OrcaShellTests(unittest.TestCase):
             runtime_lib.mkdir(parents=True)
             python_wrapper = directory / "runtime-aware python"
             python_wrapper.write_text(
-                textwrap.dedent(
+                python_source(textwrap.dedent(
                     f"""\
                     #!/usr/bin/env python3
                     import json
@@ -281,12 +282,12 @@ class OrcaShellTests(unittest.TestCase):
                         )
                     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
                     """
-                ),
+                )),
                 encoding="utf-8",
             )
             python_wrapper.chmod(0o755)
             fake.write_text(
-                textwrap.dedent(
+                python_source(textwrap.dedent(
                     f"""\
                     #!/usr/bin/env python3
                     import json
@@ -318,7 +319,7 @@ class OrcaShellTests(unittest.TestCase):
                     print("THE OPTIMIZATION HAS CONVERGED")
                     print("ORCA TERMINATED NORMALLY")
                     """
-                ),
+                )),
                 encoding="utf-8",
             )
             fake.chmod(0o755)

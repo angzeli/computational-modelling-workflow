@@ -51,6 +51,7 @@ class SuccessorServiceTests(unittest.TestCase):
         self.assertEqual(source, {p: p.read_bytes() for p in self.fixture['run'].iterdir()})
         self.assertFalse(Path(self.spec['adapter']['output']).exists())
         payload = json.loads(first.payload_json)
+        self.assertEqual(payload['runtime']['env'], {'CMW_JOBS_OWN_SESSION': '1', 'OMP_NUM_THREADS': '1'})
         self.assertTrue(payload['closure']['closed'])
         self.assertEqual(payload['adapter']['source']['scientific_acceptance'], 'not established')
         self.assertEqual(self.fixture['cleanup']['remaining_owned_processes'], [])

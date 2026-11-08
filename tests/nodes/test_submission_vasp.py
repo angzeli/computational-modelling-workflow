@@ -72,6 +72,8 @@ class VaspSubmissionTests(unittest.TestCase):
 
     def test_preview_before_transfer_and_held_registration_pin_destination_poscar(self):
         node = self.node()
+        self.assertEqual(node['config']['schema'], 1)
+        self.assertNotIn('runner_interpreter', node['config']['profiles']['vasp'])
         spec, prepared, source = self.prepare(node)
         backend = node['backends']['research']
         preview = backend.call('submit.preview', {'spec': spec})['result']
@@ -99,6 +101,15 @@ class VaspSubmissionTests(unittest.TestCase):
         self.assertIsNone(state['jobs'][0]['worker'])
         self.assertFalse(any(node['root'].rglob('OUTCAR')))
         self.assertFalse(any(node['root'].rglob('RUN_METADATA.txt')))
+        from cmw.nodes.submission import launch_blocker
+        self.assertEqual(job['env'], {})
+        self.assertIsNone(launch_blocker(job))
+        self.store(node).change(job['id'], 'release')
+        queued = self.store(node).snapshot()['jobs'][0]
+        self.assertEqual(queued['status'], 'Queue')
+        self.assertEqual(queued['env'], {})
+        self.assertIsNone(launch_blocker(queued))
+        self.assertFalse(self.store(node).snapshot()['controller']['online'])
 
     def test_explicit_sixteen_rank_preview_and_held_registration(self):
         node = self.node(max_ranks=16, expanded=True)

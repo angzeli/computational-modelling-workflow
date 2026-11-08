@@ -8,6 +8,7 @@ import unittest
 
 from cmw.molecular.multiwfn.ifct_job import finalize
 from cmw.molecular.orca.excited_states import parse_orca_tda_excited_states_file
+from tests.python_fixture import python_source
 
 ROOT = Path(__file__).resolve().parents[3]
 ORCA = ROOT / 'tests/fixtures/orca/excited_states/orca_6_1_1_tda_singlets.out'
@@ -19,7 +20,7 @@ class IfctJobTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         state = parse_orca_tda_excited_states_file(ORCA).state('singlet', 1)
         self.fake = self.root / 'Multiwfn'
-        self.fake.write_text('''#!/usr/bin/env python3
+        self.fake.write_text(python_source('''#!/usr/bin/env python3
 import sys
 menu=sys.stdin.read()
 print('Version 2026.7.15')
@@ -42,7 +43,7 @@ Intrafragment electron redistribution of fragment 2: 0.17913
 Intrinsic charge transfer percentage, CT(%): 49.840 %
 Intrinsic local excitation percentage, LE(%): 50.160 %
 Apparent charge transfer percentage, CT(%): 5.040 %
-Apparent local excitation percentage, LE(%): 94.960 %''') + ')\n')
+Apparent local excitation percentage, LE(%): 94.960 %''') + ')\n'))
         self.fake.chmod(0o755)
         (self.root/'settings.ini').write_text('nthreads= 4\n')
         wave = self.root/'wave.molden.input';wave.write_text('[Molden Format]\n')

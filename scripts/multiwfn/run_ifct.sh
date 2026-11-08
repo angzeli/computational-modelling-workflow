@@ -3,7 +3,6 @@
 set -euo pipefail
 CMW_IFCT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 CMW_ROOT=$(cd "$CMW_IFCT_DIR/../.." && pwd -P)
-PYTHON_BIN=${PYTHON_BIN:-python3}
 source "$CMW_ROOT/scripts/runtime_python.sh"
 source "$CMW_ROOT/scripts/multiwfn/multiwfn_runtime.sh"
 if (($# != 2)); then

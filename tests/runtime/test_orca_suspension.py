@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 from cmw.jobs.suspension_protocol import SuspensionProtocolError
 from cmw.molecular.orca.suspension import describe
+from tests.python_fixture import write_python_script
 
 ROOT = Path(__file__).parents[2]
 
@@ -64,7 +65,8 @@ class OrcaSuspensionTests(unittest.TestCase):
         shutil.copyfile(ROOT / 'tests/fixtures/xyz/synthetic.xyz', self.structure)
         self.input = self.root / 'stage.inp'
         self.target = self.root / 'target.json'
-        self.fake = ROOT / 'tests/fixtures/fake_orca.py'
+        self.fake = write_python_script(self.root / 'fake-orca',
+            (ROOT / 'tests/fixtures/fake_orca.py').read_text())
         self.environment = {**os.environ, 'PYTHONPATH': str(ROOT / 'src'), 'PYTHONDONTWRITEBYTECODE': '1',
                             'PYTHON_BIN': sys.executable, 'CMW_CAFFEINATE': '0', 'ORCA_EXE': str(self.fake)}
         self.environment.pop('CMW_SUSPENSION_CONTEXT', None)

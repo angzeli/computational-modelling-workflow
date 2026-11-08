@@ -18,6 +18,7 @@ from cmw.nodes.fetch import (prepare_fetch, complete_fetch, download_fetch, down
                              normalize_fetch_spec, NORMAL_FILE_BYTES, LARGE_FILE_BYTES, _capture)
 from cmw.nodes.protocol import NodeError
 from cmw.nodes.storage import identify_storage, check_storage
+from tests.nodes.sftp_case import local_sftp_command
 from tests.nodes.test_storage import volume
 from tests.periodic.vasp.handoff_case import wait_for_fixture_sources
 
@@ -285,11 +286,9 @@ class FetchTests(unittest.TestCase):
             complete_fetch(self.backend, self.job, self.fetch_id, receipt['manifest_digest'])
 
     def test_actual_separate_sftp_download_and_literal_source_quoting(self):
-        if not Path('/usr/bin/sftp').is_file() or not Path('/usr/libexec/sftp-server').is_file():
-            self.skipTest('Installed local OpenSSH SFTP mechanism unavailable')
+        argv = local_sftp_command(self)
         receipt = self.capture()
-        result = download_fetch({}, receipt, self.destination,
-            _argv=['/usr/bin/sftp', '-b', '-', '-D', '/usr/libexec/sftp-server'])
+        result = download_fetch({}, receipt, self.destination, _argv=argv)
         self.assertEqual(result['status'], 'FETCHED')
         self.assertEqual((self.destination / 'analysis/summary.txt').read_bytes(), self.source.read_bytes())
         self.assertEqual(receipt['manifest_digest'], stable_hash(receipt['manifest']))

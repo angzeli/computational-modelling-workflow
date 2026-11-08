@@ -203,7 +203,8 @@ while not (root/'release').exists() and time.monotonic()<deadline:
             if check_snapshot_mode:
                 command[2] = ('umask 022; ' + command[2] +
                               ' || code=$?; umask > "$CMW_TEST_ROOT/after.umask"; exit "${code:-0}"')
-            env = {**environment(), 'CMW_TEST_ROOT': str(root), 'TMPDIR': str(root/'tmp')}
+            env = {**environment(), 'PYTHON_BIN': sys.executable,
+                   'CMW_TEST_ROOT': str(root), 'TMPDIR': str(root/'tmp')}
             if unresolved:
                 env['CMW_TEST_REFUSE_KILL'] = '1'
             if early_interrupt:
@@ -227,7 +228,8 @@ while not (root/'release').exists() and time.monotonic()<deadline:
             try:
                 if queued:
                     job = store.add(argv=command, cwd=attempt, name='fake Multiwfn interruption',
-                                    env={'CMW_TEST_ROOT': str(root), 'TMPDIR': str(root/'tmp')})
+                                    env={'PYTHON_BIN': sys.executable,
+                                         'CMW_TEST_ROOT': str(root), 'TMPDIR': str(root/'tmp')})
                     stderr_path = Path(job['logs']['stderr'])
                     runtime.start(store)
                 else:

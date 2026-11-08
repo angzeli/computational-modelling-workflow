@@ -75,6 +75,11 @@ but newly converted ORCA results always carry the explicit typed contract.
 
 ## Runtime
 
+Set an explicit absolute `PYTHON_BIN` for the shell workflows, for example
+`export PYTHON_BIN=/absolute/environment/bin/python`. Python is never selected
+through `PATH`; retain a virtual environment's executable symlink path. See the
+[installed-runner contract](multiwfn-jobs.md#installed-runners).
+
 Executable precedence is explicit option, Python configuration, `MULTIWFN_EXE`,
 then an unambiguous `Multiwfn`/`multiwfn` on `PATH`. The automated menu profile
 is currently supported for the demonstrably tested 3.8.x series; unknown or

@@ -169,5 +169,10 @@ The same checked shell sources are packaged as runner assets. In a source checko
 they bind that checkout's package; installed assets clear inherited `PYTHONPATH`
 and use the selected installed interpreter. They never import a neighbouring
 checkout as an implicit fallback. Missing assets are detected during checking.
+Direct shell calls, including IFCT and the cube workflows, require an explicit
+absolute `PYTHON_BIN`; they never choose Python through `PATH`. Keep the selected
+virtual environment's executable symlink path. The Jobs preparation route sets
+this value to its own interpreter. Shell entrypoints also discard inherited
+`PYTHONHOME` and foreign import paths.
 Real-engine and physical dual-Mac qualification remain separate from synthetic
 local and isolated endpoint/SSH acceptance.

@@ -565,6 +565,27 @@ This change adds data and observation only. Runner argv, environment and launch
 selection remain unchanged. P3a will set `CMW_MANAGED_PYTHON` explicitly from the
 profile pin; this Phase 1 record alone does not prove launch use.
 
+Until automatic enforcement has a complete operator path ([issue #36](https://github.com/angzeli/computational-modelling-workflow/issues/36),
+post-cutover), the cutover runbook must explicitly select the qualified node-local
+CMW interpreter in the runner/controller launch environment:
+
+```sh
+export CMW_MANAGED_PYTHON="/absolute/qualified/environment/bin/python"
+```
+
+The existing VASP port wrapper sources `environment.sh`, then uses
+`exec "${CMW_MANAGED_PYTHON:-python3}" -B "$PORT_ROOT/scripts/run_vasp.py" "$@"`.
+Verify during snapshot qualification that sourcing that environment preserves
+the selected value; cutover must not rely on its `python3` fallback. A local
+trusted-argv submission can record the same value using
+`cmw jobs add ... --env CMW_MANAGED_PYTHON=/absolute/qualified/environment/bin/python -- ...`.
+This is a launch procedure, not a profile update or an arbitrary environment
+field in the portable submission schema. Synthetic tests assign the same variable
+directly in their generated `environment.sh`, using the same accepted wrapper.
+The port's capability guard separately refuses incompatible CMW ownership APIs
+before MPI starts; it does not establish deployment qualification. Missing legacy
+profile pins alone do not refuse submission or queued attempts.
+
 ## Portal reachability and recovery
 
 Status polling is every 5 s. A receipt remains fresh through 15 s inclusive,

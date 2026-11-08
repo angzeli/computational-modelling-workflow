@@ -17,10 +17,14 @@ geometry-producing parent.
 
 ## Plan and run
 
-The public interface is the shell workflow:
+The public interface is the shell workflow. Shell entrypoints require an explicit
+absolute `PYTHON_BIN`; activation and `PATH` do not choose the interpreter. Keep
+the selected virtual environment's executable symlink path. Source-checkout
+scripts bind only their own CMW source; installed scripts use the selected
+installation, without inherited Python home or foreign import paths:
 
 ```sh
-./scripts/workflows/run_opt_freq_sp.sh \
+PYTHON_BIN=/absolute/environment/bin/python ./scripts/workflows/run_opt_freq_sp.sh \
   --mode 'opt+freq+sp' \
   --structure molecule.xyz \
   --config workflow.json \

@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import sys
+from tests.python_fixture import vasp_environment
 from types import SimpleNamespace
 
 from cmw.jobs import runtime
@@ -27,10 +28,10 @@ def _runner(root):
     runner = scripts / 'run-vasp.sh'
     runner.write_text('#!/usr/bin/env bash\nset -euo pipefail\n'
                       '. "$(dirname -- "$0")/environment.sh"\n'
-                      'exec python3 -B "$PORT_ROOT/scripts/run_vasp.py" "$@"\n')
+                      'exec "${CMW_MANAGED_PYTHON:-python3}" -B "$PORT_ROOT/scripts/run_vasp.py" "$@"\n')
     runner.chmod(0o700)
     (scripts / 'environment.sh').write_text(
-        'PORT_ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)\n')
+        vasp_environment())
     for name in ('launch.py', 'observables.py'):
         (scripts / name).write_text('"""Inert source fixture: never executed."""\n')
     RunnerCompatibilityTests.write_parser(SimpleNamespace(entrypoint=scripts / 'run_vasp.py'))

@@ -9,7 +9,7 @@ from cmw.molecular.workflows.multiwfn_analysis import (
     plan_analysis,
     prepare_analysis,
 )
-from tests.workflows.test_multiwfn_cubes import FAKE, MultiwfnCubeHarness, ROOT
+from tests.workflows.test_multiwfn_cubes import MultiwfnCubeHarness, ROOT
 
 
 IGMH = ROOT / "scripts" / "workflows" / "generate_igmh_cubes.sh"
@@ -72,7 +72,7 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
         *,
         extra: tuple[str, ...] = (),
         env: dict[str, str] | None = None,
-        executable: Path = FAKE,
+        executable: Path | None = None,
         check: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -87,7 +87,7 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
                 "--output",
                 str(self.output),
                 "--multiwfn-exe",
-                str(executable),
+                str(executable or self.fake),
                 "--settings-source",
                 str(self.settings),
                 *extra,
@@ -296,7 +296,7 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
     def test_unsupported_version_fails_before_operation(self) -> None:
         unsupported = self.root / "unsupported Multiwfn"
         unsupported.write_text(
-            FAKE.read_text(encoding="utf-8").replace(
+            self.fake.read_text(encoding="utf-8").replace(
                 'print("Version 3.8")', 'print("Version 3.9")'
             ),
             encoding="utf-8",

@@ -8,6 +8,7 @@ from cmw.core.job import JobTarget
 from cmw.core.provenance import ArtifactRecord, file_hash
 from cmw.molecular.orca.excited_states import parse_orca_tda_excited_states_file
 from cmw.structure.xyz import geometry_hash, read_xyz
+from tests.python_fixture import python_source
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -53,11 +54,11 @@ Intrinsic charge transfer percentage, CT(%): 49.840 %
 Intrinsic local excitation percentage, LE(%): 50.160 %
 Apparent charge transfer percentage, CT(%): 5.040 %
 Apparent local excitation percentage, LE(%): 94.960 %'''
-        executable.write_text('#!/usr/bin/env python3\nimport os,sys,time\nmenu=sys.stdin.read()\n'
+        executable.write_text(python_source('#!/usr/bin/env python3\nimport os,sys,time\nmenu=sys.stdin.read()\n'
             "assert menu.splitlines()==['18','8','2','cmw-orca-excited-state.out','1','2','1-2,4','3,5','0','0','q']\n"
             "print('Version 2026.7.15',flush=True)\nprint('( Number of parallel threads: 2 Current date: synthetic )',flush=True)\n"
             "print('Loaded '+sys.argv[1]+' successfully!',flush=True)\ntime.sleep(float(os.environ.get('CMW_TEST_PAUSE','0.5')))\n"
-            f'print({output!r},flush=True)\n')
+            f'print({output!r},flush=True)\n'))
     else:
         content = (ROOT / 'tests/fixtures/fake_multiwfn.py').read_text()
         content = content.replace('commands = sys.stdin.read()',
@@ -66,7 +67,7 @@ Apparent local excitation percentage, LE(%): 94.960 %'''
             "print('Loaded ' + sys.argv[1] + ' successfully!', flush=True)\n"
             "time.sleep(float(os.environ.get('CMW_TEST_PAUSE', '0.5')))\n"
             "commands = sys.stdin.read()")
-        executable.write_text(content)
+        executable.write_text(python_source(content))
     executable.chmod(0o755)
     science = {'profile': profile, 'source_result': str(source)}
     if profile in {'FMO', 'ESP'}:

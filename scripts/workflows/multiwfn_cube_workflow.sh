@@ -6,7 +6,6 @@ set -euo pipefail
 
 CMW_WORKFLOW_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 CMW_ROOT=$(cd "$CMW_WORKFLOW_DIR/../.." && pwd -P)
-PYTHON_BIN=${PYTHON_BIN:-python3}
 source "$CMW_ROOT/scripts/runtime_python.sh"
 
 # shellcheck source=scripts/multiwfn/multiwfn_runtime.sh

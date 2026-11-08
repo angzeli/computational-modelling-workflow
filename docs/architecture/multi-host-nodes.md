@@ -826,6 +826,13 @@ set `CMW_MANAGED_PYTHON` explicitly from that pin at launch. The runner must not
 select Python from inherited environment or PATH; that future launch contract
 must refuse missing or mismatched interpreter evidence.
 
+Automatic enforcement is deferred until the operator and legacy-queue paths in
+[issue #36](https://github.com/angzeli/computational-modelling-workflow/issues/36)
+are complete (post-cutover). At cutover, explicitly set `CMW_MANAGED_PYTHON` by
+the [runner launch procedure](../cmw-dual-node.md#runner-interpreter-profile-records)
+and qualify that selected environment. The port's capability guard is independent
+of profile-pin enforcement and remains required before MPI launch.
+
 **D31 runner deployment:** commit `51d8209` is the canonical VASP port baseline,
 eligible for production only after qualification. P1 deploys it from a clean
 commit as an immutable snapshot under `~/.local/share`, retaining its

@@ -452,7 +452,7 @@ def _materialize_calculation(
     command_path.write_text(
         _command_text(
             cmw_root=cmw_root.resolve(),
-            python_bin=python_bin.resolve(),
+            python_bin=python_bin.expanduser().absolute(),
             orca_executable=orca_executable.resolve(),
             layout=layout,
             runtime_contract=runtime_contract,
@@ -694,7 +694,7 @@ def materialize_relaxed_fragment_energy(
     command_path.write_text(
         _command_text(
             cmw_root=cmw_root.resolve(),
-            python_bin=python_bin.resolve(),
+            python_bin=python_bin.expanduser().absolute(),
             orca_executable=orca_executable.resolve(),
             layout=layout,
             runtime_contract=runtime_contract,

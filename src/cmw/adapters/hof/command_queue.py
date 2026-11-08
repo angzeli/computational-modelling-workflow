@@ -253,7 +253,8 @@ set -euo pipefail
 
 QUEUE_DIR=$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd -P)
 PYTHON_BIN={_quote(python_bin)}
-export PYTHONPATH={_quote(cmw_root / 'src')}${{PYTHONPATH:+:$PYTHONPATH}}
+unset PYTHONHOME
+export PYTHONPATH={_quote(cmw_root / 'src')}
 mode=${{1:---status}}
 
 case "$mode" in
@@ -338,10 +339,10 @@ def generate_hof_command_queue(
     }
     if not required.issubset(targets):
         raise ValueError("downstream package lacks required materialized targets")
-    resolved_files = [
+    python_bin = python_bin.expanduser().absolute()
+    resolved_files = [python_bin] + [
         path.expanduser().resolve()
         for path in (
-            python_bin,
             orca_executable,
             converter,
             multiwfn_executable,

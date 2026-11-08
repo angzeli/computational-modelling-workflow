@@ -28,6 +28,8 @@ class StudyServiceTests(unittest.TestCase):
 
     def materialize(self):
         plan = self.service.plan(self.fixture['manifest_path'])
+        for runtime in payload(plan)['runtimes'].values():
+            self.assertEqual(runtime['env'], {'CMW_JOBS_OWN_SESSION': '1', 'OMP_NUM_THREADS': '1'})
         prepared = self.service.materialize(self.fixture['manifest_path'], plan.plan_digest)
         self.assertEqual(prepared.status, 'MATERIALIZED', payload(prepared))
         return plan, payload(prepared)['record_path']

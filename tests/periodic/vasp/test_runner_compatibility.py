@@ -7,6 +7,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+from tests.python_fixture import vasp_environment
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -27,11 +28,11 @@ class RunnerCompatibilityTests(unittest.TestCase):
         self.runner.write_text(
             '#!/usr/bin/env bash\nset -euo pipefail\n'
             '. "$(dirname -- "$0")/environment.sh"\n'
-            'exec python3 -B "$PORT_ROOT/scripts/run_vasp.py" "$@"\n'
+            'exec "${CMW_MANAGED_PYTHON:-python3}" -B "$PORT_ROOT/scripts/run_vasp.py" "$@"\n'
         )
         self.runner.chmod(0o700)
         (self.scripts / "environment.sh").write_text(
-            'PORT_ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)\n'
+            vasp_environment()
         )
         for name in ("launch.py", "observables.py"):
             (self.scripts / name).write_text('"""Harmless synthetic source fixture."""\n')
