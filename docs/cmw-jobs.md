@@ -78,6 +78,16 @@ use `resume` on an existing controller. `stop` requests controller shutdown and
 pauses dispatch while the independent execution supervisor finishes an active
 job. After shutdown, `start` reconciles that supervisor before dispatching.
 
+Controller replacement requires confirmed loss of the recorded owner (or an
+empty owner slot) and a free controller lock. A temporarily unreadable identity
+or lock, or a lock still held during shutdown, gets a two-second observation
+retry budget, starting at 50 ms and doubling to a 250 ms cap. The serialized
+start request rechecks both immediately before preparation. A still-verified
+controller is never replaced. If evidence remains unavailable, `start` reports
+the deciding check and asks the operator to retry; it launches nothing and
+stores no permanent refusal. Startup confirmation also retries observations
+without launching a second controller.
+
 `pause` stops future dispatch and does not pause/kill the active job. Pending
 cancellation does not disturb the active job. Running cancellation requires
 `--yes` (or typing `CANCEL` in the console), transitions through Cancelling, then
@@ -837,6 +847,13 @@ transient read fault must not prevent eventual progress once the process domain
 has been verified, or close the worker's control pipe. The never-observed-domain
 exception below retains evidence and requires manual verification. The final absence observation distinguishes PRESENT, ABSENT and
 UNAVAILABLE; EPERM and EAGAIN are both unavailable evidence.
+
+A final-admission refusal closes the never-started helper's stdin and reaps it
+through the same driven retry policy. Each wait is bounded to 0.25 seconds;
+that is an observation interval, not a signal grace. Neither the previous
+five-second wait nor this retry path sends TERM or KILL. An exit after two
+seconds is reaped without signalling; a child that remains alive beyond five
+seconds keeps its driver and attention evidence until exit can be established.
 
 After RELEASE, the original worker keeps completion evidence in memory and
 retries receipt verification, absence observations and the completion transaction

@@ -47,7 +47,8 @@ FAMILIES = {
                    '_read_job', '_commit_job', '_Completion', '_worker_intent', 'worker',
                    ),
         'recovery': ('_AdmissionRefusal', '_wait_unobserved_domain'),
-        'contract': ('reap_detached', 'start', '_prepare_start', '_stop', 'mark_unknown',
+        'contract': ('reap_detached', 'start', '_start_observation', '_require_controller_replacement',
+                     '_prepare_start', '_stop', 'mark_unknown',
                      'reconcile', 'launch_blocker', 'dispatch_authority', 'tick', 'controller'),
         'effect': ('detached',),
     },
@@ -66,7 +67,8 @@ CONTRACT_TESTS = {
     'cmw.jobs.suspension_protocol': ['tests/jobs/test_suspension_protocol.py'],
     'cmw.jobs.runtime': ['tests/jobs/test_cancellation_anchor.py',
                        'tests/jobs/test_clock_freshness.py',
-                       'tests/jobs/test_completion_retry.py'],
+                       'tests/jobs/test_completion_retry.py',
+                       'tests/jobs/test_controller_start_retry.py'],
     'cmw.molecular.orca.suspension': ['tests/runtime/test_orca_suspension.py'],
 }
 LIMITS = [
@@ -80,6 +82,10 @@ LIMITS = [
     'Controlled fixtures include a child below the computational root.',
     'External-activity admission and controller dispatch authorization are fixture '
     'inputs; controller-only reads are not claimed as worker lifecycle coverage.',
+    'Controller replacement has a separate exactly-once single-fault matrix in '
+    'test_controller_start_retry: every baseline start read occurrence times '
+    'EAGAIN, EPERM and UNAVAILABLE, with one preparation and one launch after '
+    'GONE plus a free lock. These are replacement rows, not worker completions.',
     'Recovery-only reads require a prior fault and are covered by focused hold/complete '
     'contracts rather than credited to the single-fault fault-free-baseline sweep.',
     'A receipt arriving before the first verified coordinated domain has a '

@@ -394,6 +394,80 @@ class CompletionRetryTests(unittest.TestCase):
         self.assertFalse(any('Unknown' in message for message in self.messages()))
         self.assertEqual(self.delays, [.25, .25])
 
+    def test_unadmitted_helper_self_exit_after_two_seconds_is_never_signalled(self):
+        refusal = self.refusal()
+        started = self.clock
+
+        def wait_for_exit(*, timeout):
+            remaining = max(0.0, 2.0 - (self.clock - started))
+            self.clock += min(timeout, remaining)
+            if self.clock - started < 2.0:
+                raise runtime.subprocess.TimeoutExpired('unstarted helper', timeout)
+            return 0
+
+        self.leader.wait.side_effect = wait_for_exit
+        with patch.object(runtime, 'signal_session') as session_signal, \
+                patch.object(runtime.os, 'killpg') as group_signal:
+            refusal.finish()
+        self.assertGreaterEqual(self.clock - started, 2.0)
+        self.assertLessEqual(self.clock - started, 3.0)
+        self.assertGreater(self.leader.wait.call_count, 1)
+        self.assertTrue(all(call.kwargs == {'timeout': .25} for call in self.leader.wait.call_args_list))
+        self.assertEqual(self.current()['status'], 'Queue')
+        self.assertNotIn('ownership_holds', self.current())
+        self.assertFalse(any('Unknown' in message for message in self.messages()))
+        self.leader.stdin.close.assert_called_once_with()
+        self.leader.stdin.write.assert_not_called()
+        self.leader.send_signal.assert_not_called()
+        self.leader.terminate.assert_not_called()
+        self.leader.kill.assert_not_called()
+        session_signal.assert_not_called()
+        group_signal.assert_not_called()
+
+    def test_unadmitted_persistent_helper_retains_signal_free_grace_beyond_five_seconds(self):
+        refusal = self.refusal()
+        started = self.clock
+
+        def still_running(*, timeout):
+            self.clock += timeout
+            raise runtime.subprocess.TimeoutExpired('unstarted helper', timeout)
+
+        def bounded_observation(delay):
+            self.advance(delay)
+            if self.clock - started > 5.0:
+                raise RetryBudgetExceeded('Observed beyond the base five-second wait')
+
+        self.leader.wait.side_effect = still_running
+        self.authority.queue_wait = bounded_observation
+        with patch.object(runtime, 'signal_session') as session_signal, \
+                patch.object(runtime.os, 'killpg') as group_signal:
+            with self.assertRaisesRegex(RetryBudgetExceeded, 'base five-second wait'):
+                refusal.finish()
+            pending = self.current()
+            self.assertGreater(self.clock - started, 5.0)
+            self.assertEqual((pending['status'], pending['claim']), ('Starting', self.job['claim']))
+            self.assertIn('admission', pending['ownership_holds'])
+            self.assertIsNone(pending['finished_at'])
+            self.assertFalse(any('Unknown' in message for message in self.messages()))
+            self.leader.stdin.close.assert_called_once_with()
+            self.leader.stdin.write.assert_not_called()
+            self.leader.send_signal.assert_not_called()
+            self.leader.terminate.assert_not_called()
+            self.leader.kill.assert_not_called()
+            session_signal.assert_not_called()
+            group_signal.assert_not_called()
+
+            # An eventual EOF exit completes the same operation, without
+            # closing again, replaying GO or retaining an abandoned hold.
+            self.leader.wait.side_effect = None
+            refusal.finish()
+        self.assertEqual(self.current()['status'], 'Queue')
+        self.assertNotIn('ownership_holds', self.current())
+        self.leader.stdin.close.assert_called_once_with()
+        self.leader.stdin.write.assert_not_called()
+        session_signal.assert_not_called()
+        group_signal.assert_not_called()
+
     def test_cancellation_during_unadmitted_absence_retry_is_preserved(self):
         refusal = self.refusal()
         probes = []

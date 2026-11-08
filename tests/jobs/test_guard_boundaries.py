@@ -62,7 +62,7 @@ class GuardBoundaryTests(unittest.TestCase):
             runtime.worker(self.store, row['id'], 'original')
         leader.stdin.write.assert_not_called()
         leader.stdin.close.assert_called()
-        leader.wait.assert_called_once_with(timeout=5)
+        leader.wait.assert_called_once_with(timeout=.25)
         self.assertFalse(ownership.lock_held(self.store.root / 'attempts' / row['attempt_id'] / 'worker.lock'))
         with self.store.transaction() as con:
             return self.store.get(con, row['id']), preserved

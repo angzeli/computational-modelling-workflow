@@ -65,31 +65,78 @@ def start(store):
     store.ensure_private_root()
     # Serialize client start requests separately from the long-lived owner lock.
     with exclusive(store.root / "start.lock"):
-        # A controller this client started can be a zombie until we poll it.
-        reap_detached()
-        state = store.snapshot()
-        if state["controller"]["online"]:
-            raise JobsError("Controller already online; use resume to enable dispatch")
-        if ownership_hold.blocks_replacement(state["controller"]["owner"]) or lock_held(store.root / "controller.lock"):
-            raise JobsError("Controller ownership is uncertain; inspect controller.log")
-        with store.transaction() as con:
-            _prepare_start(store, con)
+        deadline, delay = time.monotonic() + 2.0, .05
+        while True:
+            try:
+                # Reap our detached children before every observation: a killed
+                # controller may still be a zombie or retain its lock briefly.
+                _start_observation(reap_detached, 'controller.children')
+                state = _start_observation(lambda: store.snapshot(), 'controller.queue')
+                if state["controller"]["online"]:
+                    raise JobsError("Controller already online; use resume to enable dispatch")
+                _require_controller_replacement(store, state["controller"]["owner"])
+                with store.transaction() as con:
+                    _prepare_start(store, con)
+            except OwnershipUnavailable as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise OwnershipUnavailable(exc.deciding_check,
+                        f'Controller replacement temporarily unverifiable ({exc.deciding_check}); '
+                        'nothing launched; retry start') from exc
+                time.sleep(min(delay, remaining))
+                delay = min(.25, delay * 2)
+                continue
+            break
         process = _launch_controller(store)
         deadline = time.monotonic() + 5
+        unavailable = None
         while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise JobsError("Controller failed to start; inspect controller.log")
-            if store.snapshot()["controller"]["online"]:
-                return
+            try:
+                if _start_observation(lambda: process.poll(), 'controller.child') is not None:
+                    raise JobsError("Controller failed to start; inspect controller.log")
+                if _start_observation(lambda: store.snapshot(), 'controller.queue')["controller"]["online"]:
+                    return
+                unavailable = None
+            except OwnershipUnavailable as exc:
+                unavailable = exc
             time.sleep(0.05)
+        if unavailable is not None:
+            raise OwnershipUnavailable(unavailable.deciding_check,
+                'Controller startup temporarily unverifiable; inspect status before retrying') from unavailable
         raise JobsError("Controller startup not confirmed; inspect status before retrying")
 
 
+def _start_observation(read, deciding_check):
+    """Classify only reads; never replay start's preparation or launch effects."""
+    try:
+        return read()
+    except OwnershipUnavailable:
+        raise
+    except Exception as exc:
+        if not is_unavailable(exc):
+            raise
+        raise OwnershipUnavailable(deciding_check, 'Controller start evidence temporarily unreadable') from exc
+
+
+def _require_controller_replacement(store, owner):
+    if owner is not None:
+        result = _start_observation(lambda: observe_owner(owner), 'controller.identity')
+        if result.status == OwnershipStatus.UNVERIFIABLE:
+            raise OwnershipUnavailable(f'controller.{result.deciding_check}',
+                                       'Controller identity temporarily unverifiable')
+        if result.status != OwnershipStatus.GONE:
+            raise JobsError('Controller ownership is uncertain; recorded controller is still alive')
+    if _start_observation(lambda: lock_held(store.root / 'controller.lock', strict=True), 'controller.lock'):
+        raise OwnershipUnavailable('controller.lock', 'Controller ownership lock remains held')
+
+
 def _prepare_start(store, con):
-    control = store.control(con)
-    if ownership_hold.blocks_replacement(control.get('owner')):
-        raise JobsError('Existing controller ownership has not been disproved')
-    blocked = any(j.get('ownership_holds') or j['status'] in {'Unknown', 'Cancelling'} for j in store.rows(con))
+    control = _start_observation(lambda: store.control(con), 'controller.queue')
+    jobs = _start_observation(lambda: store.rows(con), 'controller.queue')
+    blocked = any(j.get('ownership_holds') or j['status'] in {'Unknown', 'Cancelling'} for j in jobs)
+    # The queue read may block. Re-observe identity and the lock immediately
+    # before the only preparation mutation, within the serialized transaction.
+    _require_controller_replacement(store, control.get('owner'))
     control.update(stop=False, dispatch=not blocked, reason='Needs attention' if blocked else 'Starting controller')
     store.set_control(con, control)
 
@@ -515,6 +562,9 @@ class _AdmissionRefusal:
 
         def reap():
             try:
+                # This is an observation interval, not a termination grace.
+                # A refused helper is never sent TERM/KILL; retain its driver
+                # until EOF produces an observed exit, however long that takes.
                 return self.leader.wait(timeout=.25)
             except subprocess.TimeoutExpired as exc:
                 raise OwnershipUnavailable('admission.exit', 'Unstarted helper exit pending') from exc
