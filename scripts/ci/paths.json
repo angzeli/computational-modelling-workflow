@@ -1,0 +1,26 @@
+{
+  "full": [".github/workflows/*", "scripts/ci/*", "tests/test_ci_*.py"],
+  "fault_matrix": [
+    "src/**/*ownership*", "src/**/*hold*", "src/**/*runtime*",
+    "src/**/*suspension*", "src/**/*identity*", "src/**/*runner*",
+    "src/cmw/jobs/lifecycle.py", "src/cmw/jobs/payload.sh", "src/cmw/jobs/store.py",
+    "src/cmw/jobs/activity.py", "src/cmw/jobs/sharing.py",
+    "tests/**/*ownership*", "tests/**/*hold*", "tests/**/*runtime*",
+    "tests/**/*suspension*", "tests/**/*identity*", "tests/**/*runner*",
+    "tests/jobs/*cancellation*", "tests/jobs/*session*", "tests/jobs/*guard*",
+    "tests/jobs/*lifecycle*", "tests/jobs/*store*", "tests/jobs/*activity*", "tests/jobs/*sharing*",
+    "tests/fixtures/vasp_port*/*", "tests/fixtures/jobs_31616be/*",
+    "tests/fixture_processes.py", "tests/python_fixture.py",
+    "scripts/runtime_python.sh", "scripts/orca/*"
+  ],
+  "packaging": [
+    "pyproject.toml", "uv.lock", "setup.py", "setup.cfg", "MANIFEST*",
+    "hatch.toml", "build.py", "scripts/cmw", "src/cmw/__init__.py",
+    "src/cmw/__main__.py", "src/cmw/cli.py", "src/cmw/_runner_assets/*",
+    "scripts/runtime_python.sh", "scripts/orca/*", "scripts/multiwfn/*", "scripts/workflows/*",
+    "tests/installed_smoke.py", "tests/distribution_hygiene.py", "tests/test_distribution_hygiene.py"
+  ],
+  "documentation": ["docs/*.md", "docs/*.rst", "docs/*.txt", "docs/website/*", "README.md", "AGENTS.md", "CAPABILITY_MAP.md", "LICENSE"],
+  "merge_label": "ci:merge",
+  "full_label": "ci:full"
+}
