@@ -10,11 +10,11 @@ This procedure uses these immutable candidates:
 
 | Component | Commit | Evidence boundary |
 |---|---|---|
-| CMW | `39d4d9270ef7137fafdfb47efc403b2cd73a5474` | Includes PR #39 retirement. Requires fresh installed qualification and deployed-revision parity for this exact target; the historical `66a372a` rehearsal does not qualify it. |
-| VASP port runner | `3c438192beb19ff9fc209c3fdcba3f5678a20e6e` | D31 runner, including the issue #19 repair. Its `scripts/launch.py` blob is `a534d39a522ebe6b9be0a6516d79f87b341fcafd`. |
+| CMW | `8d4cfc3f71ee51696f4783c579b256f05d2e16a0` | Includes PR #39 retirement. Fresh frozen-installation retirement rehearsal passed (record below); Mini qualification and deployed-revision parity remain required. |
+| VASP port runner | `4fd6fa7e4df1032a97703ce18fc6c033273d46ed` | D31 runner; only the CMW qualification pin differs from R (`3c43819`). Its `scripts/launch.py` blob is `a534d39a522ebe6b9be0a6516d79f87b341fcafd`. |
 
 The [runner qualification record](../architecture/vasp-runner-ownership-plan.md)
-records the earlier runner qualification; it does not establish qualification of this newer CMW pairing. The
+records the synthetic CI qualification of this exact pairing. The
 [deployed-runtime parity procedure](../architecture/deployed-runtime-parity.md)
 records 17 known CMW revisions and the unresolved inventory evidence. Neither
 document establishes that the operations below have run. Record actual results
@@ -146,9 +146,9 @@ force a terminal result. The v1 earlier-boot exception remains proposal-only.
 
 ## 2. Create a private sandbox and record inputs
 
-The candidate below includes retirement. The recorded earlier rehearsal used
-`66a372a`; that historical result does not qualify the newer candidate. Repeat
-the required sandbox qualification for this exact revision before live cutover.
+The candidate below includes retirement. The recorded earlier full rehearsal used
+`66a372a`; the refresh record below covers the new runtime surface and the frozen
+installation. It does not replace Mini-specific qualification before live cutover.
 
 **Precondition:** choose a new date/name; it must not already exist. The source
 repositories must contain each pinned commit. Archive those exact Git objects;
@@ -160,8 +160,8 @@ Do not read production calculation directories or copy a whole run tree.
 
 ```sh
 set -euo pipefail
-export CMW_COMMIT=39d4d9270ef7137fafdfb47efc403b2cd73a5474
-export RUNNER_COMMIT=3c438192beb19ff9fc209c3fdcba3f5678a20e6e
+export CMW_COMMIT=8d4cfc3f71ee51696f4783c579b256f05d2e16a0
+export RUNNER_COMMIT=4fd6fa7e4df1032a97703ce18fc6c033273d46ed
 export REHEARSAL_ROOT="$HOME/.local/share/cmw-sandbox/cutover-rehearsal-YYYYMMDD"
 export CMW_SOURCE=/absolute/cmw-repository
 export RUNNER_SOURCE=/absolute/runner-repository
@@ -812,3 +812,50 @@ No licensed bytes are included in this document or CI artifacts. Removing the
 staged POTCARs intentionally prevents later full producing-run revalidation;
 the retained checks describe the pre-cleanup rehearsal, not a currently complete
 scientific source closure.
+
+
+## Candidate refresh — 9 November 2026, CMW 8d4cfc3
+
+The selected pair is CMW `8d4cfc3f71ee51696f4783c579b256f05d2e16a0` and
+runner `4fd6fa7e4df1032a97703ce18fc6c033273d46ed` (port PR #6).
+The complete runtime diff from rehearsed `66a372a` contains only
+`src/cmw/jobs/retirement.py` and its CLI wiring in `src/cmw/jobs/cli.py`
+(285 added lines); `scripts/` is unchanged. The runner diff from R changes only
+`config/cmw-test-revision.txt`. Runner PR CI passed 43 tests and 2,226 fault
+cases on each qualified platform.
+
+A new MacBook sandbox used an installed wheel from the exact CMW archive,
+then froze its snapshot **before enrollment**, and qualified it in fresh
+`-I -B` processes. Full readiness, Doctor and three status calls passed.
+Only a Command profile was needed for this retirement-only refresh; no VASP
+binary or POTCAR was read or run. The earlier VASP rehearsal remains historical
+and Mini real-VASP qualification remains pending.
+
+The legacy fixture uses the provenance-checked Store and v1 identity function
+from `deployed/31616be-j4-1`, writing an enrolled schema-4 Unknown record.
+The rehearsal substituted its own PIDs and start dates for 90837/90838 and
+2 November; its OUTCAR footer and complete XML were synthetic completeness
+fixtures, not scientific evidence. The worker exited before the anchor check.
+No controller was running, and the relevant ownership locks were free.
+
+| Check | Demonstrated result |
+|---|---|
+| Live bash anchor, original v1 identity | VERIFIED; `ps`, SID and PGID matched the recorded fixture anchor. |
+| Anchor removal | Identity revalidated immediately before positive-PID SIGKILL; reaped, then ownership GONE / exit 2. No group signal. |
+| Retirement | RETIRED / exit 0; every reported identity GONE and both domain censuses empty; administrative Fail. |
+| Compatibility | Queue identity and schema 4 unchanged; no manual database edits. |
+| Admission | Unknown blocked the existing dispatch gate before retirement; the same gate accepted afterwards, then was paused again. No research job was dispatched. |
+| Repeat | ALREADY_RETIRED / exit 0. |
+| Live recorded member | REFUSED / exit 2; live member untouched. |
+| Reused v1 PID | A deterministic recorded-birth mismatch at a live fixture PID returned UNVERIFIABLE / exit 75; occupant untouched. This simulates reuse without forcing kernel PID recycling. |
+| Cleanup | All three rehearsal processes were reaped and verified GONE; the two processes from an initial driver argument-type error were also verified GONE. |
+
+No runbook procedure discrepancy was found. The initial driver passed a numeric
+job ID to `subprocess` without converting it to text; it was corrected before
+repeating on a fresh fixture queue. Snapshot enrollment initially needed the
+local execution permission that permits `diskutil` and low-priority scheduling;
+no enrollment was completed by that refused attempt. These were harness and
+execution-environment findings, not runtime fixes. No Mini contact or production
+access occurred. Private command outputs and cleanup identities are retained
+outside Git; the disposable refresh snapshot, queues and environment are removed
+after evidence collection.

@@ -81,7 +81,7 @@ updates.
 | D26 | A node-wide permanent journal with node identity and durable per-node sequence numbers (Phase 4). |
 | D29 | On battery, `mbp_m3max` accepts submissions into Hold but refuses release and dispatch. While jobs run, the controller holds a `caffeinate` assertion against idle sleep. This cannot prevent lid-close sleep on battery. |
 | D30 | The runner's Python interpreter is pinned by the runner profile; CMW sets `CMW_MANAGED_PYTHON` explicitly at launch. No reliance on inherited environment or PATH. P1 adds profile data; P3a implements the launch path. |
-| D31 | The canonical VASP port runner is commit `3c438192beb19ff9fc209c3fdcba3f5678a20e6e`, replacing historical base `51d8209` with the issue #19 ownership repair. Production use still requires node qualification. Runners are deployed only from clean commits as immutable snapshots under `~/.local/share`, each with a source-commit record and a SHA-256 manifest of its binaries; profiles pin them. Registered endpoint executables use an `-I -B` wrapper. Make runtime snapshots read-only after deployment and qualification, before enrollment. The future D18 change is based on this canonical runner and deployed as a new snapshot. P1 owns the cutover; P3a owns D18. |
+| D31 | The canonical VASP port runner is commit `4fd6fa7e4df1032a97703ce18fc6c033273d46ed`, retaining the issue #19 ownership repair from R (`3c43819`) unchanged. The synthetic-qualified pairing is CMW `8d4cfc3f71ee51696f4783c579b256f05d2e16a0` with this runner; port PR #6 changes only its CMW CI pin. Production use still requires node qualification. Runners are deployed only from clean commits as immutable snapshots under `~/.local/share`, each with a source-commit record and a SHA-256 manifest of its binaries; profiles pin them. Registered endpoint executables use an `-I -B` wrapper. Freeze runtime snapshots after build/interface preflights, before enrollment and runtime qualification. The future D18 change is based on this canonical runner and deployed as a new snapshot. P1 owns the cutover; P3a owns D18. |
 | D32 | Benchmarks and experiments never use a production queue; they use a separate sandbox namespace. Each node has exactly one production configuration. Effective immediately. |
 | D33 | The Mini is consolidated in a single cutover after its current research job finishes; no new Mini submissions until then. P1 owns the cutover. |
 | D34 | Bind Jobs process ownership to host, boot session, PID and raw kernel start token. Suspend control on unverifiable evidence, use same-boot monotonic freshness, and retain job events independently of guard noise. [J4.1 incident](../incidents/2026-11-j4.1-clock-step.md) |
@@ -837,24 +837,25 @@ the [runner launch procedure](../cmw-dual-node.md#runner-interpreter-profile-rec
 and qualify that selected environment. The port's capability guard is independent
 of profile-pin enforcement and remains required before MPI launch.
 
-**D31 runner deployment:** commit `3c438192beb19ff9fc209c3fdcba3f5678a20e6e`
+**D31 runner deployment:** commit `4fd6fa7e4df1032a97703ce18fc6c033273d46ed`
 is the canonical VASP port baseline. It replaces `51d8209` with tri-state
 ownership, retention of the pending operation across unreadable probes,
 denied-send holds and the pre-launch CMW capability guard from port PRs #2 and
-#5. The [runner qualification record](vasp-runner-ownership-plan.md) binds it to
-CMW `f3b052207f3a827636d870d2784db2c32b9f331e`; synthetic CI passed 43 tests and
+#5. Port PR #6 refreshes only the CMW qualification pin; runner code remains
+byte-identical to R (`3c43819`). The [runner qualification record](vasp-runner-ownership-plan.md) binds it to
+CMW `8d4cfc3f71ee51696f4783c579b256f05d2e16a0`; synthetic CI passed 43 tests and
 2,226 cases per platform on Ubuntu/Python 3.11 and macOS/Python 3.14. Mini
 real-VASP smoke and deployed-runtime parity against the actual deployment
 candidate remain pending. P1 deploys it from a clean
 commit as an immutable snapshot under `~/.local/share`, retaining its
 source-commit record and a SHA-256 manifest of its binaries. Profiles pin the
 snapshot and its evidence. Registered endpoint executables must launch the pinned
-Python through an `-I -B` wrapper. After deployment and qualification, make the
-runtime snapshot read-only, including its source directories and all compiled
-caches, before recording its enrolled security evidence. This also protects it
+Python through an `-I -B` wrapper. After build/interface preflights, make the runtime snapshot read-only, including
+its source directories and all compiled caches, before enrollment and runtime
+qualification. Record its security evidence only after this final freeze. This also protects it
 from unrelated Python processes, explicit compilation and installation tools.
 Synthetic qualification is not deployment or complete node qualification.
-P3a bases the D18 verify-only/NPAR-rejection change on `3c43819`, qualifies it,
+P3a bases the D18 verify-only/NPAR-rejection change on `4fd6fa7`, qualifies it,
 and deploys it as a new immutable snapshot with new
 profile pins; it must not modify the prior snapshot in place. Benchmark and
 experimental qualification runs obey D32's separate sandbox namespace and
@@ -1037,9 +1038,9 @@ pipe cannot be restored by upgrading CMW.
 | Immediate operating rules | D32: one production configuration per node; sandbox namespaces for benchmarks/experiments, never production queues. D33: no new Mini submissions until its current research job finishes. | Effective now; no deployment implied |
 | P0 | This delta specification; ported pure logic; local status-cost measurement | — |
 | 3.11 PR | Minimum Python 3.11; CI adjustment | P0 merged |
-| P1 | **Code implemented, not deployed:** cheap status, independent telemetry, 3-failure rule, 5 s polling/15 s freshness and D30 profile data. **Cutover pending:** default registry and aliases; canonical production configuration of both machines in both directions; thermal configuration; D30 interpreter profile pins; D31 `3c43819` immutable snapshot cutover, Mini real-VASP smoke and deployed-runtime parity against the actual candidate; D33 single Mini consolidation | 3.11 PR merged; synthetic runner pair qualified, node qualification before production use; Mini cutover only after its current research job finishes |
+| P1 | **Code implemented, not deployed:** cheap status, independent telemetry, 3-failure rule, 5 s polling/15 s freshness and D30 profile data. **Cutover pending:** default registry and aliases; canonical production configuration of both machines in both directions; thermal configuration; D30 interpreter profile pins; D31 `4fd6fa7` immutable snapshot cutover, Mini real-VASP smoke and deployed-runtime parity against the actual candidate; D33 single Mini consolidation | 3.11 PR merged; synthetic runner pair qualified, node qualification before production use; Mini cutover only after its current research job finishes |
 | P2 | Single entry point: `cmw jobs watch` opens `NodesApp` including the local queue; node tabs; consolidate `JobsTable` and `NodesTable` | P1 |
-| P3a | Cancellation modes and 10 s hard grace; D18 verify-only INCAR and NPAR rejection in the VASP port (separate repository PR based on `3c43819`); D30 explicit `CMW_MANAGED_PYTHON` launch path; D31 newly qualified immutable successor snapshot and profile pins | P2; qualify the changed runner before production deployment |
+| P3a | Cancellation modes and 10 s hard grace; D18 verify-only INCAR and NPAR rejection in the VASP port (separate repository PR based on `4fd6fa7`); D30 explicit `CMW_MANAGED_PYTHON` launch path; D31 newly qualified immutable successor snapshot and profile pins | P2; qualify the changed runner before production deployment |
 | P3b | Binary transfer endpoint replacing SFTP; restart-artifact submission; forced-command gate; D23 | P3a; gate after the transfer endpoint |
 | P4 | Node-wide permanent journal | P3b |
 | P5 | File UX: fetch-and-open, selection without hand-written JSON | P3b |
@@ -1120,7 +1121,7 @@ normative decisions or wiring Phase 0 contracts into runtime entry points.
    existing variant/restart restrictions. D30/D31 fix the interpreter and runner
    deployment policy. Versioned interpreter profile data is implemented in P1;
    launch integration, qualified snapshots and deployment remain pending. The separate port PR owns D18 enforcement based on
-   current canonical runner `3c43819`; the issue #19 ownership repair does not
+   current canonical runner `4fd6fa7`; the issue #19 ownership repair does not
    implement D18 or authorize deployment.
 9. **D20/D22 capability data and rollout:** current host evidence supplies platform
     UUID, not the new physical-core/tier/policy object, and node submission fixes

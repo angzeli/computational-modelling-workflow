@@ -3,14 +3,16 @@
 ## Current canonical runner and qualification
 
 D31 now selects VASP port commit
-`3c438192beb19ff9fc209c3fdcba3f5678a20e6e` (R), including the issue #19 repair
+`4fd6fa7e4df1032a97703ce18fc6c033273d46ed` (qualification refresh of R, `3c43819`), including the issue #19 repair
 from port [PR #2](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port/pull/2)
 and [PR #5](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port/pull/5).
 Its `scripts/launch.py` Git blob is
 `a534d39a522ebe6b9be0a6516d79f87b341fcafd`, identical to the qualified launch
 file at `c4aa0aa`. The qualified pair is CMW
-`f3b052207f3a827636d870d2784db2c32b9f331e` plus R.
-[Port CI run 42534521961](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port/actions/runs/42534521961)
+`8d4cfc3f71ee51696f4783c579b256f05d2e16a0` plus `4fd6fa7e4df1032a97703ce18fc6c033273d46ed`.
+[Port PR #6](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port/pull/6)
+changes only `config/cmw-test-revision.txt`; runner code is unchanged from R.
+[Port CI run 42639296668](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port/actions/runs/42639296668)
 passed all 43 tests and 2,226 synthetic cases on each qualified platform:
 Ubuntu/Python 3.11 and macOS/Python 3.14.
 
@@ -24,7 +26,7 @@ This is synthetic pair qualification, not deployment. The Mini's real-VASP
 runner smoke and [deployed-runtime parity](deployed-runtime-parity.md) against
 the actual deployment candidate are deferred to the authorized cutover window
 after the research job finishes. Neither was performed in this wrap-up, and no
-Mini contact occurred. Future D18 work is based on R, not `51d8209`.
+Mini contact occurred. Future D18 work is based on the refreshed canonical snapshot, not `51d8209`.
 
 ## Historical runner and Boolean compatibility
 
