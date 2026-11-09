@@ -81,7 +81,7 @@ updates.
 | D26 | A node-wide permanent journal with node identity and durable per-node sequence numbers (Phase 4). |
 | D29 | On battery, `mbp_m3max` accepts submissions into Hold but refuses release and dispatch. While jobs run, the controller holds a `caffeinate` assertion against idle sleep. This cannot prevent lid-close sleep on battery. |
 | D30 | The runner's Python interpreter is pinned by the runner profile; CMW sets `CMW_MANAGED_PYTHON` explicitly at launch. No reliance on inherited environment or PATH. P1 adds profile data; P3a implements the launch path. |
-| D31 | The canonical VASP port runner is commit `4fd6fa7e4df1032a97703ce18fc6c033273d46ed`, retaining the issue #19 ownership repair from R (`3c43819`) unchanged. The synthetic-qualified pairing is CMW `8d4cfc3f71ee51696f4783c579b256f05d2e16a0` with this runner; port PR #6 changes only its CMW CI pin. Production use still requires node qualification. Runners are deployed only from clean commits as immutable snapshots under `~/.local/share`, each with a source-commit record and a SHA-256 manifest of its binaries; profiles pin them. Registered endpoint executables use an `-I -B` wrapper. Make runtime snapshots read-only after deployment and qualification, before enrollment. The future D18 change is based on this canonical runner and deployed as a new snapshot. P1 owns the cutover; P3a owns D18. |
+| D31 | The canonical VASP port runner is commit `4fd6fa7e4df1032a97703ce18fc6c033273d46ed`, retaining the issue #19 ownership repair from R (`3c43819`) unchanged. The synthetic-qualified pairing is CMW `8d4cfc3f71ee51696f4783c579b256f05d2e16a0` with this runner; port PR #6 changes only its CMW CI pin. Production use still requires node qualification. Runners are deployed only from clean commits as immutable snapshots under `~/.local/share`, each with a source-commit record and a SHA-256 manifest of its binaries; profiles pin them. Registered endpoint executables use an `-I -B` wrapper. Freeze runtime snapshots after build/interface preflights, before enrollment and runtime qualification. The future D18 change is based on this canonical runner and deployed as a new snapshot. P1 owns the cutover; P3a owns D18. |
 | D32 | Benchmarks and experiments never use a production queue; they use a separate sandbox namespace. Each node has exactly one production configuration. Effective immediately. |
 | D33 | The Mini is consolidated in a single cutover after its current research job finishes; no new Mini submissions until then. P1 owns the cutover. |
 | D34 | Bind Jobs process ownership to host, boot session, PID and raw kernel start token. Suspend control on unverifiable evidence, use same-boot monotonic freshness, and retain job events independently of guard noise. [J4.1 incident](../incidents/2026-11-j4.1-clock-step.md) |
@@ -850,9 +850,9 @@ candidate remain pending. P1 deploys it from a clean
 commit as an immutable snapshot under `~/.local/share`, retaining its
 source-commit record and a SHA-256 manifest of its binaries. Profiles pin the
 snapshot and its evidence. Registered endpoint executables must launch the pinned
-Python through an `-I -B` wrapper. After deployment and qualification, make the
-runtime snapshot read-only, including its source directories and all compiled
-caches, before recording its enrolled security evidence. This also protects it
+Python through an `-I -B` wrapper. After build/interface preflights, make the runtime snapshot read-only, including
+its source directories and all compiled caches, before enrollment and runtime
+qualification. Record its security evidence only after this final freeze. This also protects it
 from unrelated Python processes, explicit compilation and installation tools.
 Synthetic qualification is not deployment or complete node qualification.
 P3a bases the D18 verify-only/NPAR-rejection change on `4fd6fa7`, qualifies it,
