@@ -139,7 +139,7 @@ future build metadata does not invent a value or silently choose a build.
 | `scf_result` | New persistent diagnostic classifier over existing bounded native source readers; definition below. Not policy acceptance. |
 | `last_step`, `ionic_step`, `energy_ev`, `delta_energy_ev` | Reuse final matched electronic row and evaluation evidence; last_step is electronic index, ionic_step its enclosing ionic label. Energy is electronic-row E in eV and delta is electronic dE in eV, not ionic F/E0/d E. |
 | `total_magnetisation_mu_b` | New bounded scalar whole-cell extraction, in Bohr magnetons; unavailable/vector evidence stays null. |
-| `restart_outputs.WAVECAR`, `.CHGCAR`, `hashes_pending` | New stable terminal output byte digests, null until asynchronously computed. Hashing never blocks drainage or Done. A true pending flag means hashing is outstanding; null with false may mean absent/unavailable, never validated. |
+| `restart_outputs` (role → SHA-256 map), `hashes_pending` | New stable terminal output byte digests using the same engine-neutral roles as restart_inputs (including ORCA_GBW). Omit absent roles; null denotes an evidenced output with an unknown/pending digest until asynchronously computed. Hashing never blocks drainage or Done. A true pending flag means hashing is outstanding; null with false may mean unavailable, never validated. |
 | `evidence[].source`, `.marker`, `.line` | Bounded classification reason/line references, reusing source reader anchors. Source is OUTCAR/stdout/queue; `user-contract` is reserved for the explicitly unverified example expectations. Retain fuller source coverage/identity in existing evidence records rather than copy whole logs. |
 
 The five issue statuses need one conservative extension: **null** for unresolved
@@ -320,6 +320,12 @@ known restart digest. Backfill can retain an independently evidenced historical
 parent while a currently unavailable digest remains null, with that limitation
 reported; the J27.1 contract fixture is not evidence of such a verified match.
 
+Parent inference compares non-null child restart_inputs and parent
+restart_outputs digests under the same engine-specific role (for example ORCA_GBW
+or WAVECAR); a missing/null role is not a match. Both fields share the
+restart_digests schema. Digest equality still requires unique source/attempt
+evidence under the inference rules above.
+
 Input restart files are hashed synchronously at submission, before immutable
 publication; these hashes cannot be filled later into job.json. Output hashing
 is deferred asynchronous work only after the original supervisor establishes
@@ -330,6 +336,13 @@ state through its single writer.
 Restart transport is a **separate multi-host requirement, outside #41**. Current
 upload refusals and limits remain in place; do not smuggle files through support
 roles or add transport work to any phase of this issue.
+Managed restart-runner qualification is tracked separately in
+[#46](https://github.com/angzeli/computational-modelling-workflow/issues/46),
+covering copy-only PBE→HSE and staged-HSE restarts with synchronous source/copy
+hashes, unchanged source bytes and operator-supplied INCAR settings. It must
+integrate with native manifest creation when qualified; the interim legacy route
+is not the permanent solution. This work is not implemented in #42.
+
 The current managed submission fixes `--restart none`; there is no supported
 managed restart-from-WAVECAR path between deployment and completion of Phase 1.
 For an urgent restart during that interval, use only a separately authorized,

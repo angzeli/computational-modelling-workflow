@@ -246,13 +246,7 @@
       "type": "boolean"
     },
     "restart_inputs": {
-      "type": "object",
-      "propertyNames": {
-        "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$"
-      },
-      "additionalProperties": {
-        "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/sha256_or_null"
-      },
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/restart_digests",
       "description": "Engine-neutral role to digest map. Omit absent roles. Native copied inputs require synchronous non-null digests; legacy unknown digests may be null."
     }
   },
@@ -448,20 +442,13 @@
         }
       ]
     },
-    "restart_hashes": {
+    "restart_digests": {
       "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "WAVECAR",
-        "CHGCAR"
-      ],
-      "properties": {
-        "WAVECAR": {
-          "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/sha256_or_null"
-        },
-        "CHGCAR": {
-          "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/sha256_or_null"
-        }
+      "propertyNames": {
+        "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/sha256_or_null"
       }
     }
   },

@@ -89,6 +89,25 @@ class JobManifestSchemaTests(unittest.TestCase):
             value['restart_inputs'] = restart
             self.assertFalse(self.validators['job'].is_valid(value))
 
+    def test_engine_neutral_restart_outputs_and_lineage(self):
+        for engine, role in (('ORCA', 'ORCA_GBW'), ('VASP', 'WAVECAR')):
+            with self.subTest(engine=engine, role=role):
+                child = deepcopy(self.native['job'])
+                child.update(engine=engine, parent='J2', restart_inputs={role: 'a' * 64})
+                parent_state = deepcopy(self.native['state'])
+                parent_state.update(id='J2', restart_outputs={role: 'a' * 64})
+                self.validators['job'].validate(child)
+                self.validators['state'].validate(parent_state)
+                self.assertEqual(child['restart_inputs'][role], parent_state['restart_outputs'][role])
+                self.assertEqual(set(parent_state['restart_outputs']), {role})
+                parent_state.update(restart_outputs={role: None}, hashes_pending=True)
+                self.validators['state'].validate(parent_state)
+                parent_state.update(restart_outputs={}, hashes_pending=False)
+                self.validators['state'].validate(parent_state)
+                for bad in ({role: 'invalid'}, {'../checkpoint': 'a' * 64}):
+                    parent_state['restart_outputs'] = bad
+                    self.assertFalse(self.validators['state'].is_valid(parent_state))
+
     def test_native_ids_are_positive_unpadded(self):
         for identifier in ('J0', 'J00', 'J01'):
             for kind in KINDS:

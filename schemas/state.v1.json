@@ -150,7 +150,8 @@
       ]
     },
     "restart_outputs": {
-      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/restart_hashes"
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/restart_digests",
+      "description": "Engine-neutral role to output digest map, using the same roles as restart_inputs. Omit absent roles; null means a present or historically evidenced output has an unknown/pending digest."
     },
     "hashes_pending": {
       "type": "boolean"
