@@ -975,8 +975,18 @@ The [read-site manifest and fault-sweep contract](ownership-fault-sweep.md)
 separate terminal rows, accepted pending rows and reads outside the worker
 lifecycle fixtures; unittest counts are reported independently from injected rows.
 
-Recovery after worker death is a distinct post-cutover proposal, to be reassessed
-after the slimming audit: [durable completion](durable-completion-proposal.md).
+Local [administrative retirement](../cmw-jobs-retirement.md) is available for an
+`Unknown` attempt only after every recorded identity is GONE and its recorded
+sessions/groups are empty. It records the existing terminal `Fail` disposition
+with execution outcome unknown and an audit snapshot; it never supplies
+scientific completion, signals, new enrollment or automatic dispatch. D01
+identities and schema 4 are preserved. V2 prior-boot identities are GONE; v1
+boot/birth mismatches remain UNVERIFIABLE and refuse, including after reboot.
+The guide contains the separately authorized J4.1 cutover step and a proposal
+for independently attested earlier-boot v1 evidence, which is not implemented.
+
+Recovery of completion evidence after worker death is a distinct post-cutover
+proposal, to be reassessed after the slimming audit: [durable completion](durable-completion-proposal.md).
 It is tracked by [issue #23](https://github.com/angzeli/computational-modelling-workflow/issues/23)
 and linked to #24 because both change the release protocol.
 The proposed schema 5, runtime protocol 4, anchor acknowledgement and controller

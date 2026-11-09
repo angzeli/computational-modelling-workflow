@@ -566,7 +566,7 @@ and the read-only NAME display remains usable.
 | Run | The execution supervisor has persisted ownership and admitted execution |
 | Cancelling | Cancellation requested; termination has not yet been confirmed |
 | Done | Foreground execution and its managed process group completed with exit 0 |
-| Fail | A concrete launch/execution failure, with captured exit evidence |
+| Fail | A concrete launch/execution failure, or an explicitly recorded administrative retirement of an Unknown attempt; retirement does not claim an observed exit |
 | Cancelled | Cancelled before start or managed group termination confirmed |
 | Unknown | Ownership/completion cannot be safely established; progression stops |
 
@@ -991,8 +991,15 @@ logs. Establish whether the original execution is still running and which
 supervisor, if any, can supply closure. Use `cmw jobs reconcile JOB --preview`
 to inspect the supported recovery evidence. If ownership or completion remains
 unresolved, retain the original state and give the evidence to the queue
-operator for a separately authorized recovery. This release has no supported
-command to adopt a workerless claim or clear its `Unknown` state.
+operator for a separately authorized recovery. When every recorded identity is
+confirmed GONE and the recorded sessions/groups are empty, use the local
+`cmw jobs --state QUEUE_STATE retire JOB --reason TEXT [--json]` operation.
+It is the supported administrative recovery after worker loss, reboot-related
+loss of recorded authority, or an ownership contradiction; it records `Fail`
+with execution outcome unknown, never success. It does not adopt a workerless
+claim, signal processes, alter job files, or enable dispatch. A live or
+UNVERIFIABLE identity refuses. Read the [retirement safety rules, reboot limits
+and J4.1 cutover procedure](cmw-jobs-retirement.md) before using it.
 
 For an Unknown job, `cmw jobs show J1.1` adds an ephemeral
 `ownership_observation`: the worker identity is matched, gone, unavailable,
