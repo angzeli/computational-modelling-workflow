@@ -1,4 +1,6 @@
 """Actual mouse and keyboard routing of Files cells across attempt identities."""
+
+from tests.ui_readiness import await_laid_out
 import threading
 import unittest
 
@@ -41,6 +43,8 @@ class PortalFilesTests(unittest.IsolatedAsyncioTestCase):
     async def files_ready(self, app, pilot):
         await self.until(pilot, lambda: isinstance(app.screen, NodeFiles) and app.screen.is_mounted
                          and app.screen.query_one(DataTable).row_count == len(app.screen.locations))
+
+        await await_laid_out(app.screen.query_one('#node-files-fetch'), hit_test=True)
 
     def assert_files(self, app, job):
         self.assertIsInstance(app.screen, NodeFiles)
