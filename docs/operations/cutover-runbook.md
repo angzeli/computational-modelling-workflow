@@ -75,23 +75,73 @@ implementation limits stop production cutover:
 * `cancel` refuses `Unknown`. `stop` stops the controller and dispatch; it does
   not drain workers or retire an anchor.
 
-**Mini J4.1 step: pending the retire operation.** A separate PR must provide the
-minimal supported retirement of a confirmed-dead `Unknown` attempt while
-preserving node, queue, storage, job and attempt identities and their evidence.
-Its exact command and acceptance checks belong here only after implementation
-and qualification. Until then, preserve the original queue and storage in place;
-do not replace them with new live IDs, rename/move them, or rewrite their rows.
-The runbook does not adopt an archive-and-reenroll alternative.
+**Mini J4.1 step: supported retirement (PR #39).** Use a qualified candidate
+containing PR #39 on the original queue in place. Preserve all node, queue,
+storage, job and attempt identities; no archive-and-reenroll alternative or
+manual database edit is authorized. See the [retirement contract](../cmw-jobs-retirement.md).
+The following is a procedure for the separately authorized Mini cutover window,
+not evidence that it has been performed.
 
-For J4.1, the reported surviving anchor PID was `90838`. That number is
-historical evidence, not permission to signal that PID. Its lost anonymous
-control pipe cannot be recreated by upgrading CMW. A future, separately
-authorized anchor-retirement step must establish that the calculation is over,
-match the original recorded anchor evidence, verify a complete v2 identity on
-the same host/boot, and revalidate it immediately before any direct signal.
-Capturing the current occupant of PID `90838` alone proves no relationship to
-J4.1. A legacy mismatch or missing original binding stops the operation. No
-unguarded `kill`, adoption, or queue-state rewrite is part of this runbook.
+**Before the window — v1 limits:** J4.1's recorded identities are v1, including
+worker PID `90837` (reported dead on 3 November) and anchor PID `90838`.
+Keep network time on and do not reboot the Mini. Read the complete recorded
+identity list from the original job/attempt evidence, then inspect those PIDs
+read-only, for example:
+
+```sh
+ps -p 90837,90838 -o pid,lstart,command
+```
+
+Repeat for every other recorded PID. An absent PID makes `ps` return nonzero;
+inspect and record that result explicitly rather than treating it as proof of
+all retirement preconditions. Retirement refuses with exit **75** if a reboot
+or clock step has changed the recorded v1 boot timestamp, or if any recorded
+PID has been reused with a different birth time. In particular, check for reuse
+of worker `90837`. Wall-clock dates alone cannot override the tri-state reader.
+Network time being enabled does not repair an existing mismatch.
+
+1. Confirm the original J4.1 calculation has ended and independently review its
+   outputs: the OUTCAR completion/timing footer and a complete, parseable
+   `vasprun.xml` with its closing document element. Preserve this evidence and
+   check the scientific convergence separately; completeness is not convergence.
+   Stop the original controller through its supported command and confirm its
+   ownership lock is free, keeping dispatch paused.
+2. Match the leftover anchor to the **original recorded identity**. Require the
+   candidate's `ownership ... --role group --json` result to be VERIFIED (exit
+   0), and inspect `ps -p 90838 -o pid,lstart,command,sess,pgid`: the expected
+   process is a bash command started on **2 November 2026**, with SID and PGID
+   **90838**. Verify the complete start identity, not merely this date or PID.
+   Establish that no computation or receipt writer remains. Revalidate the
+   original identity immediately before the separately authorized signal, then
+   send **SIGKILL to PID 90838 only** (positive PID, never its process group).
+   The lost anonymous control pipe cannot be recreated by upgrading CMW.
+   If the identity is GONE, do not signal its current PID; if UNVERIFIABLE or
+   inconsistent, stop. After signalling, wait for reaping and require ownership
+   exit 2 / GONE. A zombie or unreadable probe is insufficient.
+3. Retire promptly after ending the anchor, using the verified original state
+   root and immutable J4.1 job identifier:
+
+   ```sh
+   "$CANDIDATE_CMW" jobs --state "$ORIGINAL_STATE" retire "$ORIGINAL_JOB" \
+     --reason "Cutover: outputs reviewed independently; recorded execution processes confirmed gone" --json
+   ```
+
+   Require exit 0 and RETIRED (or an already-retired matching attempt). Inspect
+   every reported identity observation for GONE and the empty recorded
+   session/group evidence. The disposition is administrative Fail with execution
+   outcome unknown; it does not finalize or certify the scientific result.
+4. Re-read `show` and `status --json` on that original queue. Confirm the
+   retirement evidence is retained, J4.1 is terminal, and it no longer supplies
+   an Unknown/ownership admission block. Check other attempts and admission
+   reasons as well. Dispatch deliberately remains paused: retirement does not
+   enable it. Only after all other cutover gates pass may the operator explicitly
+   start the qualified controller or resume dispatch and confirm admission is
+   unblocked. Do not dispatch a research job merely to test this condition.
+
+**Stop:** if retirement refuses for any reason, stop the Mini cutover and report
+its JSON evidence and exit code. Preserve the original queue and outputs; do not
+edit the DB, rewrite identities, kill a reused PID, reboot as a workaround or
+force a terminal result. The v1 earlier-boot exception remains proposal-only.
 
 ## 2. Create a private sandbox and record inputs
 
@@ -718,7 +768,7 @@ registry, runtime, launcher or live-portal change occurred.
 | Step | Result | Evidence and correction |
 |---|---|---|
 | Candidate pairing | Pass | `f3b0522..66a372a` changes tests/docs only. |
-| Mini J4.1 retirement | Pending | Pending the retire operation; D01 and all identities remain unchanged. |
+| Mini J4.1 retirement | Pending | Supported by PR #39; execute and verify §1 during the authorized window. D01 and all identities remain unchanged. |
 | Saved deployed-revision parity | Pass, dated inventory only | All 17 revisions compared against `66a372a`: 16 ancestors; only `31616be` has an unmatched patch. Its receipt trap and denied-send protections are represented by PR #21 (`579f494`, `b33f298`), subsequent ownership-hold recovery and runner R. Installed-byte/live Mini parity remains a cutover-window check. |
 | Snapshot build and order | Fixed, pass | Corrected wrapper to `-m cmw.cli`; exact Git objects select archives. Binary SHA-256 matches R. A post-baseline chmod preserves the content fingerprint but refuses security observation; final freeze precedes enrollment and runtime qualification. |
 | Enrollment/readiness | Pass | Fresh private node, queue and storage. Full identity/runtime/storage/profile readiness true with no errors after execution; no writable snapshot members. |
