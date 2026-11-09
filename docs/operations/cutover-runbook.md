@@ -10,11 +10,11 @@ This procedure uses these immutable candidates:
 
 | Component | Commit | Evidence boundary |
 |---|---|---|
-| CMW | `66a372a82d5931372b324a7d23c4ff7ea72e8e86` | The diff from the qualified `f3b052207f3a827636d870d2784db2c32b9f331e` changes documentation/tests, not `src/`, `scripts/` or package configuration. This preserves that source qualification; it does not qualify a new installation or machine. |
+| CMW | `39d4d9270ef7137fafdfb47efc403b2cd73a5474` | Includes PR #39 retirement. Requires fresh installed qualification and deployed-revision parity for this exact target; the historical `66a372a` rehearsal does not qualify it. |
 | VASP port runner | `3c438192beb19ff9fc209c3fdcba3f5678a20e6e` | D31 runner, including the issue #19 repair. Its `scripts/launch.py` blob is `a534d39a522ebe6b9be0a6516d79f87b341fcafd`. |
 
 The [runner qualification record](../architecture/vasp-runner-ownership-plan.md)
-records synthetic CI for the named pair. The
+records the earlier runner qualification; it does not establish qualification of this newer CMW pairing. The
 [deployed-runtime parity procedure](../architecture/deployed-runtime-parity.md)
 records 17 known CMW revisions and the unresolved inventory evidence. Neither
 document establishes that the operations below have run. Record actual results
@@ -629,7 +629,7 @@ authorizes Mini access now.
 
 1. Repeat the full 17-revision
    [deployed-runtime parity procedure](../architecture/deployed-runtime-parity.md#required-cutover-procedure)
-   against `66a372a82d5931372b324a7d23c4ff7ea72e8e86`, using actual installed
+   against the exact pinned `CMW_COMMIT` from §2, using actual installed
    evidence. Preserve source records and provenance tags. Resolve every
    unmatched protection and unverified runtime before deployment.
 2. Qualify the exact candidate/runner installation on each machine in that
