@@ -388,11 +388,29 @@ mkdir -m 700 "$REHEARSAL_ROOT/runs/control"
   --cpus 1 --memory-gib 0.1 --hold -- /bin/sleep 30
 ```
 
-Set `SMOKE_JOB` to the returned display ID after checking its attempt and paths:
+Set `SMOKE_JOB` to the returned display ID and `SMOKE_ATTEMPT` to its immutable
+attempt ID after checking its paths. Release/resume do not wait for launch:
 
 ```sh
 "$CANDIDATE_CMW" jobs --state "$REHEARSAL_ROOT/state" release "$SMOKE_JOB" --json
 "$CANDIDATE_CMW" jobs --state "$REHEARSAL_ROOT/state" resume --json
+"$CMW_MANAGED_PYTHON" -I -B - "$REHEARSAL_ROOT/state" "$SMOKE_JOB" "$SMOKE_ATTEMPT" <<'PY'
+import sys, time
+from cmw.jobs.lifecycle import read_job_with_identity_retry
+from cmw.jobs.store import Store
+store = Store(sys.argv[1])
+job_id = int(sys.argv[2].removeprefix('J').split('.')[0])
+deadline = time.monotonic() + 15
+while time.monotonic() < deadline:
+    job, _, _ = read_job_with_identity_retry(store, job_id)
+    assert job['attempt_id'] == sys.argv[3], 'Attempt changed; stop'
+    if job['status'] == 'Run' and job.get('group'):
+        break
+    assert job['status'] in {'Queue', 'Starting', 'Run'}, job['status']
+    time.sleep(0.1)
+else:
+    raise TimeoutError('Attempt did not reach Run with a recorded group; no signal sent')
+PY
 "$CANDIDATE_CMW" jobs --state "$REHEARSAL_ROOT/state" ownership "$SMOKE_JOB" --role group --json
 "$CANDIDATE_CMW" jobs --state "$REHEARSAL_ROOT/state" cancel "$SMOKE_JOB" --yes --json
 "$CANDIDATE_CMW" jobs --state "$REHEARSAL_ROOT/state" show "$SMOKE_JOB" --json
