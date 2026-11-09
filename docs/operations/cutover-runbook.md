@@ -146,6 +146,10 @@ force a terminal result. The v1 earlier-boot exception remains proposal-only.
 
 ## 2. Create a private sandbox and record inputs
 
+The candidate below includes retirement. The recorded earlier rehearsal used
+`66a372a`; that historical result does not qualify the newer candidate. Repeat
+the required sandbox qualification for this exact revision before live cutover.
+
 **Precondition:** choose a new date/name; it must not already exist. The source
 repositories must contain each pinned commit. Archive those exact Git objects;
 the source checkout's HEAD or unrelated working changes do not select the
@@ -156,7 +160,7 @@ Do not read production calculation directories or copy a whole run tree.
 
 ```sh
 set -euo pipefail
-export CMW_COMMIT=66a372a82d5931372b324a7d23c4ff7ea72e8e86
+export CMW_COMMIT=39d4d9270ef7137fafdfb47efc403b2cd73a5474
 export RUNNER_COMMIT=3c438192beb19ff9fc209c3fdcba3f5678a20e6e
 export REHEARSAL_ROOT="$HOME/.local/share/cmw-sandbox/cutover-rehearsal-YYYYMMDD"
 export CMW_SOURCE=/absolute/cmw-repository
