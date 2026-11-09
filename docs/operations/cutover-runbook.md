@@ -108,7 +108,8 @@ Network time being enabled does not repair an existing mismatch.
    ownership lock is free, keeping dispatch paused.
 2. Match the leftover anchor to the **original recorded identity**. Require the
    candidate's `ownership ... --role group --json` result to be VERIFIED (exit
-   0), and inspect `ps -p 90838 -o pid,lstart,command,sess,pgid`: the expected
+   0), and inspect `ps -p 90838 -o pid,lstart,command,pgid` and obtain the SID
+   read-only with the qualified Python interpreter’s `os.getsid(90838)`: the expected
    process is a bash command started on **2 November 2026**, with SID and PGID
    **90838**. Verify the complete start identity, not merely this date or PID.
    Establish that no computation or receipt writer remains. Revalidate the
