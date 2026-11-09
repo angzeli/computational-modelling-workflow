@@ -7,6 +7,10 @@ The [multi-host nodes delta specification](multi-host-nodes.md) records the
 existing `cmw nodes` baseline, approved decisions and phased changes. Its new
 pure helpers are Phase 0 contracts and are not wired into runtime commands.
 
+The [cutover runbook](../operations/cutover-runbook.md) consolidates deployment
+ordering, qualification, rollback and the MacBook sandbox rehearsal. Production
+cutover remains gated on the supported retirement operation and Mini checks.
+
 The [durable completion proposal](durable-completion-proposal.md) records deferred
 worker-death recovery. It is post-cutover work to reassess after the slimming
 audit, not an implemented queue schema or runtime protocol.
