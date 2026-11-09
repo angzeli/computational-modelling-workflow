@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "sequence": 1,
-  "request_uuid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sequence": 4,
+  "request_uuid": "dddddddddddddddddddddddddddddddd",
   "event": "registration",
   "timestamp": "2026-11-09T12:00:00Z",
   "project": "example-project",

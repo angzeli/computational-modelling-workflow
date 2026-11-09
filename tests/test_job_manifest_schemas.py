@@ -153,6 +153,10 @@ class JobManifestSchemaTests(unittest.TestCase):
             self.assertFalse(self.validators['integrity'].is_valid(invalid))
         self.assertEqual(kinds, {'manifest', 'registration', 'queue_binding',
                                 'queue_locator', 'legacy_alias'})
+        events = sorted((read_json(path) for path in paths), key=lambda event: event['sequence'])
+        self.assertEqual([event['sequence'] for event in events], list(range(1, 6)))
+        self.assertEqual(len({event['request_uuid'] for event in events}), 5)
+        self.assertLess(events[1]['payload']['binding_sequence'], events[1]['sequence'])
         value = read_json(FIXTURES / 'journal' / 'registration.integrity.json')
         value['payload']['binding'] = None
         self.assertFalse(self.validators['integrity'].is_valid(value))
