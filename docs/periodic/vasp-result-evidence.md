@@ -548,7 +548,7 @@ queue becomes unreadable. The owner keeps the input hashes in a
 commands return 75 for temporary refusal. The endpoint reports
 `SUCCESSOR_UNVERIFIABLE` before publication or during registration, and
 `SUCCESSOR_PENDING_VERIFICATION` for a published successor awaiting its
-parent check. See [successor preparation and registration](../../cmw-jobs-successors.md).
+parent check. See [successor preparation and registration](../cmw-jobs-successors.md).
 
 If the first `successor.json` creation fails after VASP inputs were published,
 retrying at the original destination can recover it from the approved-plan
@@ -558,7 +558,7 @@ every input's bytes. A mismatch or unreadable entry refuses without changing
 the files. A temporarily unavailable parent permits only
 `PENDING_VERIFICATION`, with the same exit 75 and endpoint code above; it never
 authorizes registration. Publications lacking that recovery evidence require
-the documented [fresh-destination recovery](../../cmw-jobs-successors.md#disk-full-creating-the-first-successor-record).
+the documented [fresh-destination recovery](../cmw-jobs-successors.md#disk-full-creating-the-first-successor-record).
 
 Publication writes only:
 

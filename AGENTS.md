@@ -178,95 +178,40 @@ Do not include long command transcripts, repeated status summaries, or forensic 
 - Process health is advisory operational evidence and never scientific success
   or an automatic termination policy.
 
-## 12. Continuous integration
+## CI and test verification
 
-The minimum Python version is 3.11. Keep the qualification matrix limited to
-Python 3.11 on Ubuntu 24.04 x64 and Python 3.14 on macOS 15 Apple Silicon;
-Python 3.12–3.13 are not qualified. Do not add Python 3.10 compatibility shims.
+The full suite is CI's job; local checks verify the change. The qualified
+platforms remain Ubuntu 24.04 x64/Python 3.11 and macOS 15 Apple Silicon/Python
+3.14. Python 3.12–3.13 are unqualified. Follow [the CI tier contract](docs/development/ci-tiers.md):
 
-Keep CI lean and proportional to project risk. Prioritize meaningful
-correctness checks, fast feedback, and minimal maintenance. Do not introduce
-additional workflows, extensive matrices, or expensive validation without a
-demonstrated need.
+- **Fast, every PR push:** lint/publication and docs checks, Ubuntu's full suite
+  with the representative fault slice and required SFTP tests, and the core wheel.
+  Superseded PR-push runs are cancelled. Prose/site-only changes run checks only.
+- **Merge:** marking ready for review (including opening non-draft), a `ci:merge`
+  label, and later ready-PR pushes run macOS's full suite. Ready/label events do
+  not repeat Ubuntu. Critical paths add both full matrices; packaging paths add
+  all install modes. CI changes or `ci:full` select the complete set.
+- **Full, nightly and every main push:** both full suites, both exact-union fault
+  matrices, all install modes, required SFTP tests, lint, publication and docs checks.
+  **Deployment candidates must have passed a full nightly (or main) run** at
+  the exact candidate commit; PR checks alone are not deployment qualification.
 
-## Test verification policy
+Path lists live only in `scripts/ci/paths.json`. Read the tier plan and report
+unittest counts separately from injected rows; skipped, cancelled, unfinished
+or incomplete checks are not passing evidence. The watchdog, private-identifier
+screen and [failure-triage policy](docs/development/ci-tiers.md#triage-before-calling-a-failure-real)
+remain mandatory and unchanged. Do not bypass branch protection.
 
-The full test suite is CI's job. Local runs verify the change; they do not
-repeat CI.
+Use each worktree's own environment. Locally select changed-module tests,
+direct importers where few, and changed non-import entry points; do not expand
+through transitive imports. While calculations run, keep checks sequential at
+nice 19, about ten minutes or less per interpreter; never run a full local suite.
+Run a full local suite only when requested or justified by cross-cutting runtime
+changes and no calculation is running. Never run two full suites concurrently.
+Audit registered fixture identities after local runs; clean up survivors only
+after re-verifying ownership. Stale mocks of replaced ownership APIs may hang
+under indefinite UNVERIFIABLE holds: inspect the caller before changing assertions.
 
-### Where tests run
-- **Qualified combinations** are those listed in README "Tested support"
-  (currently Python 3.11 on Ubuntu 24.04 x64, run on every PR, and Python 3.14
-  on macOS 15 Apple Silicon, run on main after merge and available as a manual
-  workflow run on a branch). Only these are merge gates.
-- **Locally**, run the tests related to the change on the local qualified
-  interpreter. Run the full local suite only when asked, or when the change
-  touches cross-cutting runtime code (Jobs runtime, process groups, the nodes
-  endpoint, transport or identity), and never while a calculation on that
-  machine is running; use the manual macOS CI run instead.
-- **macOS-specific code** (process groups, mounts and volumes, `ioreg`,
-  `sysctl`, TCC-protected paths, ACLs and extended attributes, sleep
-  assertions) is exercised by PR CI only on Ubuntu. Before merging, trigger the
-  manual macOS CI run on the branch, and always wait for and report the
-  post-merge main CI result.
-- Unqualified combinations (for example macOS with the minimum Python) are not
-  merge gates. Report failures there as findings; do not block on them or fix
-  them silently.
-
-### How to run
-- Choose targeted local tests from the changed modules' tests, adding their
-  direct importers where these are few, and tests of changed shell, subprocess
-  or other non-import entry points. Broad coverage comes from CI; do not expand
-  local selection through transitive reverse imports.
-- A running calculation on the machine takes priority. While one is running,
-  keep local tests sequential at low priority and total local test time to
-  about 10 minutes or less per interpreter; leave broader coverage to CI.
-- Never run two full test suites at the same time on one machine. Run
-  lifecycle, profile and other timing-sensitive tests one test process at a
-  time.
-- Each worktree uses its own environment installed from that worktree, so
-  comparisons between commits test the intended code.
-- Ordinary CI test methods have a 300 s native watchdog; a positive finite
-  `CMW_TEST_TIMEOUT_SECONDS` overrides the budget for test fixtures. The fault
-  sweep lifecycle methods retain their stricter row watchdog; manifest checks
-  use the ordinary guard. The method budget covers setUp, the body, tearDown
-  and instance cleanups, not module/class fixtures. A native timeout prints the active
-  test and stack, aborts only that isolated module process, and may bypass its
-  cleanup; partial counts are incomplete, never a passing suite. The external
-  reporter lists registered fixture PIDs and their recorded v2 identities from
-  a private ledger; it does not claim to discover unregistered descendants or
-  signal other processes. Audit those identities after local runs and clean up
-  survivors only after re-verifying ownership. Intentional indefinite `UNVERIFIABLE` holds mean a
-  stale mock of an old ownership API can now hang instead of producing a quick
-  failure: audit the mock against the actual caller before changing assertions.
-- The ordinary suite runs the representative ownership-fault slice. The full,
-  unchanged matrix runs in a dedicated job in the same workflow, on each
-  qualified platform. Its row-union check requires exactly every unfiltered
-  baseline read occurrence times all fault types, with no missing or duplicate
-  rows. Report unittest methods and injected rows separately.
-- Pushing and opening a PR may proceed while local targeted diagnosis runs;
-  merging waits for both.
-- Before reporting a PR as ready, read every review comment, including
-  automated reviews. Address or explicitly answer each comment.
-
-### Triage before calling a failure real
-1. **Load:** rerun the failing test alone. On its first occurrence, a failure
-   that passes alone may be recorded as provisionally LOAD. If it recurs,
-   investigate its cause before retaining the LOAD classification.
-   In CI, a test recorded as known-flaky in an open issue (currently the study
-   lifecycle timeout and the test_names.py restoration race) may be rerun once.
-2. **Pre-existing:** if it fails alone, run it on the base commit with the same
-   kind of environment. If it fails there too, it is pre-existing.
-3. **Introduced:** fails only on the branch.
-
-Only introduced failures block a merge, with one exception: a PR that changes
-the CI test matrix must fix, within the same PR, any test that fails on the
-newly gated combination, even if the failure is pre-existing. Record other
-pre-existing failures and recurring load failures as issues, stating whether
-they affect real behaviour or only tests.
-
-### Never
-- Change code or tests just to make CI pass without approval.
-- Bypass checks or branch protection (`--admin` or equivalent).
-- Treat a skipped, cancelled or unfinished check as passing.
-- Report a suite as passing without test counts.
+Pushing may proceed during targeted diagnosis; merging waits for it and the
+applicable CI tiers. Before reporting ready, read and address or explicitly
+answer every review comment, including automated ones. Always report post-merge CI.

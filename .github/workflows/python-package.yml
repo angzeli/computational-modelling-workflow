@@ -1,31 +1,51 @@
 name: CI
 
-# PRs get the Linux/Python 3.11 lower-bound suite plus the core wheel install.
-# Main pushes and manual runs add macOS/Python 3.14; a manual run also checks
-# every installed-artifact mode (core, jobs, sdist, editable).
+# All path policy lives in scripts/ci/paths.json; plan.py emits job matrices.
 on:
   pull_request:
-    paths-ignore:
-      - 'docs/website/**'
+    types: [opened, reopened, synchronize, ready_for_review, labeled]
   push:
     branches: [main]
-    paths-ignore:
-      - 'docs/website/**'
-  workflow_dispatch:
+  schedule:
+    - cron: '23 2 * * *'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  # Ready/label events must not cancel an in-flight fast run at the same head.
+  group: ci-${{ github.event.pull_request.number || github.run_id }}-${{ github.event.action == 'labeled' && github.event.label.name || github.event.action == 'ready_for_review' && 'merge' || 'push' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
+  plan:
+    name: Select CI tiers and check docs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      active: ${{ steps.plan.outputs.active }}
+      suites: ${{ steps.plan.outputs.suites }}
+      sweep: ${{ steps.plan.outputs.sweep }}
+      artifacts: ${{ steps.plan.outputs.artifacts }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Select tiers from the complete PR diff
+        id: plan
+        run: python3 scripts/ci/plan.py
+      - name: Documentation checks
+        if: steps.plan.outputs.active == 'true'
+        run: python3 scripts/ci/check_docs.py
+
   checks:
     name: Lint and publication hygiene
+    needs: plan
+    if: needs.plan.outputs.active == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -41,16 +61,15 @@ jobs:
 
   tests:
     name: Tests / ${{ matrix.os }} / Python ${{ matrix.python }}
-    needs: checks
+    needs: [plan, checks]
+    if: needs.plan.outputs.suites != '[]'
     env:
       # Both platforms must exercise local client/server SFTP upload and fetch.
       CMW_REQUIRE_SFTP_INTEGRATION: '1'
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'pull_request'
-          && '[{"os":"ubuntu-24.04","python":"3.11"}]'
-          || '[{"os":"ubuntu-24.04","python":"3.11"},{"os":"macos-15","python":"3.14"}]') }}
+        include: ${{ fromJSON(needs.plan.outputs.suites) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -61,7 +80,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
       - name: Install test dependencies
         run: python -m pip install -e '.[jobs]'
       # Thousands of test subprocesses import cmw; without cached bytecode each
@@ -84,14 +105,13 @@ jobs:
         run: PYTHON_BIN="$(command -v python)" bash scripts/ci/run_tests.sh "$RUNNER_TEMP/cmw-tests"
 
   ownership-sweep:
+    if: needs.plan.outputs.sweep != '[]'
     name: Full ownership matrix / ${{ matrix.os }} / Python ${{ matrix.python }}
-    needs: checks
+    needs: [plan, checks]
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'pull_request'
-          && '[{"os":"ubuntu-24.04","python":"3.11"}]'
-          || '[{"os":"ubuntu-24.04","python":"3.11"},{"os":"macos-15","python":"3.14"}]') }}
+        include: ${{ fromJSON(needs.plan.outputs.sweep) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -102,7 +122,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
       - name: Install test dependencies
         run: python -m pip install -e '.[jobs]'
       - name: Precompile bytecode
@@ -111,14 +133,13 @@ jobs:
         run: PYTHON_BIN="$(command -v python)" bash scripts/ci/run_ownership_sweep.sh "$RUNNER_TEMP/cmw-ownership-matrix"
 
   artifacts:
-    name: Installed artifacts / ${{ matrix.os }} / ${{ github.event_name == 'workflow_dispatch' && 'all modes' || 'core wheel' }}
-    needs: checks
+    if: needs.plan.outputs.artifacts != '[]'
+    name: Installed artifacts / ${{ matrix.os }} / ${{ matrix.modes }}
+    needs: [plan, checks]
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'pull_request'
-          && '[{"os":"ubuntu-24.04","python":"3.11"}]'
-          || '[{"os":"ubuntu-24.04","python":"3.11"},{"os":"macos-15","python":"3.14"}]') }}
+        include: ${{ fromJSON(needs.plan.outputs.artifacts) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -129,12 +150,14 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
       - name: Install build frontend
         run: python -m pip install build
       # The wheel is built from the sdist; core mode installs it without the
       # optional console and runs the installed smoke outside the checkout.
       - name: Build, inspect and test fresh installations outside checkout
         env:
-          CMW_ARTIFACT_MODES: ${{ github.event_name == 'workflow_dispatch' && 'all' || 'core' }}
+          CMW_ARTIFACT_MODES: ${{ matrix.modes }}
         run: PYTHON_BIN="$(command -v python)" bash scripts/ci/check_artifacts.sh "$RUNNER_TEMP/cmw-artifact-check"

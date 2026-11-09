@@ -224,10 +224,13 @@ python3 -m unittest discover -s tests
 Python 3.11 or newer is required. The qualification matrix is Python 3.11 on
 Ubuntu 24.04 x64 and Python 3.14 on macOS 15 Apple Silicon; Python 3.12–3.13
 are not qualified. The [Python/package CI](.github/workflows/python-package.yml)
-checks Ubuntu on pull requests and adds macOS for pushes to `main` and manual
-runs; website-only changes skip this workflow. Each run builds the
-wheel/sdist, installs the core wheel fresh and runs synthetic POSIX lifecycle tests;
-manual runs also check fresh Jobs, sdist and editable installations. Local acceptance also covers Python 3.14.3 on macOS 26.3
+uses [fast, merge and full tiers](docs/development/ci-tiers.md). PR pushes run
+Ubuntu's full suite and core wheel; ready PRs also run macOS. Critical paths add
+the full fault matrix on both platforms, and packaging changes add every install
+mode. Prose/site-only PRs run lint, publication hygiene and documentation checks.
+Nightly runs and every main push execute the complete set on both platforms.
+Deployment candidates require a successful full nightly or main run at their
+exact commit. Local acceptance also covers Python 3.14.3 on macOS 26.3
 Apple Silicon. Other OS/architecture combinations have not been qualified in
 this campaign. macOS Apple Silicon remains the primary
 Jobs acceptance platform; Linux evidence covers these synthetic checks. Windows
