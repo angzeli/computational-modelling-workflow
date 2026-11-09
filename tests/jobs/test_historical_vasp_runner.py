@@ -1,11 +1,12 @@
-"""Managed-foreground contract for the VASP port at 51d8209 (cutover issue #19)."""
-from contextlib import ExitStack
+"""Qualified VASP runner contract, with the issue #19 historical negative control."""
+from contextlib import ExitStack, redirect_stderr
 from datetime import datetime
 from hashlib import sha1
 from importlib.util import module_from_spec, spec_from_file_location
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import TestCase, expectedFailure
+from unittest import TestCase, TestResult
 from unittest.mock import Mock, patch
 import os
 import signal
@@ -15,13 +16,20 @@ import psutil
 from cmw.jobs import ownership
 
 
-def pinned_runner():
-    path = Path(__file__).resolve().parents[1] / 'fixtures/vasp_port_51d8209/launch.py'
+RUNNER_COMMIT = '3c438192beb19ff9fc209c3fdcba3f5678a20e6e'
+RUNNER_BLOBS = {
+    # git rev-parse COMMIT:scripts/launch.py in the VASP port repository.
+    RUNNER_COMMIT: 'a534d39a522ebe6b9be0a6516d79f87b341fcafd',
+    '51d8209': '5a51f958d7c357bec073ccc16725c2bd4df92a5e',
+}
+
+
+def pinned_runner(revision=RUNNER_COMMIT):
+    path = Path(__file__).resolve().parents[1] / f'fixtures/vasp_port_{revision[:7]}/launch.py'
     source = path.read_bytes()
-    # git rev-parse 51d8209:scripts/launch.py (also f7afe0a:scripts/launch.py)
     blob = sha1(b'blob ' + str(len(source)).encode() + b'\0' + source).hexdigest()
-    if blob != '5a51f958d7c357bec073ccc16725c2bd4df92a5e':
-        raise AssertionError('Historical launch.py does not match the pinned port commit')
+    if blob != RUNNER_BLOBS[revision]:
+        raise AssertionError(f'launch.py does not match pinned port commit {revision}')
     spec = spec_from_file_location('historical_port_launch', path)
     runner = module_from_spec(spec)
     pins = {'PORT_OPENMPI_VERSION': 'fixture', 'PORT_PRRTE_VERSION': 'fixture'}
@@ -30,7 +38,16 @@ def pinned_runner():
     return runner
 
 
-def supervise(runner, *, stepped=False, denied_reads=0, reused=False, timeout=False):
+class HoldObserved(BaseException):
+    """Stop the synthetic observation, without claiming the runner completed."""
+
+
+class FixtureViolation(BaseException):
+    """A harness error must never count as an expected historical assertion failure."""
+
+
+def supervise(runner, *, stepped=False, denied_reads=0, reused=False, timeout=False,
+              observed=None):
     """Observe our own kernel PID. Model only the port's topology, child, clocks and send."""
     leader = os.getpid()
     payload, child = 1900000001, 1900000002
@@ -38,12 +55,15 @@ def supervise(runner, *, stepped=False, denied_reads=0, reused=False, timeout=Fa
     probes = 0
     now = 0.
     signals = []
+    sleeps = []
+    waits = []
+    diagnostics = StringIO()
     real_read = ownership.process_identity.process_evidence
 
     def evidence(pid):
         nonlocal probes
         if pid != leader:
-            raise AssertionError('unexpected PID')
+            raise FixtureViolation('unexpected PID')
         if polls:
             probes += 1
             if probes <= denied_reads:
@@ -59,21 +79,26 @@ def supervise(runner, *, stepped=False, denied_reads=0, reused=False, timeout=Fa
 
     def members(pid, *, session):
         if pid != leader or not session:
-            raise AssertionError('unexpected domain')
+            raise FixtureViolation('unexpected domain')
         # A surviving subgroup drains on the next ordinary poll. Real timeout
         # cleanup needs a signal and must exclude both the leader and payload.
         return [leader, payload] + ([child] if polls == 1 and not signals else [])
 
-    def send(owner, signum, *, include_leader):
+    def send(owner, signum, *, include_leader, read_domain=None, anchor_ready_for_release=None):
         if owner['pid'] != leader or include_leader:
-            raise AssertionError('signal outside the permitted fixture subgroup')
+            raise FixtureViolation('signal outside the permitted fixture subgroup')
         signals.append(signum)
 
     def sleep(seconds):
         nonlocal now
+        sleeps.append(seconds)
         now += seconds
-        if now > 20:
-            raise AssertionError('supervisor did not finish within synthetic time budget')
+        if now > 70:
+            raise HoldObserved()
+
+    def wait(timeout):
+        waits.append(timeout)
+        return 0
 
     class Wall(datetime):
         @classmethod
@@ -82,12 +107,14 @@ def supervise(runner, *, stepped=False, denied_reads=0, reused=False, timeout=Fa
 
     clock = SimpleNamespace(monotonic=lambda: now, sleep=sleep)
     mocked_os = SimpleNamespace(getpgrp=lambda: leader, getpid=lambda: payload,
-                                getsid=lambda _: leader, getpgid=lambda _: child,
+                                getsid=lambda _: leader,
+                                getpgid=lambda pid: leader if pid in (0, leader, payload) else child,
                                 environ={'CMW_JOBS_OWN_SESSION': '1'}, setpgrp=lambda: None)
     signal_api = SimpleNamespace(SIGINT=signal.SIGINT, SIGTERM=signal.SIGTERM, SIGKILL=signal.SIGKILL,
                                  Signals=signal.Signals, signal=Mock())
-    process = SimpleNamespace(pid=child, returncode=0, poll=poll, wait=lambda timeout: 0)
+    process = SimpleNamespace(pid=child, returncode=0, poll=poll, wait=wait)
     with ExitStack() as stack:
+        stack.enter_context(redirect_stderr(diagnostics))
         def replace(obj, name, value):
             stack.enter_context(patch.object(obj, name, value))
         replace(ownership.process_identity, 'process_evidence', evidence)
@@ -106,6 +133,12 @@ def supervise(runner, *, stepped=False, denied_reads=0, reused=False, timeout=Fa
             return result['reason'], result['status'], signals
         except RuntimeError as exc:
             return str(exc), None, signals
+        except HoldObserved:
+            return diagnostics.getvalue(), None, signals
+        finally:
+            if observed is not None:
+                observed.update(polls=polls, probes=probes, sleeps=sleeps, waits=waits,
+                                elapsed=now, diagnostics=diagnostics.getvalue())
 
 
 class HistoricalVaspRunnerTests(TestCase):
@@ -132,22 +165,55 @@ class HistoricalVaspRunnerTests(TestCase):
                 self.assertNotEqual(status, 0)
                 self.assertEqual(sends, [])
 
-    # Issue #19. Keep the desired outcomes executable until the successor port is qualified.
-    @expectedFailure
     def test_unavailable_exit_reports_a_distinct_outcome_from_gone(self):
-        denied = supervise(self.runner, denied_reads=float('inf'))
+        observed = {}
+        denied = supervise(self.runner, denied_reads=float('inf'), observed=observed)
         lost = supervise(self.runner, reused=True)
         self.assertNotEqual(denied[0], lost[0])
+        self.assertIn('UNVERIFIABLE', denied[0])
+        self.assertIn('GONE', lost[0])
+        self.assertEqual(denied[1:], (None, []))
+        self.assertEqual(lost[1:], (None, []))
+        self.assertGreater(observed['elapsed'], 70)
+        self.assertGreater(observed['polls'], 1)
+        self.assertGreater(observed['probes'], 1)
+        self.assertEqual(observed['waits'], [])
+        self.assertTrue(all(0 < delay <= 5 for delay in observed['sleeps']))
+        self.assertIn('operator attention required', denied[0])
 
-    @expectedFailure
     def test_unavailable_cleanup_identifies_unverifiable_ownership(self):
-        reason, _, _ = supervise(self.runner, timeout=True, denied_reads=float('inf'))
+        observed = {}
+        reason, status, sends = supervise(self.runner, timeout=True, denied_reads=float('inf'),
+                                          observed=observed)
         self.assertIn('UNVERIFIABLE', reason.upper())
+        self.assertEqual((status, sends), (None, []))
+        self.assertGreater(observed['elapsed'], 70)
+        self.assertGreater(observed['polls'], 1)
+        self.assertEqual(observed['waits'], [])
+        self.assertIn('operator attention required', reason)
 
-    @expectedFailure
     def test_recovered_whole_check_resumes_ordinary_drainage(self):
         self.assertEqual(supervise(self.runner, denied_reads=2), ('completed', 0, []))
 
-    @expectedFailure
     def test_recovered_whole_check_resumes_ordinary_drainage_across_step(self):
         self.assertEqual(supervise(self.runner, stepped=True, denied_reads=2), ('completed', 0, []))
+
+
+class HistoricalRunnerNegativeControlTests(TestCase):
+    def test_old_pinned_runner_fails_the_four_issue19_assertions(self):
+        runner = pinned_runner('51d8209')
+        for name in (
+            'test_unavailable_exit_reports_a_distinct_outcome_from_gone',
+            'test_unavailable_cleanup_identifies_unverifiable_ownership',
+            'test_recovered_whole_check_resumes_ordinary_drainage',
+            'test_recovered_whole_check_resumes_ordinary_drainage_across_step',
+        ):
+            with self.subTest(name=name):
+                case = HistoricalVaspRunnerTests(name)
+                case.runner = runner
+                result = TestResult()
+                case.run(result)
+                self.assertEqual(result.testsRun, 1)
+                self.assertEqual(result.errors, [])
+                self.assertEqual(len(result.failures), 1, 'Historical runner unexpectedly satisfies #19')
+                self.assertEqual(result.expectedFailures, [])

@@ -1,7 +1,35 @@
 # VASP managed foreground ownership qualification
 
+## Current canonical runner and qualification
+
+D31 now selects VASP port commit
+`3c438192beb19ff9fc209c3fdcba3f5678a20e6e` (R), including the issue #19 repair
+from port [PR #2](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port/pull/2)
+and [PR #5](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port/pull/5).
+Its `scripts/launch.py` Git blob is
+`a534d39a522ebe6b9be0a6516d79f87b341fcafd`, identical to the qualified launch
+file at `c4aa0aa`. The qualified pair is CMW
+`f3b052207f3a827636d870d2784db2c32b9f331e` plus R.
+[Port CI run 42534521961](https://github.com/angzeli/vasp-6.6.1-macos-arm64-port/actions/runs/42534521961)
+passed all 43 tests and 2,226 synthetic cases on each qualified platform:
+Ubuntu/Python 3.11 and macOS/Python 3.14.
+
+The repair distinguishes VERIFIED, GONE and UNVERIFIABLE, retains the pending
+operation while a probe is unreadable, holds denied sends without inventing a
+termination intent, and guards the CMW ownership capability before MPI starts.
+The original drainage operation resumes after recovery; ordinary MPI exit does
+not become signalling cleanup merely because an observation failed.
+
+This is synthetic pair qualification, not deployment. The Mini's real-VASP
+runner smoke and [deployed-runtime parity](deployed-runtime-parity.md) against
+the actual deployment candidate are deferred to the authorized cutover window
+after the research job finishes. Neither was performed in this wrap-up, and no
+Mini contact occurred. Future D18 work is based on R, not `51d8209`.
+
+## Historical runner and Boolean compatibility
+
 The VASP port owns MPI supervision in `scripts/launch.py:supervise`. The file
-is identical at `f7afe0a` and the D31 base `51d8209` (Git blob `5a51f95`).
+was identical at `f7afe0a` and the historical D31 base `51d8209` (Git blob `5a51f95`).
 At lines 70–77 it imports CMW's identity, membership and signalling helpers,
 pins the session leader and checks the initial topology before spawning MPI.
 Lines 102–115 check that pin when enumerating surviving members. Lines 117–135
@@ -34,17 +62,25 @@ At a stable clock, CMW must match or improve on both historical revisions. Acros
 
 The matched synthetic comparison used psutil 7.2.2 on Python 3.11 and 3.14. It recorded signal requests without delivering them. The final adapter makes at most two complete observations, with zero backoff and a 100 ms monotonic deadline to start the second observation. In the 15 ms outage control, the earlier 10 ms sleep in b845df8 placed the second cleanup check after recovery and caused an unsolicited TERM. Removing the sleep restored the historical outcome (no signal) for that control.
 
-The [pinned compatibility test](../../tests/jobs/test_historical_vasp_runner.py)
-exercises this runner without MPI or signal delivery. Four expected failures
-track the two persistent-denial outcomes and recovery during ordinary
-drainage at stable and stepped clocks.
+This table records the historical comparison, not the behavior of R. The
+[pinned compatibility test](../../tests/jobs/test_historical_vasp_runner.py)
+retains `51d8209` as a negative control and pins R separately. The four cases
+formerly marked as expected failures now assert the repaired behavior normally:
+the two persistent-denial outcomes and recovery during ordinary drainage at
+stable and stepped clocks. Persistent denial retains supervision without a
+completion or signal; the bounded test horizon is not permission to terminate.
+The CMW fixture suite passed 9 tests on each of Python 3.14 and 3.11: eight
+ordinary positive assertions and one negative-control test confirming all four
+historical failures in `51d8209`, with zero expected failures in the suite.
 
-## Separate port change based on 51d8209
+## Implemented port ownership contract
 
-[Cutover prerequisite #19](https://github.com/angzeli/computational-modelling-workflow/issues/19)
-tracks this change in the port. Resume the original drainage observation
-after recovery. Only an actual termination intent may start signalling
-cleanup. A failed identity lookup cannot supply that intent.
+[Issue #19](https://github.com/angzeli/computational-modelling-workflow/issues/19)
+tracked the separate port repair, implemented in R. The original change was
+based on `51d8209`; that source is retained above as historical evidence.
+The implemented contract resumes the original drainage observation after
+recovery. Only an actual termination intent may start signalling cleanup.
+A failed identity lookup cannot supply that intent.
 
 1. Require the qualified CMW v2 identity and tri-state API at managed launch.
    Capture the leader once. Verify the session, protected group membership and
@@ -66,8 +102,9 @@ cleanup. A failed identity lookup cannot supply that intent.
    cross-interpreter checks, denied reads before TERM and KILL, recovery,
    confirmed PID reuse and protection of the leader group. Verify that no
    signal reaches the replacement identity, and that coordinated mode leaves
-   termination authority with its CMW worker. Qualify in the D32 sandbox with
-   D30's interpreter pin before creating a new D31 snapshot.
+   termination authority with its CMW worker. The CI evidence above covers the
+   synthetic contract. Node qualification still uses the D32 sandbox and the
+   explicitly selected D30 interpreter before a D31 production snapshot.
 
 This plan applies to future launches. Recovery of an existing anonymous control
 pipe requires a separate design.
