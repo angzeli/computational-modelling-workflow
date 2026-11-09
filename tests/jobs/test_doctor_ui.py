@@ -1,6 +1,8 @@
 """Doctor routes over synthetic jobs/nodes; no scientific engines or real hosts."""
 from __future__ import annotations
 
+from tests.ui_readiness import await_selection_settled
+
 import asyncio
 from copy import deepcopy
 import os
@@ -140,6 +142,8 @@ class DoctorUiTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     base = app.screen
                     table = app.query_one('#table', DataTable)
+                    selected = app.selected()
+                    await await_selection_settled(app, selected['id'], selected['attempt_id'])
                     before = table_view(table)
                     machine = str(app.query_one('#machine', Static).render())
                     await pilot.press('enter')

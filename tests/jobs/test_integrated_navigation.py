@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from tests.ui_readiness import await_laid_out, await_selection_settled
 from cmw.jobs.store import Store
 from tests.jobs.test_navigation_ui import SyntheticObserver, SyntheticSampler, table_view
 try:
@@ -65,6 +66,7 @@ class IntegratedNavigationTests(unittest.IsolatedAsyncioTestCase):
                         await pilot.press('/')
                         self.assertIsInstance(app.screen, CatalogueSearch)
                         app.screen.query_one('#catalogue-text', Input).value = 'case'
+                        await await_laid_out(app.screen.query_one('#catalogue-apply'), hit_test=True)
                         await pilot.click('#catalogue-apply')
                         await self.until(pilot, lambda: bool(app.catalogue_pages) and not app.catalogue_busy)
                         table = app.query_one('#table', DataTable)
@@ -72,6 +74,8 @@ class IntegratedNavigationTests(unittest.IsolatedAsyncioTestCase):
                         await pilot.press('home', *(['down']*19))
                         await self.until(pilot, lambda: app.selected_id == 'J20.1')
                         for action in actions:
+                            selected = app.selected()
+                            await await_selection_settled(app, selected['id'], selected['attempt_id'])
                             before = table_view(table)
                             await pilot.press('enter')
                             self.assertIsInstance(app.screen, Inspect)

@@ -1,4 +1,5 @@
 """Full portal interactions preserve node/attempt identity and deliberate viewports."""
+from tests.ui_readiness import await_laid_out
 from copy import deepcopy
 import threading
 import unittest
@@ -206,6 +207,7 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
             files = NodeFiles('MINI', target, 'Synthetic locations', result)
             app.push_screen(files)
             await self.until(pilot, lambda: files.is_mounted, 'synthetic Files mounted')
+            await await_laid_out(files.query_one(DataTable))
             table = files.query_one(DataTable)
             callbacks = []
             with patch.object(app, 'call_after_refresh', side_effect=lambda callback, token: callbacks.append(token)):
@@ -448,17 +450,55 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
             await self.until(pilot, lambda: isinstance(app.screen, NodeFiles) and app.screen.is_mounted, 'remote Files')
             parent = app.screen
             with patch.object(app, 'restore_view', wraps=app.restore_view) as restore:
+                await await_laid_out(parent.query_one('#node-files-fetch'), hit_test=True)
                 await pilot.click('#node-files-fetch')
                 await self.until(pilot, lambda: isinstance(app.screen, FetchDialog) and app.screen.is_mounted, 'nested fetch form')
                 self.assertEqual(app.screen.target, target)
+                await await_laid_out(app.screen.query_one('#fetch-back'), hit_test=True)
                 await pilot.click('#fetch-back')
                 await self.until(pilot, lambda: app.screen is parent and not app.navigation_pending(), 'intermediate Files return')
                 self.assertEqual([call.args[0].screen for call in restore.call_args_list], [parent])
+                await await_laid_out(parent.query_one('#node-files-back'), hit_test=True)
                 await pilot.click('#node-files-back')
                 await self.returned(app, pilot)
             self.assert_same_view(before, app)
             for backend in backends.values():
                 self.assertFalse(any(call[0].startswith('fetch') for call in backend.calls))
+
+    async def test_files_readiness_waits_for_first_layout(self):
+        import asyncio
+        from textual.screen import Screen
+        app, backends = self.app()
+        original = Screen._refresh_layout
+        held = []
+        release = False
+        def layout(screen, *args, **kwargs):
+            if isinstance(screen, NodeFiles) and not release:
+                held.append((screen, args, kwargs))
+                return
+            return original(screen, *args, **kwargs)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.position(app, backends, pilot)
+            with patch.object(Screen, '_refresh_layout', layout):
+                await pilot.press('f')
+                await self.until(pilot, lambda: isinstance(app.screen, NodeFiles)
+                                 and app.screen.is_mounted, 'Files mounted before layout')
+                button = app.screen.query_one('#node-files-fetch')
+                self.assertFalse(button.region)
+                pending = asyncio.create_task(await_laid_out(button, hit_test=True))
+                started = asyncio.Event()
+                asyncio.get_running_loop().call_soon(started.set)
+                await asyncio.wait_for(started.wait(), 1)
+                self.assertFalse(pending.done())
+                release = True
+                for screen, args, kwargs in held:
+                    screen.call_later(layout, screen, *args, **kwargs)
+                app.screen.refresh(layout=True)
+                await pending
+                self.assertTrue(button.region)
+                self.assertIs(app.get_widget_at(*button.region.offset)[0], button)
+                await pilot.click('#node-files-fetch')
+                await self.until(pilot, lambda: isinstance(app.screen, FetchDialog), 'Fetch opened')
 
     async def test_genuine_input_before_deferred_restore_wins(self):
         from tests.campaign.navigation_trace import NavigationTrace

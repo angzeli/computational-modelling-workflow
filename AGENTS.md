@@ -250,7 +250,9 @@ repeat CI.
   automated reviews. Address or explicitly answer each comment.
 
 ### Triage before calling a failure real
-1. **Load:** rerun the failing test alone. If it passes, it is load-induced.
+1. **Load:** rerun the failing test alone. On its first occurrence, a failure
+   that passes alone may be recorded as provisionally LOAD. If it recurs,
+   investigate its cause before retaining the LOAD classification.
    In CI, a test recorded as known-flaky in an open issue (currently the study
    lifecycle timeout and the test_names.py restoration race) may be rerun once.
 2. **Pre-existing:** if it fails alone, run it on the base commit with the same

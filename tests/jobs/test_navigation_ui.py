@@ -12,6 +12,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+from tests.ui_readiness import await_selection_settled
 from cmw.jobs.freshness import clock_stamp
 from cmw.jobs.store import Store
 from cmw.jobs.telemetry import Sampler
@@ -188,6 +189,8 @@ class NavigationUiTests(unittest.IsolatedAsyncioTestCase):
         table = app.query_one('#table', DataTable)
         await pilot.press('home', *(['down'] * (number - 1)))
         await self.wait(pilot, lambda: app.selected_id == f'J{number}.1' and not app.progress_busy)
+        job = app.selected()
+        await await_selection_settled(app, job['id'], job['attempt_id'])
         rows = table.content_size.height - table.header_height
         y = number - 1 - rows // 2 if middle else number - rows
         table.scroll_to(y=max(0, y), animate=False, immediate=True)
@@ -350,6 +353,35 @@ class NavigationUiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press('escape')
             await self.returned(app, pilot, history)
             self.assertEqual(table_view(history_table), history_before)
+            await pilot.press('escape')
+            await self.returned(app, pilot, base)
+            self.assertEqual(table_view(table), before)
+
+    async def test_selection_barrier_waits_for_current_attempt_after_stale_response(self):
+        app = self.app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.ready(app, pilot)
+            for timer in app.refresh_timers:
+                timer.stop()
+            self.service.gate.arm()
+            app.collect_progress()
+            await self.wait(pilot, self.service.gate.entered.is_set)
+            await pilot.press('home', *(['down'] * 24))
+            job = app.selected()
+            self.assertEqual(job['display_id'], 'J25.1')
+            self.assertIsNone(app.progress_snapshot)
+            self.service.gate.release.set()
+            await self.wait(pilot, lambda: not app.progress_busy)
+            self.assertIsNone(app.progress_snapshot)
+            await await_selection_settled(app, job['id'], job['attempt_id'])
+            self.assertEqual(app.progress_snapshot.context.job_id, job['id'])
+            self.assertEqual(app.progress_snapshot.context.attempt_id, job['attempt_id'])
+            table = app.query_one('#table', DataTable)
+            before = table_view(table)
+            base = app.screen
+            await pilot.press('g')
+            await self.wait(pilot, lambda: isinstance(app.screen, ProgressHistory)
+                            and app.screen.page is not None and not app.progress_busy)
             await pilot.press('escape')
             await self.returned(app, pilot, base)
             self.assertEqual(table_view(table), before)
@@ -545,6 +577,8 @@ class NavigationUiTests(unittest.IsolatedAsyncioTestCase):
                 await self.wait(pilot, lambda: app.screen is base and bool(callbacks))
                 await pilot.press('up')
                 await self.wait(pilot, lambda: app.selected_id == 'J24.1')
+                job = app.selected()
+                await await_selection_settled(app, job['id'], job['attempt_id'])
                 newer = table_view(table)
             for token in callbacks:
                 restore(token)
