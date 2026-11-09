@@ -486,6 +486,9 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
                 button = app.screen.query_one('#node-files-fetch')
                 self.assertFalse(button.region)
                 pending = asyncio.create_task(await_laid_out(button, hit_test=True))
+                started = asyncio.Event()
+                asyncio.get_running_loop().call_soon(started.set)
+                await asyncio.wait_for(started.wait(), 1)
                 self.assertFalse(pending.done())
                 release = True
                 for screen, args, kwargs in held:
