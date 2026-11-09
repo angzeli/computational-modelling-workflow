@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "id": "J27.1",
+  "project": "fixture-project",
+  "provenance": "native",
+  "created_at": "2026-11-09T12:00:00Z",
+  "authoring_node": "fixture-node-a",
+  "target_node": "fixture-node-b",
+  "id_owner_node": "fixture-node-a",
+  "engine": "VASP",
+  "inputs": {
+    "INCAR": "a96a8953c7108022e10efbc38faa95f778fa07083100240bc8e4dbde96d50367",
+    "POSCAR": "25b000385da50eea6930565470db2c076625161b2ab76f5afa9a3a73ff871e86",
+    "KPOINTS": "521162d7d2d055c3d5b01b1417f27b4895e373f67abcdc1acdac187aacaec1f6"
+  },
+  "potcar": [
+    {
+      "element": "Si",
+      "label": "Si",
+      "family": "PAW_PBE",
+      "dataset_date": null,
+      "sha256": null,
+      "block_index": 0
+    }
+  ],
+  "preparation_record": null,
+  "executable": {
+    "path": "/fixture-root/bin/vasp_std",
+    "sha256": null,
+    "version": null,
+    "build_id": null,
+    "variant": "std"
+  },
+  "runtime_fingerprint": null,
+  "launch": {
+    "argv": [
+      "/fixture-root/run-vasp.sh",
+      "--input",
+      "inputs",
+      "--output",
+      "run"
+    ],
+    "mpi_ranks": 4,
+    "environment": {
+      "OMP_NUM_THREADS": "1"
+    }
+  },
+  "parent": null,
+  "parent_inferred": false,
+  "restart_inputs": {
+    "WAVECAR": null,
+    "CHGCAR": null
+  }
+}

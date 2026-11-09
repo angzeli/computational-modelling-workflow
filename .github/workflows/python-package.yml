@@ -63,7 +63,7 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install test dependencies
-        run: python -m pip install -e '.[jobs]'
+        run: python -m pip install -e '.[jobs,schema-tests]'
       # Thousands of test subprocesses import cmw; without cached bytecode each
       # recompiles it (~0.18 s). Compile once; PYTHONDONTWRITEBYTECODE still stops
       # writes during tests. Bytecode stays outside enrolled source fingerprints;

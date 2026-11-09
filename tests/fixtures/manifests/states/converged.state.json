@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "J28",
+  "project": "fixture-project",
+  "provenance": "native",
+  "revision": 2,
+  "writer_node": "fixture-node-b",
+  "status": "done",
+  "native_status": "Done",
+  "started_at": "2026-11-09T12:10:00Z",
+  "ended_at": "2026-11-09T12:11:00Z",
+  "exit_code": 0,
+  "cancel_mode": null,
+  "scf_result": "converged",
+  "last_step": null,
+  "ionic_step": null,
+  "energy_ev": null,
+  "delta_energy_ev": null,
+  "total_magnetisation_mu_b": null,
+  "restart_outputs": {
+    "WAVECAR": null,
+    "CHGCAR": null
+  },
+  "hashes_pending": false,
+  "evidence": [],
+  "binding": {
+    "node_id": "fixture-node-b",
+    "queue_id": "fixture-queue",
+    "job_id": 1,
+    "attempt_id": "fixture-attempt"
+  }
+}

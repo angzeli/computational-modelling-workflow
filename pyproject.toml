@@ -24,6 +24,7 @@ dependencies = ["ase>=3.23", "gemmi>=0.7.5,<0.8", "numpy>=1.23", "PyYAML>=6.0", 
 
 [project.optional-dependencies]
 jobs = ["textual>=1.0,<7"]
+schema-tests = ["jsonschema[format]>=4.18,<5"]
 
 [project.urls]
 Repository = "https://github.com/angzeli/computational-modelling-workflow"

@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "event": "legacy_alias",
+  "project": "example-project",
+  "label": "J10.7",
+  "target": "node-a/project-queue:J16.1"
+}

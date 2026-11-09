@@ -1,0 +1,62 @@
+{
+  "description": "Synthetic Phase 2 classifier excerpt, not a complete finalization input. Join each line list with newlines and append a final newline. The supplied queue context independently establishes operational status; Phase 0 validates only the expected state schema.",
+  "invocation_bound": true,
+  "OUTCAR_lines": [
+    "vasp.6.6.1",
+    "Startparameter for this run:",
+    "NELM = 2; EDIFF = 1E-6",
+    "Iteration 1( 1)",
+    "EDDAV: cpu time 0.01: real time 0.01",
+    "free energy TOTEN = -1.0000000E+01 eV",
+    "Iteration 1( 2)",
+    "EDDAV: cpu time 0.01: real time 0.01",
+    "free energy TOTEN = -1.1000000E+01 eV",
+    "EDIFF was not reached"
+  ],
+  "stdout_lines": [
+    "DAV: 1 -1.0000000E+01 -1.0E+01 -1.0E+00 16 1.0E-03",
+    "DAV: 2 -1.1000000E+01 -1.0E+00 -1.0E-01 16 1.0E-03"
+  ],
+  "expected": {
+    "schema_version": 1,
+    "id": "J28",
+    "project": "fixture-project",
+    "provenance": "native",
+    "revision": 2,
+    "writer_node": "fixture-node-b",
+    "status": "done",
+    "native_status": "Done",
+    "started_at": null,
+    "ended_at": null,
+    "exit_code": null,
+    "cancel_mode": null,
+    "scf_result": "nelm_reached",
+    "last_step": 2,
+    "ionic_step": 1,
+    "energy_ev": -11.0,
+    "delta_energy_ev": -1.0,
+    "total_magnetisation_mu_b": null,
+    "restart_outputs": {
+      "WAVECAR": null,
+      "CHGCAR": null
+    },
+    "hashes_pending": false,
+    "evidence": [],
+    "binding": {
+      "node_id": "fixture-node-b",
+      "queue_id": "fixture-queue",
+      "job_id": 1,
+      "attempt_id": "fixture-attempt"
+    }
+  },
+  "queue_context": {
+    "native_status": "Done",
+    "binding": {
+      "node_id": "fixture-node-b",
+      "queue_id": "fixture-queue",
+      "job_id": 1,
+      "attempt_id": "fixture-attempt"
+    }
+  },
+  "context_note": "The two electronic rows match OUTCAR iteration labels and energies. Unrelated ionic geometry/finalization blocks are deliberately omitted; these excerpts specify the native SCF classifier, not scientific acceptance."
+}

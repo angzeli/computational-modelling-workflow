@@ -30,3 +30,6 @@ dist/
 POTCAR
 POTCAR.*
 .cmw-potcar-*
+
+# Private queue inventory; never publish local paths.
+/.local/

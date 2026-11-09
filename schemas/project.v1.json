@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/project.v1.json",
+  "title": "CMW project identity and ID-owner configuration v1 (Phase 0 proposal)",
+  "description": "Proposed .cmw-project.json identity record. owner_node_id is the enrolled persistent node UUID, never an SSH/display alias. legacy_nodes binds historical node tokens; legacy_queues binds queue tokens to existing enrolled or unenrolled source-state evidence. Mapping stability, object identity and uniqueness require semantic checks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project_key",
+    "owner_node_id",
+    "legacy_nodes",
+    "legacy_queues"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "project_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "maxLength": 128
+    },
+    "owner_node_id": {
+      "$ref": "#/$defs/node_uuid"
+    },
+    "legacy_nodes": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        "maxLength": 128
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/node_uuid"
+      },
+      "description": "Stable historical node token to persistent node UUID. Empty is allowed for projects without legacy references. Tokens must never be rebound; duplicate values and ambiguous historical queue IDs are rejected by future semantic validation."
+    },
+    "legacy_queues": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        "maxLength": 128
+      },
+      "additionalProperties": {
+        "type": "object",
+        "propertyNames": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "maxLength": 128
+        },
+        "additionalProperties": {
+          "$ref": "#/$defs/legacy_queue"
+        }
+      },
+      "description": "Materialized initial node/queue token bindings from the project integrity journal. Empty is allowed when no legacy queues are mapped. Record each initial source binding once; later path moves do not change references. Semantic validation must require mapped nodes, unique source queues, immutable bindings and unambiguous short references; schemas establish syntax only."
+    }
+  },
+  "$defs": {
+    "node_uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "legacy_queue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "queue_id",
+        "state_root",
+        "root_identity",
+        "database_identity"
+      ],
+      "properties": {
+        "queue_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/node_uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Existing enrolled queue UUID when recorded; null for an unenrolled source queue. Never mint a UUID to fill a historical unknown."
+        },
+        "state_root": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Initial absolute owner-local state directory locator recorded once in the project integrity journal. It is source evidence, not queue identity; later moves do not change job references."
+        },
+        "root_identity": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "description": "Original filesystem [device, inode] evidence retained in the initial project integrity-journal binding for this node and source object."
+        },
+        "database_identity": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "description": "Original filesystem [device, inode] evidence retained in the initial project integrity-journal binding for this node and source object."
+        }
+      }
+    }
+  }
+}

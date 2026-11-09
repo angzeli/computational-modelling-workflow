@@ -1,0 +1,432 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/state.v1.json",
+  "title": "CMW state manifest v1 (Phase 0 proposal)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "project",
+    "provenance",
+    "revision",
+    "writer_node",
+    "status",
+    "native_status",
+    "started_at",
+    "ended_at",
+    "exit_code",
+    "cancel_mode",
+    "scf_result",
+    "last_step",
+    "ionic_step",
+    "energy_ev",
+    "delta_energy_ev",
+    "total_magnetisation_mu_b",
+    "restart_outputs",
+    "hashes_pending",
+    "evidence",
+    "binding"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^(?:J\\d+|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?:J\\d+\\.\\d+)$",
+      "maxLength": 256,
+      "description": "Native IDs are project-unique J<n>. Legacy dotted IDs require backfilled provenance and qualification spelled node[/queue]:J<n>.<m>. The queue token is required when the short node-qualified form is ambiguous; schemas check syntax, not resolution. Existing queue IDs and directories remain unchanged."
+    },
+    "project": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "maxLength": 128
+    },
+    "provenance": {
+      "enum": [
+        "native",
+        "backfilled"
+      ]
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "writer_node": {
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+    },
+    "status": {
+      "enum": [
+        "queued",
+        "running",
+        "done",
+        "failed",
+        "cancelled",
+        null
+      ]
+    },
+    "native_status": {
+      "enum": [
+        "Queue",
+        "Hold",
+        "Starting",
+        "Run",
+        "Cancelling",
+        "Done",
+        "Fail",
+        "Cancelled",
+        "Unknown",
+        null
+      ]
+    },
+    "started_at": {
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/utc_or_null"
+    },
+    "ended_at": {
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/utc_or_null"
+    },
+    "exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "cancel_mode": {
+      "enum": [
+        "hard",
+        "soft",
+        "graceful",
+        null
+      ]
+    },
+    "scf_result": {
+      "enum": [
+        "converged",
+        "labort",
+        "nelm_reached",
+        "crashed",
+        "unknown"
+      ]
+    },
+    "last_step": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ionic_step": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "energy_ev": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "delta_energy_ev": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "total_magnetisation_mu_b": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "restart_outputs": {
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/restart_hashes"
+    },
+    "hashes_pending": {
+      "type": "boolean"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "marker",
+          "line"
+        ],
+        "properties": {
+          "source": {
+            "enum": [
+              "OUTCAR",
+              "stdout",
+              "queue",
+              "user-contract"
+            ]
+          },
+          "marker": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "binding": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "node_id",
+            "queue_id",
+            "job_id",
+            "attempt_id"
+          ],
+          "properties": {
+            "node_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "queue_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "job_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "attempt_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "provenance": {
+            "const": "native"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "pattern": "^J\\d+$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "native_status": {
+            "const": "Queue"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "queued"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "native_status": {
+            "const": "Hold"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "queued"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "native_status": {
+            "const": "Starting"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "queued"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "native_status": {
+            "const": "Run"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "running"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "native_status": {
+            "const": "Cancelling"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "running"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "native_status": {
+            "const": "Done"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "done"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "native_status": {
+            "const": "Fail"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "failed"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "native_status": {
+            "const": "Cancelled"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "cancelled"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "native_status": {
+            "const": "Unknown"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": null
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "native_status": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "provenance": {
+            "const": "backfilled"
+          },
+          "status": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provenance": {
+            "const": "native"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "writer_node": {
+            "not": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "description": "Executing-node projection of operational status plus separately parsed scientific diagnostics. Null status preserves unresolved native Unknown; it never means done. Numeric energies are eV, magnetisation is scalar total cell mu_B."
+}

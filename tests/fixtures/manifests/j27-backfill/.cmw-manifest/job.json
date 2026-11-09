@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "node-a/project-queue:J27.1",
+  "project": "example-project",
+  "provenance": "backfilled",
+  "created_at": null,
+  "authoring_node": null,
+  "target_node": null,
+  "id_owner_node": null,
+  "engine": "VASP",
+  "inputs": {
+    "INCAR": null,
+    "POSCAR": null,
+    "KPOINTS": null
+  },
+  "potcar": null,
+  "preparation_record": null,
+  "executable": null,
+  "runtime_fingerprint": null,
+  "launch": {
+    "argv": null,
+    "mpi_ranks": null,
+    "environment": null
+  },
+  "parent": "node-a/project-queue:J16.1",
+  "parent_inferred": true,
+  "restart_inputs": {
+    "WAVECAR": null,
+    "CHGCAR": null
+  }
+}
