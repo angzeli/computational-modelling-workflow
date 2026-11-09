@@ -81,6 +81,9 @@ def _attempt_metadata(store, attempt):
                 _refuse(str(directory), 'Attempt metadata directory is redirected or not a directory')
             entries = list(os.scandir(directory))
         except FileNotFoundError:
+            if len(prefix) == 2:
+                _refuse('/'.join(prefix), 'Recorded attempt directory is missing; '
+                        'its ownership metadata cannot be established')
             continue
         for entry in entries:
             if not entry.name.endswith('.json'):
@@ -220,6 +223,11 @@ def retire(store, job_id, *, reason):
                               ('attempts', attempt, 'suspension', 'runner.lock')]:
                     _lock_existing(locks, store, parts, lock_evidence)
                 metadata = _attempt_metadata(store, attempt)
+                if (job.get('suspension') or {}).get('capability') is not None:
+                    for name in ('context.json', 'registration.json'):
+                        key = f'attempts/{attempt}/suspension/{name}'
+                        if key not in metadata:
+                            _refuse(key, 'Recorded coordinated capability has lost its ownership metadata')
                 evidence = _gone_evidence(job, control, metadata)
                 if _attempt_metadata(store, attempt) != metadata:
                     _refuse('attempt', 'Ownership metadata changed during observation')

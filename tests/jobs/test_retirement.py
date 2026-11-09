@@ -286,6 +286,14 @@ class RetirementTests(unittest.TestCase):
         with patch('cmw.jobs.retirement._attempt_metadata', side_effect=changed):
             self.refuse('UNVERIFIABLE', 'metadata changed')
 
+    def test_missing_attempt_directory_is_not_empty_ownership_evidence(self):
+        (self.store.root / 'attempts' / self.job['attempt_id']).rmdir()
+        self.refuse('UNVERIFIABLE', 'Recorded attempt directory is missing')
+
+    def test_recorded_capability_requires_its_original_metadata(self):
+        self.update(suspension={'capability': {'runner': self.gone}})
+        self.refuse('UNVERIFIABLE', 'lost its ownership metadata')
+
     def test_symlink_attempt_metadata_is_not_followed(self):
         directory = self.store.root / 'attempts' / self.job['attempt_id']
         external = self.root / 'not-evidence.json'
