@@ -40,7 +40,7 @@ No calculation was launched and no job directory was inspected to make them.
 
 All job manifest documents require schema version 1 and a provenance marker.
 Native IDs use `J<n>`. Backfilled IDs may retain a flat ID or use a node-qualified
-legacy ID such as `node-a:J27.1`; bare `J27.1` is invalid even for backfill.
+legacy ID such as `node-a/project-queue:J27.1`; bare `J27.1` is invalid even for backfill.
 This qualifies the manifest identity without changing an existing queue ID or
 directory. The same `J4.1` suffix on two nodes remains two distinct identities.
 If that suffix also collides across queues on one node, the full identity is
@@ -82,3 +82,9 @@ The registration receipt remains the authority for that association. Annotation
 text fields use `null` for no change and an empty string for deliberate clearing.
 Parser-contract `queue_context` supplies operational status independently of the
 OUTCAR/stdout evidence used for scientific classification.
+
+Review additions: `native/orca-parent.job.json` exercises engine-neutral restart
+digests. `journal/` supplies every integrity envelope kind, including alias
+events. Project queue bindings carry synthetic volume UUIDs; matching uses
+volume UUID plus inode, not device number. Electronic-row fixtures cover DMP,
+CG, SDA, CGA, DIA, RMM and DAV→DMP transitions. No classifier is implemented.

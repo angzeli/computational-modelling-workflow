@@ -86,7 +86,7 @@ or any existing file. Never overwrite a collision, move a run, rename an ID,
 change old input bytes, or rewrite recorded paths. Adapter provenance remains
 at its current location; do not replace execution-layout records. Discovery
 uses the reviewed mapping, not recursive guessing through calculation trees.
-Running or unresolved legacy jobs, including `node-a:J27.1` and
+Running or unresolved legacy jobs, including `node-a/project-queue:J27.1` and
 `node-b:J4.1`, receive no sidecars until independently established terminal.
 
 Files are the portable source of truth for the new manifest fields; queues and
@@ -115,15 +115,17 @@ for every proposed field, including nested fields.
 | `preparation_record` | Optional existing record locator, not a copied parameter tree or parent identity. A locator alone is not an integrity assertion; verify the record's own existing contract before reuse. |
 | `executable.path`, `.sha256`, `.version`, `.build_id`, `.variant` | Target-local locator and selected verified executable/build evidence from existing profile/binary records where available; general VASP handshake advertisement is future D22 work. Never substitute the runner shell or Python executable for VASP. Unknown build fields remain null. |
 | `runtime_fingerprint` | Existing CMW runtime fingerprint, distinct from executable SHA/build. |
-| `launch.argv`, `.mpi_ranks`, `.environment` | Reuse resolved target command and requested ranks from Store/submission. Copy only declared `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`; never capture ambient secrets. Unknown environment is null, known empty is `{}`. |
+| `launch.argv`, `.mpi_ranks`, `.environment` | Reuse resolved target command and requested ranks from Store/submission. Copy only explicitly selected keys with prefixes `OMP_`, `OPENBLAS_`, `MKL_`, `VECLIB_`, `GFORTRAN_`, `OMPI_MCA_`; never capture arbitrary ambient environment or secrets even under an allowed prefix. Unknown environment is null, known empty is `{}`. |
 | `parent`, `parent_inferred` | New restart-source reference: flat ID, node-qualified legacy ID, or either with a cross-project prefix, never a path. Bare dotted references are rejected. Explicit restart selection sets false; uniquely evidenced inference sets true. A null parent requires false. Existing geometry/artifact relations remain separate. |
-| `restart_inputs.WAVECAR`, `.CHGCAR` | New byte identities of files actually copied in. Null for absent/unknown. Hashes prove byte lineage, not checkpoint validity, convergence or scientific compatibility. |
+| `restart_inputs` (role → SHA-256 map) | New engine-neutral byte identities of files actually copied in: VASP roles `WAVECAR`/`CHGCAR`, ORCA role `ORCA_GBW`, and adapter-defined Multiwfn roles. Omit absent roles; backfill may use null for unknown digests. Native copies always have synchronous non-null digests; a native parent requires a non-empty map. Hashes prove byte lineage, not checkpoint validity, convergence or scientific compatibility. |
 
 Prefer the existing POTCAR dataset identities above to the issue's raw element
 title/TITEL proposal: this follows D21, avoids a second potential identity model,
 and carries no licensed payload. Do not duplicate the full preparation spec,
-node configuration, package dependency list or artifact manifest. A native VASP
-job requires known input digests, creation time, nodes and launch argv; absent
+node configuration, package dependency list or artifact manifest. Native node fields use enrolled lowercase 32-hex UUIDs, never aliases: authoring_node,
+target_node, id_owner_node, writer_node, author_node and binding.node_id. Legacy
+unknowns remain as previously defined. A native VASP job requires a non-empty
+potcar array and known input digests, creation time, nodes and launch argv; absent
 future build metadata does not invent a value or silently choose a build.
 
 | `state.json` field | Existing source / new meaning |
@@ -160,10 +162,10 @@ unblock dispatch. A native `Unknown` must never become `done` via log parsing.
 | --- | --- |
 | `schema_version`, `id`, `project`, `provenance`, `revision` | Shared identity plus append-only event count/revision, new generic representation. |
 | `events[].sequence`, `.timestamp`, `.author_node` | New contiguous 1-based event order and attribution; known native events require UTC time and author identity. Wall clocks do not order events. |
-| `events[].purpose`, `.system`, `.outcome`, `.note` | Human-authored changes only. Reuse catalogue system/note UI/service concepts; outcome is `reported`, `superseded`, `checkpoint-only`, `discarded`, or null (no change). New append-only history; never infer judgement from Done or a directory name. |
+| `events[].label`, `.purpose`, `.system`, `.outcome`, `.note` | Human-authored changes only. Reuse catalogue system/note UI/service concepts; outcome is `reported`, `superseded`, `checkpoint-only`, `discarded`, or null (no change). New append-only history; never infer judgement from Done or a directory name. |
 
 Each non-null event field updates that field's displayed value; null is “no
-change”, not clearing. Empty strings can explicitly clear purpose/system/note;
+change”, not clearing. Empty strings can explicitly clear label/purpose/system/note;
 outcome clearing is deferred. No-op events are rejected by the future command.
 The current view folds events in sequence; history is never overwritten.
 Do not automatically import the existing replaceable note as an historical
@@ -190,7 +192,11 @@ shape; enrollment identity and unique UUID values are semantic checks.
 
 Each `legacy_queues` record reuses the existing enrollment fields `queue_id`
 (nullable for unenrolled queues), `state_root`, `root_identity` and
-`database_identity` (the initial device/inode pairs). Queue tokens are permanent
+`database_identity` (the initial device/inode pairs), plus a new normalized
+`volume_uuid` from the containing filesystem. Compare volume UUID + inode for
+both root and database identity: device numbers are diagnostic evidence only
+and can change when an external APFS volume remounts. Unknown volume UUID blocks
+binding/backfill until resolved; never fabricate it. Queue tokens are permanent
 identity labels, not mutable queue aliases. Record each initial binding **once**
 as a `queue_binding` event in the project integrity journal; configuration is
 the materialized mapping, not a replacement authority. Never invent an enrollment
@@ -228,7 +234,7 @@ are explicitly synthetic. Ownership transfer is deferred.
    block bootstrap; remaining directories alone cannot enforce never-reuse.
 3. The author sends a durable request UUID plus normalized intent digest through
    the existing authenticated SSH JSON endpoint. A **new typed allocation
-   operation** must be added in Phase 1; there is no current generic callback.
+   operation** must be added in Phase 1b; there is no current generic callback.
    No remote SQLite, remote filesystem lock, ad hoc shell counter, or new daemon.
 4. On the owner, one `BEGIN IMMEDIATE` transaction serializes the counter,
    permanent reservation and request outcome. Commit durably before replying.
@@ -250,7 +256,7 @@ Manifest identities and parent references must retain origin:
 
 | Reference | Syntax / example |
 | --- | --- |
-| Native own ID / same-project parent | `J28`, pattern `^J\d+$` |
+| Native own ID / same-project parent | `J28`, pattern `^J[1-9]\d*$` |
 | Unambiguous backfilled legacy own ID / same-project parent | `<node>:J<n>.<attempt>`; short form allowed only after complete in-scope resolution finds one queue |
 | Queue-qualified legacy own ID / same-project parent | `<node>/<queue>:J<n>.<attempt>`, e.g. `node-a/project-queue:J27.1`; required when the short form is ambiguous |
 | Cross-project native parent | `<project>:J28` |
@@ -281,7 +287,7 @@ project/qualified-ID as identity, never purpose or catalogue system.
 
 For new jobs, the job directory basename equals the allocated job ID, always.
 Human-readable names live only in annotations event `label` fields (nullable,
-latest event is the current value); never use them in paths or as references.
+fold only non-null changes; an empty string clears); never use them in paths or as references.
 This reuses the intent of existing queue names without importing their path
 semantics. Legacy directories remain unchanged.
 
@@ -320,16 +326,29 @@ is deferred asynchronous work only after the original supervisor establishes
 closure and files are stable. It never blocks process drainage, Done, terminal
 publication or resource release. Digests remain null until computed, and failed
 or interrupted work leaves null/pending evidence. Completion of the hash updates
-state through its single writer. No hashing of J27.1 while WAVECAR is written.
+state through its single writer.
 Restart transport is a **separate multi-host requirement, outside #41**. Current
 upload refusals and limits remain in place; do not smuggle files through support
 roles or add transport work to any phase of this issue.
-The current managed submission also fixes `--restart none`: metadata support
-does not make even target-local restart execution supported. Phase 1 must
-qualify a copy-only route using an existing compatible runner, without changing
-scientific inputs or launch semantics. If that cannot be done, refuse that
-submission and return the runtime integration question for separate review.
-`--restart-from` never implicitly chooses INCAR restart settings.
+The current managed submission fixes `--restart none`; there is no supported
+managed restart-from-WAVECAR path between deployment and completion of Phase 1.
+For an urgent restart during that interval, use only a separately authorized,
+reviewed **existing external foreground-runner route**, optionally submitted as
+a generic Jobs command under the [foreground integration contract](../cmw-jobs.md#integration-and-foreground-command-contract).
+This interim creation is owner-local; non-owner nodes cannot use it to bypass
+the pre-1b refusal for manifest-enabled projects. The operator supplies the exact runner command and scientific restart settings;
+verify that runner actually supports copying a stable, terminated source WAVECAR
+into a fresh destination and using it, with synchronous source/copy hashes and
+unchanged source bytes. The current managed runner checker only accepts restart
+none and cannot qualify that external restart route. If no such independently
+qualified runner exists, defer the launch; never bypass managed validation,
+smuggle restart files through transport, or silently rely on an existing WAVECAR.
+This interim route remains a legacy job with existing provenance, with manifest
+backfill only after termination; it is not native manifest creation or manual
+adoption. After 1a, only owner-local native creation is available, and managed
+VASP restart still requires separate runner qualification; 1b adds allocation
+transport, not restart-file transport. `--restart-from` never chooses INCAR
+settings implicitly. No launch or qualification is performed by this Phase 0 PR.
 
 ## Single writers, synchronization and integrity
 
@@ -382,7 +401,26 @@ permission to bypass today's `inputs/`/`support/` allowlist.
 **One project integrity file:** `.cmw/integrity.jsonl` is append-only and owned
 by the project node, reached through the same authenticated channel as allocation
 and annotations. Each complete JSON-line receipt records schema version, a
-monotonic sequence, request UUID and event kind. `manifest`/`registration` events
+monotonic sequence, request UUID, event kind and UTC timestamp. The timestamp
+is the journal append time, never an invented historical job time. All records
+validate against `schemas/integrity.v1.json`: required `schema_version`,
+`sequence` (positive integer), `request_uuid` (32-hex), `event`, `timestamp`,
+`project` and closed `payload`. `legacy-alias.v1.json` specializes this same
+envelope; it no longer defines incompatible top-level label/target fields.
+
+| Event | Payload |
+| --- | --- |
+| manifest | id, job_sha256, binding (null until known) |
+| registration | id, job_sha256, non-null binding with enrolled node UUID |
+| queue_binding | node token, queue token, initial binding including volume_uuid |
+| queue_locator | node token, queue token, binding_sequence pointing to the initial queue_binding, locator including volume_uuid |
+| legacy_alias | label and fully queue-qualified target |
+
+Each mapping gets its own durable request UUID, so several alias events cannot
+conflict under one request key. Future semantic validation enforces sequence
+continuity, the referenced binding kind/project/tokens, and locator identity.
+
+`manifest`/`registration` events
 carry project/qualified job ID, exact job.json SHA-256 and target queue/attempt
 binding when known. `queue_binding` carries the initial project/node/queue token,
 nullable queue UUID, state path and filesystem identities exactly once;
@@ -454,7 +492,20 @@ invocation; missing data is otherwise not proof of failure.
 Missing unrelated ionic geometry/finalization blocks do not erase fully bound
 electronic facts; relevant truncation concerns the selected SCF evidence.
 
-`last_step`, energy and dE come from the last complete matched DAV/RMM row,
+`last_step`, energy and dE come from the last complete matched electronic row.
+Phase 2 must accept `DAV`, `RMM`, `DMP` (ALGO=Damped), `CG`, `SDA`, `CGA`,
+`DIA`, `EIG` and `NONE` labels with their documented numeric columns; whitespace
+before the colon is allowed (`CG :`), and NONE may omit the colon. See the
+[VASP ALGO output grammar](https://vasp.at/wiki/ALGO) and
+[OSZICAR columns](https://vasp.at/wiki/OSZICAR). Algorithm changes within one
+invocation do not reset the step count. Accept finite numeric E/dE/d-eps and
+positive step index plus ncg/rms; preserve optional rms(c)/ort without confusing
+it with energy. Ignore line-search diagnostics as electronic rows. Bind every
+row to the OUTCAR evaluation and energy, never classify from its label alone.
+EIG/NONE postprocessing rows do not establish SCF convergence; incompatible
+algorithm/mode evidence or unsupported/malformed grammar yields unknown.
+DMP, CG, SDA/CGA and mixed-prefix synthetic cases extend only this proposed
+classifier contract, not existing runtime parser coverage. Values are taken
 with the enclosing ionic step retained. Do not replace electronic E/dE with
 ionic-summary quantities. Existing numeric consistency checks retain both
 energy differences; the single displayed dE cannot independently prove EDIFF.
@@ -570,7 +621,8 @@ switch its profiles, collect live restart hashes, or adopt its worker.
 | Phase | Change and gate |
 | --- | --- |
 | 0 (this PR) | Design, schemas, fixtures and schema tests only. Stop for design decisions; no runtime behavior, packaging release or production mutation. |
-| 1 | Extend existing creation/submission with root project identity, project ledger/SSH allocation, uniform `.cmw-manifest/` layout, project integrity file, manifest binding, restart selection and immutable publication. Preserve queue UUID/internal IDs and legacy routes. Test all-node bootstrap, concurrent allocation, qualified legacy IDs and crash/lost-reply burns. Same-node restart selection requires stable verified copies; restart transport remains a separate multi-host requirement outside #41. Bind available build evidence; coordinate general advertisement with D22. Runtime isolation qualification below is a deployment prerequisite. |
+| 1a | Single-node owner-only: root project file, local ledger, job.json in the uniform sidecar layout, and integrity journal. Bootstrap the reviewed all-node inventory before local allocation; freeze node UUIDs and available build evidence. Test local concurrency, publication/receipt failure and never-reuse. Non-owner nodes refuse native job creation; no fallback allocation. Runtime isolation is a prerequisite; restart execution still needs separately qualified runner support. |
+| 1b | Add remote allocation/publication requests over the existing authenticated SSH channel. Test all-node owner routing, idempotent retries, unreachable-owner refusal, concurrent requests and lost replies. Before 1b completes, non-owner nodes refuse all new job creation for manifest-enabled projects even if they hold a project-file replica; legacy commands cannot bypass the owner requirement. Restart-file transport remains separate and out of scope. |
 | 2 | Add the executing-node state publisher and bounded classifier, synthetic plus authorized native parser fixtures, stable asynchronous output hashing. Reuse supervisor completion; never make SCF parsing a completion gate or signal policy. Existing workers receive no new writer. |
 | 3 | Add explicit manifest forms to annotate/query/check, enforce owner writes via the allocation channel, project-receipt verification and append-only events. Add the agent rule forbidding direct manifest edits, with schema-test fixtures explicitly distinguished. Existing commands keep their behavior. |
 | 4 | Implement reviewed dry-run/apply backfill; do not automatically run it on `example-project`. A separate authorized window must establish closure, stable evidence, safe destinations and parent identities. Report unresolved jobs/nulls; leave active runs untouched. |

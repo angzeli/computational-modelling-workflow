@@ -12,7 +12,7 @@ from referencing import Registry, Resource
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / 'tests' / 'fixtures' / 'manifests'
 KINDS = ('job', 'state', 'annotations')
-SCHEMA_KINDS = (*KINDS, 'project', 'legacy-alias')
+SCHEMA_KINDS = (*KINDS, 'project', 'legacy-alias', 'integrity')
 
 
 def read_json(path):
@@ -42,6 +42,7 @@ class JobManifestSchemaTests(unittest.TestCase):
         cls.native = {kind: read_json(FIXTURES / 'native' / '.cmw-manifest' / f'{kind}.json')
                       for kind in KINDS}
         cls.native['legacy-alias'] = read_json(FIXTURES / 'journal' / 'example.legacy-alias.json')
+        cls.native['integrity'] = read_json(FIXTURES / 'journal' / 'manifest.integrity.json')
         cls.project = read_json(FIXTURES / 'project' / '.cmw-project.json')
 
     def test_labels_and_alias_targets(self):
@@ -52,12 +53,124 @@ class JobManifestSchemaTests(unittest.TestCase):
         self.assertFalse(self.validators['annotations'].is_valid(doc))
         alias = read_json(FIXTURES / 'journal' / 'example.legacy-alias.json')
         for target in ('J10.7', 'node-a:J16.1', 'human label', 'J28'):
-            alias['target'] = target
+            alias['payload']['target'] = target
             self.assertFalse(self.validators['legacy-alias'].is_valid(alias))
-        alias['target'] = 'node-a/research:J16.1'
+        alias['payload']['target'] = 'node-a/research:J16.1'
         self.validators['legacy-alias'].validate(alias)
         del alias['schema_version']
         self.assertFalse(self.validators['legacy-alias'].is_valid(alias))
+
+    def test_annotation_label_fold_contract(self):
+        # Phase 0 contract model, not an implementation of the annotation writer.
+        value = deepcopy(self.native['annotations'])
+        first = value['events'][0]
+        first['label'] = 'Checkpoint candidate'
+        second = deepcopy(first)
+        second.update(sequence=2, label=None, purpose=None, system=None,
+                      note=None, outcome='checkpoint-only')
+        third = deepcopy(second)
+        third.update(sequence=3, label='', outcome=None)
+        value.update(events=[first, second, third], revision=3)
+        self.validators['annotations'].validate(value)
+        labels = []
+        current = None
+        for event in value['events']:
+            if event['label'] is not None:
+                current = event['label']
+            labels.append(current)
+        self.assertEqual(labels, ['Checkpoint candidate', 'Checkpoint candidate', ''])
+
+    def test_engine_neutral_restart_inputs(self):
+        value = read_json(FIXTURES / 'native' / 'orca-parent.job.json')
+        for engine in ('ORCA', 'Multiwfn'):
+            value['engine'] = engine
+            self.validators['job'].validate(value)
+        for restart in ({}, {'ORCA_GBW': None}, {'ORCA_GBW': 'bad'}, {'../gbw': 'a' * 64}):
+            value['restart_inputs'] = restart
+            self.assertFalse(self.validators['job'].is_valid(value))
+
+    def test_native_ids_are_positive_unpadded(self):
+        for identifier in ('J0', 'J00', 'J01'):
+            for kind in KINDS:
+                value = deepcopy(self.native[kind])
+                value['id'] = identifier
+                self.assertFalse(self.validators[kind].is_valid(value))
+            value = deepcopy(self.native['job'])
+            value['restart_inputs'] = {'WAVECAR': 'a' * 64}
+            for parent in (identifier, 'other:' + identifier):
+                value['parent'] = parent
+                self.assertFalse(self.validators['job'].is_valid(value))
+
+    def test_native_node_fields_require_uuids(self):
+        paths = {'job': [('authoring_node',), ('target_node',), ('id_owner_node',)],
+                 'state': [('writer_node',), ('binding', 'node_id')],
+                 'annotations': [('events', 0, 'author_node')]}
+        for kind, fields in paths.items():
+            for path in fields:
+                for invalid in ('node-a', 'A' * 32, '1' * 31, None):
+                    value = deepcopy(self.native[kind])
+                    target = value
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = invalid
+                    with self.subTest(kind=kind, path=path, invalid=invalid):
+                        self.assertFalse(self.validators[kind].is_valid(value))
+
+    def test_environment_prefix_allowlist_and_native_potcar(self):
+        value = deepcopy(self.native['job'])
+        for name in ('OMP_PROC_BIND', 'OPENBLAS_VERBOSE', 'MKL_DYNAMIC',
+                     'VECLIB_MAXIMUM_THREADS', 'GFORTRAN_UNBUFFERED_ALL',
+                     'OMPI_MCA_btl'):
+            value['launch']['environment'] = {name: '1'}
+            self.validators['job'].validate(value)
+        for name in ('PATH', 'AWS_SECRET_ACCESS_KEY', 'MY_OMP_THREADS', 'OMP_'):
+            value['launch']['environment'] = {name: '1'}
+            self.assertFalse(self.validators['job'].is_valid(value))
+        value['launch']['environment'] = {}
+        for potcar in (None, []):
+            value['potcar'] = potcar
+            self.assertFalse(self.validators['job'].is_valid(value))
+
+    def test_journal_envelope_and_payloads(self):
+        paths = list((FIXTURES / 'journal').glob('*.json'))
+        kinds = set()
+        for path in paths:
+            event = read_json(path)
+            kinds.add(event['event'])
+            self.validators['integrity'].validate(event)
+            for key in ('schema_version', 'sequence', 'request_uuid', 'event', 'timestamp', 'payload'):
+                invalid = deepcopy(event)
+                del invalid[key]
+                self.assertFalse(self.validators['integrity'].is_valid(invalid))
+            for key, bad in (('sequence', 0), ('request_uuid', 'alias'),
+                             ('event', 'unknown'), ('timestamp', None),
+                             ('payload', {})):
+                invalid = deepcopy(event)
+                invalid[key] = bad
+                self.assertFalse(self.validators['integrity'].is_valid(invalid))
+            invalid = deepcopy(event)
+            invalid['payload']['extra'] = True
+            self.assertFalse(self.validators['integrity'].is_valid(invalid))
+        self.assertEqual(kinds, {'manifest', 'registration', 'queue_binding',
+                                'queue_locator', 'legacy_alias'})
+        value = read_json(FIXTURES / 'journal' / 'registration.integrity.json')
+        value['payload']['binding'] = None
+        self.assertFalse(self.validators['integrity'].is_valid(value))
+
+    def test_volume_identity_survives_device_number_change_contract(self):
+        before = self.project['legacy_queues']['node-a']['research']
+        after = deepcopy(before)
+        for key in ('root_identity', 'database_identity'):
+            after[key][0] += 100
+            self.assertEqual((before['volume_uuid'], before[key][1]),
+                             (after['volume_uuid'], after[key][1]))
+        for invalid in (None, 'disk4', '1' * 32):
+            value = deepcopy(self.project)
+            value['legacy_queues']['node-a']['research']['volume_uuid'] = invalid
+            self.assertFalse(self.validators['project'].is_valid(value))
+        value = deepcopy(self.project)
+        del value['legacy_queues']['node-a']['research']['volume_uuid']
+        self.assertFalse(self.validators['project'].is_valid(value))
 
     def test_schemas_are_draft_2020_12(self):
         for kind, schema in self.schemas.items():
@@ -87,6 +200,17 @@ class JobManifestSchemaTests(unittest.TestCase):
                 self.assertEqual(contract['expected']['binding'], contract['queue_context']['binding'])
                 outcomes.add(contract['expected']['scf_result'])
         self.assertEqual(outcomes, {'converged', 'labort', 'nelm_reached', 'crashed', 'unknown'})
+
+    def test_electronic_prefix_contract_coverage(self):
+        prefixes = set()
+        for path in (FIXTURES / 'parser-contracts').glob('*.json'):
+            contract = read_json(path)
+            for line in contract['stdout_lines']:
+                prefixes.add(line.split()[0].rstrip(':'))
+        self.assertTrue({'DAV', 'RMM', 'DMP', 'CG', 'SDA', 'CGA', 'DIA', 'EIG', 'NONE'} <= prefixes)
+        for name in ('eig-postprocessing', 'none-postprocessing'):
+            contract = read_json(FIXTURES / 'parser-contracts' / (name + '.json'))
+            self.assertEqual(contract['expected']['scf_result'], 'unknown')
 
     def test_negative_documents_fail_for_the_intended_field(self):
         expected_fields = {'bad-id.job.json': 'id', 'unknown-outcome.annotations.json': 'outcome',
@@ -295,10 +419,10 @@ class JobManifestSchemaTests(unittest.TestCase):
 
     def test_annotation_text_can_be_explicitly_cleared(self):
         value = deepcopy(self.native['annotations'])
-        for field in ('purpose', 'system', 'note'):
+        for field in ('purpose', 'system', 'note', 'label'):
             value['events'][0][field] = ''
         self.validators['annotations'].validate(value)
-        for field in ('purpose', 'system', 'note'):
+        for field in ('purpose', 'system', 'note', 'label'):
             value['events'][0][field] = None
         self.validators['annotations'].validate(value)
 

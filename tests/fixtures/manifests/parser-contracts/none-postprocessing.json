@@ -1,0 +1,61 @@
+{
+  "description": "Synthetic Phase 2 classifier excerpt, not a complete finalization input. Join each line list with newlines and append a final newline. The supplied queue context independently establishes operational status; Phase 0 validates only the expected state schema.",
+  "invocation_bound": true,
+  "OUTCAR_lines": [
+    "vasp.6.6.1",
+    "Startparameter for this run:",
+    "NELM = 2; EDIFF = 1E-6",
+    "ISPIN = 2",
+    "Iteration 1( 1)",
+    "free energy TOTEN = -1.0000000E+01 eV",
+    "Iteration 1( 2)",
+    "free energy TOTEN = -1.000000001E+01 eV",
+    "number of electron 8.0000000 magnetization 2.0000000"
+  ],
+  "stdout_lines": [
+    "NONE 1 -1.0000000E+01 -1.0E+01 -1.0E+00 16 1.0E-03",
+    "NONE 2 -1.000000001E+01 -1.0E-08 -1.0E-08 16 1.0E-08"
+  ],
+  "expected": {
+    "schema_version": 1,
+    "id": "J28",
+    "project": "fixture-project",
+    "provenance": "native",
+    "revision": 2,
+    "writer_node": "22222222222222222222222222222222",
+    "status": "done",
+    "native_status": "Done",
+    "started_at": null,
+    "ended_at": null,
+    "exit_code": null,
+    "cancel_mode": null,
+    "scf_result": "unknown",
+    "last_step": 2,
+    "ionic_step": 1,
+    "energy_ev": -10.00000001,
+    "delta_energy_ev": -1e-08,
+    "total_magnetisation_mu_b": 2.0,
+    "restart_outputs": {
+      "WAVECAR": null,
+      "CHGCAR": null
+    },
+    "hashes_pending": false,
+    "evidence": [],
+    "binding": {
+      "node_id": "22222222222222222222222222222222",
+      "queue_id": "fixture-queue",
+      "job_id": 1,
+      "attempt_id": "fixture-attempt"
+    }
+  },
+  "queue_context": {
+    "native_status": "Done",
+    "binding": {
+      "node_id": "22222222222222222222222222222222",
+      "queue_id": "fixture-queue",
+      "job_id": 1,
+      "attempt_id": "fixture-attempt"
+    }
+  },
+  "context_note": "Synthetic postprocessing rows record electronic values but do not imply SCF convergence."
+}

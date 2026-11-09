@@ -13,7 +13,7 @@
     "project": "fixture-project",
     "provenance": "native",
     "revision": 2,
-    "writer_node": "fixture-node-b",
+    "writer_node": "22222222222222222222222222222222",
     "status": "failed",
     "native_status": "Fail",
     "started_at": null,
@@ -33,7 +33,7 @@
     "hashes_pending": false,
     "evidence": [],
     "binding": {
-      "node_id": "fixture-node-b",
+      "node_id": "22222222222222222222222222222222",
       "queue_id": "fixture-queue",
       "job_id": 1,
       "attempt_id": "fixture-attempt"
@@ -42,7 +42,7 @@
   "queue_context": {
     "native_status": "Fail",
     "binding": {
-      "node_id": "fixture-node-b",
+      "node_id": "22222222222222222222222222222222",
       "queue_id": "fixture-queue",
       "job_id": 1,
       "attempt_id": "fixture-attempt"

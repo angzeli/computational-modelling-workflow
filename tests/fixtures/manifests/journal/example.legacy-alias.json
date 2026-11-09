@@ -1,7 +1,12 @@
 {
   "schema_version": 1,
+  "sequence": 1,
+  "request_uuid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "event": "legacy_alias",
+  "timestamp": "2026-11-09T12:00:00Z",
   "project": "example-project",
-  "label": "J10.7",
-  "target": "node-a/project-queue:J16.1"
+  "payload": {
+    "label": "J10.7",
+    "target": "node-a/project-queue:J16.1"
+  }
 }

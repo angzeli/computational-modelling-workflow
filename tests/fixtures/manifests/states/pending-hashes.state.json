@@ -4,7 +4,7 @@
   "project": "fixture-project",
   "provenance": "native",
   "revision": 3,
-  "writer_node": "fixture-node-b",
+  "writer_node": "22222222222222222222222222222222",
   "status": "done",
   "native_status": "Done",
   "started_at": null,
@@ -24,7 +24,7 @@
   "hashes_pending": true,
   "evidence": [],
   "binding": {
-    "node_id": "fixture-node-b",
+    "node_id": "22222222222222222222222222222222",
     "queue_id": "fixture-queue",
     "job_id": 1,
     "attempt_id": "fixture-attempt"

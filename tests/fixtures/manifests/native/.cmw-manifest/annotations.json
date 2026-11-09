@@ -8,7 +8,7 @@
     {
       "sequence": 1,
       "timestamp": "2026-11-09T12:01:00Z",
-      "author_node": "fixture-node-a",
+      "author_node": "11111111111111111111111111111111",
       "purpose": "Synthetic schema example",
       "system": "Si",
       "outcome": null,

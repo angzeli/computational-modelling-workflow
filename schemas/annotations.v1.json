@@ -18,7 +18,7 @@
     },
     "id": {
       "type": "string",
-      "pattern": "^(?:J\\d+|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?:J\\d+\\.\\d+)$",
+      "pattern": "^(?:J[1-9]\\d*|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?:J\\d+\\.\\d+)$",
       "maxLength": 256,
       "description": "Native IDs are project-unique J<n>. Legacy dotted IDs require backfilled provenance and qualification spelled node[/queue]:J<n>.<m>. The queue token is required when the short node-qualified form is ambiguous; schemas check syntax, not resolution. Existing queue IDs and directories remain unchanged."
     },
@@ -95,8 +95,7 @@
               "string",
               "null"
             ],
-            "minLength": 1,
-            "description": "Human-readable name only; never a path component or reference. Null clears the current label."
+            "description": "Human-readable name only, never a path or reference. Null means no change; empty string clears."
           }
         }
       }
@@ -114,7 +113,17 @@
       "then": {
         "properties": {
           "id": {
-            "pattern": "^J\\d+$"
+            "pattern": "^J[1-9]\\d*$"
+          },
+          "events": {
+            "items": {
+              "properties": {
+                "author_node": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            }
           }
         }
       }

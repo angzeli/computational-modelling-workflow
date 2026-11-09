@@ -30,7 +30,7 @@
     },
     "id": {
       "type": "string",
-      "pattern": "^(?:J\\d+|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?:J\\d+\\.\\d+)$",
+      "pattern": "^(?:J[1-9]\\d*|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?:J\\d+\\.\\d+)$",
       "maxLength": 256,
       "description": "Native IDs are project-unique J<n>. Legacy dotted IDs require backfilled provenance and qualification spelled node[/queue]:J<n>.<m>. The queue token is required when the short node-qualified form is ambiguous; schemas check syntax, not resolution. Existing queue IDs and directories remain unchanged."
     },
@@ -216,20 +216,11 @@
           "anyOf": [
             {
               "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "OMP_NUM_THREADS": {
-                  "type": "string"
-                },
-                "OPENBLAS_NUM_THREADS": {
-                  "type": "string"
-                },
-                "MKL_NUM_THREADS": {
-                  "type": "string"
-                },
-                "VECLIB_MAXIMUM_THREADS": {
-                  "type": "string"
-                }
+              "propertyNames": {
+                "pattern": "^(?:OMP_|OPENBLAS_|MKL_|VECLIB_|GFORTRAN_|OMPI_MCA_)[A-Za-z0-9_]+$"
+              },
+              "additionalProperties": {
+                "type": "string"
               }
             },
             {
@@ -243,7 +234,7 @@
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^(?:(?:[A-Za-z0-9][A-Za-z0-9._-]*:)?J\\d+|(?:[A-Za-z0-9][A-Za-z0-9._-]*:)?[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?:J\\d+\\.\\d+)$"
+          "pattern": "^(?:(?:[A-Za-z0-9][A-Za-z0-9._-]*:)?J[1-9]\\d*|(?:[A-Za-z0-9][A-Za-z0-9._-]*:)?[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?:J\\d+\\.\\d+)$"
         },
         {
           "type": "null"
@@ -255,7 +246,14 @@
       "type": "boolean"
     },
     "restart_inputs": {
-      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/restart_hashes"
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/sha256_or_null"
+      },
+      "description": "Engine-neutral role to digest map. Omit absent roles. Native copied inputs require synchronous non-null digests; legacy unknown digests may be null."
     }
   },
   "allOf": [
@@ -270,7 +268,25 @@
       "then": {
         "properties": {
           "id": {
-            "pattern": "^J\\d+$"
+            "pattern": "^J[1-9]\\d*$"
+          },
+          "authoring_node": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "target_node": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "id_owner_node": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "restart_inputs": {
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
           }
         }
       }
@@ -348,6 +364,10 @@
                       }
                     }
                   }
+                },
+                "potcar": {
+                  "type": "array",
+                  "minItems": 1
                 }
               }
             }
@@ -363,26 +383,12 @@
             "then": {
               "properties": {
                 "restart_inputs": {
-                  "anyOf": [
-                    {
-                      "properties": {
-                        "WAVECAR": {
-                          "not": {
-                            "type": "null"
-                          }
-                        }
-                      }
-                    },
-                    {
-                      "properties": {
-                        "CHGCAR": {
-                          "not": {
-                            "type": "null"
-                          }
-                        }
-                      }
+                  "minProperties": 1,
+                  "not": {
+                    "additionalProperties": {
+                      "type": "null"
                     }
-                  ]
+                  }
                 }
               }
             }

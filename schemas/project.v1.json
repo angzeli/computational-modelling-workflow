@@ -69,7 +69,8 @@
         "queue_id",
         "state_root",
         "root_identity",
-        "database_identity"
+        "database_identity",
+        "volume_uuid"
       ],
       "properties": {
         "queue_id": {
@@ -96,7 +97,7 @@
             "type": "integer",
             "minimum": 0
           },
-          "description": "Original filesystem [device, inode] evidence retained in the initial project integrity-journal binding for this node and source object."
+          "description": "Original [device, inode] evidence. Device is diagnostic only; identity comparison uses volume_uuid plus inode across remounts."
         },
         "database_identity": {
           "type": "array",
@@ -106,7 +107,11 @@
             "type": "integer",
             "minimum": 0
           },
-          "description": "Original filesystem [device, inode] evidence retained in the initial project integrity-journal binding for this node and source object."
+          "description": "Original [device, inode] evidence. Device is diagnostic only; identity comparison uses volume_uuid plus inode across remounts."
+        },
+        "volume_uuid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
         }
       }
     }

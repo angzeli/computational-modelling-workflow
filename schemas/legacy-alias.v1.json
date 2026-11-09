@@ -1,34 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/legacy-alias.v1.json",
-  "title": "Project integrity journal legacy alias event",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "event",
-    "project",
-    "label",
-    "target"
-  ],
-  "properties": {
-    "schema_version": {
-      "const": 1
+  "title": "Legacy alias journal event (common envelope)",
+  "allOf": [
+    {
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/integrity.v1.json"
     },
-    "event": {
-      "const": "legacy_alias"
-    },
-    "project": {
-      "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
-    },
-    "label": {
-      "type": "string",
-      "minLength": 1
-    },
-    "target": {
-      "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*:J\\d+\\.\\d+$"
+    {
+      "properties": {
+        "event": {
+          "const": "legacy_alias"
+        }
+      }
     }
-  }
+  ]
 }

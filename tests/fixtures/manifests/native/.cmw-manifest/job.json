@@ -4,9 +4,9 @@
   "project": "fixture-project",
   "provenance": "native",
   "created_at": "2026-11-09T12:00:00Z",
-  "authoring_node": "fixture-node-a",
-  "target_node": "fixture-node-b",
-  "id_owner_node": "fixture-node-a",
+  "authoring_node": "11111111111111111111111111111111",
+  "target_node": "22222222222222222222222222222222",
+  "id_owner_node": "11111111111111111111111111111111",
   "engine": "VASP",
   "inputs": {
     "INCAR": "a96a8953c7108022e10efbc38faa95f778fa07083100240bc8e4dbde96d50367",
@@ -47,8 +47,5 @@
   },
   "parent": null,
   "parent_inferred": false,
-  "restart_inputs": {
-    "WAVECAR": null,
-    "CHGCAR": null
-  }
+  "restart_inputs": {}
 }
