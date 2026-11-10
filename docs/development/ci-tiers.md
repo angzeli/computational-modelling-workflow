@@ -107,45 +107,12 @@ content, including innocuously named tracked files and artifact members. It
 prints the path and a redacted reason only, never matched bytes. This bounded
 screen supplements filename checks; it is not a general licence or secret scanner.
 
-## Watchdog and local verification (unchanged semantics)
+## Test diagnostics and triage
 
-Ordinary CI test methods retain the 300-second native watchdog and the positive,
-finite `CMW_TEST_TIMEOUT_SECONDS` fixture override. The budget includes setUp,
-body, tearDown and instance cleanup, not module/class fixtures. Fault-sweep
-lifecycle methods retain the stricter per-row watchdog; manifest checks use the
-ordinary guard. A timeout prints the active test and stack, aborts that isolated
-module process and may bypass cleanup. Partial counts are incomplete, never a
-passing suite. The external reporter lists registered fixture PIDs and recorded
-v2 identities; it neither discovers all descendants nor signals other processes.
-
-Keep worktree-owned environments and low-priority sequential targeted checks
-while calculations run (about ten minutes or less per interpreter). No full
-local suite during a calculation. Audit registered identities and clean up
-survivors only after ownership verification. Intentional indefinite
-UNVERIFIABLE holds can turn a stale mock into a hang; inspect the actual caller
-before changing assertions. Unqualified platforms are findings, not merge gates.
-
-### Triage before calling a failure real
-1. **Load:** rerun the failing test alone. On its first occurrence, a failure
-   that passes alone may be recorded as provisionally LOAD. If it recurs,
-   investigate its cause before retaining the LOAD classification.
-   In CI, a test recorded as known-flaky in an open issue (currently the study
-   lifecycle timeout and the test_names.py restoration race) may be rerun once.
-2. **Pre-existing:** if it fails alone, run it on the base commit with the same
-   kind of environment. If it fails there too, it is pre-existing.
-3. **Introduced:** fails only on the branch.
-
-Only introduced failures block a merge, with one exception: a PR that changes
-the CI test matrix must fix, within the same PR, any test that fails on the
-newly gated combination, even if the failure is pre-existing. Record other
-pre-existing failures and recurring load failures as issues, stating whether
-they affect real behaviour or only tests.
-
-### Never
-- Change code or tests just to make CI pass without approval.
-- Bypass checks or branch protection (`--admin` or equivalent).
-- Treat a skipped, cancelled or unfinished check as passing.
-- Report a suite as passing without test counts.
+Watchdog budgets, fixture-PID diagnostics, stale-mock guidance and the triage
+procedure live in [scripts/ci/README.md](../../scripts/ci/README.md).
+The sole known-flaky registry is [tests/KNOWN_FLAKY](../../tests/KNOWN_FLAKY).
+Issue creation follows [AGENTS.md §6](../../AGENTS.md#6-issues-and-scope).
 
 ## Policy consolidation in AGENTS.md
 
@@ -162,7 +129,7 @@ Removed/replaced instructions, with their replacement:
 5. Long watchdog explanation → this linked section; implementation unchanged.
 6. Scattered review/count/skip/protection rules → the single section, retaining
    the same obligations. Failure triage and the newly-gated-combination exception
-   above are copied verbatim; no flaky rerun authority was expanded.
+   are now maintained in scripts/ci/README.md and tests/KNOWN_FLAKY; no flaky rerun authority was expanded.
 
 ## Measurement and savings
 
