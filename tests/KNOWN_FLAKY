@@ -1,0 +1,21 @@
+# Known flaky failures
+
+This is the single registry for the CI triage policy in scripts/ci/README.md.
+An entry is not proof that a new failure has the same cause. Match the exact
+signature and platform. At most one CI rerun is permitted under the policy;
+retain the original evidence. An isolated pass is provisional LOAD only on the
+first occurrence. Recurrence requires causal investigation, not another LOAD
+classification based solely on an isolated pass. Remove entries when their
+issue is resolved; unexpected failures are not implicitly authorised for rerun.
+
+## Open entries (checked 2026-11-10)
+
+- Issue: https://github.com/angzeli/computational-modelling-workflow/issues/47
+  Test: workflows.test_igmh.IgmhWorkflowTests.test_four_thread_override_and_long_child_health_monitor
+  Platform: macOS / Python 3.14
+  Signature: test_igmh.py sample-count assertion, "1 not greater than or equal to 2".
+  Evidence: https://github.com/angzeli/computational-modelling-workflow/actions/runs/42648396935/job/129267896193
+  Status: provisionally LOAD; isolated pass, cause not established. Investigate recurrence.
+
+Closed historical study-lifecycle and table-restoration reports are not blanket
+rerun permission. Do not add an entry without a linked open issue and evidence.
