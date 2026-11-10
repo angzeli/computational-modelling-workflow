@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 from cmw.molecular.workflows.multiwfn_analysis import (
@@ -9,6 +11,7 @@ from cmw.molecular.workflows.multiwfn_analysis import (
     plan_analysis,
     prepare_analysis,
 )
+from tests.python_fixture import write_python_script
 from tests.workflows.test_multiwfn_cubes import MultiwfnCubeHarness, ROOT
 
 
@@ -257,13 +260,58 @@ class IgmhWorkflowTests(MultiwfnCubeHarness):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("integrity mismatch", completed.stdout)
 
-    def test_four_thread_override_and_long_child_health_monitor(self) -> None:
-        env = {
+    def health_monitor_fixture(self) -> dict[str, str]:
+        barrier = self.root / "two-health-samples.fifo"
+        os.mkfifo(barrier, 0o600)
+        # Keep the FIFO open even if the probe reaches it before the fake child.
+        descriptor = os.open(barrier, os.O_RDWR | os.O_NONBLOCK)
+        self.addCleanup(os.close, descriptor)
+        source = self.fake.read_text()
+        insertion = "child_seconds = float(os.environ.get"
+        self.assertEqual(source.count(insertion), 1)
+        self.fake.write_text(source.replace(insertion, '''import select
+with open(os.environ["FAKE_HEALTH_BARRIER"], "rb", buffering=0) as barrier:
+    if not select.select([barrier], [], [], 30)[0] or barrier.read(1) != b"2":
+        raise SystemExit("test_four_thread_override_and_long_child_health_monitor: "
+                         "timed out waiting for two recorded health samples")
+''' + insertion))
+        probe = write_python_script(self.root / "health-probe-python", '''
+import json
+import os
+from pathlib import Path
+import runpy
+import sys
+import time
+
+arguments = sys.argv[1:]
+if arguments[:3] != ["-m", "cmw.molecular.multiwfn.cli", "health"]:
+    os.execv(os.environ["FAKE_HEALTH_PYTHON"],
+             [os.environ["FAKE_HEALTH_PYTHON"], *arguments])
+history = Path(arguments[arguments.index("--history") + 1])
+# Fault injection: every probe starts slower than the old child's 0.7 s life.
+time.sleep(1.0)
+sys.argv = arguments[1:]
+try:
+    runpy.run_module("cmw.molecular.multiwfn.cli", run_name="__main__")
+except SystemExit as exc:
+    if exc.code not in (None, 0):
+        raise
+samples = [json.loads(line) for line in history.read_text().splitlines()]
+if len(samples) >= 2:
+    with open(os.environ["FAKE_HEALTH_BARRIER"], "wb", buffering=0) as barrier:
+        barrier.write(b"2")
+''')
+        return {
             **self.env,
             "MULTIWFN_NTHREADS": "4",
-            "FAKE_MULTIWFN_CHILD_SECONDS": "0.7",
             "CMW_HEALTH_INTERVAL": "0.1",
+            "PYTHON_BIN": str(probe),
+            "FAKE_HEALTH_PYTHON": sys.executable,
+            "FAKE_HEALTH_BARRIER": str(barrier),
         }
+
+    def test_four_thread_override_and_long_child_health_monitor(self) -> None:
+        env = self.health_monitor_fixture()
         result = json.loads(self.run_igmh(env=env).stdout)
         self.assertEqual(result["runtime"]["requested_nthreads"], 4)
         attempt = next(
