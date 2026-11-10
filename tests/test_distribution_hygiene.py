@@ -28,6 +28,22 @@ class DistributionHygieneTests(unittest.TestCase):
             self.assertTrue(findings(name, b''), name)
         self.assertEqual(findings(next(iter(REDUCED_LOGS)), b'scientific parser excerpt'), [])
 
+    def test_renamed_potential_content_is_rejected_without_disclosing_matches(self):
+        # Synthetic headers only: no real potential data is used.
+        for header in ('parameters from PSCTR are:', 'PAW radial sets',
+                       'Non local Part', 'augmentation charges'):
+            content = ('  ' + header + '\nSYNTHETIC-DO-NOT-PRINT\n').encode()
+            with self.subTest(header=header), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root/'innocent.dat').write_bytes(content)
+                with patch('tests.distribution_hygiene.subprocess.check_output',
+                           return_value=b'innocent.dat\0'):
+                    result = source_findings(root)
+                self.assertEqual(result, ['innocent.dat: potential dataset marker in content (redacted)'])
+                self.assertNotIn(header, str(result))
+                self.assertNotIn('SYNTHETIC-DO-NOT-PRINT', str(result))
+        self.assertEqual(findings('guide.md', b'Use POTCAR; parse TITEL and VRHFIN.'), [])
+
     def test_archive_content_is_checked_without_extraction(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
