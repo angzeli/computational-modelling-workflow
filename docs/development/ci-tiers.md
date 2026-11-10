@@ -89,6 +89,24 @@ The offline docs check validates tracked Markdown fence balance and relative
 Markdown/HTML file targets. External URLs, site-root routes and fragment anchors
 are not fetched or validated; tracked symlinks are refused without reading them.
 
+## Console diagnostics
+
+Successful cases do not stream STARTED/FINISHED records. Module counts and
+private raw logs retain them for incomplete-module accounting; failed modules
+print their diagnostic log and invoke the fixture-process reporter once.
+The dedicated sweep uses the same bounded direct-child output reader. Its
+console retains failed rows, watchdog evidence and the summary, including
+scenario timings. The outer reader keeps the last 16 row starts in memory and
+dumps them on a watchdog or native timeout, even if the test interpreter cannot
+run Python callbacks. Full row evidence and the exact-union check are unchanged.
+Private raw logs still contain all row markers; the reduction is in CI console
+output, not a claim that private diagnostic files have been removed.
+
+Publication hygiene also rejects potential-dataset table/header markers in
+content, including innocuously named tracked files and artifact members. It
+prints the path and a redacted reason only, never matched bytes. This bounded
+screen supplements filename checks; it is not a general licence or secret scanner.
+
 ## Watchdog and local verification (unchanged semantics)
 
 Ordinary CI test methods retain the 300-second native watchdog and the positive,
