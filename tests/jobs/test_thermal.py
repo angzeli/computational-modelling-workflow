@@ -14,6 +14,7 @@ import psutil
 from cmw.jobs import activity, thermal
 from cmw.jobs.telemetry import Sampler, age_usage
 from tests.jobs.thermal_fixtures import write_fake_macmon
+from tests import waiting
 
 
 class ThermalTests(unittest.TestCase):
@@ -29,11 +30,7 @@ class ThermalTests(unittest.TestCase):
         return value
 
     def wait_for(self, condition, timeout=3):
-        deadline = time.monotonic()+timeout
-        while not condition():
-            if time.monotonic() >= deadline:
-                self.fail('test-owned provider did not reach expected state')
-            time.sleep(.01)
+        waiting.wait_for(condition, timeout=timeout, interval=.01, what='test-owned provider did not reach expected state')
 
     def parse(self, value, **extra):
         return thermal.parse_macmon(json.dumps({'temp':{'cpu_temp_avg':value}, **extra}),

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from tests.ui_readiness import await_selection_settled
 
-import asyncio
 from copy import deepcopy
 import os
 from pathlib import Path
@@ -16,6 +15,7 @@ from cmw.jobs.store import Store
 from cmw.nodes.protocol import NodeError
 from tests.jobs.test_navigation_ui import SyntheticObserver, SyntheticSampler, table_view
 from tests.nodes.test_portal import FakeBackend
+from tests import waiting
 
 try:
     from textual.containers import VerticalScroll
@@ -93,13 +93,10 @@ class DoctorUiTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(runtime.stop)
 
     async def until(self, pilot, predicate):
-        for _ in range(200):
-            if predicate():
-                await pilot.pause()
-                return
-            await asyncio.sleep(.02)
-        self.fail(f'Doctor UI event barrier did not complete: {type(pilot.app.screen).__name__}; '
-                  f'pending={getattr(pilot.app.screen, "pending", None)}')
+        screen = lambda: pilot.app.screen
+        await waiting.until(predicate, timeout=10, interval=.02, what='Doctor UI event barrier did not complete',
+                            detail=lambda: f'{type(screen()).__name__}; pending={getattr(screen(), "pending", None)}')
+        await pilot.pause()
 
     def render(self, app, kind, size):
         destination = os.environ.get('CMW_DOCTOR_UI_RENDER_DIR')

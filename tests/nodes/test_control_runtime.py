@@ -28,16 +28,11 @@ from cmw.nodes.protocol import NodeError
 from cmw.nodes.transport import ProcessTransport
 from tests.jobs.isolated_runtime import environment, install
 from tests.jobs.lifecycle_evidence import capture, retain_lifecycle_evidence
+from tests import waiting
 
 
 def wait_for(predicate, timeout=20):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        result = predicate()
-        if result:
-            return result
-        time.sleep(.05)
-    raise AssertionError('Owned node control fixture did not reach the bounded condition')
+    return waiting.wait_for(predicate, timeout=timeout, what='Owned node control fixture did not reach the bounded condition')
 
 
 @contextmanager

@@ -19,18 +19,13 @@ from cmw.jobs.runtime import launch_blocker, reap_detached, reconcile, start, st
 from cmw.jobs.store import JobsError, Store
 from tests.jobs.isolated_runtime import environment, install
 from tests.jobs.lifecycle_evidence import retain_lifecycle_evidence
+from tests import waiting
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def wait_for(predicate, timeout=12):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        result = predicate()
-        if result:
-            return result
-        time.sleep(.05)
-    raise AssertionError("Timed out waiting for synthetic lifecycle")
+    return waiting.wait_for(predicate, timeout=timeout, what='Timed out waiting for synthetic lifecycle')
 
 
 class QueueTests(unittest.TestCase):

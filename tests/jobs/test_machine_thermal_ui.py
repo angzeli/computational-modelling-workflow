@@ -6,7 +6,6 @@ import math
 import os
 from pathlib import Path
 import tempfile
-import time
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +14,7 @@ from cmw.jobs.freshness import clock_stamp
 from cmw.jobs.snapshot import capture_snapshot, render_snapshot
 from cmw.nodes.contracts import NodeState
 from cmw.nodes.protocol import NodeError
+from tests import waiting
 
 
 def thermal(*, age=12., quality='fresh', temperature=63.2, now=112.):
@@ -159,11 +159,8 @@ def save_render(app, name):
 @unittest.skipIf(JobsApp is None, 'Optional Jobs UI extra unavailable')
 class MachineThermalTuiTests(unittest.IsolatedAsyncioTestCase):
     async def until(self, pilot, predicate):
-        for _ in range(80):
-            if predicate():
-                return
-            await pilot.pause(.05)
-        self.fail('Synthetic frontend observation did not settle')
+        await waiting.until(predicate, pilot=pilot, timeout=10, interval=.05,
+                            what='Synthetic frontend observation did not settle')
 
     def assert_disconnected_then_unreachable(self, app, owner, message, retained=None):
         lane = app.lanes[owner]

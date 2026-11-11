@@ -10,6 +10,7 @@ from unittest.mock import patch
 from tests.ui_readiness import await_laid_out, await_selection_settled
 from cmw.jobs.store import Store
 from tests.jobs.test_navigation_ui import SyntheticObserver, SyntheticSampler, table_view
+from tests import waiting
 try:
     from cmw.jobs.tui import JobsApp, Inspect
     from cmw.jobs.catalogue_ui import CatalogueSearch
@@ -22,12 +23,8 @@ except ImportError:
 @unittest.skipIf(JobsApp is None, 'Optional Jobs UI unavailable')
 class IntegratedNavigationTests(unittest.IsolatedAsyncioTestCase):
     async def until(self, pilot, predicate):
-        for _ in range(120):
-            if predicate():
-                await pilot.pause()
-                return
-            await pilot.pause(.025)
-        self.fail('Bounded navigation event did not complete')
+        await waiting.until(predicate, pilot=pilot, timeout=10, what='Bounded navigation event did not complete')
+        await pilot.pause()
 
     async def test_refresh_during_unmount_does_not_read_state_or_missing_widgets(self):
         with tempfile.TemporaryDirectory(prefix='cmw-detach-refresh-') as tmp:
