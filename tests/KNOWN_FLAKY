@@ -1,6 +1,6 @@
 # Known flaky failures
 
-This is the single registry for the CI triage policy in scripts/ci/README.md.
+This is the single registry for the CI triage policy in AGENTS.md §5.
 An entry is not proof that a new failure has the same cause. Match the exact
 signature and platform. At most one CI rerun is permitted under the policy;
 retain the original evidence. An isolated pass is provisional LOAD only on the

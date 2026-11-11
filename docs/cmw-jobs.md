@@ -874,7 +874,7 @@ payload receipt or a RELEASE.
 
 These retries belong to the original worker. Worker death, restart recovery,
 durable completion records and release acknowledgement are not implemented by
-this change; see the post-cutover [durable completion proposal](architecture/durable-completion-proposal.md).
+this change; see post-cutover [issue #23](https://github.com/angzeli/computational-modelling-workflow/issues/23).
 
 ### Process domain never observed
 
@@ -1046,8 +1046,7 @@ controller crash/restart, same-group descendants, actual PTY terminal closure,
 console keys/resize/selection, bounded safe logs and a queued existing CMW
 workflow with fake ORCA. Tests require local process-identity and terminal access;
 a restrictive sandbox may deny macOS sysctl/PTY operations. All test queues and
-processes are isolated. See the [implementation record](architecture/cmw-jobs-implementation.md)
-for measured validation results and compatibility boundaries.
+processes are isolated.
 
 ## External activity and admission guard
 

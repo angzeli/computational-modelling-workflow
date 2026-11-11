@@ -114,36 +114,9 @@ procedure live in [scripts/ci/README.md](../../scripts/ci/README.md).
 The sole known-flaky registry is [tests/KNOWN_FLAKY](../../tests/KNOWN_FLAKY).
 Issue creation follows [AGENTS.md §6](../../AGENTS.md#6-issues-and-scope).
 
-## Policy consolidation in AGENTS.md
+## Measurement
 
-Removed/replaced instructions, with their replacement:
-
-1. Separate “Continuous integration” section and its repeated platform/lean-CI
-   guidance → one CI/test-verification section and this contract.
-2. “Ubuntu on every PR, macOS on main/manual” and the instruction to dispatch
-   manual macOS before merge → automatic merge tier plus main/nightly full tier.
-3. Full matrices on every workflow regardless of changed paths → critical-path
-   additions and unconditional main/nightly matrices.
-4. Repeated full-suite/local-selection/low-priority/environment rules → concise
-   local rules in AGENTS.md, preserving the calculation boundary.
-5. Long watchdog explanation → this linked section; implementation unchanged.
-6. Scattered review/count/skip/protection rules → the single section, retaining
-   the same obligations. Failure triage and the newly-gated-combination exception
-   are now maintained in scripts/ci/README.md and tests/KNOWN_FLAKY; no flaky rerun authority was expanded.
-
-## Measurement and savings
-
-See [the measured baseline](ci-baseline-2026-11-09.md). The median ordinary
-non-critical fast path is about **9.8 minutes** including selection/lint overhead,
-versus **26.7 minutes** for successful first-attempt PR workflows: about **63%**
-less wall time. The observed Ubuntu suite tail is 12.1 minutes, so under ten is
-a target rather than a guarantee. No watchdog budget or test assertion is reduced
-to meet it. Ready macOS checks still add a median 13.6 minutes of execution plus
-allocation; that work is delayed until readiness, not removed.
-
-Each avoided full matrix saves roughly 30.4 Ubuntu runner-minutes and, when it
-would otherwise run, 22.9 macOS runner-minutes. Removing a duplicate manual Ubuntu
-suite saves roughly 9.6 runner-minutes per completed pair. Main/nightly install
-coverage expands from core-only on main to all four modes: roughly 8.5/11.9
-minutes instead of 2.4/3.2 minutes on Ubuntu/macOS. These estimates are not claimed
-savings for ownership/packaging PRs, which retain their expensive coverage.
+Measured on 9 November 2026, the median ordinary non-critical PR path is about
+9.8 minutes including selection and lint, versus 26.7 minutes for successful
+first-attempt PR workflows before the tiers. Under ten minutes is a target, not
+a guarantee; no watchdog budget or assertion was reduced to meet it.

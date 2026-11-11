@@ -11,8 +11,8 @@ The [cutover runbook](../operations/cutover-runbook.md) consolidates deployment
 ordering, qualification, rollback and the MacBook sandbox rehearsal. Production
 cutover remains gated on the supported retirement operation and Mini checks.
 
-The [durable completion proposal](durable-completion-proposal.md) records deferred
-worker-death recovery. It is post-cutover work to reassess after the slimming
+Deferred worker-death recovery (durable completion) is tracked in
+[issue #23](https://github.com/angzeli/computational-modelling-workflow/issues/23); the proposal is [archived at a281651](https://github.com/angzeli/computational-modelling-workflow/blob/a281651/docs/architecture/durable-completion-proposal.md). It is post-cutover work to reassess after the slimming
 audit, not an implemented queue schema or runtime protocol.
 
 This document describes the architecture the repository implements
@@ -78,9 +78,7 @@ molecule-agnostic
 [vertical stacking workflow](vertical-stacking-workflow.md) composes explicit
 periodic registry extraction, deterministic dimer assembly, hierarchical
 relaxation, TDDFT/TDA planning, and Multiwfn hole/electron analysis through
-those same contracts. Its quantitative excited-state, NTO, and
-fragment-resolved readiness is assessed in the
-[excited-state artifact audit](stacking-excited-state-artifact-audit.md).
+those same contracts.
 Domain-specific translation remains outside the core graph. The first adapter,
 documented in the [HOF adapter guide](../adapters/hof.md), validates the HOF
 system schema and maps it onto those generic graph and artifact contracts.
