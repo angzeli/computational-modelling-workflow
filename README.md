@@ -98,8 +98,7 @@ contracts are documented in
 │   ├── structure/
 │   └── website/
 ├── examples/molecular/
-│   ├── orca/
-│   └── multiwfn/
+│   └── orca/
 ├── scripts/
 │   ├── orca/
 │   └── workflows/

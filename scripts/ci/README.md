@@ -35,24 +35,4 @@ survivors only after ownership verification. Intentional indefinite
 UNVERIFIABLE holds can turn a stale mock into a hang; inspect the actual caller
 before changing assertions. Unqualified platforms are findings, not merge gates.
 
-### Triage before calling a failure real
-1. **Load:** rerun the failing test alone. On its first occurrence, a failure
-   that passes alone may be recorded as provisionally LOAD. If it recurs,
-   investigate its cause before retaining the LOAD classification.
-   In CI, only exact failures listed in [tests/KNOWN_FLAKY](../../tests/KNOWN_FLAKY),
-   linked to an open issue, may be rerun once.
-2. **Pre-existing:** if it fails alone, run it on the base commit with the same
-   kind of environment. If it fails there too, it is pre-existing.
-3. **Introduced:** fails only on the branch.
-
-Only introduced failures block a merge, with one exception: a PR that changes
-the CI test matrix must fix, within the same PR, any test that fails on the
-newly gated combination, even if the failure is pre-existing. Report other
-pre-existing failures and recurring load failures, stating whether they affect
-real behaviour or only tests. Issue creation follows [AGENTS.md §6](../../AGENTS.md#6-issues-and-scope).
-
-### Never
-- Change code or tests just to make CI pass without approval.
-- Bypass checks or branch protection (`--admin` or equivalent).
-- Treat a skipped, cancelled or unfinished check as passing.
-- Report a suite as passing without test counts.
+Failure triage and the "Never" rules are in [AGENTS.md §5](../../AGENTS.md#5-tests-and-ci).

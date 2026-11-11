@@ -987,7 +987,7 @@ The guide contains the separately authorized J4.1 cutover step and a proposal
 for independently attested earlier-boot v1 evidence, which is not implemented.
 
 Recovery of completion evidence after worker death is a distinct post-cutover
-proposal, to be reassessed after the slimming audit: [durable completion](durable-completion-proposal.md).
+proposal, to be reassessed after the slimming audit.
 It is tracked by [issue #23](https://github.com/angzeli/computational-modelling-workflow/issues/23)
 and linked to #24 because both change the release protocol.
 The proposed schema 5, runtime protocol 4, anchor acknowledgement and controller
