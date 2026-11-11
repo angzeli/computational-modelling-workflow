@@ -17,7 +17,6 @@ import time
 from unittest.mock import patch
 
 import cmw
-import cmw.adapters.hof.execution
 import cmw.structure.conversion
 from cmw.jobs import runtime
 from cmw.jobs.ownership import owner_alive

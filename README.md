@@ -41,8 +41,6 @@ This repository currently contains:
 - ORCA 6.1.1 fixed-geometry intermolecular LED with exact ghost-basis fragment
   references, six-component numerical reconstruction, typed finalization, and
   hash-validated reuse;
-- a HOF domain adapter that validates two-fragment hydrogen-bonded systems and
-  translates their YAML configuration into generic CP/LED workflow contracts;
 - shell-owned ORCA execution;
 - a configurable, resumable `opt`, `opt+sp`, `opt+freq`, or `opt+freq+sp`
   molecular workflow with synthetic integration tests;
@@ -83,8 +81,6 @@ contracts are documented in
 [`docs/architecture/composite-workflow-engine.md`](docs/architecture/composite-workflow-engine.md).
 The reusable stacking contracts and artifact lineage are documented in
 [`docs/architecture/vertical-stacking-workflow.md`](docs/architecture/vertical-stacking-workflow.md).
-The HOF YAML mapping, validators, CP/LED graph, and non-executing ORCA input
-plans are documented in [`docs/adapters/hof.md`](docs/adapters/hof.md).
 The generic cleanup eligibility, plan-hash, transaction, registry, and purge
 contracts are documented in
 [`docs/architecture/attempt-cleanup.md`](docs/architecture/attempt-cleanup.md).
@@ -109,7 +105,6 @@ contracts are documented in
 │   └── workflows/
 ├── src/
 │   └── cmw/
-│       ├── adapters/
 │       ├── core/
 │       ├── molecular/
 │       └── structure/
