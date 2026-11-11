@@ -242,7 +242,7 @@ workflow:
 
 The artifact schema version remains 1 and existing manifests remain readable.
 All artifact registrations are additive. Existing OPT, FREQ, and SP stage
-types, task mappings, render behavior, CLIs, HOF adapter workflows, and
-Multiwfn workflows are unchanged. TDDFT is an additional stage and
+types, task mappings, render behavior, CLIs, and Multiwfn workflows are
+unchanged. TDDFT is an additional stage and
 `excited_state` is an additional computational task; neither is inferred from
 a method name.

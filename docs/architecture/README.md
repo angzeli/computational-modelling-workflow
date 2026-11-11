@@ -81,9 +81,8 @@ relaxation, TDDFT/TDA planning, and Multiwfn hole/electron analysis through
 those same contracts. Its quantitative excited-state, NTO, and
 fragment-resolved readiness is assessed in the
 [excited-state artifact audit](stacking-excited-state-artifact-audit.md).
-Domain-specific translation remains outside the core graph. The first adapter,
-documented in the [HOF adapter guide](../adapters/hof.md), validates the HOF
-system schema and maps it onto those generic graph and artifact contracts.
+Domain-specific translation remains outside the core graph and belongs in the
+project that uses it, composing these generic graph and artifact contracts.
 Program-specific analysis adapters remain molecule agnostic. The
 [Multiwfn analysis layer](../molecular/multiwfn-cubes.md) maps validated
 wavefunction or density inputs through deterministic command and output
