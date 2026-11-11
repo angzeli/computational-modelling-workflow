@@ -2,153 +2,142 @@
 
 **Find an existing route before building another one.** This is a routing index
 for the current checkout, not execution authorization or a scientific recipe.
-Read only the relevant row and linked contract; verify its entry point before use.
-
-- Structure conversion: [structure routes](#structure).
-- VASP inputs: [preparation and checking](#periodic-and-vasp).
-- ORCA/Multiwfn: [molecular workflows](#molecular-workflows).
-- Scheduling, observation or Unknown: [Jobs routes](#execution-and-operations).
-- Reusable infrastructure: [shared mechanisms](#shared-mechanisms).
-- Missing command in another project: [installation check](#using-cmw-from-another-project).
+Read the relevant row, then its linked contract, which is authoritative for
+scope and limits. Verify the entry point before use, and report any drift.
 
 For a **usage request**, use the supported interface. For **development**, extend
 that implementation only after identifying a concrete unsupported requirement or
-contract mismatch. A small project adapter can compose existing APIs; it should
-not replace their validation, materialization, provenance or execution gates.
-Source and feature contracts take precedence over this index. Report any drift.
+contract mismatch. A small project adapter can compose existing APIs; it must not
+replace their validation, materialization, provenance or execution gates.
 
-## How to read availability and evidence
+**Status labels:**
+* **IMPLEMENTED:** the route exists within its contract's scope.
+* **PARTIAL:** only the named part exists.
+* **EXTERNAL INTEGRATION:** needs a separately supplied implementation.
+* **DEFERRED:** an explicit boundary.
+* **NOT WIRED / NOT DEPLOYED:** code exists, but no live route uses it.
+* **PROCEDURE:** a manual review, not code.
 
-**IMPLEMENTED** means the named route exists, within its stated scope.
-**PARTIAL** means only the identified part of the task exists.
-**EXTERNAL INTEGRATION** requires a separately supplied implementation.
-**DEFERRED** is an explicit boundary; **NOT FOUND IN CURRENT CHECKOUT** records
-absence from the inspected surfaces, not a claim about all possible software.
-Legacy routes are marked separately. None of these labels certifies science.
+None of these labels certifies science.
 
-`cmw …` denotes the installed console entry point. `python -m …` denotes a Python
-module entry point, not a top-level `cmw` command. Paths under `scripts/` generally require the checkout or extracted sdist. The
-reviewed ORCA/Multiwfn Jobs route packages its exact runner/helper closure inside
-the wheel; it does not expose the whole repository script tree.
-API rows are importable Python interfaces, not invented console commands.
+**Entry-point forms:**
+* `cmw …` is the installed console command.
+* `python -m …` is a module entry point.
+* Paths under `scripts/` need the checkout or an extracted sdist.
+* API rows are importable Python interfaces.
 
-Tests below are **coverage references**, not evidence they ran in your session.
-For distribution/platform boundaries, see [tested support](README.md#tested-support),
-[package configuration](pyproject.toml), [installed smoke](tests/installed_smoke.py)
-and the [existing CI matrix](.github/workflows/python-package.yml). Workflow
-configuration is not proof that a particular commit passed remote CI.
+Tests live under `tests/`, mirroring `src/`. Supported platforms are listed in
+[tested support](README.md#tested-support).
 
-## Task-to-capability routes
+## Structure
 
-### Structure
-
-| Task | Existing entry point / availability | Scope and mechanism to reuse | Contract and evidence |
+| Task | Entry point | Status and key boundary | Contract |
 | --- | --- | --- | --- |
-| Put an ordinary molecule in a periodic box | `cmw structure embed-molecule` — IMPLEMENTED | Molecular XYZ; explicit cell-construction intent, charge/cell/vacuum policy. Reuse centering, stable grouping and Scratch mapping. | [Guide](docs/structure/xyz-to-poscar.md), [adapter](src/cmw/structure/embedding.py), [tests](tests/structure/test_embedding.py) |
-| Import an ordered periodic CIF | `cmw structure import-cif` — IMPLEMENTED | Ordered core CIF, full occupancy, selected structural block; preserve represented cell and expand symmetry. Reuse importer, periodic model and split publication. | [Guide](docs/structure/cif-import.md), [adapter](src/cmw/structure/cif_import.py), [parser](src/cmw/structure/cif.py), [tests](tests/structure/test_cif.py) |
-| Validate molecular XYZ / retain geometry identity | `cmw.structure.xyz.read_xyz`, `geometry_hash`; `structure_artifact_from_file` API — IMPLEMENTED | Strict atom rows, finite Cartesian coordinates and ordered geometry; electronic state belongs to the target. Reuse typed structure validation. | [Contract](docs/architecture/orca-status-and-xyz.md), [XYZ API](src/cmw/structure/xyz.py), [artifact API](src/cmw/core/structure_artifacts.py), [tests](tests/core/test_structure_artifacts.py) |
-| Consume imported periodic geometry | `PeriodicStructure`, `PeriodicAtom` API — IMPLEMENTED | Immutable represented cell and ordered fractional/Cartesian atoms; indices link to full source/operator evidence in the import record. | [Model](docs/structure/periodic-model.md), [API](src/cmw/structure/periodic.py), [tests](tests/structure/test_periodic.py) |
-| Maintain an existing XYZ conversion integration | `scripts/workflows/xyz_to_poscar.sh`; `cmw.structure.conversion.xyz_to_poscar` — IMPLEMENTED, **legacy publication** | Reuse existing conversion only when its overwrite/adjacent-sidecar contract is intended. New standalone preparation should use `embed-molecule`. | [Guide](docs/structure/xyz-to-poscar.md), [script](scripts/workflows/xyz_to_poscar.sh), [API](src/cmw/structure/conversion.py), [tests](tests/structure/test_conversion.py) |
+| Put an ordinary molecule in a periodic box | `cmw structure embed-molecule` | IMPLEMENTED; explicit cell, charge and vacuum intent | [Guide](docs/structure/xyz-to-poscar.md) |
+| Import an ordered periodic CIF | `cmw structure import-cif` | IMPLEMENTED; ordered, fully occupied CIF only | [Guide](docs/structure/cif-import.md) |
+| Validate molecular XYZ / keep geometry identity | `cmw.structure.xyz.read_xyz`, `geometry_hash`; `structure_artifact_from_file` | IMPLEMENTED (API) | [Contract](docs/architecture/orca-status-and-xyz.md) |
+| Consume imported periodic geometry | `PeriodicStructure`, `PeriodicAtom` | IMPLEMENTED (API) | [Model](docs/structure/periodic-model.md) |
+| Maintain an existing XYZ conversion integration | `scripts/workflows/xyz_to_poscar.sh`; `cmw.structure.conversion.xyz_to_poscar` | IMPLEMENTED, **legacy publication** (overwrites, adjacent sidecars); new work uses `embed-molecule` | [Guide](docs/structure/xyz-to-poscar.md) |
 
-### Periodic and VASP
+## Periodic and VASP
 
-| Task | Existing entry point / availability | Scope and mechanism to reuse | Contract and evidence |
+| Task | Entry point | Status and key boundary | Contract |
 | --- | --- | --- | --- |
-| Discover local potential variants | `cmw vasp potcar list ELEMENT` — IMPLEMENTED | Caller-supplied library; no dataset download. Reuse discovery before selecting variants. | [Guide](docs/periodic/vasp-potcar.md), [CLI](src/cmw/periodic/vasp/cli.py), [tests](tests/periodic/vasp/test_potcar.py) |
-| Build/check POTCAR in POSCAR block order | `cmw vasp potcar build` / `check` — IMPLEMENTED | Preserve repeated species blocks; explicit variants and comparability requirements; distinguish species compatibility from exact selected-byte identity. | [Contract](docs/periodic/vasp-potcar.md), [resolver](src/cmw/periodic/vasp/potentials.py), [tests](tests/periodic/vasp/test_potcar.py) |
-| Prepare static inputs from reviewed POSCAR | `cmw vasp prepare --spec …` — IMPLEMENTED | Spec `calculation: static`; explicit scientific profile, mesh and local potentials. Preserve POSCAR bytes; reuse typed resolution and four-file publication. | [Guide](docs/periodic/vasp-preparation.md), [preparer](src/cmw/periodic/vasp/preparation.py), [tests](tests/periodic/vasp/test_preparation.py) |
-| Prepare fixed-cell relaxation | Same `cmw vasp prepare` — IMPLEMENTED | Spec `calculation: fixed-cell-relaxation`; bounded ionic controls and explicit required values. No variable-cell or general relaxation claim. | [Guide](docs/periodic/vasp-preparation.md), [preparer](src/cmw/periodic/vasp/preparation.py), [tests](tests/periodic/vasp/test_preparation.py) |
-| Check an existing four-file bundle | `cmw vasp check-inputs DIRECTORY` — IMPLEMENTED | Read-only bounded POSCAR/INCAR/KPOINTS/POTCAR checks; optional `--preparation-record`. Shared POSCAR syntax includes exact elemental annotations and complete zero velocity tails, preserving bytes/order. Invalid and unsupported differ; a pass is not scientific validation. | [Dialect/exit contract](docs/periodic/vasp-input-checking.md), [checker](src/cmw/periodic/vasp/inputs.py), [tests](tests/periodic/vasp/test_inputs.py) |
-| Compare a baseline or retain structure lineage | Preparation spec `baseline` / `source_record`; `compare_inputs` API — IMPLEMENTED | Reuse category-aware differences and complete hash-matched import/embedding records. Declared runtime comparison needs record evidence; no observed effective inputs are invented. | [Guide](docs/periodic/vasp-preparation.md#baseline-comparison-and-structure-lineage), [API](src/cmw/periodic/vasp/preparation.py), [handoff tests](tests/structure/test_cif_import.py) |
-| Inspect or assess native VASP result evidence | `cmw vasp inspect-result DIRECTORY [--policy …] [--spec …]`; `inspect_result` / `assess_result` APIs — IMPLEMENTED | Bounded 6.6.1 static/fixed-cell evidence, typed native-section settings (not advice), explicit segments, endpoint and whole-atom force summaries. DAV has native-sample evidence; RMM/collinear coverage is synthetic. No policy means no acceptance. | [Contract](docs/periodic/vasp-result-evidence.md), [parser](src/cmw/periodic/vasp/results.py), [policy](src/cmw/periodic/vasp/result_policy.py), [tests](tests/periodic/vasp/test_results.py) |
-| Analyze SCF or independent electronic levels | `cmw vasp analyze-scf DIRECTORY`; `analyze-electronic DIRECTORY --only …`; `scf_analysis` / `electronic_levels` APIs — IMPLEMENTED | Lazy request-local snapshots, full SCF history, occupation-aware sampled edges, explicit vacuum references. Bounded HSE06/static/DAV analysis adds no artifact-acceptance or live Dashboard scope. LOCPOT is opt-in: standard accepts qualified source consistency; strict/crosscheck require native corroboration, never generation authentication. | [V1 contract](docs/periodic/vasp-analysis.md), [SCF API](src/cmw/periodic/vasp/scf_analysis.py), [electronic API](src/cmw/periodic/vasp/electronic_levels.py), [tests](tests/periodic/vasp/test_analysis_api.py) |
-| Finalize accepted VASP energies or periodic endpoint | `cmw vasp finalize-result DIRECTORY --policy … --spec …`; `verify-result-record RECORD` — IMPLEMENTED | Explicit retrospective binding and native Jobs completion; optional bounded runner record connects separate wrapper/output directories and four input identities. Shared core finalizer and Scratch-only record. Reverification distinguishes a verified record, a contradiction and unavailable live queue evidence. No relocation/adoption, wavefunction/charge-density finalization or source archiving. | [Contract](docs/periodic/vasp-result-evidence.md#commands-output-and-reuse), [runner association](docs/periodic/vasp-result-evidence.md#optional-external-runner-association), [adapter](src/cmw/periodic/vasp/result_finalization.py), [tests](tests/periodic/vasp/test_result_finalization.py) |
-| Execute prepared VASP inputs | Caller-supplied foreground runner, optionally through Jobs — EXTERNAL INTEGRATION | No native VASP launcher is registered. Review the runner's executable, MPI, resource, restart and output contracts separately; result finalization never launches it. | [Runner integration](docs/cmw-jobs.md#integration-and-foreground-command-contract), [current CLI](src/cmw/cli.py) |
-| Check the selected managed VASP port interface | `cmw vasp check-runner --runner … [--project-root …] -- <explicit port arguments>` — IMPLEMENTED | Read-only static declarations for the known `run-vasp.sh` route; explicit ordinary ranks up to 16 require the recognized expanded runner guards. VASP profile defaults and controlled suspension remain at most eight ranks. Host-toolchain dependencies, source identities and relevant dirty state are retained. Explicit experimental `--binary std --binary-manifest NAME` selections are checked statically (manifest, executable, aggregator and library digests) and can be pinned by profile `binary_manifests`; job details summarize the per-rank backend evidence without treating it as acceptance. Exit 0 establishes argument compatibility only. Lifecycle and result binding require separate exact-combination qualification; no runner execution, staging or Jobs mutation. | [Contract and example](docs/periodic/vasp-result-evidence.md#check-a-managed-runner-interface), [checker](src/cmw/periodic/vasp/runner_compatibility.py), [tests](tests/periodic/vasp/test_runner_compatibility.py) |
+| Discover local potential variants | `cmw vasp potcar list ELEMENT` | IMPLEMENTED; caller-supplied library, no download | [Guide](docs/periodic/vasp-potcar.md) |
+| Build/check POTCAR in POSCAR block order | `cmw vasp potcar build` / `check` | IMPLEMENTED; repeated species blocks preserved | [Contract](docs/periodic/vasp-potcar.md) |
+| Prepare static inputs from a reviewed POSCAR | `cmw vasp prepare --spec …` (`calculation: static`) | IMPLEMENTED; POSCAR bytes preserved | [Guide](docs/periodic/vasp-preparation.md) |
+| Prepare fixed-cell relaxation | `cmw vasp prepare --spec …` (`calculation: fixed-cell-relaxation`) | IMPLEMENTED; no variable-cell relaxation | [Guide](docs/periodic/vasp-preparation.md) |
+| Check an existing four-file bundle | `cmw vasp check-inputs DIRECTORY [--preparation-record …]` | IMPLEMENTED, read-only; a pass is not scientific validation | [Contract](docs/periodic/vasp-input-checking.md) |
+| Compare a baseline / retain structure lineage | spec `baseline` / `source_record`; `compare_inputs` | IMPLEMENTED; needs complete hash-matched records | [Guide](docs/periodic/vasp-preparation.md#baseline-comparison-and-structure-lineage) |
+| Inspect or assess native VASP result evidence | `cmw vasp inspect-result DIRECTORY [--policy …] [--spec …]`; `inspect_result` / `assess_result` | IMPLEMENTED; bounded 6.6.1 static/fixed-cell; no policy means no acceptance | [Contract](docs/periodic/vasp-result-evidence.md) |
+| Analyze SCF or independent electronic levels | `cmw vasp analyze-scf DIRECTORY`; `analyze-electronic DIRECTORY --only …`; `scf_analysis` / `electronic_levels` | IMPLEMENTED; analysis only, no artifact acceptance | [Contract](docs/periodic/vasp-analysis.md) |
+| Finalize accepted VASP energies or periodic endpoint | `cmw vasp finalize-result DIRECTORY --policy … --spec …`; `verify-result-record RECORD` | IMPLEMENTED; explicit retrospective binding; no relocation or wavefunction finalization | [Contract](docs/periodic/vasp-result-evidence.md#commands-output-and-reuse) |
+| Execute prepared VASP inputs | Caller-supplied foreground runner, optionally through Jobs | EXTERNAL INTEGRATION; no native VASP launcher | [Runner integration](docs/cmw-jobs.md#integration-and-foreground-command-contract) |
+| Check the selected managed VASP port interface | `cmw vasp check-runner --runner … [--project-root …] -- <port arguments>` | IMPLEMENTED, read-only; exit 0 means argument compatibility only | [Contract](docs/periodic/vasp-result-evidence.md#check-a-managed-runner-interface) |
 
 The [real-calculation acceptance study](docs/evaluations/real-zis-vasp-acceptance-2026-09.md)
-records the bounded native corpus, justified fixes and remaining provenance gaps.
+records the bounded native corpus and remaining provenance gaps.
 
-### Molecular workflows
+## Molecular workflows
 
-Scientific engines/converters are supplied separately. Preparation and planning
-are distinct from commands that execute; consult the linked interface before use.
+Engines and converters are supplied separately. Planning and preparation never
+execute.
 
-| Task | Existing entry point / availability | Scope and mechanism to reuse | Contract and evidence |
+| Task | Entry point | Status and key boundary | Contract |
 | --- | --- | --- | --- |
-| Run OPT, OPT+SP, OPT+FREQ or OPT+FREQ+SP | `scripts/workflows/run_opt_freq_sp.sh` — IMPLEMENTED, checkout workflow | Explicit XYZ/electronic state/stage settings/resources and local ORCA; `--plan` is non-executing. Reuse stage validation, attempts and fail-closed resume. | [Guide](docs/molecular/orca-opt-freq-sp.md), [script](scripts/workflows/run_opt_freq_sp.sh), [tests](tests/workflows/test_opt_freq_sp.py) |
-| Check and submit reviewed ORCA/Multiwfn Jobs | `cmw jobs check --spec … --json`; `cmw jobs submit --spec … [--preview]`; explicit `--node` equivalents — IMPLEMENTED, bounded profiles | Pure engine-aware check, explicit no-clobber preparation, idempotent Hold registration, actual-admission byte checks and automatic native sources. ORCA SP/OPT/FREQ and existing compositions; Multiwfn FMO/ESP/IGMH/IFCT only, with identity-bound sequenced lifecycle evidence and the shared ANALYSIS/STAGE/OUTPUT card locally and remotely. Existing runners/finalizers are packaged, not duplicated. Real-engine and physical-node qualification remain separate. | [Jobs guide](docs/molecular-jobs.md), [shared API](src/cmw/jobs/molecular.py), [node bindings](src/cmw/nodes/molecular.py), [tests](tests/jobs/test_molecular_submission.py) |
-| Suspend/continue a newly enrolled local managed attempt | `cmw jobs suspend JOB --preview --json`, `cmw jobs suspend JOB`, `cmw jobs continue JOB`; portal `U` — IMPLEMENTED, bounded qualification | Exact live worker/runner handshake; schema 3; same processes and retained resources. VASP port and ordinary ORCA SP/OPT only through their explicit controlled routes. Native MPI, scientific engine and physical sleep acceptance are separate; no external adoption or automatic continuation. | [Jobs contract](docs/cmw-jobs.md#controlled-suspension-of-an-enrolled-local-attempt), [worker authority](src/cmw/jobs/suspension.py), [runner protocol](src/cmw/jobs/suspension_protocol.py), [ORCA contract](docs/architecture/orca-runtime.md) |
-| Prepare/check/finalize/reuse one ORCA stage | `python -m cmw.molecular.orca.cli` operations `prepare`, `status`, `finalize`, `reuse`; runner `scripts/orca/run_orca.sh` — IMPLEMENTED | Use actual stage policy and typed target/attempt evidence. Parallel production needs the validated runtime contract; shell owns launch and signals. No `cmw orca` alias. | [Lifecycle](docs/architecture/orca-runtime.md), [module CLI](src/cmw/molecular/orca/cli.py), [runner](scripts/orca/run_orca.sh), [tests](tests/runtime/test_orca_shell.py) |
-| Convert validated ORCA wavefunction for downstream analysis | `scripts/orca/convert_orca_wavefunction.sh` — IMPLEMENTED, checkout workflow | Requires finalized source and supplied converter. Reuse source hashes, geometry/spin/frontier checks and conversion lineage; no guessed HOMO/LUMO indices. | [Source contract](docs/molecular/multiwfn-cubes.md#validated-source-contract), [script](scripts/orca/convert_orca_wavefunction.sh), [tests](tests/molecular/orca/test_wavefunction_conversion.py) |
-| Generate HOMO/LUMO, density/ESP or IGMH cubes | `scripts/workflows/generate_homo_lumo_cubes.sh`, `scripts/workflows/generate_esp_cubes.sh`, `scripts/workflows/generate_igmh_cubes.sh` — IMPLEMENTED | Supplied Multiwfn/runtime settings; validated source, explicit grids/fragments. FMO is a bounded restricted closed-shell subset; IGMH consumes validated density. Reuse sibling workflows and cube checks. | [Guide](docs/molecular/multiwfn-cubes.md), [scripts](scripts/workflows/), [cube tests](tests/workflows/test_multiwfn_cubes.py), [IGMH tests](tests/workflows/test_igmh.py) |
-| Prepare/run a two-fragment IFCT revalidation | `scripts/multiwfn/run_ifct.sh SPEC.json NEW_ATTEMPT_DIRECTORY` — IMPLEMENTED, checkout runner | Explicit ORCA TDA state, wavefunction, geometry, atom count and two fragment mappings; supported Multiwfn 2026.7.15 grammar. Reuse renderer and strict finalize checks, not arbitrary menu automation. | [Runner contract](scripts/multiwfn/run_ifct.sh), [spec/finalizer](src/cmw/molecular/multiwfn/ifct_job.py), [sharing guide](docs/cmw-jobs.md#external-vasp-plus-a-prepared-independent-analysis), [tests](tests/molecular/multiwfn/test_ifct_job.py) |
-| Render/parse NTO and non-fragment hole/electron analysis | `cmw.molecular.multiwfn.excited_states`; `cmw.molecular.stacking.hole_electron` APIs — IMPLEMENTED | Versioned state/menu contracts and typed artifacts; completeness, exit and output identity are separate. Reuse explicit state mappings; no automatic CT-like state choice. | [Guide](docs/molecular/multiwfn-3.8-excited-state-analysis.md), [renderer/parser](src/cmw/molecular/multiwfn/excited_states.py), [tests](tests/molecular/stacking/test_multiwfn_excited_state_artifacts.py) |
-| Plan/assemble intermolecular LED | `python -m cmw.molecular.workflows.intermolecular_led_cli` (`plan`, `finalize`, `reuse`) — IMPLEMENTED | Fixed geometry, two explicit fragments, supported ORCA grammar and ghost-basis references. Reuse ORCA materialization and numerical assembler; not generic association thermodynamics. | [Guide](docs/molecular/orca-intermolecular-led.md), [module](src/cmw/molecular/workflows/intermolecular_led_cli.py), [tests](tests/molecular/workflows/test_intermolecular_led.py) |
-| Extract a declared molecular registry / assemble a vertical dimer | `extract_stacking_template`, `assemble_vertical_dimer` APIs — IMPLEMENTED | Explicit molecular partitions, ordered cores and validated monomer/template artifacts. Reuse deterministic frames, mappings and relaxation plans; this is not slab/interface assembly. | [Guide](docs/architecture/vertical-stacking-workflow.md), [registry](src/cmw/molecular/stacking/registry.py), [assembly](src/cmw/molecular/stacking/assembly.py), [tests](tests/molecular/stacking/test_stacking_workflow.py) |
+| Run OPT, OPT+SP, OPT+FREQ or OPT+FREQ+SP | `scripts/workflows/run_opt_freq_sp.sh` | IMPLEMENTED, checkout workflow; `--plan` does not execute | [Guide](docs/molecular/orca-opt-freq-sp.md) |
+| Check and submit reviewed ORCA/Multiwfn Jobs | `cmw jobs check --spec … --json`; `cmw jobs submit --spec … [--preview]`; `--node` equivalents | IMPLEMENTED, bounded profiles; registers on Hold | [Jobs guide](docs/molecular-jobs.md) |
+| Suspend/continue a newly enrolled local managed attempt | `cmw jobs suspend JOB [--preview --json]`, `cmw jobs continue JOB`; portal `U` | IMPLEMENTED, bounded qualification; VASP port and ordinary ORCA SP/OPT only | [Jobs contract](docs/cmw-jobs.md#controlled-suspension-of-an-enrolled-local-attempt) |
+| Prepare/check/finalize/reuse one ORCA stage | `python -m cmw.molecular.orca.cli` (`prepare`, `status`, `finalize`, `reuse`); runner `scripts/orca/run_orca.sh` | IMPLEMENTED; no `cmw orca` alias | [Lifecycle](docs/architecture/orca-runtime.md) |
+| Convert a validated ORCA wavefunction | `scripts/orca/convert_orca_wavefunction.sh` | IMPLEMENTED, checkout workflow; needs a finalized source and supplied converter | [Source contract](docs/molecular/multiwfn-cubes.md#validated-source-contract) |
+| Generate HOMO/LUMO, density/ESP or IGMH cubes | `scripts/workflows/generate_{homo_lumo,esp,igmh}_cubes.sh` | IMPLEMENTED; validated source, explicit grids/fragments; IGMH consumes validated density | [Guide](docs/molecular/multiwfn-cubes.md) |
+| Prepare/run a two-fragment IFCT revalidation | `scripts/multiwfn/run_ifct.sh SPEC.json NEW_ATTEMPT_DIRECTORY` | IMPLEMENTED, checkout runner; Multiwfn 2026.7.15 grammar | [Spec and finalizer](src/cmw/molecular/multiwfn/ifct_job.py) |
+| Render/parse NTO and non-fragment hole/electron analysis | `cmw.molecular.multiwfn.excited_states`; `cmw.molecular.stacking.hole_electron` | IMPLEMENTED (API); no automatic CT-like state choice | [Guide](docs/molecular/multiwfn-3.8-excited-state-analysis.md) |
+| Plan/assemble intermolecular LED | `python -m cmw.molecular.workflows.intermolecular_led_cli` (`plan`, `finalize`, `reuse`) | IMPLEMENTED; fixed geometry, two explicit fragments | [Guide](docs/molecular/orca-intermolecular-led.md) |
+| Extract a molecular registry / assemble a vertical dimer | `extract_stacking_template`, `assemble_vertical_dimer` | IMPLEMENTED (API); not slab/interface assembly | [Guide](docs/architecture/vertical-stacking-workflow.md) |
 
-### Execution and operations
+## Execution and operations
 
-| Task | Existing entry point / availability | Scope and mechanism to reuse | Contract and evidence |
+| Task | Entry point | Status and key boundary | Contract |
 | --- | --- | --- | --- |
-| Evaluate cancellation and node observation decisions | `cmw.nodes.contracts` pure APIs — CANCELLATION UNWIRED; OBSERVATION WIRED IN P1 | Explicit inputs only. Portal reachability uses three-failure transitions and display-only skew. At 77×24 and wider, frame titles preserve the Last reported marker and identify missing receipts. The first failure marks retained views last reported and disables owner commands until each view receives fresh data after recovery; cancellation escalation/engine availability remain pure contracts without STOPCAR writes, signals or command integration. Reuse the existing integer protocol and `NodeError`. | [Delta specification](docs/architecture/multi-host-nodes.md), [contracts](src/cmw/nodes/contracts.py), [tests](tests/nodes/test_contracts.py) |
-| Assess an author-supplied VASP plan for a target node | `cmw.nodes.vasp_plan.plan_vasp`, `Hardware`, `VaspPlan.require_submission` — PHASE 0 CONTRACTS, NOT WIRED | Existing parsed INCAR/species evidence, explicit ranks/threads and physical-core facts plus nullable node policy; absent-tag defaults, rejection of NPAR for local and remote submissions with equivalent-NCORE guidance, completeness and validation findings. No input reads/rewrites, hardware probing, new POTCAR identity, submission or runner changes. | [Delta specification](docs/architecture/multi-host-nodes.md#37-author-inputs-runner-hardware-and-builds-d17d22), [plan](src/cmw/nodes/vasp_plan.py), [tests](tests/nodes/test_vasp_plan.py) |
-| Classify node failure and recover observation | `transport_events`, `NodesApp` per-node lanes — IMPLEMENTED P1 CODE, NOT DEPLOYED | Structured authentication/security/readiness/incompatibility vs transport failure; immediate control refusal, three-failure reachability, fresh compatible handshake and no mutation replay. Status polls every 5 s with inclusive 15 s monotonic freshness, independently of mounted render surfaces while the portal runs; retained rows are last reported. Display-only clock skew. | [Node guide](docs/cmw-dual-node.md#portal-reachability-and-recovery), [adapter](src/cmw/nodes/transport_events.py), [portal tests](tests/nodes/test_reachability_portal.py) |
-| Record and inspect runner interpreter pins | `cmw.nodes.runner_profiles`, explicit profile schema 2 — IMPLEMENTED P1 DATA, NOT DEPLOYED | Absolute executable/resolved identity, digest and complete security evidence; legacy unpinned profiles remain valid. No launch changes; interpreter enforcement is P3a. | [Guide](docs/cmw-dual-node.md#runner-interpreter-profile-records), [profiles](src/cmw/nodes/runner_profiles.py), [tests](tests/nodes/test_runner_profiles.py) |
-| Verify runtime trust for a status response | `RuntimeVerifier.verify_request`, `runtime_boundary_observed` — IMPLEMENTED P1 CODE, NOT DEPLOYED | One full scan plus complete request-boundary member/directory/security/interpreter/dependency comparison for eligible schema-3 enrollments, including unchanged installed bytecode through private evidence. Sticky cache-only refusals identify files and link recovery; Doctor reports launch flags and owner cache access as warnings. Legacy and mutation double-full verification preserved. No TTL or hardware cache. | [Trust contract](docs/cmw-dual-node.md#runtime-metadata-and-operation-authority), [boundary tests](tests/nodes/test_status_runtime_boundary.py), [installed-bytecode acceptance](tests/nodes/bytecode_acceptance.py) |
-| Submit to and observe explicitly enrolled execution nodes | `cmw nodes enroll/connect/list/check`; `cmw jobs --node ALIAS --queue QUEUE status/show/observe/progress/files/submit/request/fetch`; `cmw jobs watch --all-nodes` — IMPLEMENTED, explicit | Independent node-local queues/readers; pinned hardware/runtime/storage (schema-3 bounded per-member Darwin metadata verification); verified held registration, revision-bound controls and selected replicas through a bounded SSH endpoint. No network in ordinary local mode, remote SQLite, pooled scheduler, physical-node or real-engine qualification. | [Contract](docs/cmw-dual-node.md), [backend](src/cmw/nodes/backend.py), [endpoint](src/cmw/nodes/endpoint.py), [tests](tests/nodes/) |
-| Schedule prepared foreground commands sequentially | `cmw jobs add`, then separately authorized `start` — IMPLEMENTED | `add` only enqueues. Preserve the runner's preflight, environment, layout and finalization; local ownership scope, no detached/remote workers. | [Guide](docs/cmw-jobs.md#prepared-jobs-and-controls), [CLI](src/cmw/jobs/cli.py), [tests](tests/jobs/test_jobs.py) |
-| Run one independent auxiliary beside a primary | `cmw jobs config --mode bounded-sharing`; `sharing` / `add` declarations — IMPLEMENTED | At most one primary and one auxiliary; explicit consent, trusted CPU/RAM bounds, independent non-overlapping writes and fresh admission evidence. Reuse policy; no second scheduler or OS resource enforcement. | [Guide](docs/cmw-jobs.md#bounded-sharing-one-primary-and-one-auxiliary), [policy](src/cmw/jobs/sharing.py), [tests](tests/jobs/test_sharing_policy.py) |
-| Permit coexistence with an external computation | `cmw jobs reserve OBSERVATION_ID`, `unreserve` — IMPLEMENTED | Explicit identity-bound CPU/RAM/write-scope reservation in Bounded Sharing. Configuration/reservation does not start jobs, adopt the external process or authorize signals. | [Guide](docs/cmw-jobs.md#external-vasp-plus-a-prepared-independent-analysis), [policy](src/cmw/jobs/sharing.py), [tests](tests/jobs/test_sharing_store.py) |
-| Observe external VASP/ORCA/Multiwfn and admission guard | `cmw jobs status`, `watch`, `show E…` — IMPLEMENTED, read-only | Recognized process-family evidence, not filesystem/job adoption. Disappearance means no longer observed, not scientific completion. Reuse identity-aware activity collection. | [Guide](docs/cmw-jobs.md#external-activity-and-admission-guard), [collector](src/cmw/jobs/activity.py), [tests](tests/jobs/test_mpi_family.py) |
-| Identify managed jobs in history | `cmw jobs status`, `show JOB_ID`, `watch` — IMPLEMENTED | FILES immediately follows JOB ID, then NAME, including compact console layouts. Long table names use a cell-aware middle ellipsis; details retain the complete literal name. Duplicate names remain distinct jobs. | [Guide](docs/cmw-jobs.md#prepared-jobs-and-controls), [console](src/cmw/jobs/tui.py), [tests](tests/jobs/test_names.py) |
-| Discover managed job files / open a declared folder | `cmw jobs files JOB_ID [--json] [--open --role output]`; `watch` Files cell / F — IMPLEMENTED | Read-only, state/job/attempt-bound location declarations; explicit macOS folder request only. Layout, recognized VASP/ORCA argv (including current VASP controlled-runner options and managed scientific stdout at the exact output path) and exact recorded ORCA workflow paths; opaque outputs remain unknown. Remote Files-cell clicks select the owning attempt before requesting locations. No progress parsing, scientific verification, process adoption or persistent location registry. | [Guide](docs/cmw-jobs.md#file-locations-and-folder-navigation), [location API](docs/cmw-jobs-locations.md), [resolvers](src/cmw/jobs/location_resolvers.py), [tests](tests/jobs/test_locations.py) |
-| Diagnose a loaded runtime, selected node/job or capability; export a private support capsule | `cmw doctor [--state STATE --job JOB | --node ALIAS --queue QUEUE] [--capability NAME] [--json] [--export NEW_DIRECTORY]`; Details → D — IMPLEMENTED, read-only | Reuses runtime identity, selected owner/source observation and frozen snapshots; no default network, queue initialization, engine probes or repair. Strict old-endpoint refusal, unknown worker imports, bounded aliased no-clobber exports; raw excerpts and uploads unsupported. | [Contract](docs/cmw-doctor.md), [service](src/cmw/doctor/service.py), [capsule](src/cmw/doctor/capsule.py), [tests](tests/doctor/) |
-| Observe selected-job live progress and history | `cmw jobs progress JOB_ID [--history --limit N --cursor …] [--json]`; selected `watch` card / G history / S Sources / Y Copy — IMPLEMENTED, read-only | Automatic reconciliation of runner/layout/workflow and compatible add-time declarations → bounded readers → registered adapter → generic snapshot/history. S provides attempt/state-scoped session fallback; conflicting required sources need explicit review, and unavailable evidence retains its declared binding. Bounded VASP 6.6.1 ordinary static/fixed-cell (ISIF 0 or 2) metrics, active declared OSZICAR/stdout/OUTCAR prefix checks with field-scoped frontiers, independent effective/provisional targets, per-source parse states and observation clocks, and structurally scoped LOOP/LOOP+ timing; paged native reconstruction, qualified session observation intervals. ORCA 6.1.x demonstrated DIIS/SOSCF and labelled geometry tables use exact stage output declarations and native criteria. Generic aligned metric groups and frozen Summary/Diagnostics/JSON snapshots (`--snapshot`) share observation evidence; safe selection and qualified clipboard requests never control execution. No scheduler/finalizer consumption, scientific acceptance, ETA or durable history; CP2K deferred. | [Contract](docs/cmw-jobs-progress.md), [Jobs bridge](src/cmw/jobs/progress.py), [observer](src/cmw/progress/service.py), [history](src/cmw/progress/history.py), [ORCA scope](docs/molecular/orca-live-progress.md), [tests](tests/progress/) |
-| Review one selected scientific result on its owner node | `cmw jobs review JOB [--inspect] [--policy … --spec …] [--export …] --json`; selected `watch` R Review — IMPLEMENTED, bounded | Metadata first; explicit cancellable owner-node inspection, independent scientific/provenance domains, policy-scoped assessment and no-clobber fresh exports. Native schema-2/3/4 receipt binding, strict negotiated endpoint models; no finalization, job mutation, remote-path reinterpretation or real-engine acceptance claim. | [Contract](docs/cmw-jobs-result-review.md), [service](src/cmw/jobs/review.py), [engine adapters](src/cmw/jobs/review_engines.py), [tests](tests/jobs/test_review_service.py) |
-| Plan and prepare an explicit successor calculation | `cmw jobs plan-next / materialize-next / register-next` — IMPLEMENTED, geometry-only | Retryable parent evidence (exit 75) and same-destination verification of published inputs, including recovery of a missing initial VASP successor record only from retained approved-plan evidence; exact closed owner/attempt evidence; caller-owned settings, semantic differences and approved digest. Existing VASP split publisher and ordinary ORCA SP/OPT materializer; separate idempotent new Hold registration and launch revalidation. No auto execution, checkpoint reuse, cross-host adoption or change to `jobs continue`. | [Contract](docs/cmw-jobs-successors.md), [service](src/cmw/jobs/successor.py), [VASP](src/cmw/jobs/successor_vasp.py), [ORCA](src/cmw/jobs/successor_orca.py), [tests](tests/jobs/test_successor.py) |
-| Plan and compare an explicit VASP convergence study | `cmw jobs study plan/materialize/register/compare/view`; catalogue S Study — IMPLEMENTED, bounded static subset | Pinned baseline and explicit ENCUT/regular meshes/reviewed POSCAR cases; maximum 64 and bounded response. Reuse WorkflowGraph, standalone four-file VASP preparation, durable held Jobs registration and owner result evidence. One reviewed metric/rule; structural variants remain qualified side by side. No optimizer, generic VASP renderer, second scheduler, automatic execution or cross-host result adoption. | [Contract](docs/cmw-jobs-studies.md), [planner](src/cmw/jobs/study_plan.py), [service](src/cmw/jobs/study.py), [comparison](src/cmw/jobs/study_comparison.py), [tests](tests/jobs/test_study_plan.py) |
-| Declare future scientific progress sources | `cmw jobs add --progress-source ROLE[@STAGE]=ABSOLUTE_PATH` before `--` — IMPLEMENTED, optional | Immutable metadata on the newly created attempt; literal paths and registered required/optional roles, without requiring files to exist. Automatically observed when compatible; origin remains user-declared-at-add, never verified scientific provenance. No persistent edits to existing attempts. | [Contract](docs/cmw-jobs-progress.md#declarations-for-future-jobs), [declarations](src/cmw/jobs/source_declarations.py), [Store](src/cmw/jobs/store.py), [tests](tests/jobs/test_source_declarations.py) |
-| Automatically bind staged POSCAR for new supported VASP attempts | `Store.add` / `cmw jobs add` with recognized managed `run-vasp.sh` argv — IMPLEMENTED, bounded | Immutable prepared POSCAR identity on the new attempt; read-only staging-prefix, path/time/source-stat and runtime-byte checks before mask consumption. Missing evidence limits observation only. Fresh enqueue for retries; no legacy backfill, opaque-wrapper execution proof or scientific acceptance. | [Contract](docs/cmw-jobs-progress.md#automatic-poscar-identity-for-future-vasp-attempts), [binding](src/cmw/jobs/input_sources.py), [tests](tests/jobs/test_poscar_registration.py) |
-| Organize and query research attempts | `cmw jobs query`; `catalogue show/edit/relations/relate/retract`; `watch` / Search and T Catalogue — IMPLEMENTED, bounded | Explicit human project/system/series/stage/tags, revision-checked owner edits, global attempt intent/history and qualified recorded artifact links. Literal Unicode metadata queries, per-owner paging/coverage and safe filtered controls. Paging ignores heartbeat-only writes but invalidates changed catalogue projections. No scientific status, scheduling, automatic discovery or read backfill. | [Contract](docs/cmw-jobs-catalogue.md), [store/query](src/cmw/jobs/catalogue.py), [relations](src/cmw/jobs/catalogue_relations.py), [tests](tests/jobs/test_catalogue_store.py) |
-| Annotate a managed job | `cmw jobs add --note`, `annotate JOB_ID --note` / `--clear-note`; `watch` N — IMPLEMENTED | One private plain-text note, 4096 Unicode code points; transactional replacement and optional expected revision. Immutable editor target and stale-edit conflict protection. Human metadata only, never scheduling/scientific evidence; external observations stay read-only. | [Contract](docs/cmw-jobs.md#managed-job-notes), [store](src/cmw/jobs/store.py), [CLI](src/cmw/jobs/cli.py), [tests](tests/jobs/test_notes_store.py) |
-| Read node telemetry independently of status polling | `cmw.nodes.telemetry.NodeTelemetry` — IMPLEMENTED P1 CODE, NOT DEPLOYED | Endpoint-owned 2 s cadence, latest-sample age, stale after 5 s and unavailable after 15 s. Bound ownership/membership and independent sharing evidence; stop/restart/slow-sample refusal. Status does not sample CPU/memory. | [Node guide](docs/cmw-dual-node.md), [cadence tests](tests/nodes/test_telemetry_cadence.py) |
-| Inspect current CPU/RAM and optional CPU average temperature | `cmw jobs status --json`, `show`, `watch` — IMPLEMENTED | Observation quality can be warming/stale/unavailable. Verified member RSS sums and optional macOS process-footprint sums have independent coverage and freshness; machine RAM remains psutil total minus available. Optional opt-in macmon CPU sensor average is independently aged, node-local, ephemeral and never an admission/control input; absent providers retain CPU/RAM. Enrolled endpoints load only their private node-local `thermal.env`, never frontend settings. Physical sensor qualification is separate. Current usage is not unique physical ownership, declared commitments or proof of convergence; `watch` needs the Jobs extra. | [Guide](docs/cmw-jobs.md#current-cpu-and-ram-usage), [telemetry](src/cmw/jobs/telemetry.py), [tests](tests/jobs/test_telemetry.py) |
-| Observe active/offline managed execution | `cmw jobs observe JOB_ID [--json]`; active `show` / selected `watch` — IMPLEMENTED, read-only | Schema 1/2/3, recorded PIDs and pinned existing paths only. Persisted status stays distinct from scoped worker/anchor evidence and scientific progress. Schema-3 suspension constraints retained; no full-domain/drainage claim, adoption, migration or lifecycle mutation. | [Contract](docs/cmw-jobs.md#offline-lifecycle-observations), [observer](src/cmw/jobs/lifecycle.py), [tests](tests/jobs/test_lifecycle_observation.py) |
-| Diagnose local process ownership | `cmw jobs ownership JOB [--role group\|worker\|controller] [--json]` — IMPLEMENTED, read-only | Recorded and observed identity sub-checks, boot session, record version and exit 0/2/75 for VERIFIED/GONE/UNVERIFIABLE. [Jobs](docs/cmw-jobs.md) |
-| Recover transient ownership and completion observations | Original Jobs worker — IMPLEMENTED, NOT DEPLOYED | Driven holds preserve the original pipe; verified-domain completion retries without replaying control or terminal publication. Never-observed coordinated domains retain a visible manual-verification hold. Controller replacement uncertainty is a retryable exit-75 refusal before launch, requiring confirmed GONE and a free lock. No worker-death recovery, adoption, schema or protocol-version change. | [Recovery contract](docs/cmw-jobs.md#process-domain-never-observed), [runtime](src/cmw/jobs/runtime.py), [fault sweep](tests/jobs/test_ownership_fault_sweep.py), [deferred durable completion (#23)](https://github.com/angzeli/computational-modelling-workflow/issues/23) |
-| Qualify parity with deployed CMW revisions | Required cutover review — PROCEDURE | Inventory each deployment and active runtime, compare ancestry and stable patch IDs, manually review semantic near-matches, and retain deterministic regression evidence before cutover. | [Parity procedure and recorded inventory](docs/architecture/deployed-runtime-parity.md) |
-| Preview conservative lifecycle reconciliation | `cmw jobs reconcile JOB_ID --preview [--json]` — IMPLEMENTED, read-only; apply DEFERRED | Fresh attempt/controller binding; conditional Unknown retains commitments and disables dispatch only in a future authorized operation. Schema-3 preview proposes no transition. Current command grants no mutation or terminal authority; persistent apply remains unimplemented/unqualified. | [Contract](docs/cmw-jobs.md#offline-lifecycle-observations), [preview](src/cmw/jobs/reconciliation.py), [tests](tests/jobs/test_reconciliation_preview.py) |
-| Retire an Unknown attempt whose recorded execution is gone | `cmw jobs --state QUEUE_STATE retire JOB --reason TEXT [--json]` — IMPLEMENTED, local only | Transactional administrative `Fail` after every recorded identity is GONE and recorded sessions/groups are empty; one audit event and idempotent repeats. Legacy v1 mismatches refuse. No signals, job-file changes, scientific completion, endpoint operation, reenrollment or automatic dispatch. | [Contract and Mini cutover step](docs/cmw-jobs-retirement.md), [service](src/cmw/jobs/retirement.py), [tests](tests/jobs/test_retirement.py) |
-| Understand a managed Unknown attempt | `cmw jobs show JOB_ID`, `observe JOB_ID`, `logs JOB_ID` — IMPLEMENTED, read-only | Shared lifecycle evidence plus compatible `ownership_observation`. No force-Done, takeover, blind retry or state deletion. | [Guide](docs/cmw-jobs.md#persistence-lifecycle-and-recovery), [observer](src/cmw/jobs/lifecycle.py), [tests](tests/jobs/test_unknown_diagnostics.py) |
+| Schedule prepared foreground commands sequentially | `cmw jobs add`, then separately authorized `start` | IMPLEMENTED; `add` only enqueues | [Guide](docs/cmw-jobs.md#prepared-jobs-and-controls) |
+| Identify managed jobs in history | `cmw jobs status`, `show JOB_ID`, `watch` | IMPLEMENTED | [Guide](docs/cmw-jobs.md#prepared-jobs-and-controls) |
+| Annotate a managed job | `cmw jobs add --note`, `annotate JOB_ID --note` / `--clear-note`; `watch` N | IMPLEMENTED; never scheduling or scientific evidence | [Contract](docs/cmw-jobs.md#managed-job-notes) |
+| Discover managed job files / open a declared folder | `cmw jobs files JOB_ID [--json] [--open --role output]`; `watch` Files / F | IMPLEMENTED, read-only | [Guide](docs/cmw-jobs.md#file-locations-and-folder-navigation), [location API](docs/cmw-jobs-locations.md) |
+| Observe selected-job live progress and history | `cmw jobs progress JOB_ID [--history --limit N --cursor …] [--json]`; `watch` card, G, S, Y | IMPLEMENTED, read-only; bounded VASP 6.6.1 and ORCA 6.1.x readers; no ETA or acceptance | [Contract](docs/cmw-jobs-progress.md), [ORCA scope](docs/molecular/orca-live-progress.md) |
+| Declare future scientific progress sources | `cmw jobs add --progress-source ROLE[@STAGE]=ABSOLUTE_PATH` | IMPLEMENTED, optional; user-declared, not verified provenance | [Contract](docs/cmw-jobs-progress.md#declarations-for-future-jobs) |
+| Bind staged POSCAR for new supported VASP attempts | `Store.add` / `cmw jobs add` with managed `run-vasp.sh` argv | IMPLEMENTED, bounded; new attempts only | [Contract](docs/cmw-jobs-progress.md#automatic-poscar-identity-for-future-vasp-attempts) |
+| Review one selected scientific result on its owner node | `cmw jobs review JOB [--inspect] [--policy … --spec …] [--export …] --json`; `watch` R | IMPLEMENTED, bounded; no finalization or job mutation | [Contract](docs/cmw-jobs-result-review.md) |
+| Plan and prepare an explicit successor calculation | `cmw jobs plan-next` / `materialize-next` / `register-next` | IMPLEMENTED, geometry-only; no automatic execution | [Contract](docs/cmw-jobs-successors.md) |
+| Plan and compare an explicit VASP convergence study | `cmw jobs study plan/materialize/register/compare/view`; catalogue S | IMPLEMENTED, bounded static subset; at most 64 cases | [Contract](docs/cmw-jobs-studies.md) |
+| Organize and query research attempts | `cmw jobs query`; `catalogue show/edit/relations/relate/retract`; `watch` Search, T | IMPLEMENTED, bounded; human metadata only | [Contract](docs/cmw-jobs-catalogue.md) |
+| Run one independent auxiliary beside a primary | `cmw jobs config --mode bounded-sharing`; `sharing` / `add` declarations | IMPLEMENTED; one primary and one auxiliary, explicit consent | [Guide](docs/cmw-jobs.md#bounded-sharing-one-primary-and-one-auxiliary) |
+| Permit coexistence with an external computation | `cmw jobs reserve OBSERVATION_ID`, `unreserve` | IMPLEMENTED; never starts jobs or adopts processes | [Guide](docs/cmw-jobs.md#external-vasp-plus-a-prepared-independent-analysis) |
+| Observe external VASP/ORCA/Multiwfn and the admission guard | `cmw jobs status`, `watch`, `show E…` | IMPLEMENTED, read-only; no adoption | [Guide](docs/cmw-jobs.md#external-activity-and-admission-guard) |
+| Inspect current CPU/RAM and optional CPU temperature | `cmw jobs status --json`, `show`, `watch` | IMPLEMENTED; temperature is never an admission input | [Guide](docs/cmw-jobs.md#current-cpu-and-ram-usage) |
+| Observe active/offline managed execution | `cmw jobs observe JOB_ID [--json]` | IMPLEMENTED, read-only | [Contract](docs/cmw-jobs.md#offline-lifecycle-observations) |
+| Diagnose local process ownership | `cmw jobs ownership JOB [--role group\|worker\|controller] [--json]` | IMPLEMENTED, read-only; exit 0/2/75 = VERIFIED/GONE/UNVERIFIABLE | [Guide](docs/cmw-jobs.md) |
+| Recover transient ownership and completion observations | Original Jobs worker | IMPLEMENTED, NOT DEPLOYED; no worker-death recovery ([#23](https://github.com/angzeli/computational-modelling-workflow/issues/23)) | [Recovery contract](docs/cmw-jobs.md#process-domain-never-observed) |
+| Understand a managed Unknown attempt | `cmw jobs show JOB_ID`, `observe JOB_ID`, `logs JOB_ID` | IMPLEMENTED, read-only; no force-Done or takeover | [Guide](docs/cmw-jobs.md#persistence-lifecycle-and-recovery) |
+| Preview conservative lifecycle reconciliation | `cmw jobs reconcile JOB_ID --preview [--json]` | IMPLEMENTED, read-only; apply DEFERRED | [Contract](docs/cmw-jobs.md#offline-lifecycle-observations) |
+| Retire an Unknown attempt whose recorded execution is gone | `cmw jobs --state QUEUE_STATE retire JOB --reason TEXT [--json]` | IMPLEMENTED, local only; every recorded identity must be GONE | [Contract](docs/cmw-jobs-retirement.md) |
+| Diagnose a runtime, node/job or capability; export a support capsule | `cmw doctor [--state STATE --job JOB \| --node ALIAS --queue QUEUE] [--capability NAME] [--json] [--export NEW_DIRECTORY]`; Details → D | IMPLEMENTED, read-only | [Contract](docs/cmw-doctor.md) |
+| Submit to and observe explicitly enrolled execution nodes | `cmw nodes enroll/connect/list/check`; `cmw jobs --node ALIAS --queue QUEUE …`; `cmw jobs watch --all-nodes` | IMPLEMENTED, explicit; bounded SSH endpoint, no pooled scheduler | [Contract](docs/cmw-dual-node.md) |
+| Classify node failure and recover observation | `transport_events`, `NodesApp` per-node lanes | IMPLEMENTED P1 CODE, NOT DEPLOYED | [Node guide](docs/cmw-dual-node.md#portal-reachability-and-recovery) |
+| Read node telemetry independently of status polling | `cmw.nodes.telemetry.NodeTelemetry` | IMPLEMENTED P1 CODE, NOT DEPLOYED | [Node guide](docs/cmw-dual-node.md) |
+| Verify runtime trust for a status response | `RuntimeVerifier.verify_request`, `runtime_boundary_observed` | IMPLEMENTED P1 CODE, NOT DEPLOYED | [Trust contract](docs/cmw-dual-node.md#runtime-metadata-and-operation-authority) |
+| Record and inspect runner interpreter pins | `cmw.nodes.runner_profiles`, profile schema 2 | IMPLEMENTED P1 DATA, NOT DEPLOYED; no launch enforcement | [Guide](docs/cmw-dual-node.md#runner-interpreter-profile-records) |
+| Evaluate cancellation and node observation decisions | `cmw.nodes.contracts` | CANCELLATION UNWIRED; OBSERVATION WIRED IN P1 | [Specification](docs/architecture/multi-host-nodes.md) |
+| Assess an author-supplied VASP plan for a target node | `cmw.nodes.vasp_plan.plan_vasp`, `Hardware`, `VaspPlan.require_submission` | PHASE 0 CONTRACTS, NOT WIRED | [Specification](docs/architecture/multi-host-nodes.md#37-author-inputs-runner-hardware-and-builds-d17d22) |
+| Qualify parity with deployed CMW revisions | Required cutover review | PROCEDURE | [Parity procedure](docs/architecture/deployed-runtime-parity.md) |
 
-**Independent Multiwfn beside external VASP:** select a supported prepared analysis
-runner (for IFCT, the runner above), verify its actual thread/memory behavior,
-identify the live external observation, and obtain explicit coexistence consent.
-Use the same Jobs state, declare the external reservation and auxiliary resources,
-independence and disjoint write scope, then request execution authorization.
-Low usage, a small expected job or a successful help command grants none of these.
+**Independent Multiwfn beside external VASP:** choose a supported prepared
+analysis runner, verify its actual thread and memory use, identify the live
+external observation and obtain explicit coexistence consent. Then declare the
+reservation, auxiliary resources and disjoint write scope in the same Jobs state,
+and request execution authorization. Low usage or a passing help command grants
+none of these.
 
-### Shared mechanisms
+## Shared mechanisms
 
-| Task | Existing entry point / availability | Scope and mechanism to reuse | Contract and evidence |
+| Task | Entry point | Status and key boundary | Contract |
 | --- | --- | --- | --- |
-| Express task intent / execution resources | `ExecutionIntent`, `load_execution_profiles` APIs — IMPLEMENTED | Scientific intent and operational profile hashes are separate. ORCA resource translation and Multiwfn thread settings are program-specific; memory declaration is not universal enforcement. | [Profiles](docs/architecture/execution-resource-profiles.md), [intent](src/cmw/core/execution_contract.py), [profiles API](src/cmw/core/execution_profiles.py), [tests](tests/core/test_execution_profiles.py) |
-| Materialize dependency-ready workflow nodes | `WorkflowPlanMaterializer`; `python -m cmw.molecular.orca.cli materialize-plan` — IMPLEMENTED | Requires typed artifacts and a supported renderer. Reuse target/attempt numbering, layout, readiness and reuse decisions; no launch and no universal VASP renderer implied. | [Guide](docs/architecture/workflow-plan-materialization.md), [API](src/cmw/core/plan_materialization.py), [tests](tests/core/test_plan_materialization.py) |
-| Preserve identities, provenance and artifact lineage | `JobTarget`, `ExecutionAttempt`, `Artifact`; `finalize_artifact_bundle` APIs — IMPLEMENTED | Reuse canonical identities, hashes and explicit program validation evidence. Planned artifacts and operational attempts are not scientific results. | [Graph/artifact contract](docs/architecture/composite-workflow-engine.md), [identity](src/cmw/core/job.py), [provenance](src/cmw/core/provenance.py), [finalizer](src/cmw/core/artifact_finalization.py), [tests](tests/core/test_artifact_finalization.py) |
-| Publish prepared inputs apart from provenance | `publication_plan`, `publish_preparation`, `inspect_publication`; Scratch-only `record_publication_plan`, `publish_record` APIs — IMPLEMENTED | Explicit Scratch and new destinations; no-clobber staging, complete/failed/incomplete states. Reuse split preparation or record-only finalization publication instead of copying adjacent metadata. | [Contract](docs/periodic/preparation-publication.md), [API](src/cmw/core/preparation_publication.py), [tests](tests/core/test_preparation_publication.py) |
-| Resolve/migrate execution layouts | `ExecutionLayout`; `cmw execution-layout-status`; `cmw migrate-execution-layout` — IMPLEMENTED | Reuse full scientific identity and registry-backed paths. Migration plans first; apply requires exact plan confirmation and external evidence; resume/rollback/audit follow its contract. | [Guide](docs/execution-layout-v2.md), [API](src/cmw/core/execution_layout.py), [tests](tests/core/test_execution_layout_migration.py) |
-| Clean provably superseded attempts | `cmw cleanup-attempts --campaign … --superseded-only` — IMPLEMENTED | Default dry run; guarded minimal-provenance apply or irreversible purge with exact `--confirm-plan`. Preserve current/canonical/referenced/active/uncertain attempts; no raw deletion substitute. | [Guide](docs/architecture/attempt-cleanup.md), [API](src/cmw/core/attempt_cleanup.py), [tests](tests/core/test_attempt_cleanup.py) |
-| Stage operational execution on external Scratch | ORCA runner external-scratch options; `prepare_external_scratch`, `copy_back_external_scratch`, `cleanup_external_scratch` APIs — IMPLEMENTED | Mounted volume, capacity/filesystem checks, owned session, allowlisted verified copyback and guarded cleanup. Distinct from preparation-record Scratch; no fallback when unavailable. | [Runner lifecycle](docs/architecture/orca-runtime.md), [transaction contract](src/cmw/core/external_scratch.py), [tests](tests/core/test_external_scratch.py) |
-| Inspect process health / disk admission | `cmw.core.process_health`; `check_storage_capacity` APIs — IMPLEMENTED | Advisory process evidence and storage floors; reuse runner gates without converting health into scientific success or an automatic termination policy. | [Health guide](docs/architecture/process-health.md), [storage API](src/cmw/core/storage.py), [tests](tests/core/test_storage.py) |
+| Express task intent / execution resources | `ExecutionIntent`, `load_execution_profiles` | IMPLEMENTED (API); memory declaration is not enforcement | [Profiles](docs/architecture/execution-resource-profiles.md) |
+| Materialize dependency-ready workflow nodes | `WorkflowPlanMaterializer`; `python -m cmw.molecular.orca.cli materialize-plan` | IMPLEMENTED; no launch, no universal VASP renderer | [Guide](docs/architecture/workflow-plan-materialization.md) |
+| Preserve identities, provenance and artifact lineage | `JobTarget`, `ExecutionAttempt`, `Artifact`; `finalize_artifact_bundle` | IMPLEMENTED (API) | [Graph/artifact contract](docs/architecture/composite-workflow-engine.md) |
+| Publish prepared inputs apart from provenance | `publication_plan`, `publish_preparation`, `inspect_publication`; `record_publication_plan`, `publish_record` | IMPLEMENTED (API); no-clobber staging | [Contract](docs/periodic/preparation-publication.md) |
+| Resolve/migrate execution layouts | `ExecutionLayout`; `cmw execution-layout-status`; `cmw migrate-execution-layout` | IMPLEMENTED; plan first, apply needs exact confirmation | [Guide](docs/execution-layout-v2.md) |
+| Clean provably superseded attempts | `cmw cleanup-attempts --campaign … --superseded-only` | IMPLEMENTED; dry run by default, purge needs `--confirm-plan` | [Guide](docs/architecture/attempt-cleanup.md) |
+| Stage execution on external Scratch | ORCA runner external-scratch options; `prepare_external_scratch`, `copy_back_external_scratch`, `cleanup_external_scratch` | IMPLEMENTED; no fallback when unavailable | [Runner lifecycle](docs/architecture/orca-runtime.md) |
+| Inspect process health / disk admission | `cmw.core.process_health`; `check_storage_capacity` | IMPLEMENTED (API); advisory, never scientific success | [Health guide](docs/architecture/process-health.md) |
 
-### Analysis and reporting
+## Analysis and reporting
 
-| Task | Existing entry point / availability | Scope and mechanism to reuse | Contract and evidence |
+| Task | Entry point | Status and key boundary | Contract |
 | --- | --- | --- | --- |
-| Prepare DOS/projection/band-path arrays | `cmw.analysis.electronic` APIs — IMPLEMENTED | Caller-supplied arrays, labels and conventions. Reuse energy shifting, explicit projection grouping and disconnected reciprocal segments; readers, spin interpretation and plotting remain caller-owned. | [Guide](docs/electronic-arrays.md), [API](src/cmw/analysis/electronic.py), [tests](tests/test_electronic_arrays.py) |
-| Normalize/join excited-state results | `normalize_tda_manifold`, `join_excited_state_tables` APIs — IMPLEMENTED | Explicit state identity and finalized NTO/HEA artifacts; reuse provenance-aware joins instead of matching labels/row positions by guess. | [State contract](docs/molecular/orca-6.1-tda-excited-states.md), [table API](src/cmw/molecular/excited_state_tables.py), [tests](tests/molecular/test_excited_state_tables.py) |
-| End-to-end periodic result reporting | Bounded VASP evidence/finalization plus array preparation — PARTIAL | Reuse the separate supported result adapter for static/fixed-cell evidence. General output readers, comparability analysis and report generation remain outside these capabilities. | [Result contract](docs/periodic/vasp-result-evidence.md), [array boundary](docs/electronic-arrays.md) |
+| Prepare DOS/projection/band-path arrays | `cmw.analysis.electronic` | IMPLEMENTED (API); caller owns readers and plotting | [Guide](docs/electronic-arrays.md) |
+| Normalize/join excited-state results | `normalize_tda_manifold`, `join_excited_state_tables` | IMPLEMENTED (API) | [State contract](docs/molecular/orca-6.1-tda-excited-states.md) |
+| End-to-end periodic result reporting | VASP evidence/finalization plus array preparation | PARTIAL; general readers and reports not implemented | [Result contract](docs/periodic/vasp-result-evidence.md) |
 
 ## Workflow boundaries at a glance
 
@@ -176,137 +165,65 @@ flowchart TD
     FUTURE["DEFERRED: interface or heterostructure construction"]
 ```
 
-Solid arrows show preparation/data flow or the explicitly labelled execution
-branch. Dotted arrows show optional orchestration, external integration or
-read-only evidence. Preparation never starts that execution branch automatically.
-ORCA, Multiwfn and the bounded VASP result adapter supply distinct program-specific
-validation to the shared artifact finalizer. VASP record publication requires its
-own policy and execution/input binding; preparation does not supply those facts.
+Dotted arrows are optional orchestration, external integration or read-only
+evidence. Preparation never starts the execution branch automatically.
 
 ## High-risk routing distinctions
 
-### Molecular embedding versus periodic import
-
-Ordinary molecular XYZ goes to embedding **only when constructing a periodic
-model is intended**. Embedding can create a cell, center the molecule and add
-vacuum. It is not lossless generic periodic conversion. Canonical embedding
-rejects periodic extended XYZ and CIF; dependency-level parser support is not a
-CMW contract. See the [embedding limits](docs/structure/xyz-to-poscar.md).
-
-Ordered CIF goes to the dedicated importer, not embedding or an ad hoc ASE
-read/write script. The [current CIF contract](docs/structure/cif-import.md) is:
-
-- One structural candidate is selected automatically; multiple candidates require
-  `--block`. Metadata-only blocks are retained as selection evidence.
-- Preserve represented a/b/c basis and metric. CIF metrics define no absolute
-  Cartesian orientation; CMW uses a along +x, b in xy and c with positive z.
-  No primitive/conventional conversion, reduction, supercell, centering or vacuum.
-- Require full occupancy (absent occupancy column uses the recorded dictionary
-  default); reject unknown/partial occupancy, unresolved disorder, overlapping
-  source orbits, magnetic/special unsupported models and implicit missing H.
-- Expand a complete explicit symmetry group or an unambiguous declared setting.
-  Special-position images collapse within a source orbit, retaining all generating
-  operations; ambiguous near-special positions are rejected, not snapped.
-- Write Direct coordinates in `[0,1)`, rounded to 12 decimals. Record the periodic
-  fractional tolerances and Cartesian equivalence checks; retain original values.
-- Preserve source-site → expanded-atom → POSCAR mappings. Species use stable
-  first-occurrence grouping, with deterministic ordering inside each block.
-
-[Core tests](tests/structure/test_cif.py) and [publication/handoff tests](tests/structure/test_cif_import.py)
-cover these boundaries; parser availability alone is insufficient evidence.
-The immutable model and record can feed future modeling without reparsing CIF.
-
-### Prepared POSCAR and scientific evidence
-
-An already reviewed POSCAR goes directly to checking/preparation. Do not re-embed,
-sort, wrap, center or regenerate it. The preparer retains exact source bytes,
-including repeated species blocks and supported constraints. Optional import or
-embedding lineage requires a complete record and an exact byte match.
-
-A potential's element/variant/family, exact selected bytes and caller-declared
-library release are different evidence. Dataset dates do not establish a release.
-POTCAR data must be supplied locally; CMW neither bundles nor automatically
-fetches it, and real payloads must not enter public Git artifacts.
-
-Preparation is not execution. A bounded input-check pass does not establish
-universal dialect support, DFT suitability, SCF convergence or ionic convergence.
-Requested scientific settings, committed inputs, declared runtime overlays and
-observed effective inputs are separate. VASP preparation records the last as
-unobserved. Jobs Done establishes its operational completion contract, not
-scientific convergence; ORCA validation also requires stage-specific evidence.
-
-## Output and materialization contracts
-
-For canonical VASP preparation:
-
-```text
-research calculation input directory/     explicit Scratch record directory/
-    INCAR                                     preparation.json
-    KPOINTS
-    POSCAR
-    POTCAR
-```
-
-For canonical standalone embedding or CIF import:
-
-```text
-requested structure destination: POSCAR only
-explicit Scratch record directory: preparation.json with metadata/mappings
-```
-
-Neither canonical route suggests adjacent metadata/mapping files, copied specs,
-README, run.sh or metadata symlinks. Dry run writes nothing; existing destinations
-and unavailable Scratch are refused. A failure after input publication can leave
-an **incomplete** record and retained inputs; inspect it rather than claiming
-success. See [split publication](docs/periodic/preparation-publication.md).
-
-The four-file rule does **not** apply to all CMW workflows. Molecular execution
-layouts, cube outputs, logs and typed artifacts follow their own contracts.
-The legacy XYZ converter still has adjacent mapping/metadata and overwrite
-behavior; do not transfer that convention to canonical structure preparation.
+* **Molecular embedding versus periodic import.**
+  * Use embedding only to *construct* a periodic model from ordinary molecular
+    XYZ. It is not lossless periodic conversion, and it rejects periodic extended
+    XYZ and CIF.
+  * Ordered CIF goes to `cmw structure import-cif`, never to embedding or an ad
+    hoc ASE script.
+  * The [CIF contract](docs/structure/cif-import.md) defines block selection,
+    occupancy, symmetry expansion, orientation and site mappings.
+* **Prepared POSCAR.** Check or prepare a reviewed POSCAR directly. Do not
+  re-embed, sort, wrap, center or regenerate it.
+* **POTCAR.** It is supplied locally. CMW never bundles or fetches it, and real
+  payloads must not enter Git. Element/variant, exact selected bytes and the
+  declared library release are different evidence.
+* **Evidence is not success.**
+  * Preparation is not execution.
+  * An input-check pass is not SCF or ionic convergence.
+  * Jobs Done is operational completion, not scientific success.
+  * ORCA validation needs stage-specific evidence.
+* **Outputs.**
+  * Canonical VASP preparation writes exactly `INCAR`, `KPOINTS`, `POSCAR` and
+    `POTCAR`, plus `preparation.json` in an explicit Scratch record directory.
+  * Embedding and CIF import write `POSCAR` plus that record.
+  * Neither writes adjacent metadata, a README or `run.sh`.
+  * Molecular workflows follow their own layouts.
+  * See [split publication](docs/periodic/preparation-publication.md).
 
 ## Known gaps and deferred capabilities
 
 | Task | Availability / boundary |
 | --- | --- |
-| Two CIFs into an interface or heterostructure | DEFERRED. Model construction, not concatenation or conversion. A separate scoped task must resolve slab/bulk status, Miller planes, termination/thickness, integer matching, twist, mismatch/strain, registry, separation, overlaps, vacuum/periodicity and A/B origin mapping. [Scientific handoff](docs/structure/cif-import.md#future-interface-construction-handoff). |
-| Disordered, magnetic, superspace or unsupported special CIF import | NOT FOUND IN CURRENT CHECKOUT as a supported canonical route. Ordered import rejects these; do not resolve the scientific model by selecting occupancies or bypassing the importer. |
-| Native VASP launch and general result validation | Native launch remains outside the implementation. Bounded static/fixed-cell result evidence, explicit policy acceptance and retrospective finalization exist; variable-cell, MD, general restart, wavefunction/charge-density validity and universal result validation remain unsupported. [Result scope](docs/periodic/vasp-result-evidence.md#native-dialect-and-modes). |
-| Cluster scheduling, cluster locks, arbitrary backfill or generic retry ladders | Outside implemented local contracts. Use the [Jobs limits](docs/cmw-jobs.md) and [ORCA lifecycle](docs/architecture/orca-runtime.md); a separate implementation/authorization decision is needed. |
-| Automatic CT-like state choice or general fragment-resolved HEA | DEFERRED beyond the explicit supported analysis contracts. The dedicated two-fragment IFCT runner does not make the older non-fragment HEA renderer universal. [Analysis boundary](docs/molecular/multiwfn-3.8-excited-state-analysis.md#unsupported-and-deferred-analysis). |
+| Two CIFs into an interface or heterostructure | DEFERRED; model construction, not concatenation. [Handoff](docs/structure/cif-import.md#future-interface-construction-handoff) |
+| Disordered, magnetic, superspace or unsupported special CIF | Not supported; do not resolve the model by choosing occupancies or bypassing the importer |
+| Native VASP launch and general result validation | Not implemented beyond bounded static/fixed-cell evidence. [Scope](docs/periodic/vasp-result-evidence.md#native-dialect-and-modes) |
+| Cluster scheduling, cluster locks, backfill or generic retry ladders | Outside the local contracts. [Jobs limits](docs/cmw-jobs.md) |
+| Automatic CT-like state choice or general fragment-resolved HEA | DEFERRED. [Analysis boundary](docs/molecular/multiwfn-3.8-excited-state-analysis.md#unsupported-and-deferred-analysis) |
 
 ## Using CMW from another project
 
-CMW's root AGENTS.md/map are not automatically loaded in a research repository or
-Scratch directory. The active project's guidance must explicitly point here.
-That reference imports routing information, not CMW's entire instruction policy.
-Existing sessions may need an explicit read or a new session; no hot reload or
-guaranteed agent compliance is implied.
-
-If a command is missing, first identify the selected installation and interpreter:
+CMW's AGENTS.md and this map are not loaded automatically in another repository;
+that project's guidance must point here. If a command seems missing, first
+identify the selected installation and interpreter:
 
 ```sh
 command -v cmw
 cmw --help
-cmw structure import-cif --help
 # CMW_PYTHON is the interpreter belonging to that selected installation.
 "$CMW_PYTHON" -c 'import sys, cmw; from importlib.metadata import version; print(sys.executable); print(cmw.__file__); print(version("computational-modelling-workflow"))'
+# From a declared checkout whose dependencies are available:
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$CMW_CHECKOUT/src" "$CMW_PYTHON" -m cmw.cli structure import-cif --help
 ```
 
-Compare with [current registration](src/cmw/cli.py), the linked module/script and
-[package entry point](pyproject.toml). `CMW_CHECKOUT` below denotes the declared
-checkout path, not a literal directory name. Where that checkout's dependencies
-are already available, a safe source-surface check is:
-
-```sh
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$CMW_CHECKOUT/src" \
-  "$CMW_PYTHON" -m cmw.cli structure import-cif --help
-```
-
-A failed first help command, guessed flag, stale installation or wrong environment
-does not establish a missing capability. CLI absence does not establish API or
-workflow absence. Report the concrete mismatch and choose an authorized existing
-entry point/environment correction; do not install, duplicate or bypass silently.
+A failed help command, stale installation or wrong environment does not prove a
+capability is missing, and CLI absence does not prove API absence. Report the
+mismatch; do not install, duplicate or bypass silently.
 
 Copyable consumer-project guidance (`CMW_CHECKOUT` is a placeholder to resolve):
 
@@ -320,10 +237,8 @@ Copyable consumer-project guidance (`CMW_CHECKOUT` is a placeholder to resolve):
 
 ## Maintenance
 
-A commit that adds, renames, removes, promotes or materially changes a user-facing
-capability must update its map entry, route, scope and canonical links in the same
-coherent change. Internal refactors with unchanged contracts need no map churn.
-Keep one root map; feature guides remain authoritative. Do not add changing test
-counts or use package version alone as a maturity guarantee.
-
-Runtime observation and operation scope: see the [bounded trust contract](docs/cmw-dual-node.md#runtime-metadata-and-operation-authority). Incomplete security evidence cannot authorize metadata recovery.
+* A change that adds, renames, removes or materially changes a user-facing
+  capability updates its row in the same change.
+* Keep rows to one line: details belong in the linked contract, which stays
+  authoritative.
+* Do not add test counts, test links or version-based maturity claims.
