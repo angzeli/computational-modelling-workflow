@@ -79,9 +79,8 @@ molecule-agnostic
 periodic registry extraction, deterministic dimer assembly, hierarchical
 relaxation, TDDFT/TDA planning, and Multiwfn hole/electron analysis through
 those same contracts.
-Domain-specific translation remains outside the core graph. The first adapter,
-documented in the [HOF adapter guide](../adapters/hof.md), validates the HOF
-system schema and maps it onto those generic graph and artifact contracts.
+Domain-specific translation remains outside the core graph and belongs in the
+project that uses it, composing these generic graph and artifact contracts.
 Program-specific analysis adapters remain molecule agnostic. The
 [Multiwfn analysis layer](../molecular/multiwfn-cubes.md) maps validated
 wavefunction or density inputs through deterministic command and output

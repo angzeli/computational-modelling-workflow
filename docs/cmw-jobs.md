@@ -748,9 +748,9 @@ for its private macOS API and version limitations.
 Use the existing prepared CMW shell command, including its existing arguments,
 execution profile environment, runtime contract, layout, preflight and
 finalization. Jobs determines **when** to invoke it; those runners still determine
-scientific intent, settings, output layout and validation. For example, a HOF
-materialized `run.sh` may be passed through `/bin/bash` as above. Existing HOF
-queues/authorization remain independent; Jobs does not bypass their guards.
+scientific intent, settings, output layout and validation. For example, a
+materialized `run.sh` may be passed through `/bin/bash` as above. Existing
+project queues/authorization remain independent; Jobs does not bypass their guards.
 
 An optional `--layout /path/to/layout.json` resolves an existing v1/v2 CMW layout,
 checks that its working directory matches `--cwd`, and records its exact target
