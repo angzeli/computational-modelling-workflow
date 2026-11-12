@@ -7,7 +7,6 @@ from pathlib import Path
 import signal
 import sys
 import tempfile
-import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -18,16 +17,11 @@ from cmw.jobs.store import Store
 from tests.jobs.isolated_runtime import install
 from tests.runtime.owned_process_cleanup import OwnedProcessCleanup
 from tests.runtime import owned_process_cleanup
+from tests import waiting
 
 
 def until(predicate, seconds=8):
-    limit = time.monotonic() + seconds
-    while time.monotonic() < limit:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(.025)
-    raise AssertionError('Synthetic cleanup fixture did not start')
+    return waiting.wait_for(predicate, timeout=seconds, interval=.025, what='Synthetic cleanup fixture did not start')
 
 
 class OwnedProcessCleanupTests(unittest.TestCase):

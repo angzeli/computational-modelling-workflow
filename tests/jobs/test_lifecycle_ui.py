@@ -1,5 +1,4 @@
 """Selected-attempt lifecycle facts remain separate from stored and scientific state."""
-import asyncio
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -10,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from cmw.jobs.store import Store
 from cmw.progress.models import Metric, MetricSeries, ProgressSnapshot, RunContext
+from tests import waiting
 
 try:
     from cmw.jobs.tui import JobsApp, Inspect, NoteEditor
@@ -89,11 +89,7 @@ class LifecycleUiTests(unittest.IsolatedAsyncioTestCase):
         return app
 
     async def until(self, predicate):
-        for _ in range(200):
-            if predicate():
-                return
-            await asyncio.sleep(.01)
-        self.fail('Bounded fixture did not finish')
+        await waiting.until(predicate, timeout=10, interval=.01, what='Bounded fixture did not finish')
 
     async def settled(self, app, pilot):
         await self.until(lambda: app.execution_observation is not None and not app.execution_busy)

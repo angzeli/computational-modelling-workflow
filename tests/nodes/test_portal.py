@@ -2,7 +2,6 @@
 
 These tests qualify frontend routing/rendering, not physical SSH execution.
 """
-import asyncio
 from copy import deepcopy
 from dataclasses import replace
 import json
@@ -21,6 +20,7 @@ from cmw.core.provenance import stable_hash
 from cmw.nodes.protocol import NodeError
 from cmw.progress.models import HistoryPage, HistoryEntry, SourceDescriptor
 from tests.progress.test_electronic_notation import electronic_example
+from tests import waiting
 
 try:
     from cmw.nodes.portal import NodesApp, row_key, target_key
@@ -123,11 +123,7 @@ class FakeBackend:
 @unittest.skipIf(NodesApp is None, 'Jobs UI extra unavailable')
 class PortalTests(unittest.IsolatedAsyncioTestCase):
     async def until(self, pilot, predicate):
-        for _ in range(80):
-            if predicate():
-                return
-            await pilot.pause(.05)
-        self.fail('Frontend condition did not become true')
+        await waiting.until(predicate, pilot=pilot, timeout=10, interval=.05, what='Frontend condition did not become true')
 
     def backends(self):
         return {'MBP': FakeBackend('MBP'), 'MINI': FakeBackend('MINI', remote=True)}

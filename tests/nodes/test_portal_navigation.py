@@ -8,6 +8,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from cmw.progress.models import ProgressSnapshot
 from tests.nodes.test_portal import FakeBackend, NodesApp
+from tests import waiting
 
 if NodesApp is not None:
     from cmw.jobs.copy_ui import FrozenText
@@ -56,12 +57,9 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
         return NodesApp(backends), backends
 
     async def until(self, pilot, predicate, description, diagnostics=None):
-        for _ in range(160):
-            if predicate():
-                return
-            await pilot.pause(.025)
-        detail = '; state=' + repr(diagnostics()) if diagnostics is not None else ''
-        self.fail('Frontend condition did not become true: ' + description + detail)
+        await waiting.until(predicate, pilot=pilot, timeout=10,
+                            what='Frontend condition did not become true: ' + description,
+                            detail=None if diagnostics is None else lambda: 'state=' + repr(diagnostics()))
 
     async def position(self, app, backends, pilot, number=25, *, where='middle'):
         await self.until(pilot, lambda: len(app.rows) == 72 and not app.navigation_pending(),

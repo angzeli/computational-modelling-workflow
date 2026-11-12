@@ -15,6 +15,7 @@ from cmw.jobs.snapshot import capture_snapshot, render_snapshot
 from cmw.jobs.store import Store
 from cmw.nodes.codec import encode_typed
 from cmw.nodes.protocol import NodeError
+from tests import waiting
 
 try:
     from textual.widgets import Button, DataTable, Input, Static, TextArea
@@ -106,12 +107,9 @@ class ReviewUiTests(unittest.IsolatedAsyncioTestCase):
             patched = patch.object(JobsApp,method)
             patched.start(); self.addCleanup(patched.stop)
 
-    async def until(self,pilot,predicate):
-        for _ in range(100):
-            if predicate():
-                return
-            await pilot.pause(.04)
-        self.fail('Review UI did not reach the expected bounded state')
+    async def until(self, pilot, predicate):
+        await waiting.until(predicate, pilot=pilot, timeout=10, interval=.04,
+                            what='Review UI did not reach the expected bounded state')
 
     def render(self,app,label,size):
         destination = os.environ.get('CMW_REVIEW_RENDER_DIR')

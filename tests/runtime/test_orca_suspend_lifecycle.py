@@ -20,18 +20,13 @@ from cmw.jobs.store import Store
 from tests.jobs.isolated_runtime import install
 from tests.jobs.lifecycle_evidence import bounded_tail, retain_lifecycle_evidence
 from tests.runtime.owned_process_cleanup import OwnedProcessCleanup
+from tests import waiting
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def wait_for(predicate, timeout=12):
-    limit = time.monotonic() + timeout
-    while time.monotonic() < limit:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(.05)
-    raise AssertionError('Timed out waiting for owned ORCA runner fixture')
+    return waiting.wait_for(predicate, timeout=timeout, what='Timed out waiting for owned ORCA runner fixture')
 
 
 class OrcaSuspendLifecycleTests(unittest.TestCase):
