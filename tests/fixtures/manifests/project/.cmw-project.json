@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "project_key": "fixture-project",
+  "owner_node_id": "11111111111111111111111111111111",
+  "legacy_nodes": {
+    "node-a": "11111111111111111111111111111111",
+    "node-b": "22222222222222222222222222222222"
+  },
+  "legacy_queues": {
+    "node-a": {
+      "research": {
+        "queue_id": null,
+        "state_root": "/fixture-root/queues/q1",
+        "root_identity": [
+          1,
+          101
+        ],
+        "database_identity": [
+          1,
+          102
+        ],
+        "volume_uuid": "11111111-1111-1111-1111-111111111111"
+      },
+      "secondary": {
+        "queue_id": "33333333333333333333333333333333",
+        "state_root": "/fixture-root/queues/q2",
+        "root_identity": [
+          1,
+          201
+        ],
+        "database_identity": [
+          1,
+          202
+        ],
+        "volume_uuid": "11111111-1111-1111-1111-111111111111"
+      }
+    },
+    "node-b": {
+      "research": {
+        "queue_id": "44444444444444444444444444444444",
+        "state_root": "/fixture-root/queues/q3",
+        "root_identity": [
+          2,
+          301
+        ],
+        "database_identity": [
+          2,
+          302
+        ],
+        "volume_uuid": "11111111-1111-1111-1111-111111111111"
+      }
+    }
+  }
+}

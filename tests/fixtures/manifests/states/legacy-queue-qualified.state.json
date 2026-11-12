@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "node-a/research:J4.1",
+  "project": "fixture-project",
+  "provenance": "backfilled",
+  "revision": 2,
+  "writer_node": "11111111111111111111111111111111",
+  "status": "done",
+  "native_status": "Done",
+  "started_at": "2026-11-09T12:10:00Z",
+  "ended_at": "2026-11-09T12:11:00Z",
+  "exit_code": 0,
+  "cancel_mode": null,
+  "scf_result": "unknown",
+  "last_step": null,
+  "ionic_step": null,
+  "energy_ev": null,
+  "delta_energy_ev": null,
+  "total_magnetisation_mu_b": null,
+  "restart_outputs": {
+    "WAVECAR": null,
+    "CHGCAR": null
+  },
+  "hashes_pending": false,
+  "evidence": [],
+  "binding": null
+}

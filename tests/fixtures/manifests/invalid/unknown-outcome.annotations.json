@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "J28",
+  "project": "fixture-project",
+  "provenance": "native",
+  "revision": 1,
+  "events": [
+    {
+      "sequence": 1,
+      "timestamp": "2026-11-09T12:01:00Z",
+      "author_node": "11111111111111111111111111111111",
+      "purpose": "Synthetic schema example",
+      "system": "Si",
+      "outcome": "accepted",
+      "note": "Held input bundle; no calculation was launched.",
+      "label": null
+    }
+  ]
+}

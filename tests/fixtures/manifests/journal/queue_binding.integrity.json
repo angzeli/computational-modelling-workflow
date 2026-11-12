@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "sequence": 1,
+  "request_uuid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "event": "queue_binding",
+  "timestamp": "2026-11-09T12:00:00Z",
+  "project": "example-project",
+  "payload": {
+    "node": "node-a",
+    "queue": "research",
+    "binding": {
+      "queue_id": null,
+      "state_root": "/fixture-root/queues/q1",
+      "root_identity": [
+        1,
+        101
+      ],
+      "database_identity": [
+        1,
+        102
+      ],
+      "volume_uuid": "11111111-1111-1111-1111-111111111111"
+    }
+  }
+}

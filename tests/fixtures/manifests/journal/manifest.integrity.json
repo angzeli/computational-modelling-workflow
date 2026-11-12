@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "sequence": 3,
+  "request_uuid": "cccccccccccccccccccccccccccccccc",
+  "event": "manifest",
+  "timestamp": "2026-11-09T12:00:00Z",
+  "project": "example-project",
+  "payload": {
+    "id": "J28",
+    "job_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "binding": null
+  }
+}
