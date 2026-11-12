@@ -3,6 +3,7 @@ name: Deploy workflow website to Pages
 on:
   push:
     branches: [main]
+    paths: [docs/website/**, .github/workflows/pages.yml]
   workflow_dispatch:
 
 permissions:

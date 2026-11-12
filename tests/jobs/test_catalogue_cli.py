@@ -17,6 +17,20 @@ from cmw.jobs.store import Store
 from tests.nodes import test_catalogue as node_catalogue_tests
 
 
+def run_jobs(arguments, state_root=None):
+    """Run the core `jobs` grammar in process; return (exit code, stdout+stderr)."""
+    parser = argparse.ArgumentParser()
+    register(parser.add_subparsers())
+    output = io.StringIO()
+    with redirect_stdout(output), redirect_stderr(output):
+        try:
+            args = parser.parse_args(['jobs', *(['--state', str(state_root)] if state_root else []), *arguments])
+            code = args.handler(args)
+        except SystemExit as exc:
+            code = exc.code
+    return code, output.getvalue()
+
+
 class CatalogueCliTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='cmw-catalogue-cli-')
@@ -25,16 +39,7 @@ class CatalogueCliTests(unittest.TestCase):
         self.store = Store(self.root/'state')
 
     def call(self, arguments, *, state=True):
-        parser = argparse.ArgumentParser()
-        register(parser.add_subparsers())
-        output = io.StringIO()
-        with redirect_stdout(output), redirect_stderr(output):
-            try:
-                args = parser.parse_args(['jobs', *(['--state', str(self.store.root)] if state else []), *arguments])
-                code = args.handler(args)
-            except SystemExit as exc:
-                code = exc.code
-        return code, output.getvalue()
+        return run_jobs(arguments, self.store.root if state else None)
 
     def add(self):
         return self.store.add(argv=['/bin/true'], cwd=self.root, name='同名 [literal].*', note='long ' + '字'*4000, hold=True)

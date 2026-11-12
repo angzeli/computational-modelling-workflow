@@ -1,8 +1,6 @@
 """Explicit successor CLI grammar and owner-local forwarding remain core-only."""
 import argparse
-from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
-import io
 import json
 from pathlib import Path
 import subprocess
@@ -15,6 +13,7 @@ from uuid import uuid4
 from cmw.jobs.cli import register
 from cmw.jobs.store import Store
 from cmw.jobs.successor_models import SuccessorResult, SuccessorUnverifiable
+from tests.jobs.test_catalogue_cli import run_jobs
 from tests.nodes import test_successor
 
 
@@ -30,16 +29,7 @@ class SuccessorCliTests(unittest.TestCase):
                                      'plan', 'READY', self.digest, '{"checkpoint":"refused"}')
 
     def call(self, arguments, *, local=True):
-        parser = argparse.ArgumentParser()
-        register(parser.add_subparsers())
-        output = io.StringIO()
-        with redirect_stdout(output), redirect_stderr(output):
-            try:
-                args = parser.parse_args(['jobs', *(['--state', str(self.store.root)] if local else []), *arguments])
-                code = args.handler(args)
-            except SystemExit as exc:
-                code = exc.code
-        return code, output.getvalue()
+        return run_jobs(arguments, self.store.root if local else None)
 
     def test_plan_prints_complete_result_and_writes_no_preview_file(self):
         with patch('cmw.jobs.successor.SuccessorService') as factory:
