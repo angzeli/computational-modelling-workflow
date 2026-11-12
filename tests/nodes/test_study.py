@@ -2,26 +2,18 @@
 from copy import deepcopy
 from dataclasses import replace
 import json
-import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
 from cmw.jobs.study_models import StudyResult
 from cmw.nodes.codec import CodecError, decode_typed, encode_typed
-from cmw.nodes.connections import ConnectedBackend
 from cmw.nodes.protocol import NodeError, is_mutation, validate_envelope
-from tests.nodes import test_backend
-from tests.nodes.test_review import DirectTransport
+from tests.nodes.test_review import OwnerNodeTestCase
 
 
-class StudyNodeTests(unittest.TestCase):
+class StudyNodeTests(OwnerNodeTestCase):
     def setUp(self):
-        self.fixture = test_backend.BackendObservationTests()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
-        self.backend, self.store = self.fixture.backend, self.fixture.store
-        self.job = self.fixture.job()
-        self.target = self.backend.target(self.job)
+        super().setUp()
         self.study_id, self.digest = uuid4().hex, 'a'*64
         patcher = patch('cmw.jobs.study.StudyService')
         self.factory = patcher.start(); self.addCleanup(patcher.stop)
@@ -31,15 +23,6 @@ class StudyNodeTests(unittest.TestCase):
                 self.study_id,action,status,self.digest,json.dumps({'cases':[],'coverage':'synthetic interface only'}))
         self.service.view_for_job.return_value = replace(self.service.view.return_value,
             payload_json=json.dumps({'selected_target':self.target,'cases':[]}))
-
-    def client(self, *, readonly=True, transform=None):
-        entry = {'transport':'local','config_root':str(self.fixture.root/'node-config'),
-            'node_id':self.target['node_id'],'host_id':self.fixture.config['host_id'],
-            'runtime_id':self.fixture.config['runtime']['fingerprint'],
-            'queues':{'research':self.target['queue_id']},'default_queue':'research','read_only':readonly}
-        client = ConnectedBackend('fixture',entry,transport=DirectTransport(self.backend,transform))
-        self.addCleanup(client.close)
-        return client
 
     def test_plan_view_compare_are_owner_local_and_read_only(self):
         client = self.client(); before = self.store.path.read_bytes()

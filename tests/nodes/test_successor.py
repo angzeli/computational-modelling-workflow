@@ -3,27 +3,19 @@ from copy import deepcopy
 from dataclasses import replace
 import io
 import json
-import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
 from cmw.jobs.successor_models import SuccessorResult, SuccessorUnverifiable
 from cmw.jobs.store import JobsError, Store
 from cmw.nodes.codec import CodecError, decode_typed, encode_typed
-from cmw.nodes.connections import ConnectedBackend
 from cmw.nodes.protocol import NodeError, decode, encode, is_mutation, request, response, validate_envelope
-from tests.nodes import test_backend
-from tests.nodes.test_review import DirectTransport
+from tests.nodes.test_review import OwnerNodeTestCase
 
 
-class SuccessorNodeTests(unittest.TestCase):
+class SuccessorNodeTests(OwnerNodeTestCase):
     def setUp(self):
-        self.fixture = test_backend.BackendObservationTests()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
-        self.backend, self.store = self.fixture.backend, self.fixture.store
-        self.job = self.fixture.job()
-        self.target = self.backend.target(self.job)
+        super().setUp()
         self.digest = 'a' * 64
         self.patcher = patch('cmw.jobs.successor.SuccessorService')
         self.factory = self.patcher.start()
@@ -33,15 +25,6 @@ class SuccessorNodeTests(unittest.TestCase):
             getattr(self.service, action).return_value = SuccessorResult(1, self.target['node_id'],
                 self.target['queue_id'], self.job['id'], self.job['attempt_id'], action, status,
                 self.digest, json.dumps({'scope': 'synthetic interface test; no scientific claim'}))
-
-    def client(self, *, readonly=True, transform=None):
-        entry = {'transport': 'local', 'config_root': str(self.fixture.root / 'node-config'),
-            'node_id': self.target['node_id'], 'host_id': self.fixture.config['host_id'],
-            'runtime_id': self.fixture.config['runtime']['fingerprint'],
-            'queues': {'research': self.target['queue_id']}, 'default_queue': 'research', 'read_only': readonly}
-        client = ConnectedBackend('fixture', entry, transport=DirectTransport(self.backend, transform))
-        self.addCleanup(client.close)
-        return client
 
     def test_plan_is_read_only_owner_local_and_exact_attempt_bound(self):
         client = self.client()

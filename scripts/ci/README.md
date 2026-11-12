@@ -16,6 +16,9 @@ duplicate rows. Report unittest methods and injected rows separately.
 [check_artifacts.sh](check_artifacts.sh) validates fresh core wheel, Jobs wheel,
 sdist and editable installations outside the checkout. Publication hygiene also
 screens tracked source and built artifacts for private identifiers.
+[check_campaign.sh](check_campaign.sh) is the opt-in, out-of-band
+[integrated correctness campaign](../../docs/evaluations/integrated-correctness.md);
+it is not a pull-request gate.
 
 ## Watchdog and local verification (unchanged semantics)
 
