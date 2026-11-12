@@ -122,12 +122,15 @@ print('benign counter completed with original in-memory sentinel',sentinel)
                 assert str(app.query_one('#suspension-action', Button).label) == '[U] ' + action.title() + ' job'
                 assert app.query_one('#suspension-action').region.bottom <= size[1]
                 await pilot.press('u')
-                await until(lambda: isinstance(app.screen, SuspensionConfirm))
+                # The modal focuses its reason field in on_mount; keys sent before then are lost.
+                await until(lambda: isinstance(app.screen, SuspensionConfirm)
+                            and getattr(app.focused, 'id', None) == 'suspension-reason')
                 modal = app.screen
                 assert modal.request['attempt_id'] == job['attempt_id']
                 assert modal.request['action'] == action
                 await pilot.press('u', 'c', 'p', 'x')
-                assert modal.query_one(Input).value == 'ucpx'
+                reason = modal.query_one(Input).value
+                assert reason == 'ucpx', repr(reason)
                 if size == (77, 24):
                     await pilot.resize_terminal(80, 24)
                     await pilot.pause()
