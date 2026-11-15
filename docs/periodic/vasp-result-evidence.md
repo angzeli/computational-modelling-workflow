@@ -110,7 +110,13 @@ never nonstandard JSON numbers. No whole-directory hashing is performed.
 
 Snapshots are sequential observations, not an atomic filesystem snapshot. A quiet
 file is not proof of completed execution. Finalization revalidates exact source
-identities; arbitrary external edits can still race that final check. Reuse must
+identities; arbitrary external edits can still race that final check. Across
+observations, a source keeps its identity while its device, inode, size,
+modification time, byte count and full SHA-256 match. A change-time (`ctime_ns`)
+difference alone, as from `chmod`, `chown` or extended-attribute edits, is
+reported in `metadata_changes` (`source.metadata_changed`) and does not
+invalidate it. Change time still counts within a single read, where any change
+makes that observation unstable. Reuse must
 recheck the recorded sources, policy and bindings. Records describe snapshots,
 not permanent certificates for paths.
 
