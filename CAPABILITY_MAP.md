@@ -53,7 +53,7 @@ Tests live under `tests/`, mirroring `src/`. Supported platforms are listed in
 | Analyze SCF or independent electronic levels | `cmw vasp analyze-scf DIRECTORY`; `analyze-electronic DIRECTORY --only …`; `scf_analysis` / `electronic_levels` | IMPLEMENTED; analysis only, no artifact acceptance | [Contract](docs/periodic/vasp-analysis.md) |
 | Finalize accepted VASP energies or periodic endpoint | `cmw vasp finalize-result DIRECTORY --policy … --spec …`; `verify-result-record RECORD` | IMPLEMENTED; explicit retrospective binding; no relocation or wavefunction finalization | [Contract](docs/periodic/vasp-result-evidence.md#commands-output-and-reuse) |
 | Execute prepared VASP inputs | Caller-supplied foreground runner, optionally through Jobs | EXTERNAL INTEGRATION; no native VASP launcher | [Runner integration](docs/cmw-jobs.md#integration-and-foreground-command-contract) |
-| Check the selected managed VASP port interface | `cmw vasp check-runner --runner … [--project-root …] -- <port arguments>` | IMPLEMENTED, read-only; exit 0 means argument compatibility only | [Contract](docs/periodic/vasp-result-evidence.md#check-a-managed-runner-interface) |
+| Check the selected managed VASP port interface | `cmw vasp check-runner --runner … [--project-root …] -- <port arguments>` | IMPLEMENTED, read-only; exit 0 means argument compatibility only; warm restart from `--input` accepted, not finalizable | [Contract](docs/periodic/vasp-result-evidence.md#check-a-managed-runner-interface) |
 
 The [real-calculation acceptance study](docs/evaluations/real-zis-vasp-acceptance-2026-09.md)
 records the bounded native corpus and remaining provenance gaps.
