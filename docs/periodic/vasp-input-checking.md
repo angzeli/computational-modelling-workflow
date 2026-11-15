@@ -71,7 +71,9 @@ not presented as verified selection or comparability.
   DIPOL has three components. Noncollinear/SOC arrays are unsupported. Positive
   ionic steps with disabled ionic motion are inconsistent; other ionic modes
   beyond explicit fixed-cell IBRION 1/2/3 and ISIF 2 are unsupported. Checkpoint
-  restart and frozen-density modes are outside this four-input contract.
+  restart and frozen-density modes are outside this four-input contract; a warm
+  restart through Jobs relies on the runner's own restart checks
+  ([contract](vasp-result-evidence.md#warm-restart-through-jobs)).
 
 `expected_selection` accepts the POTCAR component's ordered selection record or
 its explicit requirements mapping. The checker reuses the existing POTCAR parser

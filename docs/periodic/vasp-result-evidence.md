@@ -376,6 +376,24 @@ Exit 2 means incompatible or unknown. An absent `--managed-foreground` is report
 explicitly; it is never removed or mapped to a standalone flag. A flag's help
 text identifies only a declared contract, not implementation of that contract.
 
+#### Warm restart through Jobs
+
+`--restart wavecar|chgcar|both` is accepted when the runner declares that value
+and the checkpoint files are in `--input` (`--restart-from` stays unsupported).
+It is not accepted with `--controlled-suspension` or `--binary-manifest`. The
+JSON then adds `observed_capabilities.restart` with the mode, donor directory and
+files. The runner copies each checkpoint into the new output, hashes the copy and
+checks that the source is unchanged; it also enforces the ISTART/ICHARG policy,
+checks WAVECAR/CHGCAR headers and records `restart_observed`. These are runner
+facts, not CMW scientific acceptance. `cmw vasp check-inputs` remains a
+four-file checker and reports `incar.restart` as unsupported for such inputs.
+
+At `jobs add`, CMW records the stat identity of each requested checkpoint in
+`--input`. Staging evidence is accepted only if the runner staged exactly the
+four inputs plus those files, each from the same unchanged source file.
+`finalize-result` refuses restart runs: their staged checkpoints are not
+reverified. Portable node submission still forces `--restart none`.
+
 The source combination records available commits, relevant source dirty state,
 bounded source hashes, CMW module/distribution origin and the optional project
 identity. Whole-worktree dirty state and untracked files outside the known runner
@@ -451,8 +469,8 @@ The supported invocation explicitly supplies `--input`, `--output`, `--binary st
 `--stop-before` and `--managed-foreground`. Counts must satisfy the external
 runner's 1–8 rank range and decomposition rules. Both native and synthetic MPI
 topology modes are recognized; the latter names a topology setting, not fake
-scientific execution. Unknown/repeated options, restart modes and other wrappers
-are unsupported. Paths must remain absolute and canonical: Jobs cwd equals the
+scientific execution. Unknown/repeated options, restart runs and other wrappers
+are unsupported for finalization. Paths must remain absolute and canonical: Jobs cwd equals the
 input argument, and the inspected directory equals the output argument.
 
 Only the original `<output>/RUN_METADATA.txt` is accepted, with one ordered

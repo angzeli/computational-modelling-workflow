@@ -15,7 +15,7 @@ import stat
 import subprocess
 
 from . import backend_evidence
-from .result_runner import DIALECT, validate_runner_argv
+from .result_runner import DIALECT, RESTART_FILES, validate_runner_argv
 from .result_sources import SnapshotReader
 
 
@@ -322,6 +322,15 @@ def check_runner(runner, argv, *, project_root=None, allow_planned_input=False):
         # argv has already passed the existing result-association grammar.
         intended = dict(zip([item for item in argv if item != '--managed-foreground'][::2],
                             [item for item in argv if item != '--managed-foreground'][1::2]))
+        if intended['--restart'] != 'none':
+            result['observed_capabilities']['restart'] = {
+                'mode': intended['--restart'], 'donor': str(source),
+                'files': list(RESTART_FILES[intended['--restart']]),
+                'contract': 'The runner copies these checkpoint files from --input into the new output and '
+                            'records each copy\'s SHA-256 and source stat identity; --restart-from is unsupported.',
+                'qualification': 'declaration only; header compatibility and VASP acceptance are runner/runtime evidence'}
+            result['result_binding_qualification']['reason'] = (
+                'Restart runs are refused by result finalization; their staged checkpoints are not reverified.')
         if int(intended['--ranks']) > 8:
             result['observed_capabilities']['max_mpi_ranks'] = _expanded_rank_limit(
                 contents['run_vasp.py'], contents['launch.py'])

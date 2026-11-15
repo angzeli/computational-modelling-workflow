@@ -136,6 +136,14 @@ class RunnerBindingTests(unittest.TestCase):
             self.edit_job(change)
             self.assertNotEqual(self.inspect()["status"], "eligible")
 
+    def test_restart_invocation_is_refused_by_finalization(self):
+        for mode in ("wavecar", "chgcar", "both"):
+            with self.subTest(mode=mode):
+                self.edit_job(lambda j: j["argv"].__setitem__(j["argv"].index("--restart") + 1, mode))
+                result = self.inspect()
+                self.assertNotEqual(result["status"], "eligible")
+                self.assertIn("Restart runs are not finalizable", json.dumps(result))
+
     def test_missing_native_receipt_and_nonzero_completion_remain_ineligible(self):
         receipt = self.root / self.spec["execution"]["receipt"]
         receipt.unlink()

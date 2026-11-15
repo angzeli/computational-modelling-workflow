@@ -2,8 +2,10 @@
 
 The dialect name versions CMW's interpretation of an unversioned local record;
 it does not authenticate the runner, or turn its scientific summaries into facts.
-Only the observed single-image, no-restart, managed-foreground invocation is
-supported. Relocated output trees and archived copies are intentionally excluded.
+Only the observed single-image, managed-foreground invocation is supported.
+Warm restart (``--restart wavecar|chgcar|both``) is accepted only with its
+checkpoint files taken from ``--input``; result finalization still refuses it.
+Relocated output trees and archived copies are intentionally excluded.
 The experimental ``--binary-manifest NAME`` selection adds backend keys to the
 same record (backend_evidence.py); they are accepted only for that argv.
 """
@@ -24,9 +26,11 @@ MAX_MPI_RANKS = 16
 DIALECT = "vasp-run-metadata-text-v1"
 CONTROLLED_DIALECT = "vasp-run-metadata-text-v2"
 _INPUTS = ("INCAR", "POSCAR", "POTCAR", "KPOINTS")
+# Mirrors the port runner's RESTARTS table: files copied from --input per mode.
+RESTART_FILES = {"none": (), "wavecar": ("WAVECAR",), "chgcar": ("CHGCAR",), "both": ("WAVECAR", "CHGCAR")}
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _STAGED = re.compile(
-    r"(INCAR|POSCAR|POTCAR|KPOINTS); bytes=([0-9]+); "
+    r"(INCAR|POSCAR|POTCAR|KPOINTS|WAVECAR|CHGCAR); bytes=([0-9]+); "
     r"source_stat=\(([0-9]+), ([0-9]+), ([0-9]+), ([0-9]+)\); SHA256=([0-9a-f]{64})\Z")
 _KEYS = frozenset({
     "state", "child_status", "staging_start_utc", "source", "output", "donor", "binary", "sha",
@@ -107,8 +111,11 @@ def validate_runner_argv(argv):
             options[name] = argv[index + 1]
             index += 2
     _require(set(options) == pairs | {"--managed-foreground"} | ({"--controlled-suspension"} if controlled else set()), "Runner invocation must explicitly record supported options")
-    _require(options["--restart"] == "none" and options["--binary"] == "std"
+    _require(options["--restart"] in RESTART_FILES and options["--binary"] == "std"
              and options["--mpi-mode"] in {"synthetic", "native"}, "Unsupported runner mode")
+    # Restart is qualified only for ordinary execution with its donor equal to --input.
+    _require(options["--restart"] == "none" or not (controlled or manifest is not None),
+             "Restart is not qualified with controlled suspension or binary-manifest selection")
     for key in ("--ranks", "--ncore", "--kpar"):
         _require(re.fullmatch(r"[1-9][0-9]*", options[key]) is not None, "Invalid runner parallel count")
     ranks, ncore, kpar = (int(options[k]) for k in ("--ranks", "--ncore", "--kpar"))
@@ -254,6 +261,8 @@ def inspect_runner(declaration, job, receipt, run_directory, native_sources=()):
     try:
         validate_declaration(declaration)
         source, output = validate_runner_argv(job.get("argv"))
+        _require(job["argv"][job["argv"].index("--restart") + 1] == "none",
+                 "Restart runs are not finalizable: their staged checkpoint inputs are not reverified")
         controlled = "--controlled-suspension" in job["argv"]
         _require((declaration["dialect"] == CONTROLLED_DIALECT) == controlled,
                  "Runner metadata dialect must match the explicit invocation contract")
