@@ -248,7 +248,8 @@ The cause of that metadata change was not established. This is the existing
 strict source-identity contract working as designed, not a content-change claim
 or a numerical disagreement. The old record was retained unchanged. The new
 installed record captures the current source observation and verified in both
-environments. No production file was altered to manufacture this condition.
+environments. No production file was altered to manufacture this condition. Since issue #38, a change-time-only difference like this one is reported
+as `source.metadata_changed` rather than refused.
 
 This additional finding is **FALSE ALARM / CURRENT CONTRACT CORRECT**: source
 reverification can reject a same-content file whose recorded filesystem identity

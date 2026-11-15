@@ -21,7 +21,19 @@ from .result_differences import field_differences
 
 MAX_LINE_BYTES = 1024 * 1024
 MAX_JSON_BYTES = 4 * 1024 * 1024
-_STAT_KEYS = ("device", "inode", "size", "mtime_ns", "ctime_ns")
+# Persistent identity across observations. ctime_ns stays part of each read's
+# own stability check, but a later metadata-only change (chmod, chown, xattrs)
+# is reported rather than treated as a different source: replacement is caught
+# by device/inode, content by the full SHA-256 and byte count.
+PERSISTENT_STAT_KEYS = ("device", "inode", "size", "mtime_ns")
+
+
+def same_persistent_identity(first: dict[str, object], second: dict[str, object]) -> bool:
+    """Compare two complete observations by bytes and persistent file identity."""
+    before, after = first.get("stat_before"), second.get("stat_before")
+    return (isinstance(before, dict) and isinstance(after, dict)
+            and first.get("sha256") == second.get("sha256")
+            and all(before.get(key) == after.get(key) for key in PERSISTENT_STAT_KEYS))
 
 
 @dataclass(frozen=True)
@@ -254,12 +266,15 @@ def read_json_source(path: str | os.PathLike[str], role: str,
 def revalidate_sources(source_records: Iterable[dict[str, object]]) -> dict[str, object]:
     """Reobserve consumed sources immediately before publication, without writes.
 
-    Exact descriptor and path identities and the complete streamed digest must
-    match. This cannot prevent writes after this check or make a cross-file read
-    atomic; callers must retain that limitation in their finalization record.
+    Persistent descriptor and path identities and the complete streamed digest
+    must match. A ctime-only change is listed in ``metadata_changes`` and does
+    not invalidate the source. This cannot prevent writes after this check or
+    make a cross-file read atomic; callers must retain that limitation in their
+    finalization record.
     """
     findings = []
     observed = []
+    metadata_changes = []
     for expected in source_records:
         role = expected.get("role")
         if not (expected.get("stable") is True and expected.get("coverage") == "complete"
@@ -286,10 +301,13 @@ def revalidate_sources(source_records: Iterable[dict[str, object]]) -> dict[str,
         actual = reader.record
         observed.append(actual)
         same = (actual["stable"] and actual["coverage"] == "complete"
-                and actual["sha256"] == expected["sha256"]
                 and actual["bytes_read"] == expected.get("bytes_read")
-                and all(actual["stat_before"].get(key) == expected["stat_before"].get(key)
-                        for key in _STAT_KEYS))
+                and same_persistent_identity(expected, actual))
+        if same and actual["stat_before"].get("ctime_ns") != expected["stat_before"].get("ctime_ns"):
+            metadata_changes.append({"code": "source.metadata_changed", "role": role, "path": locator,
+                                     "fields": ["ctime_ns"],
+                                     "recorded": expected["stat_before"].get("ctime_ns"),
+                                     "observed": actual["stat_before"].get("ctime_ns")})
         if not same:
             findings.append({"code": "source.identity_changed", "role": role,
                              "message": "source identity or exact bytes changed since parsing",
@@ -297,4 +315,5 @@ def revalidate_sources(source_records: Iterable[dict[str, object]]) -> dict[str,
                                  f"sources[{role}:{locator}]",
                                  {k: expected.get(k) for k in ("stable", "coverage", "sha256", "bytes_read", "stat_before")},
                                  {k: actual[k] for k in ("stable", "coverage", "sha256", "bytes_read", "stat_before")})})
-    return {"valid": not findings, "findings": findings, "sources": observed}
+    return {"valid": not findings, "findings": findings, "sources": observed,
+            "metadata_changes": metadata_changes}
