@@ -13,6 +13,7 @@ from cmw.molecular.multiwfn.runtime import resolve_threads
 
 from .multiwfn_analysis import (
     AnalysisOperation,
+    diagnose_density,
     finalize_analysis,
     normalize_outputs,
     plan_analysis,
@@ -34,6 +35,8 @@ def _plan(args: argparse.Namespace) -> int:
         threads=resolve_threads(cli_value=args.threads),
         fragment_path=args.fragments,
         igmh_config_path=args.config,
+        grid_origin_bohr=tuple(args.grid_origin_bohr) if args.grid_origin_bohr else None,
+        grid_dimensions=tuple(args.grid_dimensions) if args.grid_dimensions else None,
     )
     _print(plan)
     return 0
@@ -48,6 +51,8 @@ def _prepare(args: argparse.Namespace) -> int:
         threads=resolve_threads(cli_value=args.threads),
         fragment_path=args.fragments,
         igmh_config_path=args.config,
+        grid_origin_bohr=tuple(args.grid_origin_bohr) if args.grid_origin_bohr else None,
+        grid_dimensions=tuple(args.grid_dimensions) if args.grid_dimensions else None,
     )
     if plan["reuse"]["reuse"]:
         _print(plan)
@@ -89,6 +94,16 @@ def _normalize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _diagnose(args: argparse.Namespace) -> int:
+    report = diagnose_density(
+        args.result, output_path=args.diagnostics_output, isovalue=args.isovalue,
+        max_boundary_density=args.max_boundary_density,
+        max_electron_discrepancy=args.max_electron_discrepancy,
+    )
+    _print(report)
+    return 3 if report["status"] == "FAIL" else 0
+
+
 def _lock(args: argparse.Namespace) -> int:
     if args.lock_action == "acquire":
         owner = acquire_lock(args.lock, job_id=args.job_id, owner_pid=args.owner_pid)
@@ -106,6 +121,8 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--grid-spacing-bohr", type=float)
+    parser.add_argument("--grid-origin-bohr", type=float, nargs=3, metavar=("X", "Y", "Z"))
+    parser.add_argument("--grid-dimensions", type=int, nargs=3, metavar=("NX", "NY", "NZ"))
     parser.add_argument("--fragments", type=Path)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--threads")
@@ -137,6 +154,13 @@ def build_parser() -> argparse.ArgumentParser:
     finalize.add_argument("--process-exit-code", type=int, required=True)
     finalize.add_argument("--repository", type=Path)
     finalize.set_defaults(handler=_finalize)
+    diagnose = sub.add_parser("diagnose", help="advisory density-cube diagnostics for an ESP result")
+    diagnose.add_argument("--result", type=Path, required=True)
+    diagnose.add_argument("--diagnostics-output", type=Path)
+    diagnose.add_argument("--isovalue", type=float, default=0.001)
+    diagnose.add_argument("--max-boundary-density", type=float)
+    diagnose.add_argument("--max-electron-discrepancy", type=float)
+    diagnose.set_defaults(handler=_diagnose)
     lock = sub.add_parser("lock")
     lock_sub = lock.add_subparsers(dest="lock_action", required=True)
     acquire = lock_sub.add_parser("acquire")
