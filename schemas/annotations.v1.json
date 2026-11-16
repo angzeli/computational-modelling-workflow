@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/annotations.v1.json",
+  "title": "CMW annotations manifest v1 (Phase 0 proposal)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "project",
+    "provenance",
+    "revision",
+    "events"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^(?:J[1-9]\\d*|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?:J\\d+\\.\\d+)$",
+      "maxLength": 256,
+      "description": "Native IDs are project-unique J<n>. Legacy dotted IDs require backfilled provenance and qualification spelled node[/queue]:J<n>.<m>. The queue token is required when the short node-qualified form is ambiguous; schemas check syntax, not resolution. Existing queue IDs and directories remain unchanged."
+    },
+    "project": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "maxLength": 128
+    },
+    "provenance": {
+      "enum": [
+        "native",
+        "backfilled"
+      ]
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence",
+          "timestamp",
+          "author_node",
+          "purpose",
+          "system",
+          "outcome",
+          "note",
+          "label"
+        ],
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "timestamp": {
+            "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/utc_or_null"
+          },
+          "author_node": {
+            "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+          },
+          "purpose": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "system": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "enum": [
+              "reported",
+              "superseded",
+              "checkpoint-only",
+              "discarded",
+              null
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable name only, never a path or reference. Null means no change; empty string clears."
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "provenance": {
+            "const": "native"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "pattern": "^J[1-9]\\d*$"
+          },
+          "events": {
+            "items": {
+              "properties": {
+                "author_node": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provenance": {
+            "const": "native"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "events": {
+            "items": {
+              "properties": {
+                "timestamp": {
+                  "not": {
+                    "type": "null"
+                  }
+                },
+                "author_node": {
+                  "not": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "description": "Append-only human judgement. A writer must also enforce contiguous event sequence, revision equal to event count, immutable history and optimistic concurrency; JSON Schema cannot prove those temporal rules."
+}

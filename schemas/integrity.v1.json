@@ -1,0 +1,332 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "sequence",
+    "request_uuid",
+    "event",
+    "timestamp",
+    "project",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "request_uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "event": {
+      "enum": [
+        "manifest",
+        "registration",
+        "queue_binding",
+        "queue_locator",
+        "legacy_alias"
+      ]
+    },
+    "timestamp": {
+      "allOf": [
+        {
+          "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/utc_or_null"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "project": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/integrity.v1.json",
+  "title": "Project integrity journal envelope and payloads",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "manifest"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "job_sha256",
+              "binding"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^(?:J[1-9]\\d*|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?:J\\d+\\.\\d+)$",
+                "maxLength": 256,
+                "description": "Native IDs are project-unique J<n>. Legacy dotted IDs require backfilled provenance and qualification spelled node[/queue]:J<n>.<m>. The queue token is required when the short node-qualified form is ambiguous; schemas check syntax, not resolution. Existing queue IDs and directories remain unchanged."
+              },
+              "job_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "binding": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "node_id",
+                      "queue_id",
+                      "job_id",
+                      "attempt_id"
+                    ],
+                    "properties": {
+                      "node_id": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{32}$"
+                      },
+                      "queue_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "job_id": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "attempt_id": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "registration"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "job_sha256",
+              "binding"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^(?:J[1-9]\\d*|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?:J\\d+\\.\\d+)$",
+                "maxLength": 256,
+                "description": "Native IDs are project-unique J<n>. Legacy dotted IDs require backfilled provenance and qualification spelled node[/queue]:J<n>.<m>. The queue token is required when the short node-qualified form is ambiguous; schemas check syntax, not resolution. Existing queue IDs and directories remain unchanged."
+              },
+              "job_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "binding": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "node_id",
+                  "queue_id",
+                  "job_id",
+                  "attempt_id"
+                ],
+                "properties": {
+                  "node_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  "queue_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "job_id": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "attempt_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "queue_binding"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "node",
+              "queue",
+              "binding"
+            ],
+            "properties": {
+              "node": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+              },
+              "queue": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+              },
+              "binding": {
+                "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/project.v1.json#/$defs/legacy_queue"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "queue_locator"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "node",
+              "queue",
+              "binding_sequence",
+              "locator"
+            ],
+            "properties": {
+              "node": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+              },
+              "queue": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+              },
+              "binding_sequence": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "locator": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state_root",
+                  "root_identity",
+                  "database_identity",
+                  "volume_uuid"
+                ],
+                "properties": {
+                  "state_root": {
+                    "type": "string",
+                    "pattern": "^/",
+                    "description": "Initial absolute owner-local state directory locator recorded once in the project integrity journal. It is source evidence, not queue identity; later moves do not change job references."
+                  },
+                  "root_identity": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "description": "Original [device, inode] evidence. Device is diagnostic only; identity comparison uses volume_uuid plus inode across remounts."
+                  },
+                  "database_identity": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "description": "Original [device, inode] evidence. Device is diagnostic only; identity comparison uses volume_uuid plus inode across remounts."
+                  },
+                  "volume_uuid": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "legacy_alias"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "label",
+              "target"
+            ],
+            "properties": {
+              "label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "target": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*:J\\d+\\.\\d+$"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

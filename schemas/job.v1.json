@@ -1,0 +1,456 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json",
+  "title": "CMW job manifest v1 (Phase 0 proposal)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "project",
+    "provenance",
+    "created_at",
+    "authoring_node",
+    "target_node",
+    "id_owner_node",
+    "engine",
+    "inputs",
+    "potcar",
+    "preparation_record",
+    "executable",
+    "runtime_fingerprint",
+    "launch",
+    "parent",
+    "parent_inferred",
+    "restart_inputs"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^(?:J[1-9]\\d*|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?:J\\d+\\.\\d+)$",
+      "maxLength": 256,
+      "description": "Native IDs are project-unique J<n>. Legacy dotted IDs require backfilled provenance and qualification spelled node[/queue]:J<n>.<m>. The queue token is required when the short node-qualified form is ambiguous; schemas check syntax, not resolution. Existing queue IDs and directories remain unchanged."
+    },
+    "project": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "maxLength": 128
+    },
+    "provenance": {
+      "enum": [
+        "native",
+        "backfilled"
+      ]
+    },
+    "created_at": {
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/utc_or_null"
+    },
+    "authoring_node": {
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+    },
+    "target_node": {
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+    },
+    "id_owner_node": {
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+    },
+    "engine": {
+      "enum": [
+        "VASP",
+        "ORCA",
+        "Multiwfn",
+        "Command"
+      ]
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "INCAR",
+        "POSCAR",
+        "KPOINTS"
+      ],
+      "properties": {
+        "INCAR": {
+          "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/sha256_or_null"
+        },
+        "POSCAR": {
+          "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/sha256_or_null"
+        },
+        "KPOINTS": {
+          "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/sha256_or_null"
+        }
+      }
+    },
+    "potcar": {
+      "anyOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "element",
+              "label",
+              "family",
+              "dataset_date",
+              "sha256",
+              "block_index"
+            ],
+            "properties": {
+              "element": {
+                "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+              },
+              "label": {
+                "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+              },
+              "family": {
+                "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+              },
+              "dataset_date": {
+                "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+              },
+              "sha256": {
+                "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/sha256_or_null"
+              },
+              "block_index": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "preparation_record": {
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+    },
+    "executable": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256",
+            "version",
+            "build_id",
+            "variant"
+          ],
+          "properties": {
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^/[^\\u0000]+$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sha256": {
+              "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/sha256_or_null"
+            },
+            "version": {
+              "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+            },
+            "build_id": {
+              "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+            },
+            "variant": {
+              "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/text_or_null"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "runtime_fingerprint": {
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/sha256_or_null"
+    },
+    "launch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "argv",
+        "mpi_ranks",
+        "environment"
+      ],
+      "properties": {
+        "argv": {
+          "anyOf": [
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mpi_ranks": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "type": "object",
+              "propertyNames": {
+                "pattern": "^(?:OMP_|OPENBLAS_|MKL_|VECLIB_|GFORTRAN_|OMPI_MCA_)[A-Za-z0-9_]+$"
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "parent": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(?:(?:[A-Za-z0-9][A-Za-z0-9._-]*:)?J[1-9]\\d*|(?:[A-Za-z0-9][A-Za-z0-9._-]*:)?[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?:J\\d+\\.\\d+)$"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "New parent: J<n> or project:J<n>. Legacy parent: node[/queue]:J<n>.<m> or project:node[/queue]:J<n>.<m>. Short form requires unique queue resolution; node and queue tokens resolve only through the permanent project mappings."
+    },
+    "parent_inferred": {
+      "type": "boolean"
+    },
+    "restart_inputs": {
+      "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/restart_digests",
+      "description": "Engine-neutral role to digest map. Omit absent roles. Native copied inputs require synchronous non-null digests; legacy unknown digests may be null."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "provenance": {
+            "const": "native"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "pattern": "^J[1-9]\\d*$"
+          },
+          "authoring_node": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "target_node": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "id_owner_node": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "restart_inputs": {
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provenance": {
+            "const": "native"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "created_at": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "authoring_node": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "target_node": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "id_owner_node": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "allOf": [
+          {
+            "properties": {
+              "launch": {
+                "properties": {
+                  "argv": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "engine": {
+                  "const": "VASP"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "inputs": {
+                  "properties": {
+                    "INCAR": {
+                      "not": {
+                        "type": "null"
+                      }
+                    },
+                    "POSCAR": {
+                      "not": {
+                        "type": "null"
+                      }
+                    },
+                    "KPOINTS": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                },
+                "potcar": {
+                  "type": "array",
+                  "minItems": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "parent": {
+                  "type": "string"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "restart_inputs": {
+                  "minProperties": 1,
+                  "not": {
+                    "additionalProperties": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "parent": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parent_inferred": {
+            "const": false
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "text_or_null": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sha256_or_null": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "utc_or_null": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "restart_digests": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "https://raw.githubusercontent.com/angzeli/computational-modelling-workflow/main/schemas/job.v1.json#/$defs/sha256_or_null"
+      }
+    }
+  },
+  "description": "Immutable creation provenance, separate from queue control and engine-specific job records. Null hashes are unknown, never verified. Legacy own IDs are node-qualified and require backfilled provenance; all legacy parent references are node-qualified."
+}

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "node-a/project-queue:J27.1",
+  "project": "example-project",
+  "provenance": "backfilled",
+  "revision": 0,
+  "writer_node": null,
+  "status": "done",
+  "native_status": "Done",
+  "started_at": null,
+  "ended_at": null,
+  "exit_code": null,
+  "cancel_mode": null,
+  "scf_result": "labort",
+  "last_step": 22,
+  "ionic_step": null,
+  "energy_ev": null,
+  "delta_energy_ev": null,
+  "total_magnetisation_mu_b": null,
+  "restart_outputs": {
+    "WAVECAR": null,
+    "CHGCAR": null
+  },
+  "hashes_pending": false,
+  "evidence": [
+    {
+      "source": "user-contract",
+      "marker": "Issue #41 expected backfill: done, LABORT after DAV 22; not a live observation.",
+      "line": null
+    }
+  ],
+  "binding": null
+}

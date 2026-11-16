@@ -1,0 +1,52 @@
+{
+  "description": "Synthetic Phase 2 classifier excerpt, not a complete finalization input. Join each line list with newlines and append a final newline. The supplied queue context independently establishes operational status; Phase 0 validates only the expected state schema.",
+  "invocation_bound": true,
+  "OUTCAR_lines": [
+    "vasp.6.6.1",
+    "aborting loop because hard stop was set",
+    "ZHEGV failed"
+  ],
+  "stdout_lines": [],
+  "expected": {
+    "schema_version": 1,
+    "id": "J28",
+    "project": "fixture-project",
+    "provenance": "native",
+    "revision": 2,
+    "writer_node": "22222222222222222222222222222222",
+    "status": "failed",
+    "native_status": "Fail",
+    "started_at": null,
+    "ended_at": null,
+    "exit_code": null,
+    "cancel_mode": null,
+    "scf_result": "crashed",
+    "last_step": null,
+    "ionic_step": null,
+    "energy_ev": null,
+    "delta_energy_ev": null,
+    "total_magnetisation_mu_b": null,
+    "restart_outputs": {
+      "WAVECAR": null,
+      "CHGCAR": null
+    },
+    "hashes_pending": false,
+    "evidence": [],
+    "binding": {
+      "node_id": "22222222222222222222222222222222",
+      "queue_id": "fixture-queue",
+      "job_id": 1,
+      "attempt_id": "fixture-attempt"
+    }
+  },
+  "queue_context": {
+    "native_status": "Fail",
+    "binding": {
+      "node_id": "22222222222222222222222222222222",
+      "queue_id": "fixture-queue",
+      "job_id": 1,
+      "attempt_id": "fixture-attempt"
+    }
+  },
+  "context_note": "No matched complete electronic energy row is provided, so electronic metrics remain null. Missing metrics do not erase an independently bound positive fatal or LABORT action marker."
+}

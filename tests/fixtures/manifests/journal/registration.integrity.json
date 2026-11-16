@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "sequence": 4,
+  "request_uuid": "dddddddddddddddddddddddddddddddd",
+  "event": "registration",
+  "timestamp": "2026-11-09T12:00:00Z",
+  "project": "example-project",
+  "payload": {
+    "id": "J28",
+    "job_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "binding": {
+      "node_id": "22222222222222222222222222222222",
+      "queue_id": "fixture-queue",
+      "job_id": 1,
+      "attempt_id": "fixture-attempt"
+    }
+  }
+}
