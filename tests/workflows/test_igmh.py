@@ -341,6 +341,15 @@ if len(samples) >= 2:
         self.assertNotIn("menu", json.dumps(plan).lower())
         self.assertFalse(self.output.exists())
 
+    def test_esp_only_grid_and_diagnostic_options_are_rejected(self) -> None:
+        for extra in (("--plan", "--grid-origin-bohr", "-4", "-4", "-4", "--grid-dimensions", "17", "17", "17"),
+                      ("--max-electron-discrepancy", "0")):
+            with self.subTest(extra=extra):
+                completed = self.run_igmh(extra=extra, check=False)
+                self.assertEqual(completed.returncode, 64)
+                self.assertIn("supported only for ESP", completed.stderr)
+        self.assertFalse(self.log.exists())
+
     def test_unsupported_version_fails_before_operation(self) -> None:
         unsupported = self.root / "unsupported Multiwfn"
         unsupported.write_text(

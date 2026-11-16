@@ -477,6 +477,9 @@ def diagnose_density(
     if density is None:
         raise ValueError("ESP result records no density_cube artifact")
     log = resolve_result_artifact(record, result_path, "multiwfn_log")
+    if log is not None and (not log[0].is_file() or file_hash(log[0]) != log[1].get("sha256")):
+        # The electron count is gate evidence; an altered log must not supply it.
+        raise ValueError("multiwfn.log differs from the recorded result artifact")
     report = diagnose(
         density[0], expected_sha256=str(density[1].get("sha256")),
         log_path=log[0] if log is not None else None, isovalue=isovalue,

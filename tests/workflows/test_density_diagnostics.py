@@ -154,6 +154,28 @@ class DensityDiagnosticsWorkflowTests(MultiwfnCubeHarness):
         self.assertEqual(direct.returncode, 0, direct.stdout)
         self.assertEqual(json.loads(direct.stdout)["status"], "PASS")
 
+    def test_altered_log_cannot_supply_electron_evidence(self) -> None:
+        self.run_workflow(ESP, env={**self.env, "FAKE_MULTIWFN_ELECTRONS": "10.0"})
+        result_path = next(self.output.rglob("result.json"))
+        log = next(self.output.rglob("multiwfn.log"))
+        log.write_text(log.read_text().replace("10.0", "0.06"))
+        direct = subprocess.run(
+            [sys.executable, "-m", "cmw.molecular.workflows.downstream_cli", "diagnose",
+             "--result", str(result_path), "--max-electron-discrepancy", "1000"],
+            cwd=ROOT, env=self.env, capture_output=True, text=True)
+        self.assertEqual(direct.returncode, 64, direct.stdout)
+        self.assertIn("multiwfn.log differs from the recorded result artifact", direct.stdout)
+
+    def test_esp_only_options_are_rejected_for_other_operations(self) -> None:
+        from tests.workflows.test_multiwfn_cubes import FMO
+        for extra in (("--max-boundary-density", "0"), ("--diagnostic-isovalue", "0.002"),
+                      ("--grid-origin-bohr", "-4", "-4", "-4", "--grid-dimensions", "17", "17", "17")):
+            with self.subTest(extra=extra):
+                completed = self.run_workflow(FMO, extra=extra, check=False)
+                self.assertEqual(completed.returncode, 64)
+                self.assertIn("supported only for ESP", completed.stderr)
+        self.assertFalse(self.output.exists())
+
     def test_missing_electron_evidence_fails_a_requested_gate(self) -> None:
         completed = self.run_workflow(ESP, extra=("--max-electron-discrepancy", "0.5"), check=False)
         self.assertEqual(completed.returncode, 3, completed.stderr)

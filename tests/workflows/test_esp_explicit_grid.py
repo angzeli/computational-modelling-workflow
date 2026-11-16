@@ -4,13 +4,15 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
 from cmw.molecular.multiwfn.automation import Operation, menu_stream
 from cmw.molecular.workflows.cube import read_cube, validate_cube_grid
 from cmw.molecular.workflows.esp_cubes import EspConfiguration, estimated_cube_bytes
-from tests.workflows.test_multiwfn_cubes import ESP, MultiwfnCubeHarness
+from tests.workflows.test_multiwfn_cubes import ESP, ROOT, MultiwfnCubeHarness
 
 # target_id values produced by main before explicit grids existed (b6ba043 era).
 PINNED_SPACING_ONLY = {
@@ -98,8 +100,15 @@ class ExplicitGridWorkflowTests(MultiwfnCubeHarness):
     def test_fmo_rejects_explicit_grid(self) -> None:
         from tests.workflows.test_multiwfn_cubes import FMO
         completed = self.run_workflow(FMO, extra=("--plan", *GRID), check=False)
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("only for ESP", completed.stdout)
+        self.assertEqual(completed.returncode, 64)
+        self.assertIn("supported only for ESP", completed.stderr)
+        # Direct callers of the Python bridge are refused too.
+        direct = subprocess.run(
+            [sys.executable, "-m", "cmw.molecular.workflows.downstream_cli", "plan", "--operation", "FMO",
+             "--source", str(self.source), "--output", str(self.output), "--grid-spacing-bohr", "0.5", *GRID],
+            cwd=ROOT, env=self.env, capture_output=True, text=True)
+        self.assertEqual(direct.returncode, 64)
+        self.assertIn("only for ESP", direct.stdout)
 
 
 class ExplicitGridUnitTests(unittest.TestCase):

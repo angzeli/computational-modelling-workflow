@@ -49,6 +49,11 @@ multiwfn_cube_main() {
       *) printf 'Unknown argument: %s\n' "$1" >&2; multiwfn_cube_usage; return 64 ;;
     esac
   done
+  if [[ "$operation" != ESP ]] && (( ${#grid_args[@]} + ${#diagnostic_args[@]} )); then
+    printf 'Explicit grid and density-diagnostic options are supported only for ESP\n' >&2
+    multiwfn_cube_usage
+    return 64
+  fi
   if [[ -n "$prepared_plan" ]]; then
     prepared_json=$("$PYTHON_BIN" -m cmw.molecular.multiwfn.jobs verify-prepared "$prepared_plan") || return 64
     source_result=$(printf '%s' "$prepared_json" | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["source_result"])')
