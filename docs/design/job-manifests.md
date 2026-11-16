@@ -21,7 +21,7 @@ state, access job input/output directories or installed runtimes, or restart ser
 | Scientific provenance | [`core/job.py`](../../src/cmw/core/job.py), [`provenance.py`](../../src/cmw/core/provenance.py), VASP preparation/finalization, ORCA job records | Target/attempt/geometry identities, input/artifact hashes and executable/resource provenance already exist in adapter-specific records. Generic Jobs does not freeze every input or output. ORCA already has an engine-specific `job.json`: do not overwrite it. |
 | Human metadata | [`catalogue.py`](../../src/cmw/jobs/catalogue.py), catalogue relations, `Store.annotate` | Project/system/series/stage/tags, attempt relations and a revision-checked **replaceable** note exist. Append-only purpose/outcome events do not. |
 | Node handshake | [`backend.py`](../../src/cmw/nodes/backend.py) capabilities, [`identity.py`](../../src/cmw/nodes/identity.py), [`runner_profiles.py`](../../src/cmw/nodes/runner_profiles.py) | Node/queue UUIDs, runtime fingerprint (package/Python/dependencies), runner/dependency identities, limits, readiness, interpreter pins and profiles exist. CMW version is not VASP build identity. |
-| Bundle and binary evidence | [`transfer.py`](../../src/cmw/nodes/transfer.py), [`submission.py`](../../src/cmw/nodes/submission.py), [`backend_evidence.py`](../../src/cmw/periodic/vasp/backend_evidence.py) | Selected files already have SHA-256, size, role, mode and origin; registration binds bundle/submission/profile digests. Explicit POTCAR authorization is required. Upload currently refuses WAVECAR/CHGCAR (64 MiB/file, 256 MiB total), and managed VASP submission emits `--restart none`. Selected reviewed binary manifests can pin VASP executable/build evidence; general D22 VASP build advertisement is still planned. |
+| Bundle and binary evidence | [`transfer.py`](../../src/cmw/nodes/transfer.py), [`submission.py`](../../src/cmw/nodes/submission.py), [`backend_evidence.py`](../../src/cmw/periodic/vasp/backend_evidence.py) | Selected files already have SHA-256, size, role, mode and origin; registration binds bundle/submission/profile digests. Explicit POTCAR authorization is required. Upload currently refuses WAVECAR/CHGCAR (64 MiB/file, 256 MiB total), and portable node submission emits `--restart none` (managed warm restart from `--input` is local; see below). Selected reviewed binary manifests can pin VASP executable/build evidence; general D22 VASP build advertisement is still planned. |
 
 Relevant contracts are [Jobs](../cmw-jobs.md), [nodes](../cmw-dual-node.md),
 [result evidence](../periodic/vasp-result-evidence.md),
@@ -336,32 +336,26 @@ state through its single writer.
 Restart transport is a **separate multi-host requirement, outside #41**. Current
 upload refusals and limits remain in place; do not smuggle files through support
 roles or add transport work to any phase of this issue.
-Managed restart-runner qualification is tracked separately in
-[#46](https://github.com/angzeli/computational-modelling-workflow/issues/46),
-covering copy-only PBE→HSE and staged-HSE restarts with synchronous source/copy
-hashes, unchanged source bytes and operator-supplied INCAR settings. It must
-integrate with native manifest creation when qualified; the interim legacy route
-is not the permanent solution. This work is not implemented in #42.
+Managed warm restart exists since #59 (closing
+[#46](https://github.com/angzeli/computational-modelling-workflow/issues/46)):
+`--restart wavecar|chgcar|both` is accepted when the runner declares it and the
+checkpoint files are in `--input`. CMW records each checkpoint's stat identity
+at `jobs add`; the runner copies each checkpoint into the new output, hashes the
+copy, checks the source is unchanged, enforces the ISTART/ICHARG policy and
+records `restart_observed`. `finalize-result` still refuses restart runs, and
+portable node submission still forces `--restart none`. See the
+[warm-restart contract](../periodic/vasp-result-evidence.md#warm-restart-through-jobs).
 
-The current managed submission fixes `--restart none`; there is no supported
-managed restart-from-WAVECAR path between deployment and completion of Phase 1.
-For an urgent restart during that interval, use only a separately authorized,
-reviewed **existing external foreground-runner route**, optionally submitted as
-a generic Jobs command under the [foreground integration contract](../cmw-jobs.md#integration-and-foreground-command-contract).
-This interim creation is owner-local; non-owner nodes cannot use it to bypass
-the pre-1b refusal for manifest-enabled projects. The operator supplies the exact runner command and scientific restart settings;
-verify that runner actually supports copying a stable, terminated source WAVECAR
-into a fresh destination and using it, with synchronous source/copy hashes and
-unchanged source bytes. The current managed runner checker only accepts restart
-none and cannot qualify that external restart route. If no such independently
-qualified runner exists, defer the launch; never bypass managed validation,
-smuggle restart files through transport, or silently rely on an existing WAVECAR.
-This interim route remains a legacy job with existing provenance, with manifest
-backfill only after termination; it is not native manifest creation or manual
-adoption. After 1a, only owner-local native creation is available, and managed
-VASP restart still requires separate runner qualification; 1b adds allocation
-transport, not restart-file transport. `--restart-from` never chooses INCAR
-settings implicitly. No launch or qualification is performed by this Phase 0 PR.
+That route identifies a donor by its `--input` directory, not by a job ID, and
+records stat identity at submission rather than a content digest. Phase 1 adds
+what it lacks: `--restart-from <ID>` resolves the donor job and its stable,
+terminated checkpoints, and `restart_inputs`/`parent` record the copied-input
+SHA-256 digests from the runner's staging evidence, which the existing route
+already computes. Until then, restart jobs remain legacy jobs with existing
+provenance, eligible for backfill only after termination, with any parent
+inferred rather than explicit. `--restart-from` never chooses INCAR settings
+implicitly; the operator still supplies them. Finalizing restart results is
+outside #41. No launch or qualification is performed by this Phase 0 PR.
 
 ## Single writers, synchronization and integrity
 
@@ -532,6 +526,11 @@ of scientific acceptance or checkpoint reuse validity. The LABORT grammar and
 magnetisation extraction are new; the existing broad stop regex is insufficient.
 Qualify native dialects with authorized transcripts in Phase 2, not by reading
 the still-running production jobs during Phase 0.
+
+Reuse first: build the classifier on the existing
+[SCF analysis](../../src/cmw/periodic/vasp/scf_analysis.py) history and
+convergence helpers (`cmw vasp analyze-scf`) and the bounded readers below;
+extend them rather than adding a second OUTCAR parser.
 
 Marker basis: [existing parser](../../src/cmw/periodic/vasp/results.py),
 [EDIFF](https://vasp.at/wiki/EDIFF), [OSZICAR](https://vasp.at/wiki/OSZICAR),
