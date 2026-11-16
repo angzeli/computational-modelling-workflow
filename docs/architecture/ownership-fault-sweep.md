@@ -2,7 +2,7 @@
 
 This is the executable verification manifest for the in-memory ownership-hold
 and completion recovery change. It does not claim worker-crash recovery; that
-requires the [durable-completion proposal](durable-completion-proposal.md).
+is deferred durable-completion work ([issue #23](https://github.com/angzeli/computational-modelling-workflow/issues/23)).
 
 ## What the matrix executes
 

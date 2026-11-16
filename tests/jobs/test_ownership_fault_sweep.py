@@ -72,6 +72,11 @@ class OwnershipFaultSweepTests(unittest.TestCase):
                 except SweepBoundExceeded as exc:
                     watchdog.fail(exc.kind, str(exc), observed=exc.observed, limit=exc.limit)
             return result, outcome_class
+        except RowWatchdogExpired:
+            raise  # The watchdog already emitted the exact failing row.
+        except BaseException as exc:
+            emit('ROW', event='FAILED', **identity, error=f'{type(exc).__name__}: {exc}')
+            raise
         finally:
             emit('ROW', event='END', **identity, elapsed_seconds=clock()-self.started,
                  row_elapsed_seconds=clock()-started,

@@ -110,7 +110,13 @@ never nonstandard JSON numbers. No whole-directory hashing is performed.
 
 Snapshots are sequential observations, not an atomic filesystem snapshot. A quiet
 file is not proof of completed execution. Finalization revalidates exact source
-identities; arbitrary external edits can still race that final check. Reuse must
+identities; arbitrary external edits can still race that final check. Across
+observations, a source keeps its identity while its device, inode, size,
+modification time, byte count and full SHA-256 match. A change-time (`ctime_ns`)
+difference alone, as from `chmod`, `chown` or extended-attribute edits, is
+reported in `metadata_changes` (`source.metadata_changed`) and does not
+invalidate it. Change time still counts within a single read, where any change
+makes that observation unstable. Reuse must
 recheck the recorded sources, policy and bindings. Records describe snapshots,
 not permanent certificates for paths.
 
@@ -376,6 +382,24 @@ Exit 2 means incompatible or unknown. An absent `--managed-foreground` is report
 explicitly; it is never removed or mapped to a standalone flag. A flag's help
 text identifies only a declared contract, not implementation of that contract.
 
+#### Warm restart through Jobs
+
+`--restart wavecar|chgcar|both` is accepted when the runner declares that value
+and the checkpoint files are in `--input` (`--restart-from` stays unsupported).
+It is not accepted with `--controlled-suspension` or `--binary-manifest`. The
+JSON then adds `observed_capabilities.restart` with the mode, donor directory and
+files. The runner copies each checkpoint into the new output, hashes the copy and
+checks that the source is unchanged; it also enforces the ISTART/ICHARG policy,
+checks WAVECAR/CHGCAR headers and records `restart_observed`. These are runner
+facts, not CMW scientific acceptance. `cmw vasp check-inputs` remains a
+four-file checker and reports `incar.restart` as unsupported for such inputs.
+
+At `jobs add`, CMW records the stat identity of each requested checkpoint in
+`--input`. Staging evidence is accepted only if the runner staged exactly the
+four inputs plus those files, each from the same unchanged source file.
+`finalize-result` refuses restart runs: their staged checkpoints are not
+reverified. Portable node submission still forces `--restart none`.
+
 The source combination records available commits, relevant source dirty state,
 bounded source hashes, CMW module/distribution origin and the optional project
 identity. Whole-worktree dirty state and untracked files outside the known runner
@@ -451,8 +475,8 @@ The supported invocation explicitly supplies `--input`, `--output`, `--binary st
 `--stop-before` and `--managed-foreground`. Counts must satisfy the external
 runner's 1–8 rank range and decomposition rules. Both native and synthetic MPI
 topology modes are recognized; the latter names a topology setting, not fake
-scientific execution. Unknown/repeated options, restart modes and other wrappers
-are unsupported. Paths must remain absolute and canonical: Jobs cwd equals the
+scientific execution. Unknown/repeated options, restart runs and other wrappers
+are unsupported for finalization. Paths must remain absolute and canonical: Jobs cwd equals the
 input argument, and the inspected directory equals the output argument.
 
 Only the original `<output>/RUN_METADATA.txt` is accepted, with one ordered
@@ -548,7 +572,7 @@ queue becomes unreadable. The owner keeps the input hashes in a
 commands return 75 for temporary refusal. The endpoint reports
 `SUCCESSOR_UNVERIFIABLE` before publication or during registration, and
 `SUCCESSOR_PENDING_VERIFICATION` for a published successor awaiting its
-parent check. See [successor preparation and registration](../../cmw-jobs-successors.md).
+parent check. See [successor preparation and registration](../cmw-jobs-successors.md).
 
 If the first `successor.json` creation fails after VASP inputs were published,
 retrying at the original destination can recover it from the approved-plan
@@ -558,7 +582,7 @@ every input's bytes. A mismatch or unreadable entry refuses without changing
 the files. A temporarily unavailable parent permits only
 `PENDING_VERIFICATION`, with the same exit 75 and endpoint code above; it never
 authorizes registration. Publications lacking that recovery evidence require
-the documented [fresh-destination recovery](../../cmw-jobs-successors.md#disk-full-creating-the-first-successor-record).
+the documented [fresh-destination recovery](../cmw-jobs-successors.md#disk-full-creating-the-first-successor-record).
 
 Publication writes only:
 

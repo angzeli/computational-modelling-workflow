@@ -15,7 +15,7 @@ from cmw.core.provenance import stable_hash
 from .result_binding import inspect_binding
 from .result_differences import field_differences
 from .result_policy import load_policy, assess_result
-from .result_sources import read_json_source, revalidate_sources
+from .result_sources import read_json_source, revalidate_sources, same_persistent_identity
 from .results import inspect_result, compare_geometry
 
 
@@ -378,7 +378,7 @@ def _unique_sources(sources):
     selected = {}
     for source in sources:
         key = source["resolved_path"]
-        if key in selected and any(source[k] != selected[key][k] for k in ("sha256", "stat_before")):
+        if key in selected and not same_persistent_identity(source, selected[key]):
             raise ResultFinalizationError("A source has conflicting observations within this finalization")
         selected[key] = source
     return list(selected.values())

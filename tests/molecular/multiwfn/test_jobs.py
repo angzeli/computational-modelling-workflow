@@ -168,6 +168,14 @@ class JobsProfileTests(unittest.TestCase):
         source = json.loads(source_path.read_text()); source.pop('attempt'); source_path.write_text(json.dumps(source))
         self.assertIn('attempt', check(spec)['findings'][-1]['message'])
 
+    def test_explicit_esp_grid_is_refused_by_managed_jobs(self):
+        spec = make_spec(self.root / 'explicit-grid', 'ESP')
+        spec['scientific'].update(grid_origin_bohr=[-4, -4, -4], grid_dimensions=[17, 17, 17])
+        result = check(spec)
+        self.assertNotEqual(result['status'], 'READY')
+        self.assertIn('Explicit ESP grids are not supported through managed Jobs',
+                      json.dumps(result['findings']))
+
     def test_ifct_negative_state_fragments_geometry_and_donor(self):
         spec = make_spec(self.root / 'ifct-negative', 'IFCT')
         for key, value in [('atom_count', 4), ('state_index', 999), ('fragments', [{'label': 'A', 'indices_zero_based': [0, 1, 3]}, {'label': 'B', 'indices_zero_based': [0, 2, 4]}])]:

@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+import stat
 import time
 
 from cmw.periodic.vasp.result_runner import (
-    _CONTROLLED_KEYS, _DIGEST, _INPUTS, _KEYS, _STAGED, _parse_record, _timestamp,
+    _CONTROLLED_KEYS, _DIGEST, _INPUTS, _KEYS, _STAGED, RESTART_FILES, _parse_record, _timestamp,
 )
 from cmw.periodic.vasp.result_sources import SnapshotReader
 from cmw.progress.models import SourceDescriptor
@@ -64,6 +65,19 @@ def prepare_vasp_input(job):
         before = observed['stat_before']
         binding.update(sha256=observed['sha256'], bytes=observed['bytes_read'],
                        source_stat=[before[key] for key in ('device', 'inode', 'size', 'mtime_ns')])
+        restart = options.get('--restart', 'none')
+        _require(restart in RESTART_FILES and '--restart-from' not in options,
+                 'Restart checkpoints must come from the registered --input')
+        if RESTART_FILES[restart]:
+            # Stat identity only: the runner hashes its copy while staging, and
+            # multi-GiB checkpoints are not re-read at registration.
+            restart_sources = {}
+            for name in RESTART_FILES[restart]:
+                info = (source / name).lstat()
+                _require(stat.S_ISREG(info.st_mode) and info.st_size > 0,
+                         f'Restart {name} must be a nonempty regular file in --input')
+                restart_sources[name] = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+            binding['restart_sources'] = restart_sources
     except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
         binding['issue'] = str(exc)
     return binding
@@ -79,8 +93,11 @@ def _staging_evidence(content, binding, job, options, now):
     values, positions, staged = _parse_record(prefix, _KEYS | _CONTROLLED_KEYS)
     _require(values.get('state') == ['STAGING', 'RUNNING'] and positions['state'][0] == 0,
              'Runner staging lifecycle is ambiguous')
-    _require(values.get('child_status') == ['NOT STARTED'] and set(staged) == set(_INPUTS),
-             'Runner staging must identify all four inputs before launch')
+    restart = options.get('--restart', 'none')
+    _require(restart in RESTART_FILES, 'Unsupported runner restart mode')
+    _require(values.get('child_status') == ['NOT STARTED']
+             and set(staged) == set(_INPUTS) | set(RESTART_FILES[restart]),
+             'Runner staging must identify all four inputs and requested restart files before launch')
     scalar = {key: entries[0] for key, entries in values.items() if len(entries) == 1}
     _require(scalar.get('source') == binding['input'] and scalar.get('output') == binding['output'],
              'Runner staging paths differ from the registered attempt')
@@ -103,6 +120,10 @@ def _staging_evidence(content, binding, job, options, now):
     match = next(_STAGED.fullmatch(value) for value in values['staged_file'] if value.startswith('POSCAR;'))
     _require([int(value) for value in match.groups()[2:6]] == binding['source_stat'],
              'Staged POSCAR source identity differs from the registered prepared input')
+    for name in RESTART_FILES[restart]:
+        match = next(_STAGED.fullmatch(value) for value in values['staged_file'] if value.startswith(name + ';'))
+        _require([int(value) for value in match.groups()[2:6]] == binding.get('restart_sources', {}).get(name),
+                 f'Staged {name} source identity differs from the registered restart input')
 
 
 def resolve_vasp_input(job, engine, *, now=None):

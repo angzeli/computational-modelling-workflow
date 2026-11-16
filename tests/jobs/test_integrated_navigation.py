@@ -7,8 +7,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from tests.ui_readiness import await_laid_out, await_selection_settled
 from cmw.jobs.store import Store
 from tests.jobs.test_navigation_ui import SyntheticObserver, SyntheticSampler, table_view
+from tests import waiting
 try:
     from cmw.jobs.tui import JobsApp, Inspect
     from cmw.jobs.catalogue_ui import CatalogueSearch
@@ -21,12 +23,8 @@ except ImportError:
 @unittest.skipIf(JobsApp is None, 'Optional Jobs UI unavailable')
 class IntegratedNavigationTests(unittest.IsolatedAsyncioTestCase):
     async def until(self, pilot, predicate):
-        for _ in range(120):
-            if predicate():
-                await pilot.pause()
-                return
-            await pilot.pause(.025)
-        self.fail('Bounded navigation event did not complete')
+        await waiting.until(predicate, pilot=pilot, timeout=10, what='Bounded navigation event did not complete')
+        await pilot.pause()
 
     async def test_refresh_during_unmount_does_not_read_state_or_missing_widgets(self):
         with tempfile.TemporaryDirectory(prefix='cmw-detach-refresh-') as tmp:
@@ -65,6 +63,7 @@ class IntegratedNavigationTests(unittest.IsolatedAsyncioTestCase):
                         await pilot.press('/')
                         self.assertIsInstance(app.screen, CatalogueSearch)
                         app.screen.query_one('#catalogue-text', Input).value = 'case'
+                        await await_laid_out(app.screen.query_one('#catalogue-apply'), hit_test=True)
                         await pilot.click('#catalogue-apply')
                         await self.until(pilot, lambda: bool(app.catalogue_pages) and not app.catalogue_busy)
                         table = app.query_one('#table', DataTable)
@@ -72,6 +71,8 @@ class IntegratedNavigationTests(unittest.IsolatedAsyncioTestCase):
                         await pilot.press('home', *(['down']*19))
                         await self.until(pilot, lambda: app.selected_id == 'J20.1')
                         for action in actions:
+                            selected = app.selected()
+                            await await_selection_settled(app, selected['id'], selected['attempt_id'])
                             before = table_view(table)
                             await pilot.press('enter')
                             self.assertIsInstance(app.screen, Inspect)

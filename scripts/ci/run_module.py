@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 
+from filter_sweep import SweepOutput
+
 
 def run(log_path, module):
     log_path = Path(log_path)
@@ -19,6 +21,11 @@ def run(log_path, module):
         'import sys; sys.path.insert(0, "tests"); '
         'exec(compile(open("scripts/ci/unittest_guard.py", "rb").read(), '
         '"scripts/ci/unittest_guard.py", "exec"))', module]
+    def publish(data):
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+
+    sweep = SweepOutput(publish) if module == 'jobs.test_ownership_fault_sweep' else None
     with live_path.open('xb', buffering=0) as destination, live_path.open('rb', buffering=0) as source, \
             log_path.open('xb', buffering=0) as snapshot:
         process = subprocess.Popen(command, stdout=destination, stderr=subprocess.STDOUT)
@@ -32,9 +39,13 @@ def run(log_path, module):
                 if not data:
                     break
                 snapshot.write(data)
-                sys.stdout.buffer.write(data)
-                sys.stdout.buffer.flush()
+                if sweep:
+                    sweep.feed(data)
+                else:
+                    publish(data)
             if status is not None:
+                if sweep:
+                    sweep.finish()
                 return status if status >= 0 else 128 - status
             time.sleep(.01)
 

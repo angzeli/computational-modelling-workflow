@@ -1,6 +1,8 @@
 """Watchdogs stop diagnostic runs; they do not change the lifecycle assertions."""
 import json
 import signal
+import runpy
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -18,6 +20,37 @@ class SweepReportingTests(unittest.TestCase):
         self.backup = self.enterContext(patch.object(reporting.faulthandler, 'dump_traceback_later'))
         self.cancel_backup = self.enterContext(patch.object(reporting.faulthandler, 'cancel_dump_traceback_later'))
         self.identity = dict(route='controlled', outcome='cancel', point='module:read:123:Store.get#2', fault='EPERM')
+
+    def test_console_keeps_only_bounded_recent_starts_until_watchdog(self):
+        namespace = runpy.run_path(str(Path(__file__).resolve().parents[2] /
+                                       'scripts/ci/filter_sweep.py'))
+        output = []
+        reporter = namespace['SweepOutput'](output.append)
+        count = namespace['RECENT_ROWS'] + 5
+        for index in range(count):
+            for event in ('START', 'END'):
+                line = b'OWNERSHIP_FAULT_ROW ' + json.dumps(dict(event=event, point=index)).encode() + b'\n'
+                reporter.feed(line[:9])
+                reporter.feed(line[9:])
+        self.assertEqual(output, [])
+        reporter.feed(b'Timeout (0:00:20)!\nstack frame\n')
+        recent = json.loads(output[0].split(b' ', 1)[1])
+        self.assertEqual([row['point'] for row in recent], list(range(5, count)))
+        self.assertIn(b'stack frame', b''.join(output))
+        self.assertEqual(len(reporter.starts), namespace['RECENT_ROWS'])
+
+    def test_console_preserves_failed_rows_summary_and_malformed_evidence(self):
+        namespace = runpy.run_path(str(Path(__file__).resolve().parents[2] /
+                                       'scripts/ci/filter_sweep.py'))
+        output = []
+        reporter = namespace['SweepOutput'](output.append)
+        kept = [b'OWNERSHIP_FAULT_ROW {"event":"FAILED","point":"x"}\n',
+                b'OWNERSHIP_FAULT_SWEEP {"passed_rows":3}\n',
+                b'OWNERSHIP_FAULT_ROW malformed\n']
+        for line in kept:
+            reporter.feed(line)
+        reporter.finish()
+        self.assertEqual(output, kept)
 
     def test_real_alarm_escapes_exception_retry_and_virtual_clock(self):
         previous = signal.getsignal(signal.SIGALRM)
@@ -93,6 +126,16 @@ with RowWatchdog(row, wall_seconds=.02, hard_seconds=.05):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('blocked-native-read#1', result.stdout)
         self.assertIn('Timeout', result.stderr)
+        namespace = runpy.run_path(str(Path(__file__).resolve().parents[2] /
+                                       'scripts/ci/filter_sweep.py'))
+        console = []
+        reporter = namespace['SweepOutput'](console.append)
+        reporter.feed(result.stdout.encode())
+        self.assertEqual(console, [], 'Successful row starts stay private until a timeout')
+        reporter.feed(result.stderr.encode())
+        reporter.finish()
+        self.assertIn(b'blocked-native-read#1', b''.join(console))
+        self.assertIn(b'Timeout', b''.join(console))
 
     def test_failfast_keeps_injected_count_and_reports_incomplete_scenario(self):
         from tests.jobs import test_ownership_fault_sweep as sweep
@@ -109,6 +152,7 @@ with RowWatchdog(row, wall_seconds=.02, hard_seconds=.05):
             case.run(result)
             case.tearDownClass()
         self.assertEqual(len(result.failures), 1)
+        self.assertTrue(any(b'"event": "FAILED"' in line for line in self.output))
         self.assertEqual(len(case.rows), 1)
         self.assertEqual(case.rows[0]['injected_count'], 1)
         self.assertFalse(case.timings[0]['completed'])

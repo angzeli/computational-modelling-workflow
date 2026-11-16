@@ -12,6 +12,5 @@ unset PYTHONPATH
 export TMPDIR="$work_root/tmp" CMW_JOBS_STATE="$work_root/unused-state"
 export CMW_TEST_EVIDENCE_DIR="$work_root/evidence" CMW_FAULT_SWEEP=full
 cd "$source_root"
-"$python_exe" -c 'import sys; sys.path.insert(0, "tests"); exec(compile(open("scripts/ci/unittest_guard.py", "rb").read(), "scripts/ci/unittest_guard.py", "exec"))' \
-  jobs.test_ownership_fault_sweep 2>&1 | tee "$work_root/log"
+"$python_exe" scripts/ci/run_module.py "$work_root/log" jobs.test_ownership_fault_sweep 2>&1 | tee "$work_root/output"
 "$python_exe" scripts/ci/check_ownership_sweep.py "$work_root/evidence/ownership-fault-sweep.json" | tee "$work_root/coverage-union.txt"

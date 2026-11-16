@@ -4,6 +4,7 @@ from dataclasses import replace
 import unittest
 
 from cmw.nodes.protocol import NodeError
+from tests import waiting
 
 try:
     from textual.widgets import Button, Select
@@ -23,11 +24,8 @@ class RetainedViewsTests(unittest.IsolatedAsyncioTestCase):
         self.app = NodesApp({'TEST': self.backend}, clock=lambda: 100., wall_clock=lambda: 1800000000.)
 
     async def until(self, pilot, condition):
-        for _ in range(100):
-            if condition():
-                return
-            await pilot.pause(.02)
-        self.fail('View did not receive its requested observation')
+        await waiting.until(condition, pilot=pilot, timeout=10, interval=.02,
+                            what='View did not receive its requested observation')
 
     def disconnect(self):
         self.app.accept('TEST', ('status', {}, None, None, True), None,

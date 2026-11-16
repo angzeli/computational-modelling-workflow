@@ -12,6 +12,27 @@ from typing import Mapping
 from .runtime import require_supported_version
 
 
+# Grid option 5 (origin, spacings, point counts) was confirmed by a sandbox run
+# on these exact versions only; other versions are not natively qualified.
+EXPLICIT_GRID_VERSIONS = frozenset({(2026, 7, 15)})
+
+
+def _explicit_grid_menu(version: str, parameters: Mapping[str, object]) -> str:
+    try:
+        fields = tuple(int(value) for value in version.split("."))
+    except ValueError as exc:
+        raise ValueError(f"invalid Multiwfn version: {version!r}") from exc
+    if fields not in EXPLICIT_GRID_VERSIONS:
+        raise ValueError(
+            f"explicit ESP grids are not natively qualified for Multiwfn {version}; "
+            "verified: " + ", ".join(".".join(map(str, item)) for item in sorted(EXPLICIT_GRID_VERSIONS))
+        )
+    spacing = repr(float(parameters["grid_spacing_bohr"]))
+    origin = ",".join(repr(float(value)) for value in parameters["grid_origin_bohr"])
+    counts = ",".join(str(int(value)) for value in parameters["grid_dimensions"])
+    return f"5\n{origin}\n{spacing},{spacing},{spacing}\n{counts}"
+
+
 class Operation(str, Enum):
     FMO = "FMO_HOMO_LUMO"
     ESP = "ESP_DENSITY_PAIR"
@@ -36,6 +57,9 @@ def menu_stream(
     if operation is Operation.ESP:
         spacing = float(parameters["grid_spacing_bohr"])
         # Main function 5 exports density.cub and totesp.cub by default.
+        if "grid_origin_bohr" in parameters:
+            grid = _explicit_grid_menu(version, parameters)
+            return f"5\n1\n{grid}\n2\n0\n5\n12\n{grid}\n2\n0\nq\n"
         return f"5\n1\n4\n{spacing:g}\n2\n0\n5\n12\n4\n{spacing:g}\n2\n0\nq\n"
     if operation is Operation.IGMH:
         fragment_a = ",".join(str(value) for value in parameters["fragment_a"])

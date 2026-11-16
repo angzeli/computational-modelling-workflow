@@ -49,7 +49,7 @@ class RunnerCompatibilityTests(unittest.TestCase):
                      "--restart", "none", "--timeout", "10", "--stop-before", "0",
                      "--managed-foreground"]
 
-    def write_parser(self, *, managed=True, suffix="", prefix=""):
+    def write_parser(self, *, managed=True, suffix="", prefix="", restart='choices=("none",)'):
         declarations = [
             'p.add_argument("--input", required=True)',
             'p.add_argument("--output", required=True)',
@@ -58,7 +58,7 @@ class RunnerCompatibilityTests(unittest.TestCase):
             'p.add_argument("--ncore", type=int, required=True)',
             'p.add_argument("--kpar", type=int, required=True)',
             'p.add_argument("--mpi-mode", choices=("native", "synthetic"))',
-            'p.add_argument("--restart", choices=("none",))',
+            'p.add_argument("--restart", ' + restart + ')',
             'p.add_argument("--timeout", type=float)',
             'p.add_argument("--stop-before", type=float)',
         ]
@@ -240,6 +240,44 @@ class RunnerCompatibilityTests(unittest.TestCase):
         result = self.check()
         self.assertEqual(result["interface_compatibility"]["status"], "COMPATIBLE", result)
         self.assertEqual(result["exit_code"], 0)
+
+    def restart_runner(self):
+        # Same literal table form as the port: choices=tuple(RESTARTS).
+        self.write_parser(prefix="RESTARTS = {'none': (), 'wavecar': ('WAVECAR',), "
+                                 "'chgcar': ('CHGCAR',), 'both': ('WAVECAR', 'CHGCAR')}\n",
+                          restart="choices=tuple(RESTARTS)")
+
+    def test_declared_warm_restart_from_input_is_compatible_but_not_finalizable(self):
+        self.restart_runner()
+        for mode, files in (("wavecar", ["WAVECAR"]), ("chgcar", ["CHGCAR"]), ("both", ["WAVECAR", "CHGCAR"])):
+            with self.subTest(mode=mode):
+                argv = list(self.argv)
+                argv[argv.index("--restart") + 1] = mode
+                result = self.check(argv)
+                self.assertEqual(result["interface_compatibility"]["status"], "COMPATIBLE", result)
+                restart = result["observed_capabilities"]["restart"]
+                self.assertEqual((restart["mode"], restart["donor"], restart["files"]),
+                                 (mode, str(self.inputs), files))
+                self.assertIn("not reverified", result["result_binding_qualification"]["reason"])
+        self.assertNotIn("restart", self.check()["observed_capabilities"])
+
+    def test_undeclared_or_unqualified_restart_routes_are_incompatible(self):
+        argv = list(self.argv)
+        argv[argv.index("--restart") + 1] = "both"
+        result = self.check(argv)  # Fixture runner declares only --restart none.
+        self.assertEqual(result["interface_compatibility"]["status"], "INCOMPATIBLE")
+        self.assertIn("--restart does not declare the required value 'both'", result["missing_requirements"])
+        self.restart_runner()
+        donor = argv[:-1] + ["--restart-from", str(self.inputs), "--managed-foreground"]
+        controlled = argv + ["--controlled-suspension", "--execution-budget", "5"]
+        unknown = list(argv)
+        unknown[unknown.index("--restart") + 1] = "all"
+        for label, variant in (("separate donor", donor), ("unknown mode", unknown),
+                               ("controlled suspension", controlled)):
+            with self.subTest(label=label):
+                result = self.check(variant)
+                self.assertEqual(result["interface_compatibility"]["status"], "INCOMPATIBLE", result)
+                self.assertEqual(result["exit_code"], 2)
 
     def test_wrong_wrapper_duplicate_unsupported_and_invalid_route_arguments(self):
         wrong = self.scripts / "different-wrapper.sh"

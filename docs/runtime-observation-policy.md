@@ -79,7 +79,7 @@ applies unconditionally. Python can still read existing caches. A third-party
 interpreter that directly imports a cold package (including bare
 `python -m cmw.cli`) can cache the package initializer before it executes.
 This also applies to standalone source helpers that invoke bare `python -m`,
-such as `xyz_to_poscar.sh` and generated HOF scripts run outside managed Jobs.
+such as `xyz_to_poscar.sh` run outside managed Jobs.
 Use `-B` or set `PYTHONDONTWRITEBYTECODE=1` before launching them.
 
 Independent processes, programs that reset the flag, explicit `compileall`

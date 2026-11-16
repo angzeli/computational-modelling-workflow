@@ -11,6 +11,7 @@ from uuid import uuid4
 from cmw.jobs.study_models import StudyResult
 from cmw.nodes.codec import encode_typed
 from cmw.nodes.protocol import NodeError
+from tests import waiting
 try:
     from textual.widgets import Static
     from cmw.jobs.catalogue_ui import CatalogueDetails
@@ -60,11 +61,8 @@ class StudyUiTests(unittest.IsolatedAsyncioTestCase):
         for method in ('collect_activity','collect_progress','collect_execution'):
             patcher=patch.object(JobsApp,method);patcher.start();self.addCleanup(patcher.stop)
 
-    async def until(self,pilot,predicate):
-        for _ in range(120):
-            if predicate():return
-            await pilot.pause(.025)
-        self.fail('Study view did not reach bounded expected state')
+    async def until(self, pilot, predicate):
+        await waiting.until(predicate, pilot=pilot, timeout=10, what='Study view did not reach bounded expected state')
 
     def render(self,app,label,size):
         directory=os.environ.get('CMW_STUDY_RENDER_DIR')

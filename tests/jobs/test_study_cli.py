@@ -1,8 +1,5 @@
 """Core-only study command grammar and explicit owner path forwarding."""
-import argparse
-from contextlib import redirect_stderr,redirect_stdout
 from dataclasses import replace
-import io
 import json
 from pathlib import Path
 import subprocess
@@ -11,9 +8,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
-from cmw.jobs.cli import register
 from cmw.jobs.store import Store
 from cmw.jobs.study_models import StudyResult
+from tests.jobs.test_catalogue_cli import run_jobs
 
 
 class StudyCliTests(unittest.TestCase):
@@ -23,13 +20,7 @@ class StudyCliTests(unittest.TestCase):
         self.result=StudyResult(1,uuid4().hex,uuid4().hex,uuid4().hex,'plan','READY','a'*64,'{"cases":[]}')
 
     def call(self,arguments,*,local=True):
-        parser=argparse.ArgumentParser();register(parser.add_subparsers());output=io.StringIO()
-        with redirect_stdout(output),redirect_stderr(output):
-            try:
-                args=parser.parse_args(['jobs',*(['--state',str(self.store.root)] if local else []),*arguments])
-                code=args.handler(args)
-            except SystemExit as exc:code=exc.code
-        return code,output.getvalue()
+        return run_jobs(arguments,self.store.root if local else None)
 
     def test_plan_is_complete_json_and_creates_no_state(self):
         with patch('cmw.jobs.study.StudyService') as factory:

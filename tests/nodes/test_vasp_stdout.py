@@ -9,6 +9,7 @@ from cmw.progress.models import ProgressSnapshot
 from tests.nodes import test_endpoint
 from tests.nodes.test_portal import NodesApp
 from tests.periodic.vasp.result_fixtures import native_texts
+from tests import waiting
 
 if NodesApp is not None:
     from cmw.nodes.portal import row_key, target_key
@@ -52,11 +53,8 @@ class ManagedStdoutEndpointTests(unittest.IsolatedAsyncioTestCase):
     node = test_endpoint.EndpointTests.node
 
     async def until(self, pilot, predicate):
-        for _ in range(240):
-            if predicate():
-                return
-            await pilot.pause(.05)
-        self.fail('Persistent portal observation did not reach the expected frontier')
+        await waiting.until(predicate, pilot=pilot, timeout=12, interval=.05,
+                            what='Persistent portal observation did not reach the expected frontier')
 
     async def test_automatic_stdout_same_selected_attempt_partial_then_complete(self):
         backend, config, _, _ = self.node('mini')

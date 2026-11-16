@@ -160,6 +160,77 @@ product. Both cubes are validated independently and then compared for exact
 dimensions and explicitly tolerant floating-point origin, axis, and atomic
 geometry agreement. Visualization isovalues are not cube-generation defaults.
 
+### Explicit common grid
+
+To put several systems on one shared grid, add an explicit box:
+
+```sh
+./scripts/workflows/generate_esp_cubes.sh \
+  --source /path/to/validated-result.json \
+  --output /path/to/analyses \
+  --grid-spacing-bohr 0.25 \
+  --grid-origin-bohr -12 -12 -10 \
+  --grid-dimensions 97 97 81 \
+  --plan
+```
+
+- The grid is axis-aligned and isotropic, all in bohr. Origin and spacing
+  must be finite, the spacing positive, and each dimension an integer ≥ 2. The
+  far corner is `origin + (dimensions - 1) × spacing`.
+- The grid keys enter the target identity only when they're given. Existing
+  spacing-only targets keep their IDs and results.
+- `--plan` refuses a box that leaves any nucleus outside it. It reports
+  `explicit_grid` with the margin at each face (`x-` … `z+`, bohr), the
+  estimated size of the cube pair and the free disk space, and refuses when the
+  free space is smaller than that estimate.
+- Each exported cube must match the requested origin, spacing and dimensions
+  (raw bohr header values, within Multiwfn's six-decimal printed precision), as
+  well as its partner. CMW never resamples. A mismatch fails the attempt, and
+  reuse applies the same check.
+- The menu (grid option 5) is confirmed only for Multiwfn **2026.7.15**. Other
+  versions refuse explicit grids as not natively qualified; spacing-only runs
+  are unchanged.
+- Explicit grids are ESP-only. FMO refuses them, and managed Jobs ESP
+  submission refuses them too; use this direct workflow.
+
+### Advisory density diagnostics
+
+After each ESP run, and on reuse, the workflow evaluates the density cube in one
+streaming pass and writes `density-diagnostics.json` next to `result.json`. It
+reports:
+
+- minimum and maximum density;
+- the maximum density in the outer two grid layers, by face (`x-` … `z+`), and
+  which face is highest;
+- whether the reference isosurface (default 0.001 e/bohr³,
+  `--diagnostic-isovalue`) reaches the outermost layer, and on which faces;
+- the trapezoidal integral and the box volume (bohr³);
+- the discrepancy between that integral and the wavefunction electron count
+  Multiwfn printed in `multiwfn.log` (`Total/Alpha/Beta electrons`), never the
+  nuclear charges (ECPs).
+
+The diagnostics are advisory: the workflow prints a one-line `[DIAGNOSTICS]`
+summary to stderr and keeps stdout as the result JSON. Optional gates make
+them binding: `--max-boundary-density V` and `--max-electron-discrepancy V`
+(absolute, electrons). A failed gate exits **3**. A requested gate whose
+evidence is missing (no electron count in the log) fails closed. Malformed,
+truncated, non-finite or mismatched cubes are hard failures, and so is a cube
+whose hash differs from the recorded result.
+
+The policy sits outside the target identity and the result record, so changing
+thresholds re-evaluates without rerunning Multiwfn. Existing results can be
+diagnosed directly:
+
+```sh
+python -m cmw.molecular.workflows.downstream_cli diagnose \
+  --result /path/to/analyses/esp/<target-id>/result.json \
+  --max-boundary-density 1e-4 --max-electron-discrepancy 0.05
+```
+
+The integral mostly reflects grid resolution near nuclear cusps, not box
+coverage. Boundary density and the plan's face margins are the coverage
+signals. These diagnostics establish sanity, not grid convergence.
+
 ## Reuse and layout
 
 Results are stored under `<output>/<operation>/<target-id>/`. Attempts are

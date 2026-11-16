@@ -566,7 +566,7 @@ and the read-only NAME display remains usable.
 | Run | The execution supervisor has persisted ownership and admitted execution |
 | Cancelling | Cancellation requested; termination has not yet been confirmed |
 | Done | Foreground execution and its managed process group completed with exit 0 |
-| Fail | A concrete launch/execution failure, with captured exit evidence |
+| Fail | A concrete launch/execution failure, or an explicitly recorded administrative retirement of an Unknown attempt; retirement does not claim an observed exit |
 | Cancelled | Cancelled before start or managed group termination confirmed |
 | Unknown | Ownership/completion cannot be safely established; progression stops |
 
@@ -748,9 +748,9 @@ for its private macOS API and version limitations.
 Use the existing prepared CMW shell command, including its existing arguments,
 execution profile environment, runtime contract, layout, preflight and
 finalization. Jobs determines **when** to invoke it; those runners still determine
-scientific intent, settings, output layout and validation. For example, a HOF
-materialized `run.sh` may be passed through `/bin/bash` as above. Existing HOF
-queues/authorization remain independent; Jobs does not bypass their guards.
+scientific intent, settings, output layout and validation. For example, a
+materialized `run.sh` may be passed through `/bin/bash` as above. Existing
+project queues/authorization remain independent; Jobs does not bypass their guards.
 
 An optional `--layout /path/to/layout.json` resolves an existing v1/v2 CMW layout,
 checks that its working directory matches `--cwd`, and records its exact target
@@ -874,7 +874,7 @@ payload receipt or a RELEASE.
 
 These retries belong to the original worker. Worker death, restart recovery,
 durable completion records and release acknowledgement are not implemented by
-this change; see the post-cutover [durable completion proposal](architecture/durable-completion-proposal.md).
+this change; see post-cutover [issue #23](https://github.com/angzeli/computational-modelling-workflow/issues/23).
 
 ### Process domain never observed
 
@@ -991,8 +991,15 @@ logs. Establish whether the original execution is still running and which
 supervisor, if any, can supply closure. Use `cmw jobs reconcile JOB --preview`
 to inspect the supported recovery evidence. If ownership or completion remains
 unresolved, retain the original state and give the evidence to the queue
-operator for a separately authorized recovery. This release has no supported
-command to adopt a workerless claim or clear its `Unknown` state.
+operator for a separately authorized recovery. When every recorded identity is
+confirmed GONE and the recorded sessions/groups are empty, use the local
+`cmw jobs --state QUEUE_STATE retire JOB --reason TEXT [--json]` operation.
+It is the supported administrative recovery after worker loss, reboot-related
+loss of recorded authority, or an ownership contradiction; it records `Fail`
+with execution outcome unknown, never success. It does not adopt a workerless
+claim, signal processes, alter job files, or enable dispatch. A live or
+UNVERIFIABLE identity refuses. Read the [retirement safety rules, reboot limits
+and J4.1 cutover procedure](cmw-jobs-retirement.md) before using it.
 
 For an Unknown job, `cmw jobs show J1.1` adds an ephemeral
 `ownership_observation`: the worker identity is matched, gone, unavailable,
@@ -1039,8 +1046,7 @@ controller crash/restart, same-group descendants, actual PTY terminal closure,
 console keys/resize/selection, bounded safe logs and a queued existing CMW
 workflow with fake ORCA. Tests require local process-identity and terminal access;
 a restrictive sandbox may deny macOS sysctl/PTY operations. All test queues and
-processes are isolated. See the [implementation record](architecture/cmw-jobs-implementation.md)
-for measured validation results and compatibility boundaries.
+processes are isolated.
 
 ## External activity and admission guard
 

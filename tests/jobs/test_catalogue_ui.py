@@ -16,6 +16,7 @@ from cmw.jobs.catalogue import CatalogueStore
 from cmw.jobs.catalogue_models import CatalogueQuery, CataloguePage, CatalogueRecord
 from cmw.nodes.codec import encode_typed,decode_typed
 from cmw.nodes.protocol import NodeError
+from tests import waiting
 try:
     from textual.widgets import DataTable,Input,Static
     from cmw.jobs.catalogue_ui import CatalogueSearch,CatalogueDetails
@@ -90,12 +91,8 @@ class CatalogueUiTests(unittest.IsolatedAsyncioTestCase):
             patched = patch.object(JobsApp,method)
             patched.start(); self.addCleanup(patched.stop)
 
-    async def until(self,pilot,predicate):
-        for _ in range(120):
-            if predicate():
-                return
-            await pilot.pause(.025)
-        self.fail('Catalogue UI did not reach bounded expected state')
+    async def until(self, pilot, predicate):
+        await waiting.until(predicate, pilot=pilot, timeout=10, what='Catalogue UI did not reach bounded expected state')
 
     async def search(self,app,pilot,text):
         await pilot.press('/')

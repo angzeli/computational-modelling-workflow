@@ -187,6 +187,8 @@ def check(spec):
         if profile not in PROFILES:
             raise Unsupported('Supported Jobs profiles are FMO, ESP, IGMH and IFCT; NTO/HEA remain typed APIs')
         allowed = {'profile', 'source_result'} | ({'grid_spacing_bohr'} if profile in {'FMO', 'ESP'} else {'fragments_file', 'configuration_file'} if profile == 'IGMH' else {'orca_output', 'spin_manifold', 'state_index', 'atom_count', 'fragments'})
+        if profile == 'ESP' and set(science) & {'grid_origin_bohr', 'grid_dimensions'}:
+            raise Unsupported('Explicit ESP grids are not supported through managed Jobs; use the direct ESP workflow')
         if set(science) - allowed:
             raise Unsupported('Unknown scientific fields for the selected Multiwfn profile')
         dependencies = []

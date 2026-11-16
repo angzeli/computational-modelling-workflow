@@ -4,11 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import os
-import time
 from uuid import uuid4
 
 from cmw.core.provenance import file_hash
 from tests.python_fixture import python_source
+from tests import waiting
 
 
 NATIVE = r'''#!/usr/bin/env python3
@@ -63,12 +63,7 @@ def make_spec(root, *, profile='sp', workflow=False, fail_stage=None):
 
 
 def wait_for(predicate, *, timeout=15):
-    deadline=time.monotonic()+timeout
-    while time.monotonic()<deadline:
-        value=predicate()
-        if value:return value
-        time.sleep(.04)
-    raise AssertionError('Timed out waiting for isolated ORCA lifecycle')
+    return waiting.wait_for(predicate, timeout=timeout, interval=.04, what='Timed out waiting for isolated ORCA lifecycle')
 
 
 def owned_jobs_surface(root):

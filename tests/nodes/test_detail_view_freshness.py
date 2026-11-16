@@ -1,10 +1,10 @@
 """A frozen node view keeps the receipt of its own displayed payload."""
-import asyncio
 import unittest
 from unittest.mock import patch
 
 from cmw.nodes.protocol import NodeError
 from tests.jobs.test_doctor_ui import DoctorBackend
+from tests import waiting
 
 try:
     from textual.widgets import TextArea
@@ -17,9 +17,7 @@ except ImportError:
 @unittest.skipIf(NodesApp is None, 'Optional Jobs console unavailable')
 class FrozenNodeViewTests(unittest.IsolatedAsyncioTestCase):
     async def until(self, predicate):
-        async with asyncio.timeout(5):
-            while not predicate():
-                await asyncio.sleep(.01)
+        await waiting.until(predicate, timeout=5, interval=.01, what='Detail view condition did not become true')
 
     async def check_view(self, action):
         now = [100.]

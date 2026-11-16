@@ -15,6 +15,9 @@ multiwfn_cube_usage() {
   printf '%s\n' \
     "Usage: $0 --source RESULT.json --output DIRECTORY" \
     "          (--grid-spacing-bohr VALUE | --fragments FILE --config FILE)" \
+    "          [--grid-origin-bohr X Y Z --grid-dimensions NX NY NZ]   (ESP only)" \
+    "          [--diagnostic-isovalue V] [--max-boundary-density V]" \
+    "          [--max-electron-discrepancy V]                         (ESP only)" \
     "          [--multiwfn-exe FILE]" \
     "          [--settings-source FILE] [--threads N] [--plan]" >&2
 }
@@ -23,7 +26,7 @@ multiwfn_cube_main() {
   local operation=$1
   shift
   local source_result="" output_root="" grid_spacing="" settings_source=""
-  local fragment_path="" igmh_config=""
+  local fragment_path="" igmh_config="" grid_args=() diagnostic_args=()
   local cli_threads="" plan_only=0 plan_json prepare_json prepared_plan="" prepared_json=""
   while (($#)); do
     case "$1" in
@@ -31,6 +34,10 @@ multiwfn_cube_main() {
       --source) source_result=${2:?}; shift 2 ;;
       --output) output_root=${2:?}; shift 2 ;;
       --grid-spacing-bohr) grid_spacing=${2:?}; shift 2 ;;
+      --grid-origin-bohr) grid_args+=("$1" "${2:?}" "${3:?}" "${4:?}"); shift 4 ;;
+      --grid-dimensions) grid_args+=("$1" "${2:?}" "${3:?}" "${4:?}"); shift 4 ;;
+      --diagnostic-isovalue) diagnostic_args+=(--isovalue "${2:?}"); shift 2 ;;
+      --max-boundary-density|--max-electron-discrepancy) diagnostic_args+=("$1" "${2:?}"); shift 2 ;;
       --fragments) fragment_path=${2:?}; shift 2 ;;
       --config) igmh_config=${2:?}; shift 2 ;;
       --multiwfn-exe) MULTIWFN_EXE=${2:?}; shift 2 ;;
@@ -42,6 +49,11 @@ multiwfn_cube_main() {
       *) printf 'Unknown argument: %s\n' "$1" >&2; multiwfn_cube_usage; return 64 ;;
     esac
   done
+  if [[ "$operation" != ESP ]] && (( ${#grid_args[@]} + ${#diagnostic_args[@]} )); then
+    printf 'Explicit grid and density-diagnostic options are supported only for ESP\n' >&2
+    multiwfn_cube_usage
+    return 64
+  fi
   if [[ -n "$prepared_plan" ]]; then
     prepared_json=$("$PYTHON_BIN" -m cmw.molecular.multiwfn.jobs verify-prepared "$prepared_plan") || return 64
     source_result=$(printf '%s' "$prepared_json" | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["source_result"])')
@@ -71,7 +83,7 @@ multiwfn_cube_main() {
   if [[ "$operation" == IGMH ]]; then
     plan_command+=(--fragments "$fragment_path" --config "$igmh_config")
   else
-    plan_command+=(--grid-spacing-bohr "$grid_spacing")
+    plan_command+=(--grid-spacing-bohr "$grid_spacing" ${grid_args[@]+"${grid_args[@]}"})
   fi
   [[ -z "$cli_threads" ]] || plan_command+=(--threads "$cli_threads")
   if [[ -n "$prepared_plan" ]]; then
@@ -85,17 +97,39 @@ multiwfn_cube_main() {
     return 0
   fi
 
-  local target_path result_path lock_path lock_json lock_token="" child_pid="" monitor_pid=""
+  local target_path result_path lock_json
+  # Global, not local: the EXIT trap runs after this function returns and must
+  # still see them to stop the child/monitor and release the target lock.
+  lock_path="" lock_token="" child_pid="" monitor_pid=""
   target_path=$(printf '%s' "$plan_json" | "$PYTHON_BIN" -c \
     'import json,sys; print(json.load(sys.stdin)["target_path"])')
   result_path=$(printf '%s' "$plan_json" | "$PYTHON_BIN" -c \
     'import json,sys; print(json.load(sys.stdin)["result_path"])')
+  # Advisory density diagnostics beside an ESP result; exit 3 only for a failed explicit gate.
+  multiwfn_density_diagnostics() {
+    [[ "$operation" == ESP ]] || return 0
+    local diagnostics status=0
+    diagnostics=$("$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli diagnose \
+      --result "$result_path" ${diagnostic_args[@]+"${diagnostic_args[@]}"}) || status=$?
+    if ((status != 0 && status != 3)); then
+      printf 'Density diagnostics failed: %s\n' "$diagnostics" >&2
+      return 70
+    fi
+    printf '%s' "$diagnostics" | "$PYTHON_BIN" -c 'import json,sys; d=json.load(sys.stdin); m=d["metrics"]
+print("[DIAGNOSTICS] %s: boundary max %.3e (%s), integral %.4f, electron discrepancy %s; %s" % (
+    d["status"], m["max_boundary_density"], m["max_boundary_face"], m["trapezoidal_integral"],
+    "n/a" if d["electron_discrepancy"] is None else "%+.4f" % d["electron_discrepancy"],
+    d["diagnostics_path"]), file=sys.stderr)
+for reason in d["reasons"]: print("[DIAGNOSTICS] " + reason, file=sys.stderr)'
+    return "$status"
+  }
   if printf '%s' "$plan_json" | "$PYTHON_BIN" -c \
     'import json,sys; raise SystemExit(not json.load(sys.stdin)["reuse"]["reuse"])'
   then
     printf '[REUSED] %s\n' "$result_path" >&2
     "$PYTHON_BIN" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), indent=2, sort_keys=True))' "$result_path"
-    return 0
+    multiwfn_density_diagnostics
+    return
   fi
 
   lock_path=${target_path}.lock
@@ -132,7 +166,7 @@ multiwfn_cube_main() {
   if [[ "$operation" == IGMH ]]; then
     prepare_command+=(--fragments "$fragment_path" --config "$igmh_config")
   else
-    prepare_command+=(--grid-spacing-bohr "$grid_spacing")
+    prepare_command+=(--grid-spacing-bohr "$grid_spacing" ${grid_args[@]+"${grid_args[@]}"})
   fi
   [[ -z "$cli_threads" ]] || prepare_command+=(--threads "$cli_threads")
   if [[ -n "$prepared_plan" ]]; then
@@ -157,8 +191,13 @@ multiwfn_cube_main() {
     multiwfn_runtime_load "$runtime_path"
   else
     multiwfn_runtime_prepare "$attempt_directory" "$runtime_path" "$settings_source"
-    "$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli menu \
-      --target "$target_path" --runtime "$runtime_path" --destination "$menu_path" >/dev/null
+    local menu_json
+    menu_json=$("$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli menu \
+      --target "$target_path" --runtime "$runtime_path" --destination "$menu_path") || {
+        # e.g. an explicit grid on a Multiwfn version without a qualified menu.
+        printf '%s\n' "$menu_json"
+        return 64
+      }
   fi
 
   export CMW_MULTIWFN_OPERATION=$operation CMW_SOURCE_GEOMETRY=$source_geometry
@@ -240,4 +279,5 @@ multiwfn_cube_main() {
   lock_token=""
   trap - EXIT INT TERM
   printf '%s\n' "$final_json"
+  multiwfn_density_diagnostics
 }

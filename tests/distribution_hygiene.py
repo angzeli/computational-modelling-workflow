@@ -24,12 +24,19 @@ REDUCED_LOGS = {
         ('2026_7_15', ('s1_nto', 't2_nto', 's1_hea', 't2_hea')))
     for case in cases
 }
+# Dataset/table headers distinguish potential data from ordinary references to
+# POTCAR, TITEL or VRHFIN in parser source and synthetic metadata fixtures.
+POTENTIAL_DATA = re.compile(
+    rb"^\s*(?:parameters from PSCTR are:|PAW radial sets|Non local Part|augmentation charges)\s*$",
+    re.MULTILINE | re.IGNORECASE)
 MAX_MEMBER_BYTES = 8 * 1024 * 1024
 
 
 def findings(name, data):
     path = PurePosixPath(name)
     problems = []
+    if POTENTIAL_DATA.search(data):
+        problems.append('potential dataset marker in content (redacted)')
     if PRIVATE_HOME.search(data):
         problems.append('local-home path in content')
     if PRIVATE_TEMP.search(data):

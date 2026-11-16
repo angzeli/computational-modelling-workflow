@@ -3,10 +3,14 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
+from cmw.periodic.vasp.result_finalization import ResultFinalizationError, _unique_sources
 from cmw.periodic.vasp.result_sources import (
     SnapshotReader, SourceSnapshotError, read_json_source, revalidate_sources,
 )
@@ -153,6 +157,69 @@ class ResultSourceTests(unittest.TestCase):
         result = revalidate_sources([record])
         self.assertIs(result["valid"], False)
         self.assertEqual(result["findings"][0]["code"], "source.identity_changed")
+
+    def metadata_only(self, change):
+        """Apply a metadata-only change and require ctime to advance (issue #38)."""
+        _, record = self.observe()
+        before = self.path.stat()
+        time.sleep(0.01)
+        change()
+        after = self.path.stat()
+        self.assertEqual((before.st_ino, before.st_size, before.st_mtime_ns),
+                         (after.st_ino, after.st_size, after.st_mtime_ns))
+        self.assertNotEqual(before.st_ctime_ns, after.st_ctime_ns, "fixture did not change ctime")
+        return record
+
+    def assert_metadata_change_only(self, record):
+        result = revalidate_sources([record])
+        self.assertIs(result["valid"], True, result)
+        self.assertEqual(result["findings"], [])
+        self.assertEqual([(c["code"], c["role"], c["fields"]) for c in result["metadata_changes"]],
+                         [("source.metadata_changed", "OUTCAR", ["ctime_ns"])])
+
+    def test_permission_change_keeps_verified_identity_and_is_reported(self):
+        record = self.metadata_only(lambda: self.path.chmod(0o400))
+        self.assert_metadata_change_only(record)
+
+    def test_same_owner_chown_keeps_verified_identity_and_is_reported(self):
+        record = self.metadata_only(lambda: os.chown(self.path, os.getuid(), os.getgid()))
+        self.assert_metadata_change_only(record)
+
+    def test_extended_attribute_change_keeps_verified_identity_and_is_reported(self):
+        if hasattr(os, "setxattr"):
+            change = lambda: os.setxattr(self.path, "user.cmw-test", b"1")
+        elif shutil.which("xattr"):
+            change = lambda: subprocess.run(["xattr", "-w", "org.cmw.test", "1", str(self.path)], check=True)
+        else:
+            self.skipTest("No extended-attribute interface available")
+        try:
+            record = self.metadata_only(change)
+        except OSError as exc:
+            self.skipTest(f"Extended attributes unsupported here: {exc}")
+        self.assert_metadata_change_only(record)
+
+    def test_metadata_change_does_not_excuse_altered_bytes(self):
+        _, record = self.observe()
+        self.path.chmod(0o400)
+        self.path.chmod(0o600)
+        self.path.write_bytes(b"other\nsecond\n")
+        result = revalidate_sources([record])
+        self.assertIs(result["valid"], False)
+        self.assertEqual(result["findings"][0]["code"], "source.identity_changed")
+        self.assertEqual(result["metadata_changes"], [])
+
+    def test_unique_sources_tolerate_metadata_only_but_not_content_or_replacement(self):
+        record = self.metadata_only(lambda: self.path.chmod(0o400))
+        reader = SnapshotReader(self.path, "OUTCAR")
+        with reader:
+            list(reader)
+        self.assertEqual(len(_unique_sources([record, reader.record])), 1)
+        changed = dict(reader.record, sha256="0" * 64)
+        with self.assertRaises(ResultFinalizationError):
+            _unique_sources([record, changed])
+        moved = dict(reader.record, stat_before=dict(reader.record["stat_before"], inode=0))
+        with self.assertRaises(ResultFinalizationError):
+            _unique_sources([record, moved])
 
     def test_revalidation_detects_identical_bytes_in_replacement_inode(self):
         _, record = self.observe()

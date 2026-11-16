@@ -17,6 +17,7 @@ from cmw.jobs.progress import resolve_context
 from cmw.jobs.store import JobsError, Store
 from cmw.periodic.vasp.inputs import parse_poscar
 from cmw.periodic.vasp.preparation import prepare
+from cmw.periodic.vasp.result_runner import RESTART_FILES
 from cmw.progress.formatting import progress_text
 from cmw.progress.models import SourceDescriptor
 from cmw.progress.service import ObservationService
@@ -122,19 +123,21 @@ class PoscarRegistrationTests(unittest.TestCase):
         with self.store.transaction(create=False) as con:
             return self.store.get(con, job['id'])
 
-    def stage(self, case, job, *, forces=None, native_count=None, evaluations=1, active=False):
+    def stage(self, case, job, *, forces=None, native_count=None, evaluations=1, active=False,
+              restart='none', staged_restart=None):
         """Mimic the documented runner copy and prefix, without invoking shell code."""
         output = case['output']
         output.mkdir(exist_ok=True)
-        for name in INPUTS:
+        restart_files = RESTART_FILES[restart] if staged_restart is None else staged_restart
+        for name in INPUTS + tuple(restart_files):
             if (case['input'] / name).is_file():
                 shutil.copyfile(case['input'] / name, output / name)
         staged_at = time.time()
         lines = ['state: STAGING', 'child_status: NOT STARTED',
                  'staging_start_utc: ' + timestamp(staged_at), 'source: ' + str(case['input']),
-                 'output: ' + str(output), 'managed_foreground: True', 'restart_requested: none',
+                 'output: ' + str(output), 'managed_foreground: True', 'restart_requested: ' + restart,
                  'requested_version: 6.6.1', 'original_incar_sha256: ' + digest(output / 'INCAR')]
-        for name in INPUTS:
+        for name in INPUTS + tuple(restart_files):
             source = case['input'] / name
             if not source.is_file():
                 continue
@@ -421,6 +424,49 @@ class PoscarRegistrationTests(unittest.TestCase):
                 else:
                     metadata.write_text(text)
                 self.assert_no_attributed_mask(job)
+
+    def restart_case(self, name, mode):
+        case = self.case(name)
+        for checkpoint in RESTART_FILES[mode]:
+            (case['input'] / checkpoint).write_bytes(b'invented checkpoint bytes ' + checkpoint.encode())
+        argv = self.argv(case)
+        argv[argv.index('--restart') + 1] = mode
+        return case, argv
+
+    def test_warm_restart_staging_binds_checkpoints_to_registered_input(self):
+        for mode in ('wavecar', 'chgcar', 'both'):
+            with self.subTest(mode=mode):
+                case, argv = self.restart_case('restart-' + mode, mode)
+                job = self.add(case, argv=argv)
+                binding = job['progress_sources']['vasp_input']
+                self.assertIsNone(binding['issue'])
+                self.assertEqual(set(binding['restart_sources']), set(RESTART_FILES[mode]))
+                self.stage(case, job, restart=mode)
+                self.staged_source(self.observe(job).context)
+                for checkpoint in RESTART_FILES[mode]:  # Copy only; sources are untouched.
+                    self.assertEqual((case['input'] / checkpoint).read_bytes(),
+                                     b'invented checkpoint bytes ' + checkpoint.encode())
+
+    def test_restart_staging_mismatches_and_separate_donor_fail_closed(self):
+        variants = (('missing staged checkpoint', 'both', ('WAVECAR',)),
+                    ('extra staged checkpoint', 'wavecar', ('WAVECAR', 'CHGCAR')),
+                    ('checkpoint without restart', 'none', ('WAVECAR',)),
+                    ('replaced checkpoint', 'both', None))
+        for label, mode, staged in variants:
+            with self.subTest(label=label):
+                case, argv = self.restart_case('restart-bad-' + label.replace(' ', '-'), 'both')
+                argv[argv.index('--restart') + 1] = mode
+                job = self.add(case, argv=argv)
+                if label == 'replaced checkpoint':
+                    replacement = case['input'] / 'WAVECAR.new'
+                    replacement.write_bytes(b'different checkpoint')
+                    replacement.replace(case['input'] / 'WAVECAR')
+                self.stage(case, job, restart=mode, staged_restart=staged)
+                self.assert_no_attributed_mask(job)
+        case, argv = self.restart_case('restart-donor', 'both')
+        argv[-1:-1] = ['--restart-from', str(case['input'])]
+        job = self.add(case, argv=argv)
+        self.assertIn('registered --input', job['progress_sources']['vasp_input']['issue'])
 
     def test_staging_timestamp_must_belong_to_the_recorded_attempt(self):
         for kind in ('before-start', 'after-finish', 'future'):

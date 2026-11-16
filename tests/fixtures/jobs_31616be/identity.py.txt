@@ -1,0 +1,3 @@
+def identity(pid=None):
+    process = psutil.Process(os.getpid() if pid is None else pid)
+    return {"pid": process.pid, "birth": process.create_time(), "host": socket.gethostname(), "boot": psutil.boot_time()}

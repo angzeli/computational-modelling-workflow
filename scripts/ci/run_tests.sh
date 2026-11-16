@@ -35,18 +35,16 @@ run_module() {
       if [[ $line == *'Timeout ('*')!'* ]]; then
         stream_timeout=1
         printf 'CMW_TEST_TIMEOUT module=%q active=%s\n' "$relative" "$active_test_record"
-        "$python_exe" "$source_root/scripts/ci/unittest_guard.py" --report-processes "$work/evidence"
       fi
       if [[ $module == jobs.test_ownership_fault_sweep || $stream_timeout == 1 ]]; then
         printf '%s\n' "$line"
       else
         # Unittest progress may precede a marker on the same line.
-        case "$line" in *OWNERSHIP_FAULT_*|*CMW_TEST_CASE_*) printf '%s\n' "$line";; esac
+        case "$line" in *OWNERSHIP_FAULT_*) printf '%s\n' "$line";; esac
       fi
     done
   pipeline_status=("${PIPESTATUS[@]}")
   status=${pipeline_status[0]}
-  "$python_exe" "$source_root/scripts/ci/unittest_guard.py" --report-processes "$work/evidence"
   if [[ $status == 0 && ${pipeline_status[1]} != 0 ]]; then
     status=1
   fi
@@ -67,6 +65,7 @@ run_module() {
     "$relative" "$result" "$status" "${tests:-incomplete}" "$((SECONDS - started))" \
     "$started_at" "$finished_at" "$work/log" "$completed" "$active"
   if [[ $status != 0 ]]; then
+    "$python_exe" "$source_root/scripts/ci/unittest_guard.py" --report-processes "$work/evidence"
     printf '::group::FAIL %s\n' "$relative"
     if [[ $module == jobs.test_ownership_fault_sweep ]]; then
       printf 'Sweep output and watchdog stacks were streamed above; log=%s\n' "$work/log"

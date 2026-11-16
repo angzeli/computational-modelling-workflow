@@ -1,0 +1,19 @@
+{
+  "tag": "deployed/31616be-j4-1",
+  "commit": "31616be474b2e2fd04ab6257c990983d46ddfcde",
+  "files": {
+    "store.py.txt": {
+      "source": "src/cmw/jobs/store.py",
+      "sha256": "f63df405a6691432c45d3b9c6f0fdec7904ec54c8df1ddca31fe93468508bff4"
+    },
+    "identity.py.txt": {
+      "source": "src/cmw/jobs/ownership.py",
+      "lines": [
+        15,
+        17
+      ],
+      "source_sha256": "a4390a44f98ec04a12905047301506b85eb8f32216cbc6430dad148a1fa9cdb4",
+      "sha256": "3444db26a8c43c35dfc52335e561065267dd48ba3f2b5e3ac9f7ef7bf7048763"
+    }
+  }
+}

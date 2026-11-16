@@ -513,6 +513,17 @@ def register(subcommands):
     ownership.add_argument("--json", action="store_true")
     ownership.set_defaults(handler=handle)
 
+    retire = operations.add_parser("retire", help="retire an Unknown record after every recorded process is confirmed gone",
+        description="Local administrative recovery after worker death, restart/reboot recovery or contradictory "
+                    "execution evidence left a job Unknown. Every recorded identity must be GONE and its "
+                    "session/groups empty. Records Fail with execution outcome unknown; never signals, "
+                    "changes job files, verifies results or resumes dispatch. V1 boot/birth mismatches "
+                    "remain UNVERIFIABLE (including after reboot); missing evidence refuses recovery.")
+    retire.add_argument("job_id")
+    retire.add_argument("--reason", required=True, help="operator's reason for administrative retirement")
+    retire.add_argument("--json", action="store_true")
+    retire.set_defaults(handler=handle)
+
     reconcile = operations.add_parser("reconcile", help="preview conservative recovery; persistent apply is unavailable",
         description="Read-only reconciliation preview. Does not start a controller, signal, update state or release resources.")
     reconcile.add_argument("job_id")
@@ -711,6 +722,9 @@ def inspect_progress(store, args):
 
 
 def handle(args):
+    if args.jobs_operation == "retire" and (getattr(args, "node", None) or getattr(args, "queue", None)):
+        print("retire is local only; select the existing queue with --state. No endpoint operation is sent.")
+        return 2
     if args.jobs_operation in {"request", "fetch"} and not getattr(args, "node", None):
         print("request/fetch require an explicitly enrolled --node; no local fallback")
         return 2
@@ -728,6 +742,18 @@ def handle(args):
     operation = args.jobs_operation
     from .activity import project
     try:
+        if operation == "retire":
+            from .retirement import RetirementRefused, retire
+            try:
+                result = retire(store, args.job_id, reason=args.reason)
+            except RetirementRefused as exc:
+                print(json.dumps(exc.result, indent=2, ensure_ascii=True) if args.json else
+                      safe_text(f"{exc.result['status']}: {exc}"))
+                return exc.exit_code
+            print(json.dumps(result, indent=2, ensure_ascii=True) if args.json else
+                  safe_text(f"{result['job_id']}: {result['status']} (Fail; execution outcome unknown). "
+                            "Dispatch policy unchanged; explicitly resume/start when the queue is safe."))
+            return 0
         if operation in {"suspend", "continue"}:
             from .suspension import readiness, submit
             from .suspension_presentation import readiness_text, submission_text

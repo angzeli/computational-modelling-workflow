@@ -29,7 +29,8 @@ class DirectTransport:
         self.backend.close()
 
 
-class ReviewNodeTests(unittest.TestCase):
+class OwnerNodeTestCase(unittest.TestCase):
+    """One owner-node backend fixture and a local client for owner-service node tests."""
     def setUp(self):
         self.fixture = test_backend.BackendObservationTests()
         self.fixture.setUp()
@@ -47,6 +48,9 @@ class ReviewNodeTests(unittest.TestCase):
         client = ConnectedBackend('fixture', entry, transport=DirectTransport(self.backend, transform))
         self.addCleanup(client.close)
         return client
+
+
+class ReviewNodeTests(OwnerNodeTestCase):
 
     def call(self, operation, params=None, *, target=None, request_id=None):
         value = self.backend.call(operation, params, self.target if target is None else target,

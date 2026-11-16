@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-from contextlib import redirect_stdout, redirect_stderr
-import io
 import json
 import queue
 import runpy
@@ -18,7 +16,6 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -43,6 +40,8 @@ class CiRunnerReportingTests(unittest.TestCase):
                         self.script.parent / "unittest_guard.py")
         shutil.copyfile(ROOT / "scripts" / "ci" / "run_module.py",
                         self.script.parent / "run_module.py")
+        shutil.copyfile(ROOT / "scripts" / "ci" / "filter_sweep.py",
+                        self.script.parent / "filter_sweep.py")
         (self.source / "tests").mkdir()
         shutil.copyfile(ROOT / 'tests' / 'fixture_processes.py',
                         self.source / 'tests' / 'fixture_processes.py')
@@ -160,93 +159,6 @@ class CiRunnerReportingTests(unittest.TestCase):
     def fields(line: str) -> dict[str, str]:
         return dict(field.split("=", 1) for field in shlex.split(line)[1:])
 
-    def test_progress_and_finished_module_are_live_while_another_module_waits(self) -> None:
-        self.module(
-            "jobs/test_ownership_fault_sweep.py",
-            """
-            import os
-            from pathlib import Path
-            import time
-            import unittest
-
-            class Waiting(unittest.TestCase):
-                def test_wait(self):
-                    print('..OWNERSHIP_FAULT_PROGRESS {"attempted_rows": 1}', flush=True)
-                    print('Synthetic unprefixed watchdog stack frame', flush=True)
-                    gate = Path(os.environ['CMW_REPORTING_GATE'])
-                    deadline = time.monotonic() + 15
-                    while not gate.exists():
-                        if time.monotonic() > deadline:
-                            raise AssertionError('fixture release was not received')
-                        time.sleep(0.01)
-                    print('OWNERSHIP_FAULT_SWEEP {"passed_rows": 1}', flush=True)
-            """,
-        )
-        self.module(
-            "test_fast.py",
-            """
-            import unittest
-
-            class Fast(unittest.TestCase):
-                def test_fast(self):
-                    print('OWNERSHIP_FAULT_WARNING synthetic warning', flush=True)
-                    self.assertTrue(True)
-            """,
-        )
-        process = self.start()
-        self.wait_for(
-            lambda line: any("OWNERSHIP_FAULT_PROGRESS" in item for item in self.lines)
-            and any(
-                item.startswith("CMW_TEST_MODULE_FINISHED module=tests/test_fast.py ")
-                for item in self.lines
-            )
-            and "Synthetic unprefixed watchdog stack frame" in self.lines
-        )
-        self.assertIsNone(process.poll(), "the gated module must still be running")
-        self.assertFalse(any(
-            line.startswith("CMW_TEST_MODULE_FINISHED module=tests/jobs/test_ownership_fault_sweep.py ")
-            for line in self.lines
-        ))
-        self.assertIn("Synthetic unprefixed watchdog stack frame", self.lines)
-        started = next(
-            line for line in self.lines
-            if line.startswith("CMW_TEST_MODULE_STARTED module=tests/jobs/test_ownership_fault_sweep.py ")
-        )
-        self.assertIn("OWNERSHIP_FAULT_PROGRESS", Path(self.fields(started)["log"]).read_text())
-        fast = next(
-            line for line in self.lines
-            if line.startswith("CMW_TEST_MODULE_FINISHED module=tests/test_fast.py ")
-        )
-        fields = self.fields(fast)
-        self.assertEqual((fields["result"], fields["exit_code"], fields["tests"]), ("PASS", "0", "1"))
-        self.assertGreaterEqual(int(fields["elapsed_seconds"]), 0)
-        self.assertIn("started_at", fields)
-        self.assertIn("finished_at", fields)
-        self.gate.touch()
-        self.assertEqual(process.wait(timeout=10), 0)
-        self.wait_for(lambda line: "2 modules, 2 tests, 0 failed modules" in line)
-        self.assertEqual(sum("OWNERSHIP_FAULT_SWEEP" in line for line in self.lines), 1)
-        self.assertTrue(any("OWNERSHIP_FAULT_WARNING" in line for line in self.lines))
-
-    def test_failed_module_keeps_exit_status_and_full_failure_log(self) -> None:
-        self.module(
-            "test_failure.py",
-            """
-            import unittest
-
-            class Failure(unittest.TestCase):
-                def test_failure(self):
-                    self.fail('synthetic reporting failure')
-            """,
-        )
-        process = self.start()
-        finished = self.wait_for(lambda line: line.startswith("CMW_TEST_MODULE_FINISHED "))
-        fields = self.fields(finished)
-        self.assertEqual((fields["result"], fields["exit_code"], fields["tests"]), ("FAIL", "1", "1"))
-        self.assertEqual(process.wait(timeout=10), 1)
-        self.wait_for(lambda line: "1 modules, 1 tests, 1 failed modules" in line)
-        self.assertIn("synthetic reporting failure", "\n".join(self.lines))
-        self.assertIn("::group::FAIL tests/test_failure.py", self.lines)
 
     def test_native_timeout_names_retrying_test_and_preserves_partial_counts(self) -> None:
         self.module(
@@ -368,39 +280,6 @@ class CiRunnerReportingTests(unittest.TestCase):
             time.sleep(.01)
         self.assertEqual(observe_owner(record['identity']).status, OwnershipStatus.GONE)
 
-    def test_process_audit_never_signals_reused_or_unreadable_identity(self) -> None:
-        from cmw.jobs import ownership
-        from tests import fixture_processes
-        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
-        def close():
-            if child.poll() is None:
-                child.terminate()
-            child.wait(timeout=5)
-        self.addCleanup(close)
-        directory = (self.root / 'registered').resolve()
-        stdout, stderr = io.StringIO(), io.StringIO()
-        with patch.dict(os.environ, {'CMW_TEST_EVIDENCE_DIR': str(directory),
-                                     'CMW_TEST_ACTIVE_TEST': self.id()}), \
-                redirect_stdout(stdout), redirect_stderr(stderr):
-            record = fixture_processes.register_process(child, role='read-only audit regression')
-        self.assertIsNotNone(record)
-        self.assertEqual(stdout.getvalue(), '', 'Fixture diagnostics must not corrupt endpoint JSON stdout')
-        self.assertIn('CMW_TEST_CASE_PROCESS_REGISTERED', stderr.getvalue())
-        for status in (ownership.OwnershipStatus.GONE, ownership.OwnershipStatus.UNVERIFIABLE):
-            with self.subTest(status=status), patch.object(ownership, 'observe_owner',
-                    return_value=SimpleNamespace(status=status, deciding_check='start_token')), \
-                    patch.object(os, 'kill') as send:
-                result = fixture_processes.audit_processes(directory)
-                self.assertEqual(result[0]['status'], status)
-                self.assertFalse(result[0]['signal_sent'])
-                send.assert_not_called()
-        with patch.object(ownership, 'observe_owner', side_effect=PermissionError('denied')), \
-                patch.object(os, 'kill') as send:
-            result = fixture_processes.audit_processes(directory)
-            self.assertEqual(result[0]['status'], 'UNVERIFIABLE')
-            self.assertEqual(result[0]['deciding_check'], 'observation')
-            send.assert_not_called()
-
     def test_registered_survivor_is_reaped_when_test_assertion_fails(self) -> None:
         class FailingAfterReceipt(CiRunnerReportingTests):
             def assertEqual(self, first, second, *args, **kwargs):
@@ -419,19 +298,6 @@ class CiRunnerReportingTests(unittest.TestCase):
         from cmw.jobs.ownership import OwnershipStatus, observe_owner
         self.assertEqual(observe_owner(record['identity']).status, OwnershipStatus.GONE)
         self.assertFalse(case.root.exists(), 'Directory removal must follow confirmed child exit')
-
-    def test_incomplete_registration_is_retained_and_never_reports_clean(self) -> None:
-        from tests import fixture_processes
-        directory = (self.root / 'incomplete').resolve()
-        with patch.dict(os.environ, {'CMW_TEST_EVIDENCE_DIR': str(directory),
-                                     'CMW_TEST_ACTIVE_TEST': self.id()}):
-            self.assertIsNone(fixture_processes.register_process(
-                SimpleNamespace(pid=os.getpid()), role='not a real fixture child'))
-        records = fixture_processes.read_records(directory)
-        self.assertEqual(len(records), 1)
-        self.assertFalse(records[0]['registration_complete'])
-        self.assertIsNone(records[0]['identity'])
-        self.assertEqual(fixture_processes.audit_processes(directory)[0]['status'], 'UNVERIFIABLE')
 
     def test_unreadable_cleanup_inventory_retains_evidence(self) -> None:
         for operation in ('enumeration', 'registry_stat'):
@@ -460,41 +326,6 @@ class CiRunnerReportingTests(unittest.TestCase):
                     # The fault is synthetic and no child was started here.
                     shutil.rmtree(case.root)
 
-    def test_failure_log_is_published_before_another_module_finishes(self) -> None:
-        self.module(
-            'test_failure.py',
-            """
-            import unittest
-            class Failure(unittest.TestCase):
-                def test_failure(self):
-                    self.fail('failure must be visible before waiting module exits')
-            """,
-        )
-        self.module(
-            'jobs/test_ownership_fault_sweep.py',
-            """
-            import os
-            from pathlib import Path
-            import time
-            import unittest
-            class OwnershipFaultSweepTests(unittest.TestCase):
-                def test_wait(self):
-                    gate = Path(os.environ['CMW_REPORTING_GATE'])
-                    deadline = time.monotonic() + 15
-                    while not gate.exists() and time.monotonic() < deadline:
-                        time.sleep(.01)
-                    self.assertTrue(gate.exists())
-            """,
-        )
-        process = self.start()
-        self.wait_for(lambda line: 'AssertionError: failure must be visible' in line)
-        self.assertIsNone(process.poll())
-        self.assertFalse(any(line.startswith(
-            'CMW_TEST_MODULE_FINISHED module=tests/jobs/test_ownership_fault_sweep.py ')
-            for line in self.lines))
-        self.gate.touch()
-        self.assertEqual(process.wait(timeout=10), 1)
-
     def test_success_cancels_native_timer_before_class_cleanup(self) -> None:
         self.module(
             'test_success.py',
@@ -516,6 +347,8 @@ class CiRunnerReportingTests(unittest.TestCase):
         self.assertEqual(process.wait(timeout=10), 0)
         self.wait_for(lambda line: '1 modules, 2 tests, 0 failed modules' in line)
         self.assertFalse(any('CMW_TEST_TIMEOUT' in line for line in self.lines))
+        self.assertFalse(any('CMW_TEST_CASE_' in line or 'CMW_TEST_FIXTURE_PROCESS' in line
+                             for line in self.lines))
 
     def test_only_sweep_lifecycle_class_keeps_its_existing_native_watchdog(self) -> None:
         self.module(
@@ -541,8 +374,9 @@ class CiRunnerReportingTests(unittest.TestCase):
         process = self.start(timeout='0.05')
         self.assertEqual(process.wait(timeout=10), 0)
         self.wait_for(lambda line: '1 modules, 2 tests, 0 failed modules' in line)
+        private_log = next((self.root / 'results').glob('m.*/log')).read_text().splitlines()
         records = [json.loads(line.split('CMW_TEST_CASE_STARTED ', 1)[1])
-                   for line in self.lines if 'CMW_TEST_CASE_STARTED ' in line]
+                   for line in private_log if 'CMW_TEST_CASE_STARTED ' in line]
         policies = {record['test']: record['watchdog'] for record in records}
         self.assertEqual(policies['jobs.test_ownership_fault_sweep.OwnershipFaultSweepTests.test_row'],
                          'sweep-per-row')

@@ -1,4 +1,5 @@
 """A retained file location or control preview cannot authorize a new command."""
+from tests.ui_readiness import await_laid_out
 from contextlib import asynccontextmanager
 import unittest
 from unittest.mock import patch
@@ -65,6 +66,7 @@ class FileControlViewFreshnessTests(unittest.IsolatedAsyncioTestCase):
     async def test_fetch_disables_submission_and_keeps_underlying_files_stale(self):
         async with self.opened('files', NodeFiles) as (app, pilot, _):
             files = app.screen
+            await await_laid_out(files.query_one('#node-files-fetch'), hit_test=True)
             await pilot.click('#node-files-fetch')
             await self.until(pilot, lambda: isinstance(app.screen, FetchDialog) and app.screen.is_mounted
                              and bool(app.screen.query('.node-view-frame')))

@@ -565,6 +565,9 @@ This change adds data and observation only. Runner argv, environment and launch
 selection remain unchanged. P3a will set `CMW_MANAGED_PYTHON` explicitly from the
 profile pin; this Phase 1 record alone does not prove launch use.
 
+The [cutover runbook](operations/cutover-runbook.md) contains the ordered snapshot,
+enrollment and qualification procedure, including the MacBook rehearsal evidence.
+
 Until automatic enforcement has a complete operator path ([issue #36](https://github.com/angzeli/computational-modelling-workflow/issues/36),
 post-cutover), the cutover runbook must explicitly select the qualified node-local
 CMW interpreter in the runner/controller launch environment:
