@@ -193,6 +193,44 @@ To put several systems on one shared grid, add an explicit box:
 - Explicit grids are ESP-only. FMO refuses them, and managed Jobs ESP
   submission refuses them too; use this direct workflow.
 
+### Advisory density diagnostics
+
+After each ESP run, and on reuse, the workflow evaluates the density cube in one
+streaming pass and writes `density-diagnostics.json` next to `result.json`. It
+reports:
+
+- minimum and maximum density;
+- the maximum density in the outer two grid layers, by face (`x-` … `z+`), and
+  which face is highest;
+- whether the reference isosurface (default 0.001 e/bohr³,
+  `--diagnostic-isovalue`) reaches the outermost layer, and on which faces;
+- the trapezoidal integral and the box volume (bohr³);
+- the discrepancy between that integral and the wavefunction electron count
+  Multiwfn printed in `multiwfn.log` (`Total/Alpha/Beta electrons`), never the
+  nuclear charges (ECPs).
+
+The diagnostics are advisory: the workflow prints a one-line `[DIAGNOSTICS]`
+summary to stderr and keeps stdout as the result JSON. Optional gates make
+them binding: `--max-boundary-density V` and `--max-electron-discrepancy V`
+(absolute, electrons). A failed gate exits **3**. A requested gate whose
+evidence is missing (no electron count in the log) fails closed. Malformed,
+truncated, non-finite or mismatched cubes are hard failures, and so is a cube
+whose hash differs from the recorded result.
+
+The policy sits outside the target identity and the result record, so changing
+thresholds re-evaluates without rerunning Multiwfn. Existing results can be
+diagnosed directly:
+
+```sh
+python -m cmw.molecular.workflows.downstream_cli diagnose \
+  --result /path/to/analyses/esp/<target-id>/result.json \
+  --max-boundary-density 1e-4 --max-electron-discrepancy 0.05
+```
+
+The integral mostly reflects grid resolution near nuclear cusps, not box
+coverage. Boundary density and the plan's face margins are the coverage
+signals. These diagnostics establish sanity, not grid convergence.
+
 ## Reuse and layout
 
 Results are stored under `<output>/<operation>/<target-id>/`. Attempts are

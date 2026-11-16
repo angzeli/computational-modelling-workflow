@@ -64,6 +64,7 @@ from .cube import (
     validate_cube_grid,
 )
 from .esp_cubes import EspConfiguration, estimated_cube_bytes, explicit_grid_from_calculation
+from .density_diagnostics import DEFAULT_ISOVALUE, diagnose
 from .fmo_cubes import FmoConfiguration, frontier_orbitals
 from .igmh import (
     FragmentDefinition,
@@ -441,6 +442,51 @@ def check_reuse(
         "result_path": str(result_path),
         "target_id": target.target_id,
     }
+
+
+def resolve_result_artifact(
+    record: Mapping[str, Any], result_path: Path, role: str
+) -> tuple[Path, Mapping[str, Any]] | None:
+    """Locate one recorded artifact of a stored result, as reuse checking does."""
+    artifact = (record.get("artifacts") or {}).get(role)
+    if not isinstance(artifact, Mapping):
+        return None
+    stored = Path(str(artifact.get("path", "")))
+    layout_record = record.get("execution_layout")
+    if isinstance(layout_record, Mapping):
+        layout = resolve_recorded_layout(layout_record, metadata_path=result_path)
+        path = resolve_internal_path(stored, layout_record=layout_record, resolved_layout=layout)
+    else:
+        path = _artifact_path(result_path, str(stored))
+    return path, artifact
+
+
+def diagnose_density(
+    result_path: Path,
+    *,
+    output_path: Path | None = None,
+    isovalue: float = DEFAULT_ISOVALUE,
+    max_boundary_density: float | None = None,
+    max_electron_discrepancy: float | None = None,
+) -> dict[str, object]:
+    """Write advisory density diagnostics beside an ESP result, never inside it."""
+    record = read_json(result_path)
+    if record.get("target", {}).get("calculation", {}).get("operation") != AnalysisOperation.ESP.value:
+        raise ValueError("density diagnostics apply to ESP results")
+    density = resolve_result_artifact(record, result_path, "density_cube")
+    if density is None:
+        raise ValueError("ESP result records no density_cube artifact")
+    log = resolve_result_artifact(record, result_path, "multiwfn_log")
+    report = diagnose(
+        density[0], expected_sha256=str(density[1].get("sha256")),
+        log_path=log[0] if log is not None else None, isovalue=isovalue,
+        max_boundary_density=max_boundary_density,
+        max_electron_discrepancy=max_electron_discrepancy,
+    )
+    report["result"] = {"path": str(result_path), "target_id": record["target"]["target_id"]}
+    destination = output_path or result_path.parent / "density-diagnostics.json"
+    atomic_write_json(destination, report)
+    return {**report, "diagnostics_path": str(destination)}
 
 
 def plan_analysis(
