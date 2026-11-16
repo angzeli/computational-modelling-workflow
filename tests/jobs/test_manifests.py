@@ -54,7 +54,8 @@ class ManifestCase(unittest.TestCase):
         self.project.mkdir()
 
     def init(self, inventory=None):
-        return manifests.init_project(self.store, self.project, 'demo', inventory=inventory)
+        return manifests.init_project(self.store, self.project, 'demo', inventory=inventory,
+                                      no_legacy=inventory is None)
 
     def vasp_job(self, *, restart='none'):
         directory = Path(manifests.reserve(self.store, self.project)['job_directory'])
@@ -89,7 +90,7 @@ class ProjectAndLedgerTests(ManifestCase):
 
     def test_unenrolled_queue_cannot_own_a_project(self):
         with self.assertRaisesRegex(ManifestError, 'enrolled to a node UUID'):
-            manifests.init_project(Store(self.base / 'other'), self.project, 'demo')
+            manifests.init_project(Store(self.base / 'other'), self.project, 'demo', no_legacy=True)
         self.assertFalse((self.project / '.cmw').exists())
 
     def test_inventory_counter_starts_above_every_legacy_id_and_label(self):
@@ -106,6 +107,17 @@ class ProjectAndLedgerTests(ManifestCase):
                                 ({'project_key': 'other'}, 'project key')):
             with self.subTest(change=change), self.assertRaisesRegex(ManifestError, message):
                 self.init({**base, **change})
+        self.assertFalse((self.project / '.cmw-project.json').exists())
+
+    def test_null_inventory_never_counts_as_no_legacy_ids(self):
+        for options in ({}, {'inventory': None}, {'inventory': {}, 'no_legacy': True}):
+            with self.subTest(options=options), self.assertRaisesRegex(ManifestError, 'exactly one'):
+                manifests.init_project(self.store, self.project, 'demo', **options)
+        inventory = self.base / 'null.json'
+        inventory.write_text('null\n')
+        code, output = run_jobs(['manifest', 'init', '--project-root', str(self.project), '--project-key', 'demo',
+                                 '--legacy-inventory', str(inventory)], self.base / 'state')
+        self.assertEqual(code, 2, output)
         self.assertFalse((self.project / '.cmw-project.json').exists())
 
     def test_reservations_are_idempotent_and_never_reused(self):
@@ -206,6 +218,15 @@ class JobManifestTests(ManifestCase):
         with self.assertRaisesRegex(ManifestError, '--output'):
             self.add(directory, argv)
         self.assertFalse((directory / '.cmw-manifest' / 'job.json').exists())
+
+    def test_symlinked_sidecar_directory_is_refused(self):
+        directory, argv = self.vasp_job()
+        outside = self.base / 'outside'
+        outside.mkdir()
+        (directory / '.cmw-manifest').symlink_to(outside)
+        with self.assertRaisesRegex(ManifestError, 'real directory'):
+            self.add(directory, argv)
+        self.assertEqual((list(outside.iterdir()), manifests.read_journal(self.project)), ([], []))
 
     def test_incomplete_vasp_inputs_refuse_before_publication(self):
         directory, argv = self.vasp_job()

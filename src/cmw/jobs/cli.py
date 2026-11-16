@@ -852,7 +852,8 @@ def handle(args):
                         inventory = json.loads(args.legacy_inventory.read_text(encoding="utf-8"))
                     except ValueError as exc:
                         raise JobsError(f"Legacy inventory is not valid JSON: {exc}") from exc
-                result = manifests.init_project(store, args.project_root, args.project_key, inventory=inventory)
+                result = manifests.init_project(store, args.project_root, args.project_key, inventory=inventory,
+                                                no_legacy=args.no_legacy_ids)
             else:
                 result = manifests.reserve(store, args.project_root, request=args.request_uuid)
         elif operation == "add":

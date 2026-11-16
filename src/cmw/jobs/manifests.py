@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import tempfile
 import time
 from uuid import UUID, uuid4
@@ -140,18 +141,24 @@ def legacy_high_water(inventory, project_key):
     return highest
 
 
-def init_project(store, root, project_key, *, inventory=None):
-    """Create the owner's project file and ledger. Refuses to touch existing ones."""
+def init_project(store, root, project_key, *, inventory=None, no_legacy=False):
+    """Create the owner's project file and ledger. Refuses to touch existing ones.
+
+    Exactly one of a reviewed inventory or the explicit no-legacy assertion is
+    required; an absent or null inventory never stands in for the assertion.
+    """
+    if no_legacy == (inventory is not None) or no_legacy not in (True, False):
+        raise ManifestError('Provide exactly one of a legacy inventory or the no-legacy-IDs assertion')
     root = _root(root)
     if not isinstance(project_key, str) or len(project_key) > 128 or not KEY.fullmatch(project_key):
         raise ManifestError('Project key must match [A-Za-z0-9][A-Za-z0-9._-]* (at most 128)')
     owner = _local_node(store)['node_id']
-    high_water = 0 if inventory is None else legacy_high_water(inventory, project_key)
+    high_water = 0 if no_legacy else legacy_high_water(inventory, project_key)
     project_path, state = root / PROJECT_FILE, root / '.cmw'
     if project_path.exists() or project_path.is_symlink() or state.exists() or state.is_symlink():
         raise ManifestError(f'Project is already initialised (or partially): {root}')
     state.mkdir(mode=0o700)
-    inventory_digest = None if inventory is None else hashlib.sha256(canonical(inventory)).hexdigest()
+    inventory_digest = None if no_legacy else hashlib.sha256(canonical(inventory)).hexdigest()
     with _ledger(root, create=True) as con:
         con.execute('BEGIN IMMEDIATE')
         con.executemany('INSERT INTO meta(key, value) VALUES (?, ?)', [
@@ -442,7 +449,14 @@ def add_native(store, root, *, cwd, argv, engine, request=None, **add_options):
                                   environment=dict(add_options.get('env') or {}))
     raw = canonical(manifest)
     digest = hashlib.sha256(raw).hexdigest()
-    (directory / MANIFEST_DIR).mkdir(exist_ok=True)
+    sidecar = directory / MANIFEST_DIR
+    try:
+        sidecar.mkdir()
+    except FileExistsError:
+        pass
+    # mkdir(exist_ok) and publication follow symlinks; the sidecar must be this job's own directory.
+    if not stat.S_ISDIR(sidecar.lstat().st_mode) or sidecar.resolve(strict=True) != sidecar:
+        raise ManifestError(f'{sidecar} must be a real directory inside the reserved job')
     _publish_new(path, raw, 0o444)
     key = project['project_key']
     append_journal(root, key, 'manifest', request, {'id': job_id, 'job_sha256': digest, 'binding': None})
