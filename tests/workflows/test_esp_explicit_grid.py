@@ -89,12 +89,15 @@ class ExplicitGridWorkflowTests(MultiwfnCubeHarness):
 
     def test_unqualified_version_and_mismatching_cubes_fail_closed(self) -> None:
         unqualified = self.run_workflow(ESP, spacing=0.5, extra=GRID, check=False)
-        self.assertNotEqual(unqualified.returncode, 0)
+        self.assertEqual(unqualified.returncode, 64, unqualified.stderr)
+        self.assertIn("not natively qualified for Multiwfn 3.8", unqualified.stdout)
         self.assertEqual(self.results("esp"), [])
+        self.assertFalse(self.log.exists())  # refused before launching Multiwfn
+        self.assertEqual(list(self.output.rglob("*.lock")), [])  # a refused attempt releases its lock
         shifted = self.run_workflow(ESP, spacing=0.5, extra=GRID, check=False,
                                     env={**self.verified, "FAKE_MULTIWFN_GRID_OFFSET": "0.01"})
         self.assertNotEqual(shifted.returncode, 0)
-        self.assertIn("origin differs from the requested origin", shifted.stdout)
+        self.assertIn("origin differs from the requested origin", shifted.stdout, shifted.stderr)
         self.assertEqual(self.results("esp"), [])
 
     def test_fmo_rejects_explicit_grid(self) -> None:

@@ -97,7 +97,10 @@ multiwfn_cube_main() {
     return 0
   fi
 
-  local target_path result_path lock_path lock_json lock_token="" child_pid="" monitor_pid=""
+  local target_path result_path lock_json
+  # Global, not local: the EXIT trap runs after this function returns and must
+  # still see them to stop the child/monitor and release the target lock.
+  lock_path="" lock_token="" child_pid="" monitor_pid=""
   target_path=$(printf '%s' "$plan_json" | "$PYTHON_BIN" -c \
     'import json,sys; print(json.load(sys.stdin)["target_path"])')
   result_path=$(printf '%s' "$plan_json" | "$PYTHON_BIN" -c \
@@ -188,8 +191,13 @@ for reason in d["reasons"]: print("[DIAGNOSTICS] " + reason, file=sys.stderr)'
     multiwfn_runtime_load "$runtime_path"
   else
     multiwfn_runtime_prepare "$attempt_directory" "$runtime_path" "$settings_source"
-    "$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli menu \
-      --target "$target_path" --runtime "$runtime_path" --destination "$menu_path" >/dev/null
+    local menu_json
+    menu_json=$("$PYTHON_BIN" -m cmw.molecular.workflows.downstream_cli menu \
+      --target "$target_path" --runtime "$runtime_path" --destination "$menu_path") || {
+        # e.g. an explicit grid on a Multiwfn version without a qualified menu.
+        printf '%s\n' "$menu_json"
+        return 64
+      }
   fi
 
   export CMW_MULTIWFN_OPERATION=$operation CMW_SOURCE_GEOMETRY=$source_geometry

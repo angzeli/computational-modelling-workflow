@@ -292,6 +292,13 @@ class EspWorkflowTests(MultiwfnCubeHarness):
         )
         self.assertNotEqual(missing.returncode, 0)
 
+    def test_failed_attempt_releases_its_lock_and_can_be_rerun(self) -> None:
+        failed = self.run_workflow(ESP, env={**self.env, "FAKE_MULTIWFN_MISSING": "esp"}, check=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(list(self.output.rglob("*.lock")), [])
+        rerun = self.run_workflow(ESP)
+        self.assertEqual(set(json.loads(rerun.stdout)["required_artifact_roles"]), {"density_cube", "esp_cube"})
+
     def test_grid_change_creates_sibling_target_and_unchanged_reuses(self) -> None:
         self.run_workflow(ESP, spacing=0.2)
         self.run_workflow(ESP, spacing=0.2)
