@@ -467,9 +467,28 @@ def register(subcommands):
     add.add_argument("--independent", action="store_true", help="assert no dependency on or unsafe writes to the primary")
     add.add_argument("--trust-resources", action="store_true", help="explicitly trust declared CPU/RAM bounds; not OS-enforced")
     add.add_argument("--write-scope", type=Path, help="declared write tree; defaults to resolved cwd")
+    add.add_argument("--manifest-project", type=Path, metavar="ROOT",
+                     help="register a reserved native job (cwd ROOT/jobs/J<n>) with a read-only job.json; owner node only")
+    add.add_argument("--manifest-request", metavar="UUID", help="durable request UUID for the manifest receipts")
     add.add_argument("--json", action="store_true")
     add.add_argument("argv", nargs="...")
     add.set_defaults(handler=handle)
+    manifest = operations.add_parser("manifest", help="native job manifests (#41 Phase 1a): project init and ID reservation")
+    manifest_operations = manifest.add_subparsers(dest="manifest_operation", required=True)
+    init = manifest_operations.add_parser("init", help="create .cmw-project.json and the ID ledger owned by this node")
+    init.add_argument("--project-root", type=Path, required=True)
+    init.add_argument("--project-key", required=True)
+    legacy = init.add_mutually_exclusive_group(required=True)
+    legacy.add_argument("--legacy-inventory", type=Path, metavar="FILE",
+                        help="reviewed complete all-node legacy ID/label inventory; IDs start above its maximum")
+    legacy.add_argument("--no-legacy-ids", action="store_true", help="assert the project has no legacy job IDs or labels")
+    init.add_argument("--json", action="store_true")
+    init.set_defaults(handler=handle)
+    reserve = manifest_operations.add_parser("reserve", help="allocate the next J<n> and create ROOT/jobs/J<n>; never reused")
+    reserve.add_argument("--project-root", type=Path, required=True)
+    reserve.add_argument("--request-uuid", metavar="UUID", help="retry with the same UUID to get the same ID")
+    reserve.add_argument("--json", action="store_true")
+    reserve.set_defaults(handler=handle)
     for name in ("show", "logs", "hold", "release", "move", "cancel"):
         command = operations.add_parser(name)
         command.add_argument("job_id")
@@ -728,6 +747,10 @@ def handle(args):
     if args.jobs_operation in {"request", "fetch"} and not getattr(args, "node", None):
         print("request/fetch require an explicitly enrolled --node; no local fallback")
         return 2
+    if ((args.jobs_operation == "manifest" or getattr(args, "manifest_project", None))
+            and (getattr(args, "node", None) or getattr(args, "queue", None))):
+        print("Native manifests are owner-local only; remote allocation is not available. No endpoint operation is sent.")
+        return 2
     if getattr(args, "node", None) or getattr(args, "queue", None) or getattr(args, "all_nodes", False):
         from cmw.nodes.jobs_cli import handle as handle_node
         return handle_node(args)
@@ -820,6 +843,18 @@ def handle(args):
             result = store.set_external_reservation(reservation)
         elif operation == "unreserve":
             result = store.set_external_reservation(None)
+        elif operation == "manifest":
+            from . import manifests
+            if args.manifest_operation == "init":
+                inventory = None
+                if args.legacy_inventory is not None:
+                    try:
+                        inventory = json.loads(args.legacy_inventory.read_text(encoding="utf-8"))
+                    except ValueError as exc:
+                        raise JobsError(f"Legacy inventory is not valid JSON: {exc}") from exc
+                result = manifests.init_project(store, args.project_root, args.project_key, inventory=inventory)
+            else:
+                result = manifests.reserve(store, args.project_root, request=args.request_uuid)
         elif operation == "add":
             from .source_declarations import parse_sources
             progress_sources = parse_sources(args.progress_source, args.engine)
@@ -830,12 +865,20 @@ def handle(args):
                 key, value = entry.split("=", 1)
                 environment[key] = value
             argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
-            result = store.add(argv=argv, cwd=args.cwd, name=args.name, engine=args.engine, note=args.note,
+            options = dict(name=args.name, note=args.note,
                 cpus=args.cpus, memory_gib=args.memory_gib, mpi_ranks=args.mpi_ranks,
-                threads_per_rank=args.threads_per_rank, env=environment, hold=args.hold,
+                threads_per_rank=args.threads_per_rank, env=environment,
                 suspension_backend=args.suspension_backend, progress_sources=progress_sources,
                 on_failure=args.on_failure, layout=args.layout, role=args.role, allow_auxiliary=args.allow_auxiliary,
                 independent=args.independent, resource_contract="trusted-declared" if args.trust_resources else None, write_scope=args.write_scope)
+            if args.manifest_project is not None:
+                from .manifests import add_native
+                result = add_native(store, args.manifest_project, cwd=args.cwd, argv=argv, engine=args.engine,
+                                    request=args.manifest_request, **options)
+            elif args.manifest_request is not None:
+                raise JobsError("--manifest-request requires --manifest-project")
+            else:
+                result = store.add(argv=argv, cwd=args.cwd, engine=args.engine, hold=args.hold, **options)
         elif operation in {"start", "stop"}:
             from . import runtime
             getattr(runtime, operation)(store)
