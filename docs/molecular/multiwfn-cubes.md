@@ -160,6 +160,39 @@ product. Both cubes are validated independently and then compared for exact
 dimensions and explicitly tolerant floating-point origin, axis, and atomic
 geometry agreement. Visualization isovalues are not cube-generation defaults.
 
+### Explicit common grid
+
+To put several systems on one shared grid, add an explicit box:
+
+```sh
+./scripts/workflows/generate_esp_cubes.sh \
+  --source /path/to/validated-result.json \
+  --output /path/to/analyses \
+  --grid-spacing-bohr 0.25 \
+  --grid-origin-bohr -12 -12 -10 \
+  --grid-dimensions 97 97 81 \
+  --plan
+```
+
+- The grid is axis-aligned and isotropic, all in bohr. Origin and spacing
+  must be finite, the spacing positive, and each dimension an integer ≥ 2. The
+  far corner is `origin + (dimensions - 1) × spacing`.
+- The grid keys enter the target identity only when they're given. Existing
+  spacing-only targets keep their IDs and results.
+- `--plan` refuses a box that leaves any nucleus outside it. It reports
+  `explicit_grid` with the margin at each face (`x-` … `z+`, bohr), the
+  estimated size of the cube pair and the free disk space, and refuses when the
+  free space is smaller than that estimate.
+- Each exported cube must match the requested origin, spacing and dimensions
+  (raw bohr header values, within Multiwfn's six-decimal printed precision), as
+  well as its partner. CMW never resamples. A mismatch fails the attempt, and
+  reuse applies the same check.
+- The menu (grid option 5) is confirmed only for Multiwfn **2026.7.15**. Other
+  versions refuse explicit grids as not natively qualified; spacing-only runs
+  are unchanged.
+- Explicit grids are ESP-only. FMO refuses them, and managed Jobs ESP
+  submission refuses them too; use this direct workflow.
+
 ## Reuse and layout
 
 Results are stored under `<output>/<operation>/<target-id>/`. Attempts are

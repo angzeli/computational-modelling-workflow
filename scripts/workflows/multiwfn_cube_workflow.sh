@@ -15,6 +15,7 @@ multiwfn_cube_usage() {
   printf '%s\n' \
     "Usage: $0 --source RESULT.json --output DIRECTORY" \
     "          (--grid-spacing-bohr VALUE | --fragments FILE --config FILE)" \
+    "          [--grid-origin-bohr X Y Z --grid-dimensions NX NY NZ]   (ESP only)" \
     "          [--multiwfn-exe FILE]" \
     "          [--settings-source FILE] [--threads N] [--plan]" >&2
 }
@@ -23,7 +24,7 @@ multiwfn_cube_main() {
   local operation=$1
   shift
   local source_result="" output_root="" grid_spacing="" settings_source=""
-  local fragment_path="" igmh_config=""
+  local fragment_path="" igmh_config="" grid_args=()
   local cli_threads="" plan_only=0 plan_json prepare_json prepared_plan="" prepared_json=""
   while (($#)); do
     case "$1" in
@@ -31,6 +32,8 @@ multiwfn_cube_main() {
       --source) source_result=${2:?}; shift 2 ;;
       --output) output_root=${2:?}; shift 2 ;;
       --grid-spacing-bohr) grid_spacing=${2:?}; shift 2 ;;
+      --grid-origin-bohr) grid_args+=("$1" "${2:?}" "${3:?}" "${4:?}"); shift 4 ;;
+      --grid-dimensions) grid_args+=("$1" "${2:?}" "${3:?}" "${4:?}"); shift 4 ;;
       --fragments) fragment_path=${2:?}; shift 2 ;;
       --config) igmh_config=${2:?}; shift 2 ;;
       --multiwfn-exe) MULTIWFN_EXE=${2:?}; shift 2 ;;
@@ -71,7 +74,7 @@ multiwfn_cube_main() {
   if [[ "$operation" == IGMH ]]; then
     plan_command+=(--fragments "$fragment_path" --config "$igmh_config")
   else
-    plan_command+=(--grid-spacing-bohr "$grid_spacing")
+    plan_command+=(--grid-spacing-bohr "$grid_spacing" ${grid_args[@]+"${grid_args[@]}"})
   fi
   [[ -z "$cli_threads" ]] || plan_command+=(--threads "$cli_threads")
   if [[ -n "$prepared_plan" ]]; then
@@ -132,7 +135,7 @@ multiwfn_cube_main() {
   if [[ "$operation" == IGMH ]]; then
     prepare_command+=(--fragments "$fragment_path" --config "$igmh_config")
   else
-    prepare_command+=(--grid-spacing-bohr "$grid_spacing")
+    prepare_command+=(--grid-spacing-bohr "$grid_spacing" ${grid_args[@]+"${grid_args[@]}"})
   fi
   [[ -z "$cli_threads" ]] || prepare_command+=(--threads "$cli_threads")
   if [[ -n "$prepared_plan" ]]; then

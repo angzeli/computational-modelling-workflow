@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+import shutil
 from typing import Any, Mapping
 
 from cmw.core.artifacts import (
@@ -55,8 +56,14 @@ from cmw.molecular.multiwfn.automation import Operation, menu_stream
 from cmw.molecular.multiwfn.runtime import MENU_CONTRACT
 from cmw.structure.xyz import read_xyz
 
-from .cube import read_cube, validate_cube_compatibility, validate_cube_geometry
-from .esp_cubes import EspConfiguration
+from .cube import (
+    BOHR_TO_ANGSTROM,
+    read_cube,
+    validate_cube_compatibility,
+    validate_cube_geometry,
+    validate_cube_grid,
+)
+from .esp_cubes import EspConfiguration, estimated_cube_bytes, explicit_grid_from_calculation
 from .fmo_cubes import FmoConfiguration, frontier_orbitals
 from .igmh import (
     FragmentDefinition,
@@ -112,13 +119,58 @@ def output_contract(
 
 
 def _configuration(
-    operation: AnalysisOperation, grid_spacing_bohr: float
+    operation: AnalysisOperation,
+    grid_spacing_bohr: float,
+    grid_origin_bohr: tuple[float, float, float] | None = None,
+    grid_dimensions: tuple[int, int, int] | None = None,
 ) -> FmoConfiguration | EspConfiguration:
-    return (
-        FmoConfiguration(grid_spacing_bohr)
-        if operation is AnalysisOperation.FMO
-        else EspConfiguration(grid_spacing_bohr)
-    )
+    if operation is AnalysisOperation.FMO:
+        if grid_origin_bohr is not None or grid_dimensions is not None:
+            raise ValueError("explicit grids are supported only for ESP")
+        return FmoConfiguration(grid_spacing_bohr)
+    return EspConfiguration(grid_spacing_bohr, grid_origin_bohr, grid_dimensions)
+
+
+def _check_requested_grid(cube, calculation: Mapping[str, Any]) -> None:
+    grid = explicit_grid_from_calculation(calculation)
+    if grid is not None:
+        validate_cube_grid(cube, origin_bohr=grid.grid_origin_bohr,
+                           spacing_bohr=grid.grid_spacing_bohr, dimensions=grid.grid_dimensions)
+
+
+def explicit_grid_report(
+    grid: EspConfiguration, geometry, output_root: Path
+) -> dict[str, object]:
+    """Refuse nuclei outside the box; report face margins, size and free space."""
+    end = grid.end_bohr()
+    margins = {}
+    for axis, name in enumerate("xyz"):
+        coordinates = [atom.coordinates[axis] / BOHR_TO_ANGSTROM for atom in geometry.atoms]
+        margins[f"{name}-"] = min(coordinates) - grid.grid_origin_bohr[axis]
+        margins[f"{name}+"] = end[axis] - max(coordinates)
+    outside = sorted(face for face, margin in margins.items() if margin < 0)
+    if outside:
+        raise ValueError("explicit grid leaves nuclei outside the box at faces: " + ", ".join(outside))
+    estimate = 2 * estimated_cube_bytes(grid.grid_dimensions, geometry.atom_count)
+    existing = output_root.resolve()
+    while not existing.exists():
+        existing = existing.parent
+    free = shutil.disk_usage(existing).free
+    if free < estimate:
+        raise ValueError(
+            f"insufficient free disk for the explicit-grid cube pair: need about {estimate} bytes, "
+            f"{free} free under {existing}"
+        )
+    return {
+        "origin_bohr": list(grid.grid_origin_bohr),
+        "end_bohr": list(end),
+        "spacing_bohr": grid.grid_spacing_bohr,
+        "dimensions": list(grid.grid_dimensions),
+        "point_count": grid.grid_dimensions[0] * grid.grid_dimensions[1] * grid.grid_dimensions[2],
+        "face_margins_bohr": margins,
+        "estimated_cube_pair_bytes": estimate,
+        "free_bytes": free,
+    }
 
 
 def build_target(
@@ -128,11 +180,13 @@ def build_target(
     grid_spacing_bohr: float,
     fragments: FragmentDefinition | None = None,
     igmh_configuration: IgmhConfiguration | None = None,
+    grid_origin_bohr: tuple[float, float, float] | None = None,
+    grid_dimensions: tuple[int, int, int] | None = None,
 ) -> tuple[JobTarget, dict[str, object]]:
     config = (
         igmh_configuration
         if operation is AnalysisOperation.IGMH
-        else _configuration(operation, grid_spacing_bohr)
+        else _configuration(operation, grid_spacing_bohr, grid_origin_bohr, grid_dimensions)
     )
     if config is None:
         raise ValueError("IGMH requires an explicit configuration")
@@ -158,6 +212,8 @@ def build_target(
             raise ValueError("IGMH requires an explicit fragment definition")
         scientific.update(fragments.to_dict())
         scientific.update(config.to_dict())
+    elif operation is AnalysisOperation.ESP:
+        scientific.update(config.grid_dict())
     target = JobTarget(
         stage_type=f"MULTIWFN_{operation.value}",
         geometry_sha256=source.geometry_sha256,
@@ -372,6 +428,7 @@ def check_reuse(
         }
         for cube in cubes.values():
             validate_cube_geometry(cube, geometry)
+            _check_requested_grid(cube, target.calculation)
         roles = tuple(cubes)
         for role in roles[1:]:
             validate_cube_compatibility(cubes[roles[0]], cubes[role])
@@ -395,7 +452,12 @@ def plan_analysis(
     threads: int,
     fragment_path: Path | None = None,
     igmh_config_path: Path | None = None,
+    grid_origin_bohr: tuple[float, float, float] | None = None,
+    grid_dimensions: tuple[int, int, int] | None = None,
 ) -> dict[str, object]:
+    explicit = grid_origin_bohr is not None or grid_dimensions is not None
+    if explicit and operation is not AnalysisOperation.ESP:
+        raise ValueError("--grid-origin-bohr/--grid-dimensions are supported only for ESP")
     source = validate_source_result(source_path)
     fragments = None
     igmh_configuration = None
@@ -415,7 +477,16 @@ def plan_analysis(
         grid_spacing_bohr=grid_spacing_bohr,
         fragments=fragments,
         igmh_configuration=igmh_configuration,
+        grid_origin_bohr=grid_origin_bohr,
+        grid_dimensions=grid_dimensions,
     )
+    grid_report = None
+    if explicit:
+        grid_report = explicit_grid_report(
+            explicit_grid_from_calculation(configuration),
+            read_xyz(Path(source.geometry_path)),
+            output_root,
+        )
     outputs = output_contract(operation, configuration)
     density_artifact = (
         density_artifact_from_source(source)
@@ -459,6 +530,7 @@ def plan_analysis(
             density_artifact.to_dict() if density_artifact is not None else None
         ),
         "runtime": {"requested_nthreads": threads},
+        **({"explicit_grid": grid_report} if grid_report is not None else {}),
         "reuse": reuse,
         "expected_artifacts": [item.output_path for item in outputs if item.required],
     }
@@ -740,6 +812,7 @@ def inspect_analysis(
         if output_map[role].media_type == "application/x-gaussian-cube":
             cube = read_cube(path)
             validate_cube_geometry(cube, geometry)
+            _check_requested_grid(cube, target.calculation)
             cubes[role] = cube
         records[role] = ArtifactRecord.from_path(
             path, role=role, relative_to=layout.working_directory

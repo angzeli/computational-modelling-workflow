@@ -34,6 +34,8 @@ def _plan(args: argparse.Namespace) -> int:
         threads=resolve_threads(cli_value=args.threads),
         fragment_path=args.fragments,
         igmh_config_path=args.config,
+        grid_origin_bohr=tuple(args.grid_origin_bohr) if args.grid_origin_bohr else None,
+        grid_dimensions=tuple(args.grid_dimensions) if args.grid_dimensions else None,
     )
     _print(plan)
     return 0
@@ -48,6 +50,8 @@ def _prepare(args: argparse.Namespace) -> int:
         threads=resolve_threads(cli_value=args.threads),
         fragment_path=args.fragments,
         igmh_config_path=args.config,
+        grid_origin_bohr=tuple(args.grid_origin_bohr) if args.grid_origin_bohr else None,
+        grid_dimensions=tuple(args.grid_dimensions) if args.grid_dimensions else None,
     )
     if plan["reuse"]["reuse"]:
         _print(plan)
@@ -106,6 +110,8 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--grid-spacing-bohr", type=float)
+    parser.add_argument("--grid-origin-bohr", type=float, nargs=3, metavar=("X", "Y", "Z"))
+    parser.add_argument("--grid-dimensions", type=int, nargs=3, metavar=("NX", "NY", "NZ"))
     parser.add_argument("--fragments", type=Path)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--threads")

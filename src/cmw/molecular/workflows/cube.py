@@ -35,6 +35,11 @@ class CubeMetadata:
     vectors_angstrom: tuple[tuple[float, float, float], ...]
     atoms: tuple[CubeAtom, ...]
     value_count: int
+    # Header values exactly as written, with their unit ("bohr" when the grid
+    # counts are positive), so requested-grid checks avoid unit round trips.
+    header_unit: str = "bohr"
+    origin_header: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    vectors_header: tuple[tuple[float, float, float], ...] = ()
 
 
 def _numbers(line: str, count: int, *, label: str) -> list[float]:
@@ -103,7 +108,12 @@ def read_cube(path: Path) -> CubeMetadata:
         raise ValueError(
             f"cube grid-value count mismatch: expected {expected}, found {len(values)}"
         )
-    return CubeMetadata(atom_count, dimensions, origin, vectors, tuple(atoms), len(values))
+    return CubeMetadata(
+        atom_count, dimensions, origin, vectors, tuple(atoms), len(values),
+        header_unit="bohr" if scale != 1.0 else "angstrom",
+        origin_header=tuple(atom_header[1:4]),
+        vectors_header=tuple(tuple(row[1:4]) for row in grid_rows),
+    )
 
 
 def _close(values_a: Iterable[float], values_b: Iterable[float], tolerance: float) -> bool:
@@ -145,3 +155,30 @@ def validate_cube_compatibility(
             tolerance_angstrom,
         ):
             raise ValueError("cube atomic geometries differ")
+
+
+# Multiwfn prints cube header coordinates with six decimals.
+CUBE_HEADER_TOLERANCE_BOHR = 1.0e-6
+
+
+def validate_cube_grid(
+    cube: CubeMetadata,
+    *,
+    origin_bohr: tuple[float, float, float],
+    spacing_bohr: float,
+    dimensions: tuple[int, int, int],
+    tolerance_bohr: float = CUBE_HEADER_TOLERANCE_BOHR,
+) -> None:
+    """Require the exact requested axis-aligned grid; never resample."""
+    if cube.header_unit != "bohr":
+        raise ValueError("cube grid is not expressed in bohr")
+    if cube.dimensions != tuple(dimensions):
+        raise ValueError(
+            f"cube grid dimensions {cube.dimensions} differ from requested {tuple(dimensions)}"
+        )
+    if not _close(cube.origin_header, origin_bohr, tolerance_bohr):
+        raise ValueError("cube grid origin differs from the requested origin")
+    for axis, vector in enumerate(cube.vectors_header):
+        expected = tuple(spacing_bohr if index == axis else 0.0 for index in range(3))
+        if not _close(vector, expected, tolerance_bohr):
+            raise ValueError("cube grid vectors differ from the requested spacing")
