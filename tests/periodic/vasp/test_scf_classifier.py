@@ -59,6 +59,19 @@ class ClassifierRuleTests(unittest.TestCase):
         stdout = [CONVERGED['stdout_lines'][0],
                   'DAV: 2 -1.000000001E+01 -1.0E-02 -1.0E-08 16 1.0E-08']
         self.assertEqual(classify(CONVERGED['OUTCAR_lines'], stdout, invocation_bound=True)['scf_result'], 'unknown')
+        stdout = [CONVERGED['stdout_lines'][0],
+                  'DAV: 2 -1.000000001E+01 -1.0E-08 -1.0E-02 16 1.0E-08']  # Only d_eps fails EDIFF.
+        self.assertEqual(classify(CONVERGED['OUTCAR_lines'], stdout, invocation_bound=True)['scf_result'], 'unknown')
+
+    def test_nonfinite_row_columns_are_invalid_evidence(self):
+        for row in ('DAV: 2 -1.000000001E+01 NaN -1.0E-08 16 1.0E-08',
+                    'DAV: 2 -1.000000001E+01 -1.0E-08 -1.0E-08 16 ***'):
+            with self.subTest(row=row):
+                result = classify(CONVERGED['OUTCAR_lines'], [CONVERGED['stdout_lines'][0], row],
+                                  invocation_bound=True)
+                self.assertEqual((result['scf_result'], result['last_step'], result['delta_energy_ev']),
+                                 ('unknown', None, None))
+                self.assertIn('nonfinite', result['evidence'][-1]['marker'])
 
     def test_vector_magnetisation_and_augmentation_stay_null(self):
         outcar = [line.replace('magnetization 2.0000000', 'magnetization 1.0 0.0 0.0')

@@ -37,8 +37,13 @@ def _row(line):
     # NONE rows may omit the colon; the shared row grammar requires one.
     text = NONE_ROW.sub(r'\1:\2', line.text, count=1)
     row = parse_electronic_row(SourceLine(line.line_number, line.byte_start, line.byte_end, text), 'stdout')
-    if row is None or row.get('malformed') or row['algorithm'] not in SCF_LABELS | POSTPROCESSING_LABELS:
-        return row and {**row, 'malformed': True}
+    if row is None:
+        return None
+    # Every printed column must be finite; NaN/Inf/overflow is invalid evidence, not a missing value.
+    columns = [row.get(key) for key in ('energy', 'dE', 'd_eps', 'ncg', 'rms', 'rms_c') if key in row]
+    if (row.get('malformed') or row['algorithm'] not in SCF_LABELS | POSTPROCESSING_LABELS
+            or len(columns) < 5 or any(column['value'] is None for column in columns)):
+        return {**row, 'malformed': True}
     return row
 
 
@@ -157,6 +162,9 @@ def classify(outcar_lines, stdout_lines=(), *, invocation_bound):
         return result
     if last is None:
         return result
+    if malformed:  # Unsupported, malformed or nonfinite row grammar cannot support an SCF outcome.
+        found('stdout', 'malformed or nonfinite electronic row', None)
+        return result
     # Only markers after the final electronic iteration belong to the final evaluation.
     converged = [line for line in outcar['converged'] if line > last[2]]
     not_reached = [line for line in outcar['not_reached'] if line > last[2]]
@@ -169,8 +177,10 @@ def classify(outcar_lines, stdout_lines=(), *, invocation_bound):
         return result
     ediff, nelm = outcar['settings'].get('EDIFF'), outcar['settings'].get('NELM')
     if converged:
-        if bound_rows and type(ediff) in (int, float) and below_printed(rows[-1]['dE'], ediff) == 'FAIL':
-            found('stdout', 'final dE opposes the EDIFF convergence marker', None)
+        # Both printed energy differences are retained; either one failing EDIFF opposes the marker.
+        if bound_rows and type(ediff) in (int, float) and any(
+                below_printed(rows[-1][key], ediff) == 'FAIL' for key in ('dE', 'd_eps')):
+            found('stdout', 'final dE or d_eps opposes the EDIFF convergence marker', None)
             return result
         found('OUTCAR', CONVERGED, converged[-1])
         result['scf_result'] = 'converged'
