@@ -512,6 +512,7 @@ class LocalBackend:
                 if operation == 'capabilities':
                     _params(params)
                     from .runner_profiles import profile_capabilities
+                    from cmw.jobs.manifests import NATIVE_CAPABILITY
                     result = {'queue': deepcopy(self.queue), 'readiness': deepcopy(self.readiness),
                               **profile_capabilities(self.config.get('profiles', {}), self.readiness.get('profiles')),
                               'operations': sorted(OPERATIONS),
@@ -521,6 +522,7 @@ class LocalBackend:
                               'research_catalogue': {'schema': 1, 'query': 'CatalogueQuery', 'page': 'CataloguePage', 'record': 'CatalogueRecord'},
                               'result_review': {'schema': 1, 'async': True, 'model': 'ReviewRecord'},
                               'doctor': {'schema': 1, 'operation': 'doctor.inspect'},
+                              'native_manifests': deepcopy(NATIVE_CAPABILITY),
                               'mutations_supported': True, 'observer_session': self.session_id}
                 elif operation == 'status':
                     result = self._status(params)

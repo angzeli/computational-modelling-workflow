@@ -432,6 +432,8 @@ def register(subcommands):
     submit = operations.add_parser("submit", help="reviewed held submission locally or on an explicit node")
     submit.add_argument("--spec", type=Path, required=True)
     submit.add_argument("--preview", action="store_true", help="prepare a local manifest and inspect destination preflight; no remote mutation")
+    submit.add_argument("--manifest-project", type=Path, metavar="ROOT",
+                        help="with --node: this owner node reserves J<n> and freezes job.json; the target registers it on Hold")
     submit.add_argument("--json", action="store_true")
     submit.set_defaults(handler=handle)
     fetch = operations.add_parser("fetch", help="explicit node only: copy selected declared artifacts as verified replicas")
@@ -749,9 +751,13 @@ def handle(args):
     if args.jobs_operation in {"request", "fetch"} and not getattr(args, "node", None):
         print("request/fetch require an explicitly enrolled --node; no local fallback")
         return 2
-    if ((args.jobs_operation == "manifest" or getattr(args, "manifest_project", None))
+    if ((args.jobs_operation == "manifest" or (args.jobs_operation == "add" and getattr(args, "manifest_project", None)))
             and (getattr(args, "node", None) or getattr(args, "queue", None))):
-        print("Native manifests are owner-local only; remote allocation is not available. No endpoint operation is sent.")
+        print("Native IDs are reserved by the owner node itself; use `jobs --node NODE submit --manifest-project` "
+              "for a remote target. No endpoint operation is sent.")
+        return 2
+    if args.jobs_operation == "submit" and getattr(args, "manifest_project", None) and not getattr(args, "node", None):
+        print("submit --manifest-project needs an explicit --node target; local native jobs use `jobs add --manifest-project`")
         return 2
     if getattr(args, "node", None) or getattr(args, "queue", None) or getattr(args, "all_nodes", False):
         from cmw.nodes.jobs_cli import handle as handle_node

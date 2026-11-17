@@ -21,8 +21,8 @@ from .storage import check_storage
 
 _SPEC_FIELDS = {'schema', 'request_id', 'node_id', 'queue_id', 'storage', 'profile', 'engine',
                 'name', 'resources', 'manifest', 'arguments', 'vasp', 'progress_sources',
-                'intent', 'dependencies_complete', 'note', 'scientific'}
-_REQUIRED = _SPEC_FIELDS - {'arguments', 'vasp', 'progress_sources', 'note', 'scientific'}
+                'intent', 'dependencies_complete', 'note', 'scientific', 'native'}
+_REQUIRED = _SPEC_FIELDS - {'arguments', 'vasp', 'progress_sources', 'note', 'scientific', 'native'}
 
 
 def _require(condition, message, code='INVALID_SUBMISSION'):
@@ -106,6 +106,10 @@ def normalize_spec(value):
                  'VASP requires exactly the existing four-file input bundle')
     else:
         _require('vasp' not in value, 'Command specification cannot carry VASP settings')
+    if 'native' in value:
+        from cmw.jobs.manifests import REMOTE_ENGINES, validate_native
+        validate_native(value['native'])
+        _require(value['engine'] in REMOTE_ENGINES, 'Native manifests support remote VASP and Command submissions')
     result = {**value, 'resources': resources, 'manifest': manifest, 'arguments': arguments,
               'progress_sources': sources, 'note': value.get('note', '')}
     from cmw.jobs.store import validate_note
@@ -123,6 +127,11 @@ def _paths(config, spec):
     storage = config['storages'][spec['storage']]
     namespace = Path(storage['root']) / ('cmw-' + config['node_id'])
     bundle = namespace / 'prepared' / spec['request_id']
+    if 'native' in spec:
+        # The job directory is keyed by its permanent ID; inputs stay in the verified bundle.
+        from cmw.jobs.manifests import target_layout
+        work = target_layout(storage['root'], spec['native'])[1]
+        return bundle, work, work / 'run'
     work = namespace / 'runs' / spec['request_id']
     return bundle, work, work / 'native'
 
@@ -198,7 +207,7 @@ def preview(config, queue, spec):
             'queue_order': 'A held queue head blocks later entries under the existing order contract'}
 
 
-def register_held(backend, spec, request_id):
+def register_held(backend, spec, request_id, job_manifest=None):
     from .transfer import lookup_transfer
     spec = normalize_spec(spec)
     _require(request_id == spec['request_id'], 'Registration request ID differs from the persisted portable request')
@@ -221,6 +230,12 @@ def register_held(backend, spec, request_id):
         _require(checked['status'] == 'valid', 'Published VASP inputs fail the existing four-file checker')
         _require(not native.exists() and not native.is_symlink(), 'VASP runner output must remain absent until its own staging')
     molecular = spec['engine'] in {'ORCA', 'Multiwfn'}
+    native_raw = None
+    if 'native' in spec:
+        from cmw.jobs.manifests import accept_remote
+        native_raw = accept_remote(config=backend.config, spec=spec, plan=plan, bundle=bundle, job=job_manifest)
+    elif job_manifest is not None:
+        _require(False, 'A job.json requires a native submission')
     resolved, checked = None, None
     if molecular:
         from .molecular import resolved_spec
@@ -229,14 +244,30 @@ def register_held(backend, spec, request_id):
         checked = check_molecular(resolved)
         _require(checked['status'] == 'READY', 'Destination molecular preflight refused: ' + json.dumps(checked['findings']), 'MOLECULAR_PREFLIGHT')
     runs = work.parent
+    if native_raw is not None:
+        runs.parent.mkdir(mode=0o700, exist_ok=True)
     runs.mkdir(mode=0o700, exist_ok=True)
     _require(runs.resolve() == runs and runs.stat().st_dev == bundle.stat().st_dev, 'Run directory must remain on the registered local volume')
     try:
         work.mkdir(mode=0o700)
     except FileExistsError:
-        _require(work.is_dir() and work.resolve() == work and not any(work.iterdir()),
+        # A native retry may find only its own job.json, which publish_remote compares byte for byte.
+        allowed = {'.cmw-manifest'} if native_raw is not None else set()
+        _require(work.is_dir() and work.resolve() == work and {item.name for item in work.iterdir()} <= allowed,
                  'Unregistered request working directory is not empty; inspect retained evidence')
     _require(stat.S_IMODE(work.stat().st_mode) & 0o077 == 0, 'Working directory must be private')
+    manifest_record = None
+    if native_raw is not None:
+        import hashlib
+        from cmw.jobs.manifests import publish_remote
+        with backend.store.read_transaction() as con:
+            _require(not any((job.get('manifest') or {}).get('root') == str(runs.parent)
+                             and job['manifest'].get('id') == spec['native']['id'] for job in backend.store.rows(con)),
+                     'This native ID is already registered in this queue', 'REQUEST_CONFLICT')
+        publish_remote(project_dir=runs.parent, work=work, native=spec['native'], raw=native_raw,
+                       request_id=request_id, queue_id=backend.queue['queue_id'])
+        manifest_record = {'project': spec['native']['project']['project_key'], 'id': spec['native']['id'],
+                           'root': str(runs.parent), 'job_sha256': hashlib.sha256(native_raw).hexdigest()}
     profile = backend.config['profiles'][spec['profile']]
     molecular_binding, environment = None, None
     actual_work = work
@@ -274,7 +305,7 @@ def register_held(backend, spec, request_id):
     job = backend.store.add(argv=plan['argv'], cwd=actual_work, env=environment, name=spec['name'], engine=spec['engine'],
                             **spec['resources'], hold=True, note=spec['note'], progress_sources=sources,
                             remote_request={'request_id': request_id, 'digest': digest}, node_submission=metadata,
-                            molecular_submission=molecular_binding)
+                            molecular_submission=molecular_binding, manifest=manifest_record)
     return {'status': 'REGISTERED', 'replayed': False, 'job': job, 'request_id': request_id}
 
 
@@ -325,13 +356,14 @@ def dispatch(backend, operation, params, *, request_id):
         identifier(params['request_id'], 'request ID')
         return {'request': backend.store.request_lookup(params['request_id'])}
     if operation in {'submit.check', 'submit.preview', 'submit'}:
-        _require(set(params) == {'spec'}, 'Submission requires one portable specification')
+        _require(set(params) == {'spec'} or (operation == 'submit' and set(params) == {'spec', 'job_manifest'}),
+                 'Submission requires one portable specification (and, for native jobs, its job.json)')
         if operation in {'submit.check', 'submit.preview'}:
             planned = preview(backend.config, backend.queue, params['spec'])
             if operation == 'submit.check':
                 return planned['preflight'] or {'status': 'UNASSESSED', 'findings': [{'domain': 'input', 'status': 'UNASSESSED', 'message': 'Generic command inputs have no engine-specific validator'}]}
             return planned
-        return register_held(backend, params['spec'], request_id)
+        return register_held(backend, params['spec'], request_id, params.get('job_manifest'))
     allowed = {'storage', 'request_id'} | ({'manifest'} if operation == 'transfer.begin' else {'manifest_digest'} if operation == 'transfer.publish' else set())
     _require(set(params) == allowed, 'Transfer parameters differ from the negotiated schema')
     identifier(params['request_id'], 'transfer request ID')

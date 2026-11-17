@@ -605,7 +605,34 @@ cmw jobs add --manifest-project ROOT --cwd ROOT/jobs/J<n> --name NAME --engine V
 - A non-owner node, `--node`/`--queue`, and plain `cmw jobs add` inside a project's
   `jobs/` tree are refused. There is no fallback allocator.
 
-Not yet: remote allocation (1b), legacy/cross-project parents and inferred parents, `state.json`
+**Remote targets (Phase 1b).** The owner node is the frontend that hands out IDs:
+
+```bash
+cmw jobs --state OWNER_STATE --node mini submit --spec SPEC.json --manifest-project ROOT
+```
+
+- The frontend checks it owns ROOT (its local enrolled queue's node UUID), checks the
+  endpoint advertises `native_manifests`, and reserves `J<n>` keyed by the spec's
+  `request_id`. Nothing is reserved if either check fails; `--preview` is refused
+  because it would burn an ID.
+- It freezes `job.json` from the target's own `submit.preview` (argv, runtime
+  fingerprint), the bundle's input digests and the POTCAR dataset identities, keeps the
+  owner copy at `ROOT/jobs/J<n>/.cmw-manifest/job.json`, and appends the `manifest`
+  receipt before any destination mutation.
+- The target recomputes every derivable field and refuses any drift rather than
+  rewriting. It writes a project replica `<storage>/<project key>/.cmw-project.json`
+  (no ledger), publishes the same bytes at
+  `<storage>/<project key>/jobs/J<n>/.cmw-manifest/job.json`, and registers on Hold with
+  cwd `jobs/J<n>`. VASP output goes to `jobs/J<n>/run`; inputs stay in the verified
+  published bundle.
+- The owner then appends the `registration` receipt with the target node, queue, job and
+  attempt. Retrying the same spec after a lost reply returns the same ID and attempt
+  without new receipts.
+- VASP and Command only; restart files never travel (`--restart none`). Non-owner
+  frontends, `jobs --node … add --manifest-project`, and plain adds inside a replica's
+  `jobs/` tree are refused.
+
+Not yet: node-to-node allocation for a frontend that isn't the owner, legacy/cross-project and inferred parents, `state.json`
 and SCF classification (2), manifest annotate/list/check (3), and backfill (4).
 
 ## Status, resources and failure policy

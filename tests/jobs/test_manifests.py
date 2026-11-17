@@ -362,7 +362,16 @@ class ManifestCliTests(ManifestCase):
     def test_remote_manifest_operations_are_refused_without_contacting_a_node(self):
         code, output = run_jobs(['--node', 'mini', 'manifest', 'reserve', '--project-root', str(self.project)])
         self.assertEqual(code, 2)
-        self.assertIn('owner-local only', output)
+        self.assertIn('reserved by the owner node itself', output)
+        code, output = run_jobs(['submit', '--spec', str(self.base / 'spec.json'), '--manifest-project',
+                                 str(self.project)], self.base / 'state')
+        self.assertEqual(code, 2)
+        self.assertIn('needs an explicit --node target', output)
+        code, output = run_jobs(['--state', str(self.base / 'state'), '--node', 'absent', '--nodes-config',
+                                 str(self.base / 'no-registry'), 'submit', '--spec', str(self.base / 'spec.json'),
+                                 '--manifest-project', str(self.project)])
+        self.assertEqual(code, 2)
+        self.assertNotIn('--state is local only', output)  # The owner's own state is allowed here.
         code, output = run_jobs(['add', '--name', 'x', '--cwd', str(self.project), '--manifest-request',
                                  uuid4().hex, '--', '/bin/true'], self.base / 'state')
         self.assertEqual(code, 2)
