@@ -133,11 +133,14 @@ def annotate(store, root, job_id, changes, *, expected_revision=None, request=No
                                                                             project['owner_node_id']):
                     raise ManifestError('Project ID ledger belongs to a different project or owner')
                 con.execute(RECEIPTS)
+                receipts = [json.loads(row[0]) for row in con.execute(
+                    'SELECT event FROM annotation_requests WHERE job_id=? ORDER BY sequence', (job_id,))]
+                # Every published event must be exactly the one its receipt recorded.
+                if receipts[:document['revision']] != document['events']:
+                    raise ManifestError(f'{path} differs from its ledger receipts; explicit review is required')
                 # Receipts committed by an append whose file publication did not finish.
-                unpublished = [json.loads(row[0]) for row in con.execute(
-                    'SELECT event FROM annotation_requests WHERE job_id=? AND sequence>? ORDER BY sequence',
-                    (job_id, document['revision']))]
-                replay = con.execute('SELECT intent_sha256, sequence, event FROM annotation_requests WHERE request_uuid=?',
+                unpublished = receipts[document['revision']:]
+                replay = con.execute('SELECT intent_sha256, sequence FROM annotation_requests WHERE request_uuid=?',
                                      (request,)).fetchone()
                 if replay is not None and replay[0] != intent:
                     raise ManifestError('Request UUID already recorded a different annotation')
@@ -165,8 +168,6 @@ def annotate(store, root, job_id, changes, *, expected_revision=None, request=No
                         'revision': document['revision'] + len(pending)}
             _write(path, document)
     sequence = event['sequence'] if event is not None else replay[1]
-    if document['events'][sequence - 1] != json.loads(replay[2] if event is None else canonical(event)):
-        raise ManifestError(f'{path} no longer holds the event its ledger receipt recorded; explicit review is required')
     return {'project': project['project_key'], 'id': job_id, 'revision': document['revision'],
             'event': document['events'][sequence - 1], 'current': current(document['events']),
             'request_uuid': request, 'replayed': event is None}

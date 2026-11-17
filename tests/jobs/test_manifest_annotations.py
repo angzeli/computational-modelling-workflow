@@ -73,8 +73,11 @@ class ManifestAnnotationTests(ManifestCase):
         edited = self.document()
         edited['events'][0]['note'] = 'rewritten by hand'
         self.path.write_text(json.dumps(edited))
-        with self.assertRaisesRegex(ManifestError, 'no longer holds the event'):
+        with self.assertRaisesRegex(ManifestError, 'differs from its ledger receipts'):
             self.annotate(note='once', request=request)
+        with self.assertRaisesRegex(ManifestError, 'differs from its ledger receipts'):
+            self.annotate(note='a fresh request')  # A new append never republishes an altered history.
+        self.assertEqual(self.document()['events'][0]['note'], 'rewritten by hand')
 
     def test_committed_receipt_without_a_published_file_is_reconciled(self):
         request = uuid4().hex
