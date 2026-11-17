@@ -80,12 +80,35 @@ def _load_json(job, path, code):
         if not stat.S_ISREG(path.lstat().st_mode):
             job.error(code, f'{path.name} is not a regular file')
             return None
-        return json.loads(path.read_bytes())
+        document = json.loads(path.read_bytes())
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as exc:
         job.error(code, f'{path.name} is unreadable: {exc}')
         return None
+    if not isinstance(document, dict):  # An existing non-object is damage, never "missing".
+        job.error(code, f'{path.name} is not a JSON object')
+        return None
+    return document
+
+
+def _malformed(record):
+    """Why a sequence-valid journal record cannot be indexed as a receipt, or None."""
+    payload = record.get('payload')
+    if record.get('event') not in ('manifest', 'registration') or not isinstance(payload, dict):
+        return 'has an unknown event or a non-object payload'
+    digest = payload.get('job_sha256')
+    if not isinstance(payload.get('id'), str) or not NATIVE_ID.fullmatch(payload['id']) or \
+            not isinstance(digest, str) or len(digest) != 64:
+        return 'has a malformed job ID or job.json digest'
+    binding = payload.get('binding')
+    if record['event'] == 'manifest' and binding is not None:
+        return 'is a manifest receipt with a binding'
+    if record['event'] == 'registration' and not (
+            isinstance(binding, dict) and isinstance(binding.get('job_id'), (int, str))
+            and all(isinstance(binding.get(key), str) for key in ('node_id', 'queue_id', 'attempt_id'))):
+        return 'is a registration receipt with a malformed binding'
+    return None
 
 
 def _identity(job, document, name, project_key):
@@ -260,6 +283,11 @@ def check(store, root, job_ids=(), *, rehash=False):
         project_findings.append({'level': 'notice', 'code': 'not_owner',
                                  'message': 'This node is not the project owner; remote state and queues are not visible'})
     records, damage = journal_prefix(root)
+    for index, record in enumerate(records):
+        reason = _malformed(record)
+        if reason:  # Only the well-formed prefix before it is indexed, like any other journal damage.
+            records, damage = records[:index], f'Integrity journal record {index + 1} {reason}'
+            break
     if damage is not None:
         project_findings.append({'level': 'error', 'code': 'journal_damaged',
                                  'message': f'{damage}; {len(records)} complete record(s) were checked'})
@@ -269,8 +297,7 @@ def check(store, root, job_ids=(), *, rehash=False):
                                      'message': f'Journal record {record["sequence"]} names another project or schema'})
     by_event = {}
     for record in records:
-        payload = record.get('payload') or {}
-        by_event.setdefault((record.get('event'), payload.get('id')), []).append(record)
+        by_event.setdefault((record['event'], record['payload']['id']), []).append(record)
     jobs = root / 'jobs'
     present = {path.name for path in jobs.iterdir() if NATIVE_ID.fullmatch(path.name)} if jobs.is_dir() else set()
     known = present | {f'J{number}' for number in reserved} | {job_id for _, job_id in by_event if job_id}

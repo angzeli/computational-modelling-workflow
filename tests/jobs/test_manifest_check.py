@@ -113,6 +113,23 @@ class ManifestCheckTests(ManifestCase):
         self.assertEqual([item['code'] for item in result['findings']], ['journal_damaged'])
         self.assertIn('2 complete record(s)', result['findings'][0]['message'])
         self.assertEqual(self.job(result, 'J1')['binding']['node_id'], self.node)  # The valid prefix still checks.
+        (sidecar / 'state.json').write_text('null')
+        self.assertIn('state_unreadable', self.codes(self.check(), 'J1'))
+        self.assertNotIn('state_missing', self.codes(self.check(), 'J1'))
+
+    def test_malformed_journal_payload_is_damage_not_a_crash(self):
+        self.command_job()
+        self.command_job()
+        journal = self.project / '.cmw' / 'integrity.jsonl'
+        records = manifests.read_journal(self.project)
+        records[2]['payload'] = ['not', 'an', 'object']  # J2's manifest receipt; J1's two records stay intact.
+        journal.write_text(''.join(json.dumps(record, sort_keys=True) + '\n' for record in records))
+        result = self.check()
+        self.assertEqual([item['code'] for item in result['findings']], ['journal_damaged'])
+        self.assertIn('record 3', result['findings'][0]['message'])
+        self.assertEqual(self.job(result, 'J1')['status'], 'verified')
+        code, output = run_jobs(['check', '--manifest-project', str(self.project), '--json'], self.base / 'state')
+        self.assertEqual((code, json.loads(output)['status']), (2, 'FAILED'), output)
 
     def test_unpublished_annotation_receipt_is_a_notice(self):
         self.command_job()
