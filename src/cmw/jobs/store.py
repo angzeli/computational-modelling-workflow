@@ -10,12 +10,17 @@ import re
 import sqlite3
 import stat
 import sys
+import threading
 import time
 import unicodedata
 from uuid import uuid4
 
 from cmw.core.execution_layout import resolve_recorded_layout
 from .freshness import age_seconds, clock_stamp
+
+# Manifest jobs saved in the innermost open transaction of this thread; their
+# state.json is projected only after that transaction commits.
+_MANIFEST_SAVES = threading.local()
 
 PENDING = {"Queue", "Hold"}
 ACTIVE = {"Starting", "Run", "Cancelling", "Unknown"}
@@ -242,9 +247,30 @@ class Store:
                 self.set_control(con, control)
                 for job in self.rows(con):
                     self.save(con, job)
-            yield con
-            if con.in_transaction:
-                self._commit(con, wait)
+            stack = _MANIFEST_SAVES.__dict__.setdefault('stack', [])
+            stack.append(set())
+            try:
+                yield con
+                if con.in_transaction:
+                    self._commit(con, wait)
+            finally:
+                saved = stack.pop()
+        self._publish_manifest_states(saved)
+
+    def _publish_manifest_states(self, job_ids):
+        """Best-effort projection after commit; a failure never changes the queue outcome."""
+        if not job_ids:
+            return
+        from .manifest_state import publish
+        for job_id in sorted(job_ids):
+            try:
+                publish(self, job_id)
+            except Exception as exc:  # noqa: BLE001 - the queue already committed; record and continue.
+                try:
+                    with self.transaction() as con:
+                        self.event(con, job_id, f'Manifest state.json not updated: {str(exc)[:300]}')
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _queue_identity(self, con, schema):
         row = con.execute("SELECT value FROM meta WHERE key='queue_identity'").fetchone()
@@ -518,6 +544,9 @@ class Store:
 
     @staticmethod
     def save(con, job):
+        stack = getattr(_MANIFEST_SAVES, 'stack', None)
+        if stack and job.get('manifest'):
+            stack[-1].add(job['id'])
         # Lifecycle callers may hold a dictionary across transactions. Human
         # annotations are edited separately and the current row is authoritative.
         row = con.execute("SELECT data FROM jobs WHERE id=?", (job['id'],)).fetchone()

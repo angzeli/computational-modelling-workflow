@@ -605,6 +605,20 @@ cmw jobs add --manifest-project ROOT --cwd ROOT/jobs/J<n> --name NAME --engine V
 - A non-owner node, `--node`/`--queue`, and plain `cmw jobs add` inside a project's
   `jobs/` tree are refused. There is no fallback allocator.
 
+**Execution state (Phase 2b).** The executing node keeps `jobs/J<n>/.cmw-manifest/state.json`
+as a projection of its queue record, published after each committed queue transaction that
+saved the job (registration, hold/release, start, finish, Unknown, retirement, notes).
+`status` maps `Queue`/`Hold`/`Starting` → `queued`, `Run`/`Cancelling` → `running`, `Done`
+→ `done`, `Fail` → `failed`, `Cancelled` → `cancelled` and `Unknown` → null, with
+`native_status` preserved. Each changed projection gets the next `revision`; unchanged
+ones are not rewritten. Writes are atomic, serialized per job, fenced to the registered
+node/queue/job/attempt, and refused if `job.json` no longer matches its registered digest.
+When a VASP attempt first reaches a terminal status, the SCF classifier reads `run/OUTCAR`
+and `run/stdout.log` once for `scf_result` and the final-row metrics; WAVECAR/CHGCAR in
+`run/` appear in `restart_outputs` with null digests until output hashing lands. A failed
+publication never changes the queue outcome: it is recorded as a job event. `state.json`
+never gates completion, releases resources or unblocks dispatch.
+
 **Remote targets (Phase 1b).** The owner node is the frontend that hands out IDs:
 
 ```bash
