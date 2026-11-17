@@ -83,11 +83,17 @@ def _scf(job):
         if stat.S_ISREG(info.st_mode) and info.st_size > 0:
             fields['restart_outputs'][role] = None  # Evidenced output; its digest is later work (2c).
     outcar, stdout = output / 'OUTCAR', output / 'stdout.log'
+    binding = (job.get('progress_sources') or {}).get('vasp_input') or {}
+    # Bound only when registration proved this attempt's output absent and the attempt actually started.
+    if (job.get('started_at') is None or binding.get('issue') is not None
+            or binding.get('attempt_id') != job['attempt_id'] or binding.get('output') != str(output)):
+        fields['evidence'].append({'source': 'queue', 'marker': 'run output is not bound to a started attempt '
+                                   'with registration staging evidence', 'line': None})
+        return fields
     if not outcar.is_file():
         fields['evidence'].append({'source': 'OUTCAR', 'marker': 'OUTCAR is absent', 'line': None})
         return fields
     try:
-        # A native job's output directory is fresh for its single registered attempt.
         result = classify_run(outcar, stdout if stdout.is_file() else None, invocation_bound=True)
     except (OSError, ValueError) as exc:
         fields['evidence'].append({'source': 'OUTCAR', 'marker': f'unreadable: {str(exc)[:400]}', 'line': None})
@@ -141,15 +147,20 @@ def _write(path, value):
 def publish(store, job_id):
     """Project the committed queue record into state.json; unchanged projections are not rewritten."""
     with store.read_transaction() as con:
-        job = store.get(con, job_id)
-    if not job.get('manifest'):
+        located = store.get(con, job_id)
+    if not located.get('manifest'):
         return None
     identity = store.queue_identity() or {}
     if not isinstance(identity.get('node_id'), str) or not NODE_UUID.fullmatch(identity['node_id']):
         raise ManifestError('state.json needs a queue enrolled to a node UUID')
-    sidecar = _sidecar(job)
+    sidecar = _sidecar(located)
     path = sidecar / 'state.json'
     with _locked(sidecar):
+        # Read the committed record under the lock so publication order matches snapshot order.
+        with store.read_transaction() as con:
+            job = store.get(con, job_id)
+        if job['attempt_id'] != located['attempt_id'] or job['cwd'] != located['cwd']:
+            raise ManifestError('Job attempt changed while publishing state.json')
         previous = None
         if path.exists():
             previous = json.loads(path.read_text(encoding='utf-8'))

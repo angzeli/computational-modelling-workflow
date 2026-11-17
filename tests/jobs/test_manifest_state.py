@@ -1,4 +1,5 @@
 """state.json publisher (#41 Phase 2b): a revisioned projection of the queue record."""
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import time
@@ -72,7 +73,7 @@ class StatePublisherTests(ManifestCase):
         (run / 'OUTCAR').write_text('\n'.join(contract['OUTCAR_lines']) + '\n')
         (run / 'stdout.log').write_text('\n'.join(contract['stdout_lines']) + '\n')
         (run / 'WAVECAR').write_bytes(b'synthetic output checkpoint')
-        self.transition(job, status='Done', exit_code=0, finished_at=time.time())
+        self.transition(job, status='Done', exit_code=0, started_at=time.time() - 5, finished_at=time.time())
         state = self.state(directory)
         self.assertEqual((state['scf_result'], state['last_step'], state['energy_ev'], state['total_magnetisation_mu_b']),
                          ('converged', 2, -10.00000001, 2.0))
@@ -81,6 +82,40 @@ class StatePublisherTests(ManifestCase):
         with patch('cmw.periodic.vasp.scf_classifier.classify_run', side_effect=AssertionError('reclassified')):
             self.store.annotate(job['id'], 'still Done')
         self.assertEqual(self.state(directory)['scf_result'], 'converged')
+
+    def test_unbound_or_unstarted_output_is_never_classified(self):
+        contract = json.loads((CONTRACTS / 'converged-at-nelm.json').read_text())
+        directory, argv = self.vasp_job()
+        run = directory / 'run'
+        run.mkdir()  # Output left from elsewhere before registration.
+        (run / 'OUTCAR').write_text('\n'.join(contract['OUTCAR_lines']) + '\n')
+        job = self.add(directory, argv)
+        self.assertIsNotNone(job['progress_sources']['vasp_input']['issue'])
+        self.transition(job, status='Cancelled', started_at=time.time(), finished_at=time.time())
+        state = self.state(directory)
+        self.assertEqual((state['scf_result'], state['last_step']), ('unknown', None))
+        self.assertIn('not bound', state['evidence'][0]['marker'])
+        directory, argv = self.vasp_job()
+        job = self.add(directory, argv)
+        (directory / 'run').mkdir()
+        (directory / 'run' / 'OUTCAR').write_text('\n'.join(contract['OUTCAR_lines']) + '\n')
+        self.transition(job, status='Cancelled', finished_at=time.time())  # Cancelled before it ever started.
+        self.assertEqual(self.state(directory)['scf_result'], 'unknown')
+
+    def test_stale_snapshot_never_overwrites_a_newer_state(self):
+        directory, job = self.command_job()
+        original, fired = manifest_state._locked, []
+
+        @contextmanager
+        def interleaved(sidecar):
+            if not fired:  # Another writer commits and publishes Run just before this lock is taken.
+                fired.append(True)
+                self.transition(job, status='Run', started_at=time.time())
+            with original(sidecar):
+                yield
+        with patch.object(manifest_state, '_locked', interleaved):
+            self.store.change(job['id'], 'release')
+        self.assertEqual(self.state(directory)['native_status'], 'Run')
 
     def test_running_vasp_attempt_is_never_classified(self):
         directory, argv = self.vasp_job()
