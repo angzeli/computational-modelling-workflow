@@ -673,8 +673,36 @@ cmw jobs annotate J28 --manifest-project ROOT --outcome checkpoint-only \
 - This is separate from the replaceable queue note: `annotate JOB --note` keeps its
   behavior, and neither form writes or migrates the other.
 
+**Integrity check (Phase 3b).** On the project owner, verify native manifests against
+their permanent anchors without writing anything:
+
+```bash
+cmw jobs check --manifest-project ROOT            # every reserved, anchored or present J<n>
+cmw jobs check --manifest-project ROOT J28 --rehash --json
+```
+
+- `job.json` must be a read-only regular file whose exact bytes match its `manifest`
+  receipt, with this project's id, provenance and owner; a hand edit is reported as
+  `job_json_changed`. Missing receipts mean unverifiable, never accepted.
+- The journal must be contiguous; a damaged tail is reported and the valid prefix is
+  still checked. Each ID has one manifest receipt and at most one registration with the
+  same digest. A reserved ID without job.json is `reserved`; a job directory the ledger
+  never reserved is an error; an unregistered (burned) ID is a notice.
+- For jobs registered in this queue: the queue record carries the same digest and
+  attempt, `state.json` is bound to the registration receipt, INCAR/POSCAR/KPOINTS still
+  match their digests, and restart copies are present (rehashed only with `--rehash`).
+  A parent's hashed restart outputs are compared with the recorded copy digests
+  (`match`, `differs`, `pending`, `unavailable`). Remote jobs are a `remote` notice:
+  their state lives on the executing node.
+- `annotations.json` must equal its ledger receipts; committed but unpublished receipts
+  are a notice (the next append publishes them).
+- Exit 0 when verified, 2 with any error finding. `check --spec` is unchanged. Full JSON
+  Schema validation is not run here (`jsonschema` is a test extra and `schemas/` is not
+  packaged); writer output stays schema-tested in CI. SQLite may leave its transient
+  `-wal`/`-shm` files beside the ledger.
+
 Not yet: node-to-node allocation for a frontend that isn't the owner, legacy/cross-project and inferred parents,
-manifest check/list (3b, 3c), and backfill (4).
+manifest list (3c), and backfill (4).
 
 ## Status, resources and failure policy
 
