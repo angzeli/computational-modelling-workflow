@@ -591,12 +591,21 @@ cmw jobs add --manifest-project ROOT --cwd ROOT/jobs/J<n> --name NAME --engine V
   `--env` keys with prefixes `OMP_`, `OPENBLAS_`, `MKL_`, `VECLIB_`, `GFORTRAN_`,
   `OMPI_MCA_`. Checkpoints for `--restart wavecar|chgcar|both` are hashed synchronously
   into `restart_inputs`; `parent` stays null. Other engines record null VASP inputs.
+- `--restart-from J<p>` (VASP) restarts from a parent in the same project and queue.
+  The parent needs a single registration receipt, a `job.json` matching it, and a
+  terminal queue status (Done, Fail or Cancelled). For the runner's `--restart` mode,
+  CMW copies each checkpoint from `jobs/J<p>/run/` into `jobs/J<n>/inputs/` (read-only),
+  hashing while copying, re-hashing the copy and requiring the parent file unchanged.
+  `job.json` records `parent: J<p>` and the copy digests in `restart_inputs`. It refuses
+  `--restart none`, an existing checkpoint in `inputs/`, and legacy or cross-project
+  parents; on refusal no copy is left behind. INCAR restart settings (ISTART/ICHARG)
+  stay yours to set.
 - If publication succeeds but registration fails, the ID is burned: reserve a new one.
   An incomplete or corrupt journal tail blocks further writes for explicit review.
 - A non-owner node, `--node`/`--queue`, and plain `cmw jobs add` inside a project's
   `jobs/` tree are refused. There is no fallback allocator.
 
-Not yet: remote allocation (1b), `--restart-from <ID>` and parent lineage, `state.json`
+Not yet: remote allocation (1b), legacy/cross-project parents and inferred parents, `state.json`
 and SCF classification (2), manifest annotate/list/check (3), and backfill (4).
 
 ## Status, resources and failure policy

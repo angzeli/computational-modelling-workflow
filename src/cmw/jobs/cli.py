@@ -470,6 +470,8 @@ def register(subcommands):
     add.add_argument("--manifest-project", type=Path, metavar="ROOT",
                      help="register a reserved native job (cwd ROOT/jobs/J<n>) with a read-only job.json; owner node only")
     add.add_argument("--manifest-request", metavar="UUID", help="durable request UUID for the manifest receipts")
+    add.add_argument("--restart-from", metavar="J<n>", help="copy the terminated parent's checkpoints for the runner "
+                     "--restart mode into inputs/ and record the lineage; requires --manifest-project")
     add.add_argument("--json", action="store_true")
     add.add_argument("argv", nargs="...")
     add.set_defaults(handler=handle)
@@ -875,9 +877,9 @@ def handle(args):
             if args.manifest_project is not None:
                 from .manifests import add_native
                 result = add_native(store, args.manifest_project, cwd=args.cwd, argv=argv, engine=args.engine,
-                                    request=args.manifest_request, **options)
-            elif args.manifest_request is not None:
-                raise JobsError("--manifest-request requires --manifest-project")
+                                    request=args.manifest_request, restart_from=args.restart_from, **options)
+            elif args.manifest_request is not None or args.restart_from is not None:
+                raise JobsError("--manifest-request and --restart-from require --manifest-project")
             else:
                 result = store.add(argv=argv, cwd=args.cwd, engine=args.engine, hold=args.hold, **options)
         elif operation in {"start", "stop"}:

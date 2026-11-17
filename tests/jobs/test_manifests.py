@@ -258,6 +258,90 @@ class JobManifestTests(ManifestCase):
         self.assertEqual(len(self.journal()), 1)
 
 
+class RestartFromTests(ManifestCase):
+    def setUp(self):
+        super().setUp()
+        self.init()
+        parent, argv = self.vasp_job()
+        self.parent_job = self.add(parent, argv)
+        self.run = parent / 'run'
+        self.run.mkdir()
+        self.checkpoint = b'synthetic parent WAVECAR'
+        (self.run / 'WAVECAR').write_bytes(self.checkpoint)
+
+    def finish_parent(self, status='Done'):
+        with self.store.transaction() as con:
+            job = self.store.get(con, self.parent_job['id'])
+            job['status'] = status
+            self.store.save(con, job)
+
+    def child(self, restart='wavecar'):
+        directory, argv = self.vasp_job()
+        (directory / 'inputs' / 'WAVECAR').unlink(missing_ok=True)
+        argv[argv.index('--restart') + 1] = restart
+        return directory, argv
+
+    def test_terminated_parent_checkpoint_is_copied_and_recorded(self):
+        self.finish_parent('Fail')  # A failed or LABORTed parent may still hold a usable checkpoint.
+        directory, argv = self.child()
+        self.add(directory, argv, restart_from='J1')
+        copy = directory / 'inputs' / 'WAVECAR'
+        self.assertEqual((copy.read_bytes(), stat.S_IMODE(copy.stat().st_mode)), (self.checkpoint, 0o444))
+        manifest = json.loads((directory / '.cmw-manifest' / 'job.json').read_text())
+        self.assertEqual((manifest['parent'], manifest['parent_inferred']), ('J1', False))
+        self.assertEqual(manifest['restart_inputs'], {'WAVECAR': hashlib.sha256(self.checkpoint).hexdigest()})
+        self.assertEqual((self.run / 'WAVECAR').read_bytes(), self.checkpoint)
+        if Draft202012Validator is not None:
+            self.assertEqual(schema_errors('job.v1.json', manifest), [])
+
+    def test_unterminated_or_unverified_parents_are_refused_without_copying(self):
+        directory, argv = self.child()
+        cases = (('J1', 'Hold; checkpoints are copied only after'), ('J99', 'no single registration'),
+                 ('node-a:J4.1', 'native J<n>'))
+        for reference, message in cases:
+            with self.subTest(reference=reference), self.assertRaisesRegex(ManifestError, message):
+                self.add(directory, argv, restart_from=reference)
+        self.finish_parent()
+        donor = self.project / 'jobs' / 'J1' / '.cmw-manifest' / 'job.json'
+        donor.chmod(0o644)
+        donor.write_text(donor.read_text().replace('"engine": "VASP"', '"engine": "VASP" '))
+        with self.assertRaisesRegex(ManifestError, 'differs from its integrity receipt'):
+            self.add(directory, argv, restart_from='J1')
+        self.assertFalse((directory / 'inputs' / 'WAVECAR').exists())
+        self.assertFalse((directory / '.cmw-manifest' / 'job.json').exists())
+
+    def test_requires_a_restart_mode_and_never_reuses_an_existing_checkpoint(self):
+        self.finish_parent()
+        directory, argv = self.child(restart='none')
+        with self.assertRaisesRegex(ManifestError, 'needs the runner'):
+            self.add(directory, argv, restart_from='J1')
+        directory, argv = self.child()
+        (directory / 'inputs' / 'WAVECAR').write_bytes(b'operator copy')
+        with self.assertRaisesRegex(ManifestError, 'never reuses an existing checkpoint'):
+            self.add(directory, argv, restart_from='J1')
+        self.assertEqual((directory / 'inputs' / 'WAVECAR').read_bytes(), b'operator copy')
+
+    def test_failed_copy_verification_or_missing_checkpoint_leaves_no_copy(self):
+        self.finish_parent()
+        directory, argv = self.child()
+        with patch('cmw.core.provenance.file_hash', return_value='0' * 64):
+            with self.assertRaisesRegex(ManifestError, 'differs from its source'):
+                self.add(directory, argv, restart_from='J1')
+        self.assertFalse((directory / 'inputs' / 'WAVECAR').exists())
+        with patch.object(manifests, '_publish_new', side_effect=OSError('synthetic disk full')):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                self.add(directory, argv, restart_from='J1')
+        self.assertFalse((directory / 'inputs' / 'WAVECAR').exists())
+        self.add(directory, argv, restart_from='J1')  # The same registration can be retried.
+        self.assertTrue((directory / 'inputs' / 'WAVECAR').exists())
+        directory, argv = self.child(restart='both')  # The parent has no CHGCAR.
+        with self.assertRaisesRegex(ManifestError, 'CHGCAR does not exist'):
+            self.add(directory, argv, restart_from='J1')
+        self.assertEqual(sorted(p.name for p in (directory / 'inputs').iterdir()),
+                         ['INCAR', 'KPOINTS', 'POSCAR', 'POTCAR'])
+        self.assertEqual(manifests.reserve(self.store, self.project)['id'], 'J4')
+
+
 class ManifestCliTests(ManifestCase):
     def test_init_reserve_and_add_through_the_cli(self):
         state = self.base / 'state'
@@ -282,7 +366,7 @@ class ManifestCliTests(ManifestCase):
         code, output = run_jobs(['add', '--name', 'x', '--cwd', str(self.project), '--manifest-request',
                                  uuid4().hex, '--', '/bin/true'], self.base / 'state')
         self.assertEqual(code, 2)
-        self.assertIn('requires --manifest-project', output)
+        self.assertIn('require --manifest-project', output)
 
 
 if __name__ == '__main__':
