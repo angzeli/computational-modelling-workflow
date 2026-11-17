@@ -69,7 +69,12 @@ def handle(args):
         elif operation == 'submit':
             from .client import submit
             from .cli import _read_spec
-            envelope = submit(backend, _read_spec(args.spec), root=args.nodes_config, preview=args.preview)
+            local_store = None
+            if args.manifest_project is not None:
+                from cmw.jobs.store import Store
+                local_store = Store(args.state)
+            envelope = submit(backend, _read_spec(args.spec), root=args.nodes_config, preview=args.preview,
+                              manifest_project=args.manifest_project, local_store=local_store)
         elif operation == 'request':
             envelope = backend.call('request', {'request_id': args.request_id})
         elif operation == 'status':

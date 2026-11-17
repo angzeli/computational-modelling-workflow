@@ -591,3 +591,181 @@ def add_native(store, root, *, cwd, argv, engine, request=None, restart_from=Non
                'job_id': job['id'], 'attempt_id': job['attempt_id']}
     append_journal(root, key, 'registration', request, {'id': job_id, 'job_sha256': digest, 'binding': binding})
     return job
+
+
+# Remote targets (Phase 1b) -----------------------------------------------------
+#
+# The owner is the frontend: it allocates the ID, freezes job.json from the
+# target's own submission preview, anchors it, and records the target's
+# registration. The target never allocates; it verifies the exact bytes against
+# its plan and publishes them beside the job under
+# <storage root>/<project key>/jobs/J<n>/. Restart files never travel.
+
+REMOTE_ENGINES = {'VASP', 'Command'}
+NATIVE_CAPABILITY = {'schema': 1, 'engines': sorted(REMOTE_ENGINES), 'layout': 'storage/project/jobs/ID'}
+
+
+def validate_native(native):
+    """The portable spec's native block: the owner's project record and the reserved ID."""
+    if not isinstance(native, dict) or set(native) != {'project', 'id'}:
+        raise ManifestError('Native submission needs exactly the project record and the reserved ID')
+    project = native['project']
+    if (not isinstance(project, dict)
+            or set(project) != {'schema_version', 'project_key', 'owner_node_id', 'legacy_nodes', 'legacy_queues'}
+            or project['schema_version'] != SCHEMA_VERSION
+            or not isinstance(project['project_key'], str) or not KEY.fullmatch(project['project_key'])
+            or not isinstance(project['owner_node_id'], str) or not NODE_UUID.fullmatch(project['owner_node_id'])
+            or project['legacy_nodes'] != {} or project['legacy_queues'] != {}):
+        raise ManifestError('Native submission project record does not match the v1 contract')
+    if not isinstance(native['id'], str) or not NATIVE_ID.fullmatch(native['id']):
+        raise ManifestError('Native submission ID must be J<n>')
+    return native
+
+
+def remote_fields(*, native, spec, plan, potcar, input_digests):
+    """Every job.json field both sides derive identically from the submission."""
+    if spec['engine'] not in REMOTE_ENGINES:
+        raise ManifestError('Native remote submission supports VASP and Command')
+    runtime = plan.get('runtime_id')
+    return {
+        'schema_version': SCHEMA_VERSION, 'id': native['id'], 'project': native['project']['project_key'],
+        'provenance': 'native', 'target_node': spec['node_id'],
+        'id_owner_node': native['project']['owner_node_id'], 'engine': spec['engine'],
+        'inputs': ({name: input_digests[f'inputs/{name}'] for name in VASP_INPUTS} if spec['engine'] == 'VASP'
+                   else dict.fromkeys(VASP_INPUTS)),
+        'potcar': potcar if spec['engine'] == 'VASP' else None, 'preparation_record': None,
+        'executable': None,
+        'runtime_fingerprint': runtime if isinstance(runtime, str) and SHA256.fullmatch(runtime) else None,
+        'launch': {'argv': list(plan['argv']), 'mpi_ranks': spec['resources']['mpi_ranks'], 'environment': {}},
+        'parent': None, 'parent_inferred': False, 'restart_inputs': {},
+    }
+
+
+def potcar_records(poscar, potcar):
+    from cmw.periodic.vasp.potentials import check_potcar
+    try:
+        datasets = check_potcar(poscar, potcar)
+    except (OSError, ValueError) as exc:
+        raise ManifestError(f'POTCAR does not match POSCAR: {exc}') from exc
+    return [{'element': item.element, 'label': item.label, 'family': item.family,
+             'dataset_date': item.date, 'sha256': item.sha256, 'block_index': index}
+            for index, item in enumerate(datasets)]
+
+
+def begin_remote(store, root, request):
+    """Owner check and idempotent reservation keyed by the submission request ID."""
+    root, project = load_project(root)
+    identity = _require_owner(store, project)
+    reserved = reserve(store, root, request=request)
+    return {'root': root, 'project': project, 'node_id': identity['node_id'], 'id': reserved['id'],
+            'native': {'project': project, 'id': reserved['id']}}
+
+
+def _spool_file(spool, manifest, path):
+    record = json.loads((spool / 'spool.json').read_text(encoding='utf-8'))
+    for item, source in zip(record['manifest']['files'], record['sources']):
+        if item['path'] == path:
+            return spool / source['flat']
+    raise ManifestError(f'Submission bundle has no {path}')
+
+
+def anchor_remote(owner, *, request, spec, plan, spool):
+    """Freeze job.json on the owner (reused verbatim on retry) and anchor it."""
+    root, job_id = owner['root'], owner['id']
+    path = root / 'jobs' / job_id / MANIFEST_DIR / 'job.json'
+    if os.path.lexists(path):  # A retry reuses the exact anchored bytes.
+        raw = anchored_job(owner, request)
+        return json.loads(raw), raw
+    files = {item['path']: item['sha256'] for item in spec['manifest']['files']}
+    potcar = None
+    if spec['engine'] == 'VASP':
+        potcar = potcar_records(_spool_file(spool, spec['manifest'], 'inputs/POSCAR'),
+                                _spool_file(spool, spec['manifest'], 'inputs/POTCAR'))
+    job = {**remote_fields(native=owner['native'], spec=spec, plan=plan, potcar=potcar, input_digests=files),
+           'created_at': _utc_now(), 'authoring_node': owner['node_id']}
+    raw = canonical(job)
+    (path.parent).mkdir(exist_ok=True)
+    _publish_new(path, raw, 0o444)
+    append_journal(root, owner['project']['project_key'], 'manifest', request,
+                   {'id': job_id, 'job_sha256': hashlib.sha256(raw).hexdigest(), 'binding': None})
+    return job, raw
+
+
+def anchored_job(owner, request):
+    """The owner's frozen job.json for this request, verified against its manifest receipt."""
+    path = owner['root'] / 'jobs' / owner['id'] / MANIFEST_DIR / 'job.json'
+    anchored = [record for record in read_journal(owner['root'])
+                if record['event'] == 'manifest' and record['request_uuid'] == request]
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ManifestError(f'{owner["id"]} job.json is missing on the owner: {exc}') from exc
+    if not anchored or anchored[0]['payload']['job_sha256'] != hashlib.sha256(raw).hexdigest():
+        raise ManifestError(f'{owner["id"]} job.json does not match its manifest receipt')
+    return raw
+
+
+def record_remote_registration(owner, *, request, raw, job, spec):
+    """Bind the ID to the target's queue job; replays return the original receipt."""
+    digest = hashlib.sha256(raw).hexdigest()
+    recorded = job.get('manifest') or {}
+    if recorded.get('id') != owner['id'] or recorded.get('job_sha256') != digest:
+        raise ManifestError('Target registration does not carry this job.json; no registration receipt was written')
+    binding = {'node_id': spec['node_id'], 'queue_id': spec['queue_id'],
+               'job_id': job['id'], 'attempt_id': job['attempt_id']}
+    return append_journal(owner['root'], owner['project']['project_key'], 'registration', request,
+                          {'id': owner['id'], 'job_sha256': digest, 'binding': binding})
+
+
+def target_layout(storage_root, native):
+    project = Path(storage_root) / native['project']['project_key']
+    return project, project / 'jobs' / native['id']
+
+
+def accept_remote(*, config, spec, plan, bundle, job):
+    """Target side: verify the owner's job.json against this node's own plan."""
+    native = validate_native(spec['native'])
+    if not isinstance(job, dict):
+        raise ManifestError('Native submission requires the job.json object')
+    raw = canonical(job)
+    expected = remote_fields(
+        native=native, spec=spec, plan=plan, input_digests={item['path']: item['sha256'] for item in spec['manifest']['files']},
+        potcar=potcar_records(bundle / 'inputs' / 'POSCAR', bundle / 'inputs' / 'POTCAR') if spec['engine'] == 'VASP' else None)
+    if expected['target_node'] != config['node_id']:
+        raise ManifestError('job.json targets another node')
+    chosen = {key: job.get(key) for key in ('created_at', 'authoring_node')}
+    if ({key: value for key, value in job.items() if key not in chosen} != expected
+            or not isinstance(chosen['authoring_node'], str) or not NODE_UUID.fullmatch(chosen['authoring_node'])
+            or not isinstance(chosen['created_at'], str)
+            or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z', chosen['created_at'])):
+        raise ManifestError('job.json differs from this node\'s plan; the target refuses drift rather than rewriting it')
+    return raw
+
+
+def publish_remote(*, project_dir, work, native, raw):
+    """Project replica (owner record, no ledger) and the job's read-only job.json."""
+    replica = canonical(native['project'])
+    project_file = project_dir / PROJECT_FILE
+    if os.path.lexists(project_file):
+        if project_file.read_bytes() != replica:
+            raise ManifestError(f'{project_file} records a different project or owner')
+    else:
+        # Only a directory this registration just created may become a replica.
+        unexpected = {item.name for item in project_dir.iterdir()} - {'jobs'}
+        unexpected |= {item.name for item in (project_dir / 'jobs').iterdir()} - {work.name}
+        if unexpected or any(work.iterdir()):
+            raise ManifestError(f'{project_dir} already holds other files; it cannot become a project replica')
+        _publish_new(project_file, replica, 0o644)
+    sidecar = work / MANIFEST_DIR
+    try:
+        sidecar.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    if not stat.S_ISDIR(sidecar.lstat().st_mode) or sidecar.resolve(strict=True) != sidecar:
+        raise ManifestError(f'{sidecar} must be a real directory inside the job')
+    path = sidecar / 'job.json'
+    if os.path.lexists(path):
+        if path.read_bytes() != raw:
+            raise ManifestError(f'{path} holds different bytes')
+        return
+    _publish_new(path, raw, 0o444)

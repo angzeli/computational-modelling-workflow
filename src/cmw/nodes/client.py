@@ -100,8 +100,27 @@ def prepare_submission(backend, specification, *, root=None):
     return record, directory / 'spool'
 
 
-def submit(backend, specification, *, root=None, preview=False):
+def _native_owner(backend, specification, manifest_project, local_store):
+    """Owner-only: confirm the endpoint can verify job.json, then reserve the ID."""
+    if not isinstance(specification, dict) or 'native' in specification:
+        raise NodeError('INVALID_SUBMISSION', 'The native block is added by --manifest-project, not the specification')
+    capability = backend.call('capabilities')['result'].get('native_manifests')
+    if (not isinstance(capability, dict) or capability.get('schema') != 1
+            or specification.get('engine') not in capability.get('engines', ())):
+        raise NodeError('INCOMPATIBLE_NATIVE_SUBMISSION',
+                        'The selected endpoint cannot verify native job manifests for this engine; no ID was reserved')
+    from cmw.jobs.manifests import begin_remote
+    return begin_remote(local_store, manifest_project, identifier(specification.get('request_id'), 'request ID'))
+
+
+def submit(backend, specification, *, root=None, preview=False, manifest_project=None, local_store=None):
     _molecular_capability(backend, specification)
+    owner = None
+    if manifest_project is not None:
+        if preview:
+            raise NodeError('INVALID_SUBMISSION', 'Native submission has no preview: it would reserve a permanent ID')
+        owner = _native_owner(backend, specification, manifest_project, local_store)
+        specification = {**specification, 'native': owner['native']}
     record, spool = prepare_submission(backend, specification, root=root)
     spec = record['spec']
     request_id = spec['request_id']
@@ -111,6 +130,10 @@ def submit(backend, specification, *, root=None, preview=False):
         if prior is not None:
             if prior['operation'] != 'submit' or prior['digest'] != record['digest']:
                 raise NodeError('REQUEST_CONFLICT', 'Endpoint recorded different semantics for this request identity')
+            if owner is not None:
+                from cmw.jobs.manifests import anchored_job, record_remote_registration
+                record_remote_registration(owner, request=request_id, raw=anchored_job(owner, request_id),
+                                           job=prior['result'], spec=spec)
             return {**previous, 'result': {'status': 'REGISTERED', 'replayed': True,
                                          'request_id': request_id, 'job': prior['result']}}
     planned = backend.call('submit.preview', {'spec': spec})
@@ -119,6 +142,12 @@ def submit(backend, specification, *, root=None, preview=False):
         planned['result']['dispatch_intent'] = dispatch
         planned['result']['client_request_record'] = str(spool.parent / 'request.json')
         return planned
+    params = {'spec': spec}
+    if owner is not None:
+        # Anchored before any destination mutation; a later refusal burns the ID.
+        from cmw.jobs.manifests import anchor_remote
+        params['job_manifest'], raw = anchor_remote(owner, request=request_id, spec=spec,
+                                                    plan=planned['result'], spool=spool)
     transfer = backend.call('transfer.begin', {'storage': spec['storage'], 'request_id': request_id,
                                               'manifest': spec['manifest']})['result']
     if transfer['status'] != 'PUBLISHED':
@@ -130,7 +159,11 @@ def submit(backend, specification, *, root=None, preview=False):
                                          'manifest_digest': transfer['manifest_digest']})
     # Lost reply is deliberately not an automatic new request. The durable ID
     # above supports explicit lookup/retry, including after client termination.
-    return backend.call('submit', {'spec': spec}, request_id=request_id)
+    envelope = backend.call('submit', params, request_id=request_id)
+    if owner is not None:
+        from cmw.jobs.manifests import record_remote_registration
+        record_remote_registration(owner, request=request_id, raw=raw, job=envelope['result']['job'], spec=spec)
+    return envelope
 
 
 def _operation_record(root, request_id, operation, target, params, digest):
