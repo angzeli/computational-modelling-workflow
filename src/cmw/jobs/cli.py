@@ -493,6 +493,11 @@ def register(subcommands):
     reserve.add_argument("--request-uuid", metavar="UUID", help="retry with the same UUID to get the same ID")
     reserve.add_argument("--json", action="store_true")
     reserve.set_defaults(handler=handle)
+    hashes = manifest_operations.add_parser("hash-outputs",
+        help="hash a terminated native job's pending restart outputs now (the automatic hasher's retry)")
+    hashes.add_argument("job_id")
+    hashes.add_argument("--json", action="store_true")
+    hashes.set_defaults(handler=handle)
     for name in ("show", "logs", "hold", "release", "move", "cancel"):
         command = operations.add_parser(name)
         command.add_argument("job_id")
@@ -862,6 +867,11 @@ def handle(args):
                         raise JobsError(f"Legacy inventory is not valid JSON: {exc}") from exc
                 result = manifests.init_project(store, args.project_root, args.project_key, inventory=inventory,
                                                 no_legacy=args.no_legacy_ids)
+            elif args.manifest_operation == "hash-outputs":
+                from .manifest_hashing import hash_outputs
+                with store.read_transaction() as con:
+                    job_number = store.get(con, args.job_id)["id"]
+                result = hash_outputs(store, job_number)
             else:
                 result = manifests.reserve(store, args.project_root, request=args.request_uuid)
         elif operation == "add":

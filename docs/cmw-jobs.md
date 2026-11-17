@@ -614,8 +614,13 @@ saved the job (registration, hold/release, start, finish, Unknown, retirement, n
 ones are not rewritten. Writes are atomic, serialized per job, fenced to the registered
 node/queue/job/attempt, and refused if `job.json` no longer matches its registered digest.
 When a VASP attempt first reaches a terminal status, the SCF classifier reads `run/OUTCAR`
-and `run/stdout.log` once for `scf_result` and the final-row metrics; WAVECAR/CHGCAR in
-`run/` appear in `restart_outputs` with null digests until output hashing lands. A failed
+and `run/stdout.log` once for `scf_result` and the final-row metrics. WAVECAR/CHGCAR in
+`run/` of a bound attempt are listed in `restart_outputs` with null digests and
+`hashes_pending: true`; a detached hasher (log: `<state>/manifest-hashes.log`) then
+fills each digest only if the file stayed unchanged (device, inode, size, mtime) while it
+was read, otherwise leaves it null with an evidence item, and clears `hashes_pending`.
+Hashing never blocks drainage, `Done` or resource release. Retry it with
+`cmw jobs manifest hash-outputs JOB`. A failed
 publication never changes the queue outcome: it is recorded as a job event. `state.json`
 never gates completion, releases resources or unblocks dispatch.
 

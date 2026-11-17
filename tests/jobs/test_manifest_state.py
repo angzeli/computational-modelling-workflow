@@ -73,11 +73,13 @@ class StatePublisherTests(ManifestCase):
         (run / 'OUTCAR').write_text('\n'.join(contract['OUTCAR_lines']) + '\n')
         (run / 'stdout.log').write_text('\n'.join(contract['stdout_lines']) + '\n')
         (run / 'WAVECAR').write_bytes(b'synthetic output checkpoint')
-        self.transition(job, status='Done', exit_code=0, started_at=time.time() - 5, finished_at=time.time())
+        with patch('cmw.jobs.manifest_hashing.launch') as launch:
+            self.transition(job, status='Done', exit_code=0, started_at=time.time() - 5, finished_at=time.time())
+        launch.assert_called_once()
         state = self.state(directory)
         self.assertEqual((state['scf_result'], state['last_step'], state['energy_ev'], state['total_magnetisation_mu_b']),
                          ('converged', 2, -10.00000001, 2.0))
-        self.assertEqual((state['restart_outputs'], state['hashes_pending']), ({'WAVECAR': None}, False))
+        self.assertEqual((state['restart_outputs'], state['hashes_pending']), ({'WAVECAR': None}, True))
         self.assert_valid(state)
         with patch('cmw.periodic.vasp.scf_classifier.classify_run', side_effect=AssertionError('reclassified')):
             self.store.annotate(job['id'], 'still Done')
