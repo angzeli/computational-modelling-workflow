@@ -328,6 +328,12 @@ class RestartFromTests(ManifestCase):
             with self.assertRaisesRegex(ManifestError, 'differs from its source'):
                 self.add(directory, argv, restart_from='J1')
         self.assertFalse((directory / 'inputs' / 'WAVECAR').exists())
+        with patch.object(manifests, '_publish_new', side_effect=OSError('synthetic disk full')):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                self.add(directory, argv, restart_from='J1')
+        self.assertFalse((directory / 'inputs' / 'WAVECAR').exists())
+        self.add(directory, argv, restart_from='J1')  # The same registration can be retried.
+        self.assertTrue((directory / 'inputs' / 'WAVECAR').exists())
         directory, argv = self.child(restart='both')  # The parent has no CHGCAR.
         with self.assertRaisesRegex(ManifestError, 'CHGCAR does not exist'):
             self.add(directory, argv, restart_from='J1')

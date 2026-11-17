@@ -554,6 +554,14 @@ def add_native(store, root, *, cwd, argv, engine, request=None, restart_from=Non
                                 f'{registered[0]["payload"]["binding"]["job_id"]}')
         raise ManifestError(f'{job_id} already has a published job.json without a registration; '
                             'the ID is burned, reserve a new one')
+    sidecar = directory / MANIFEST_DIR
+    try:
+        sidecar.mkdir()
+    except FileExistsError:
+        pass
+    # mkdir(exist_ok) and publication follow symlinks; the sidecar must be this job's own directory.
+    if not stat.S_ISDIR(sidecar.lstat().st_mode) or sidecar.resolve(strict=True) != sidecar:
+        raise ManifestError(f'{sidecar} must be a real directory inside the reserved job')
     copied = None
     if restart_from is not None:
         if engine != 'VASP':
@@ -565,21 +573,14 @@ def add_native(store, root, *, cwd, argv, engine, request=None, restart_from=Non
                                       mpi_ranks=add_options.get('mpi_ranks'),
                                       environment=dict(add_options.get('env') or {}),
                                       parent=restart_from, copied=copied)
+        raw = canonical(manifest)
+        digest = hashlib.sha256(raw).hexdigest()
+        _publish_new(path, raw, 0o444)
     except BaseException:
-        if copied:  # Nothing is published yet: leave the reserved job as it was.
+        # Until job.json exists the reserved job must look untouched, so a retry can copy again.
+        if copied and not os.path.lexists(path):
             _remove_copies(directory / 'inputs', copied)
         raise
-    raw = canonical(manifest)
-    digest = hashlib.sha256(raw).hexdigest()
-    sidecar = directory / MANIFEST_DIR
-    try:
-        sidecar.mkdir()
-    except FileExistsError:
-        pass
-    # mkdir(exist_ok) and publication follow symlinks; the sidecar must be this job's own directory.
-    if not stat.S_ISDIR(sidecar.lstat().st_mode) or sidecar.resolve(strict=True) != sidecar:
-        raise ManifestError(f'{sidecar} must be a real directory inside the reserved job')
-    _publish_new(path, raw, 0o444)
     key = project['project_key']
     append_journal(root, key, 'manifest', request, {'id': job_id, 'job_sha256': digest, 'binding': None})
     # Registration stays held: release and dispatch keep their explicit operations.
