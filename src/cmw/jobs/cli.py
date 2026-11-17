@@ -598,12 +598,24 @@ def register(subcommands):
 
     annotate = operations.add_parser("annotate", help="replace or clear a managed job note; never controls execution",
         description="Atomic plain-text annotation replacement. Without --expected-revision, replaces the latest note. "
-                    "Use the revision from show/status JSON to reject a concurrent edit. Maximum 4096 Unicode code points.")
-    annotate.add_argument("job_id")
-    edit = annotate.add_mutually_exclusive_group(required=True)
+                    "Use the revision from show/status JSON to reject a concurrent edit. Maximum 4096 Unicode code points. "
+                    "With --manifest-project, appends one event to a native job's annotations.json on the project "
+                    "owner instead (separate from the queue note); an empty value clears that field.")
+    annotate.add_argument("job_id", help="managed job ID, or the native project ID J<n> with --manifest-project")
+    edit = annotate.add_mutually_exclusive_group()
     edit.add_argument("--note", help="replacement note; CRLF and CR normalize to LF")
     edit.add_argument("--clear-note", action="store_true", help="explicitly clear the note")
-    annotate.add_argument("--expected-revision", type=int, help="require this nonnegative note revision; conflicts exit 2")
+    annotate.add_argument("--expected-revision", type=int,
+                          help="require this nonnegative note (or annotations.json) revision; conflicts exit 2")
+    annotate.add_argument("--manifest-project", type=Path, metavar="ROOT",
+                          help="append to annotations.json of native job J<n> in this owned project (#41 Phase 3a)")
+    annotate.add_argument("--label", help="manifest only: human-readable name; never a path or reference")
+    annotate.add_argument("--purpose", help="manifest only: why the job was run")
+    annotate.add_argument("--system", help="manifest only: the studied system")
+    annotate.add_argument("--outcome", choices=("reported", "superseded", "checkpoint-only", "discarded"),
+                          help="manifest only: human judgement of the result")
+    annotate.add_argument("--request-uuid", metavar="UUID",
+                          help="manifest only: retry with the same UUID to get the same event")
     annotate.add_argument("--json", action="store_true")
     annotate.set_defaults(handler=handle)
 
@@ -756,6 +768,19 @@ def handle(args):
     if args.jobs_operation in {"request", "fetch"} and not getattr(args, "node", None):
         print("request/fetch require an explicitly enrolled --node; no local fallback")
         return 2
+    if args.jobs_operation == "annotate":
+        manifest_only = [f"--{name.replace('_', '-')}" for name in ("label", "purpose", "system", "outcome", "request_uuid")
+                         if getattr(args, name) is not None]
+        if args.manifest_project is None and manifest_only:
+            print(f"{', '.join(manifest_only)} require --manifest-project; the queue note takes only --note/--clear-note")
+            return 2
+        if args.manifest_project is None and args.note is None and not args.clear_note:
+            print("annotate needs --note or --clear-note (or manifest fields with --manifest-project)")
+            return 2
+        if args.manifest_project is not None and (getattr(args, "node", None) or getattr(args, "queue", None)):
+            print("Manifest annotations are written by the project owner itself; run annotate there without "
+                  "--node/--queue. No endpoint operation is sent.")
+            return 2
     if ((args.jobs_operation == "manifest" or (args.jobs_operation == "add" and getattr(args, "manifest_project", None)))
             and (getattr(args, "node", None) or getattr(args, "queue", None))):
         print("Native IDs are reserved by the owner node itself; use `jobs --node NODE submit --manifest-project` "
@@ -838,6 +863,13 @@ def handle(args):
             current = store.snapshot()["scheduler"]
             result = (store.configure_sharing(args.mode or current["mode"], **values)
                       if args.mode is not None or any(value is not None for value in values.values()) else current)
+        elif operation == "annotate" and args.manifest_project is not None:
+            from .manifest_annotations import annotate as annotate_manifest
+            changes = {name: getattr(args, name) for name in ("label", "purpose", "system", "outcome", "note")}
+            if args.clear_note:
+                changes["note"] = ""
+            result = annotate_manifest(store, args.manifest_project, args.job_id, changes,
+                                       expected_revision=args.expected_revision, request=args.request_uuid)
         elif operation == "annotate":
             result = store.annotate(args.job_id, "" if args.clear_note else args.note, expected_revision=args.expected_revision)
         elif operation == "rename-id":
