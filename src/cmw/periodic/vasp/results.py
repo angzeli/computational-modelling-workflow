@@ -30,6 +30,8 @@ INTEGER_SETTINGS = set("NELM NELMIN NELMDL IBRION ISIF NSW ISPIN IALGO ICHARG IS
 REAL_SETTINGS = set("EDIFF EDIFFG ENCUT SIGMA NELECT EFIELD EFIELD_PEAD EFOR".split())
 TEXT_SETTINGS = {"GGA", "METAGGA", "ML_MODE", "ALGO"}
 DISTR_NCORE = re.compile(r"^\s*distr:\s+one band on NCORE\s*=\s*(\d+)\s+cores,\s*\d+\s+groups\s*$")
+# Native fatal allowlist; generic ERROR, a nonzero exit or a missing footer is not one.
+FATAL_MARKERS = re.compile(r"VERY BAD NEWS|internal error|ERROR FEXCP|ZHEGV failed|ERROR EDD|killed by signal", re.I)
 
 
 def outcar_setting_records(text, *, echoed=False, parameters=False):
@@ -332,7 +334,7 @@ def parse_outcar(path, *, max_bytes=None, analysis=False):
             timing = re.search(r"(Total CPU time used|User time|System time|Elapsed time)\s*\(sec\):\s*(" + NUMBER + ")", text)
             if timing and current["termination"]["footer_reference"]:
                 current["termination"]["timing"][timing[1]] = {**number(timing[2]), "reference": reference(line)}
-            if re.search(r"VERY BAD NEWS|internal error|ERROR FEXCP|ZHEGV failed|ERROR EDD|killed by signal", text, re.I):
+            if FATAL_MARKERS.search(text):
                 current["termination"]["fatal"].append(reference(line))
             if re.search(r"LSTOP\s*=\s*T|LABORT\s*=\s*T|STOPCAR.*(?:stop|found)|soft stop", text, re.I):
                 current["termination"]["requested_stop"].append(reference(line))
