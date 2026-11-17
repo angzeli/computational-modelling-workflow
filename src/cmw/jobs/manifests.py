@@ -365,11 +365,7 @@ def _runtime_fingerprint():
     return value if isinstance(value, str) and SHA256.fullmatch(value) else None
 
 
-def _vasp_evidence(directory, argv):
-    """Synchronous input hashes and POTCAR dataset identities from jobs/J<n>/inputs."""
-    from cmw.core.provenance import file_hash
-    from cmw.periodic.vasp.potentials import check_potcar
-    from cmw.periodic.vasp.result_runner import RESTART_FILES
+def _vasp_route(directory, argv):
     from .location_resolvers import vasp_runner_arguments
     try:
         route = vasp_runner_arguments({'argv': argv, 'cwd': str(directory)})
@@ -381,11 +377,24 @@ def _vasp_evidence(directory, argv):
     if (source, output) != (directory / 'inputs', directory / 'run'):
         raise ManifestError(f'Native VASP jobs use --input {directory / "inputs"} and --output {directory / "run"}')
     if '--restart-from' in options:
-        raise ManifestError('--restart-from is not supported yet')
+        raise ManifestError('The runner\'s own --restart-from is unsupported; use cmw jobs add --restart-from')
+    return options, source
+
+
+def _vasp_evidence(directory, argv, copied=None):
+    """Synchronous input hashes and POTCAR dataset identities from jobs/J<n>/inputs.
+
+    ``copied`` holds digests already verified while copying from a parent, so
+    multi-GiB checkpoints are not read again.
+    """
+    from cmw.core.provenance import file_hash
+    from cmw.periodic.vasp.potentials import check_potcar
+    from cmw.periodic.vasp.result_runner import RESTART_FILES
+    options, source = _vasp_route(directory, argv)
     try:
         inputs = {name: file_hash(source / name) for name in VASP_INPUTS}
         datasets = check_potcar(source / 'POSCAR', source / 'POTCAR')
-        restart = {name: file_hash(source / name)
+        restart = {name: (copied or {}).get(name) or file_hash(source / name)
                    for name in RESTART_FILES.get(options.get('--restart', 'none'), ())}
     except (OSError, ValueError) as exc:
         raise ManifestError(f'Native VASP inputs are not complete and valid: {exc}') from exc
@@ -395,9 +404,108 @@ def _vasp_evidence(directory, argv):
     return inputs, potcar, restart
 
 
-def build_job_manifest(*, project, job_id, node_id, engine, directory, argv, mpi_ranks, environment):
+# Restart lineage -----------------------------------------------------------------
+
+def _parent_run(store, root, reference):
+    """The terminated, receipt-verified native VASP parent's run directory."""
+    from .store import TERMINAL
+    if not isinstance(reference, str) or not NATIVE_ID.fullmatch(reference):
+        raise ManifestError('--restart-from takes a native J<n> in this project; legacy and cross-project '
+                            'parents are not supported yet')
+    registrations = [record['payload'] for record in read_journal(root)
+                     if record['event'] == 'registration' and record['payload']['id'] == reference]
+    if len(registrations) != 1:
+        raise ManifestError(f'Parent {reference} has no single registration receipt in this project')
+    receipt = registrations[0]
+    parent = root / 'jobs' / reference
+    try:
+        raw = (parent / MANIFEST_DIR / 'job.json').read_bytes()
+    except OSError as exc:
+        raise ManifestError(f'Parent {reference} job.json is unreadable: {exc}') from exc
+    if hashlib.sha256(raw).hexdigest() != receipt['job_sha256']:
+        raise ManifestError(f'Parent {reference} job.json differs from its integrity receipt')
+    if json.loads(raw).get('engine') != 'VASP':
+        raise ManifestError(f'Parent {reference} is not a VASP job')
+    binding = receipt['binding']
+    if binding['queue_id'] != (store.queue_identity() or {}).get('queue_id'):
+        raise ManifestError(f'Parent {reference} ran in another queue; restart-file transport is out of scope')
+    with store.read_transaction() as con:
+        job = store.get(con, binding['job_id'])
+    if job['attempt_id'] != binding['attempt_id']:
+        raise ManifestError(f'Parent {reference} queue attempt differs from its registration receipt')
+    if job['status'] not in TERMINAL:
+        raise ManifestError(f'Parent {reference} is {job["status"]}; checkpoints are copied only after it terminates')
+    return parent / 'run'
+
+
+def _copy_checkpoint(source, destination):
+    """Copy-only staging: hash the source while copying, verify the copy, require an unchanged source."""
+    from cmw.core.provenance import file_hash
+    try:
+        before = source.lstat()
+    except FileNotFoundError as exc:
+        raise ManifestError(f'Parent checkpoint {source} does not exist') from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_size == 0:
+        raise ManifestError(f'Parent checkpoint {source} must be a nonempty regular file')
+    digest = hashlib.sha256()
+    fd, name = tempfile.mkstemp(prefix=f'.{destination.name}.', dir=destination.parent)
+    try:
+        with source.open('rb') as reader, os.fdopen(fd, 'wb') as writer:
+            for chunk in iter(lambda: reader.read(8 * 1024 * 1024), b''):
+                digest.update(chunk)
+                writer.write(chunk)
+            writer.flush()
+            os.fchmod(writer.fileno(), 0o444)
+            os.fsync(writer.fileno())
+        try:
+            os.link(name, destination)
+        except FileExistsError as exc:
+            raise ManifestError(f'Refusing to overwrite existing {destination}') from exc
+    finally:
+        Path(name).unlink(missing_ok=True)
+    try:
+        after = source.lstat()
+        fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns')
+        if any(getattr(before, key) != getattr(after, key) for key in fields):
+            raise ManifestError(f'Parent checkpoint {source} changed while it was copied')
+        if file_hash(destination) != digest.hexdigest():
+            raise ManifestError(f'Copied checkpoint {destination} differs from its source')
+    except BaseException:
+        destination.unlink(missing_ok=True)  # Only the copy this call published.
+        raise
+    return digest.hexdigest()
+
+
+def _stage_parent_checkpoints(store, root, directory, argv, reference):
+    from cmw.periodic.vasp.result_runner import RESTART_FILES
+    options, inputs = _vasp_route(directory, argv)
+    names = RESTART_FILES.get(options.get('--restart', 'none'), ())
+    if not names:
+        raise ManifestError('--restart-from needs the runner\'s --restart wavecar|chgcar|both; '
+                            'INCAR restart settings remain yours to set')
+    run = _parent_run(store, root, reference)
+    for name in names:
+        if os.path.lexists(inputs / name):
+            raise ManifestError(f'{inputs / name} already exists; --restart-from never reuses an existing checkpoint')
+    copied = {}
+    try:
+        for name in names:
+            copied[name] = _copy_checkpoint(run / name, inputs / name)
+    except BaseException:
+        _remove_copies(inputs, copied)
+        raise
+    return copied
+
+
+def _remove_copies(inputs, copied):
+    for name in copied:
+        (inputs / name).unlink(missing_ok=True)
+
+
+def build_job_manifest(*, project, job_id, node_id, engine, directory, argv, mpi_ranks, environment,
+                       parent=None, copied=None):
     if engine == 'VASP':
-        inputs, potcar, restart_inputs = _vasp_evidence(directory, argv)
+        inputs, potcar, restart_inputs = _vasp_evidence(directory, argv, copied)
     else:
         inputs, potcar, restart_inputs = dict.fromkeys(VASP_INPUTS), None, {}
     selected = {key: value for key, value in environment.items() if key.startswith(ENVIRONMENT_PREFIXES)}
@@ -409,7 +517,7 @@ def build_job_manifest(*, project, job_id, node_id, engine, directory, argv, mpi
         # No verified VASP build evidence is advertised yet (D22); never substitute the runner.
         'executable': None, 'runtime_fingerprint': _runtime_fingerprint(),
         'launch': {'argv': list(argv), 'mpi_ranks': mpi_ranks, 'environment': selected},
-        'parent': None, 'parent_inferred': False, 'restart_inputs': restart_inputs,
+        'parent': parent, 'parent_inferred': False, 'restart_inputs': restart_inputs,
     }
 
 
@@ -423,9 +531,11 @@ def _native_target(root, cwd):
     return directory, directory.name
 
 
-def add_native(store, root, *, cwd, argv, engine, request=None, **add_options):
+def add_native(store, root, *, cwd, argv, engine, request=None, restart_from=None, **add_options):
     """Freeze job.json, anchor it, then register the job on Hold in the local queue.
 
+    ``restart_from`` copies the terminated parent's checkpoints for the runner's
+    ``--restart`` mode into ``inputs/`` and records the parent and copy digests.
     A published-but-unregistered ID is burned, never republished or reused.
     """
     from .store import normalized_argv
@@ -444,9 +554,21 @@ def add_native(store, root, *, cwd, argv, engine, request=None, **add_options):
                                 f'{registered[0]["payload"]["binding"]["job_id"]}')
         raise ManifestError(f'{job_id} already has a published job.json without a registration; '
                             'the ID is burned, reserve a new one')
-    manifest = build_job_manifest(project=project, job_id=job_id, node_id=identity['node_id'], engine=engine,
-                                  directory=directory, argv=normalized_argv(argv), mpi_ranks=add_options.get('mpi_ranks'),
-                                  environment=dict(add_options.get('env') or {}))
+    copied = None
+    if restart_from is not None:
+        if engine != 'VASP':
+            raise ManifestError('--restart-from currently supports VASP checkpoints only')
+        copied = _stage_parent_checkpoints(store, root, directory, argv, restart_from)
+    try:
+        manifest = build_job_manifest(project=project, job_id=job_id, node_id=identity['node_id'], engine=engine,
+                                      directory=directory, argv=normalized_argv(argv),
+                                      mpi_ranks=add_options.get('mpi_ranks'),
+                                      environment=dict(add_options.get('env') or {}),
+                                      parent=restart_from, copied=copied)
+    except BaseException:
+        if copied:  # Nothing is published yet: leave the reserved job as it was.
+            _remove_copies(directory / 'inputs', copied)
+        raise
     raw = canonical(manifest)
     digest = hashlib.sha256(raw).hexdigest()
     sidecar = directory / MANIFEST_DIR
