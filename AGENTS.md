@@ -30,6 +30,11 @@ Python owns reusable semantics: parsing, scientific validation, identities, prov
 Use stable exit codes and machine-readable JSON between layers; do not duplicate ORCA validity, convergence, geometry identity or reuse decisions in shell.
 Process health is advisory operational evidence, never scientific success or an automatic termination policy.
 
+## 3a. Native job manifests (#41)
+
+Never create, edit, chmod, move or delete manifest data directly, by hand or with ad-hoc scripts: a project's `.cmw-project.json`, its `.cmw/` ledger, journal and locks, or any `.cmw-manifest/` file (`job.json`, `state.json`, `annotations.json`, `registration-request.json`). Change them only through `cmw jobs` commands (`manifest init|reserve|hash-outputs`, `add`/`submit --manifest-project`, `annotate --manifest-project`); report anything those commands refuse.
+Schema-test fixtures under `tests/fixtures/manifests/` are static test data, edited only in reviewed PRs; they are never real job metadata, and real metadata is never copied into them.
+
 ## 4. Git and PR exceptions to the global rules
 
 Agents may commit, push and open a PR for authorised work; merging requires the owner's instruction. This permission does not authorise deployment or unrelated changes.

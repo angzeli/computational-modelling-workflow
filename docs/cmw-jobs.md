@@ -651,8 +651,30 @@ cmw jobs --state OWNER_STATE --node mini submit --spec SPEC.json --manifest-proj
   frontends, `jobs --node … add --manifest-project`, and plain adds inside a replica's
   `jobs/` tree are refused.
 
-Not yet: node-to-node allocation for a frontend that isn't the owner, legacy/cross-project and inferred parents, `state.json`
-and SCF classification (2), manifest annotate/list/check (3), and backfill (4).
+**Annotations (Phase 3a).** Human judgement on a native job is an append-only event
+history in the owner's `ROOT/jobs/J<n>/.cmw-manifest/annotations.json`, for local and
+remote jobs alike:
+
+```bash
+cmw jobs annotate J28 --manifest-project ROOT --outcome checkpoint-only \
+  --purpose "NKRED pre-convergence" --note "Stopped by LABORT after DAV 22"
+```
+
+- Each call appends one event (`sequence`, UTC `timestamp`, this node's UUID as
+  `author_node`, and `label`/`purpose`/`system`/`outcome`/`note`). Omitted fields are
+  null, meaning no change; an empty value clears label, purpose, system or note
+  (`--clear-note` clears the note). `--outcome` is `reported`, `superseded`,
+  `checkpoint-only` or `discarded` and cannot be cleared yet. An event that changes
+  nothing is refused. The JSON result shows the folded `current` values.
+- `--expected-revision N` refuses the append unless the history is still at revision N.
+  `--request-uuid` makes a retry return the original event instead of appending again.
+- Only the project owner writes, without `--node`/`--queue`; `job.json` must still match
+  its `manifest` receipt. Earlier events are never rewritten.
+- This is separate from the replaceable queue note: `annotate JOB --note` keeps its
+  behavior, and neither form writes or migrates the other.
+
+Not yet: node-to-node allocation for a frontend that isn't the owner, legacy/cross-project and inferred parents,
+manifest check/list (3b, 3c), and backfill (4).
 
 ## Status, resources and failure policy
 

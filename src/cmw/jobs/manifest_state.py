@@ -49,8 +49,8 @@ def _sidecar(job):
 
 
 @contextmanager
-def _locked(sidecar):
-    fd = os.open(sidecar / 'state.lock', os.O_RDWR | os.O_CREAT, 0o600)
+def _locked(sidecar, name='state.lock'):
+    fd = os.open(sidecar / name, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -129,7 +129,7 @@ def project(job, identity, previous=None):
 
 
 def _write(path, value):
-    fd, name = tempfile.mkstemp(prefix='.state.json.', dir=path.parent)
+    fd, name = tempfile.mkstemp(prefix=f'.{path.name}.', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
             stream.write(canonical(value))
