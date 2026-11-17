@@ -39,7 +39,9 @@ def watch(args):
 def handle(args):
     backend = None
     try:
-        if args.state is not None:
+        # Native submission reads the owner's own local queue identity; it is never sent to the endpoint.
+        owner_state = args.jobs_operation == 'submit' and getattr(args, 'manifest_project', None) is not None
+        if args.state is not None and not owner_state:
             raise NodeError('INVALID_SELECTION', '--state is local only; select an enrolled remote --queue')
         if args.jobs_operation == 'query' and args.all_nodes:
             from cmw.jobs.catalogue_cli import federation

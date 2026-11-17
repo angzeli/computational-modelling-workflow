@@ -113,7 +113,8 @@ class NativeSubmissionTests(unittest.TestCase):
         request = uuid4().hex
         owner = manifests.begin_remote(owner_store, project, request)
         spec, prepared, _ = self.prepare(node, request_id=request)
-        spec = normalize_spec({**spec, 'native': owner['native']})
+        # Literal arguments only, so a second request would produce identical job.json bytes.
+        spec = normalize_spec({**spec, 'arguments': ['literal'], 'native': owner['native']})
         plan = backend.call('submit.preview', {'spec': spec})['result']
         self.assertEqual(plan['cwd'], str(node['storage'] / 'demo' / 'jobs' / owner['id']))
         self.publish(node, spec, prepared)
@@ -138,6 +139,19 @@ class NativeSubmissionTests(unittest.TestCase):
         unrelated.unlink()
         registered = backend.call('submit', {'spec': spec, 'job_manifest': job}, request_id=spec['request_id'])
         self.assertEqual(registered['result']['job']['manifest']['id'], owner['id'])
+        # Matching bytes under another request never register a second attempt on the same ID.
+        other, prepared_other, _ = self.prepare(node)
+        other = normalize_spec({**other, 'arguments': ['literal'], 'native': owner['native']})
+        self.publish(node, other, prepared_other)
+        with self.assertRaisesRegex(NodeError, 'already registered in this queue'):
+            backend.call('submit', {'spec': other, 'job_manifest': job}, request_id=other['request_id'])
+        self.assertEqual(len(self.store(node).snapshot()['jobs']), 1)
+        work = node['storage'] / 'demo' / 'jobs' / owner['id']
+        raw = (work / '.cmw-manifest' / 'job.json').read_bytes()
+        for request_id, queue_id in ((other['request_id'], spec['queue_id']), (spec['request_id'], uuid4().hex)):
+            with self.subTest(queue_id=queue_id), self.assertRaisesRegex(JobsError, 'already claimed'):
+                manifests.publish_remote(project_dir=work.parent.parent, work=work, native=owner['native'], raw=raw,
+                                         request_id=request_id, queue_id=queue_id)
 
 
 if __name__ == '__main__':

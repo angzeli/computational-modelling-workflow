@@ -260,7 +260,12 @@ def register_held(backend, spec, request_id, job_manifest=None):
     if native_raw is not None:
         import hashlib
         from cmw.jobs.manifests import publish_remote
-        publish_remote(project_dir=runs.parent, work=work, native=spec['native'], raw=native_raw)
+        with backend.store.read_transaction() as con:
+            _require(not any((job.get('manifest') or {}).get('root') == str(runs.parent)
+                             and job['manifest'].get('id') == spec['native']['id'] for job in backend.store.rows(con)),
+                     'This native ID is already registered in this queue', 'REQUEST_CONFLICT')
+        publish_remote(project_dir=runs.parent, work=work, native=spec['native'], raw=native_raw,
+                       request_id=request_id, queue_id=backend.queue['queue_id'])
         manifest_record = {'project': spec['native']['project']['project_key'], 'id': spec['native']['id'],
                            'root': str(runs.parent), 'job_sha256': hashlib.sha256(native_raw).hexdigest()}
     profile = backend.config['profiles'][spec['profile']]

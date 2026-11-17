@@ -742,7 +742,7 @@ def accept_remote(*, config, spec, plan, bundle, job):
     return raw
 
 
-def publish_remote(*, project_dir, work, native, raw):
+def publish_remote(*, project_dir, work, native, raw, request_id, queue_id):
     """Project replica (owner record, no ledger) and the job's read-only job.json."""
     replica = canonical(native['project'])
     project_file = project_dir / PROJECT_FILE
@@ -763,6 +763,17 @@ def publish_remote(*, project_dir, work, native, raw):
         pass
     if not stat.S_ISDIR(sidecar.lstat().st_mode) or sidecar.resolve(strict=True) != sidecar:
         raise ManifestError(f'{sidecar} must be a real directory inside the job')
+    # Binds the sidecar to one registration request and queue, so matching job.json bytes
+    # alone never let another request or queue register a second attempt on this ID.
+    claim = canonical({'request_id': request_id, 'queue_id': queue_id})
+    marker = sidecar / 'registration-request.json'
+    if os.path.lexists(marker):
+        if marker.read_bytes() != claim:
+            raise ManifestError(f'{native["id"]} is already claimed by another registration request or queue')
+    else:
+        if any(sidecar.iterdir()):
+            raise ManifestError(f'{sidecar} holds files from an unknown registration')
+        _publish_new(marker, claim, 0o444)
     path = sidecar / 'job.json'
     if os.path.lexists(path):
         if path.read_bytes() != raw:
