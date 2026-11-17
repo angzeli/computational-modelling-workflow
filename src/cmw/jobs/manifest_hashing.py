@@ -1,6 +1,7 @@
 """Asynchronous restart-output digests for native manifests (#41 Phase 2c, #65).
 
-Runs as its own detached process after a VASP attempt's terminal state is
+Runs detached (launched by manifest_hashes.sh, which owns the environment,
+log descriptors and backgrounding) after a VASP attempt's terminal state is
 published, so hashing multi-GiB WAVECAR/CHGCAR never blocks drainage, Done,
 terminal publication or resource release. A file is hashed only if it is
 unchanged (device, inode, size, mtime) across the read; otherwise, or on any
@@ -10,6 +11,7 @@ clears. The result is written through the state.json single writer.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import stat
 import subprocess
@@ -20,19 +22,17 @@ CHUNK = 8 * 1024 * 1024
 
 
 def launch(store, job_id):
-    """Start the detached hasher; a failed launch leaves the state pending for an explicit retry."""
-    from .runtime import _CHILDREN, reap_detached, runtime_environment
-    from .store import private_opener
-    log = store.root / 'manifest-hashes.log'
+    """Ask the shell entry point to detach the hasher; a refusal leaves the state pending for a retry."""
+    from .runtime import runtime_environment
+    script = Path(__file__).with_name('manifest_hashes.sh')
     try:
-        reap_detached()
-        with open(log, 'ab', buffering=0, opener=private_opener) as output:
-            process = subprocess.Popen([sys.executable, '-m', 'cmw.jobs.manifest_hashing', str(store.root), str(job_id)],
-                             stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True,
-                             close_fds=True, env=runtime_environment(), cwd='/')
-        _CHILDREN.append(process)  # Reaped like other detached helpers; never waited on here.
-    except OSError:
-        pass
+        completed = subprocess.run(
+            ['/bin/bash', str(script), sys.executable, runtime_environment()['PYTHONPATH'], str(store.root),
+             str(job_id), str(store.root / 'manifest-hashes.log')],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, cwd='/', start_new_session=True)
+        return completed.returncode == 0 and json.loads(completed.stdout or '{}').get('status') == 'LAUNCHED'
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
 
 
 def stable_digest(path):
@@ -52,7 +52,6 @@ def stable_digest(path):
 
 def hash_outputs(store, job_id):
     """Hash every pending restart output of the job's terminal state and record the result."""
-    import json
     from .location_resolvers import vasp_runner_arguments
     from .manifest_state import MANIFEST_DIR, record_output_hashes
     with store.read_transaction() as con:
