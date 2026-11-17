@@ -556,6 +556,49 @@ Load the new runtime after existing work drains; do not restart live work merely
 to enable notes. Existing legacy-active migration safeguards remain authoritative,
 and the read-only NAME display remains usable.
 
+## Native job manifests
+
+Phase 1a of [#41](https://github.com/angzeli/computational-modelling-workflow/issues/41)
+([design](design/job-manifests.md)): single-node and owner-only. A
+manifest-enabled project gives each new job a permanent flat ID `J<n>`, a
+directory `<project>/jobs/J<n>/` that never moves, and a read-only
+`.cmw-manifest/job.json`. The queue database stays the operational authority.
+
+```bash
+cmw jobs manifest init --project-root ROOT --project-key KEY --legacy-inventory FILE   # or --no-legacy-ids
+cmw jobs manifest reserve --project-root ROOT [--request-uuid UUID]
+cmw jobs add --manifest-project ROOT --cwd ROOT/jobs/J<n> --name NAME --engine VASP -- \
+  run-vasp.sh --input ROOT/jobs/J<n>/inputs --output ROOT/jobs/J<n>/run ... --managed-foreground
+```
+
+- `init` writes `.cmw-project.json` and `.cmw/ids.sqlite3`, owned by the node UUID of
+  the enrolled local queue. It refuses an existing project. The legacy inventory is the
+  reviewed, complete all-node list of queue IDs and labels
+  (`{"schema_version": 1, "project_key", "complete": true, "names": [...], "reviewed_other_names": [...]}`);
+  native IDs start above the highest `J<n>[.<m>]` integer, and names with other digits
+  must be listed as reviewed. Legacy node/queue mappings stay empty until backfill.
+- `reserve` allocates the next ID in one `BEGIN IMMEDIATE` transaction and creates the
+  job directory. Retrying the same request UUID returns the same ID. IDs are never
+  reused, including after a failed registration or a deleted directory.
+- `add --manifest-project` requires a reserved `jobs/J<n>` working directory. It hashes
+  the inputs, publishes `job.json` read-only (no-clobber), appends a `manifest` receipt
+  with its exact SHA-256 to `.cmw/integrity.jsonl`, registers the job **on Hold**, then
+  appends a `registration` receipt binding the ID to the queue job and attempt.
+  Release it with the usual `cmw jobs release`.
+- VASP uses the managed `run-vasp.sh` route with `--input jobs/J<n>/inputs` and
+  `--output jobs/J<n>/run`. `job.json` records INCAR/POSCAR/KPOINTS SHA-256, POTCAR
+  dataset identities (never content), the launch argv, MPI ranks and only explicit
+  `--env` keys with prefixes `OMP_`, `OPENBLAS_`, `MKL_`, `VECLIB_`, `GFORTRAN_`,
+  `OMPI_MCA_`. Checkpoints for `--restart wavecar|chgcar|both` are hashed synchronously
+  into `restart_inputs`; `parent` stays null. Other engines record null VASP inputs.
+- If publication succeeds but registration fails, the ID is burned: reserve a new one.
+  An incomplete or corrupt journal tail blocks further writes for explicit review.
+- A non-owner node, `--node`/`--queue`, and plain `cmw jobs add` inside a project's
+  `jobs/` tree are refused. There is no fallback allocator.
+
+Not yet: remote allocation (1b), `--restart-from <ID>` and parent lineage, `state.json`
+and SCF classification (2), manifest annotate/list/check (3), and backfill (4).
+
 ## Status, resources and failure policy
 
 | Status | Meaning |

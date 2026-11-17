@@ -123,6 +123,17 @@ def _scheduling(value, resources, cwd):
     return result
 
 
+def normalized_argv(argv):
+    argv = list(argv)
+    if not argv or any(not isinstance(a, str) or "\0" in a for a in argv) or not argv[0]:
+        raise JobsError("An explicit nonempty argv without NUL bytes is required")
+    # Shell scripts must propagate command/pipeline failures, including a final echo.
+    if Path(argv[0]).name in {"bash", "sh", "zsh"}:
+        options = ["-e"] + (["-o", "pipefail"] if Path(argv[0]).name != "sh" else [])
+        argv = [argv[0], *options, *argv[1:]]
+    return argv
+
+
 class Store:
     def __init__(self, root: Path | str | None = None):
         self.root = Path(root).expanduser().resolve() if root is not None else default_state()
@@ -564,7 +575,8 @@ class Store:
             mpi_ranks=None, threads_per_rank=None, env=None, hold=False,
             on_failure="pause", layout=None, role="primary", allow_auxiliary=False,
             independent=False, resource_contract=None, write_scope=None, note='', suspension_backend=None,
-            progress_sources=(), remote_request=None, node_submission=None, molecular_submission=None):
+            progress_sources=(), remote_request=None, node_submission=None, molecular_submission=None,
+            manifest=None):
         if remote_request is not None or node_submission is not None:
             node_submission = self._prepare_node_request(remote_request, node_submission)
             previous = self.request_lookup(remote_request['request_id'])
@@ -582,16 +594,14 @@ class Store:
             from .suspension import BACKENDS
             if suspension_backend not in BACKENDS:
                 raise JobsError('Unsupported suspension backend')
-        argv = list(argv)
-        if not argv or any(not isinstance(a, str) or "\0" in a for a in argv) or not argv[0]:
-            raise JobsError("An explicit nonempty argv without NUL bytes is required")
-        # Shell scripts must propagate command/pipeline failures, including a final echo.
-        if Path(argv[0]).name in {"bash", "sh", "zsh"}:
-            options = ["-e"] + (["-o", "pipefail"] if Path(argv[0]).name != "sh" else [])
-            argv = [argv[0], *options, *argv[1:]]
+        argv = normalized_argv(argv)
         directory = Path(cwd).expanduser().resolve()
         if not directory.is_dir():
             raise JobsError(f"Working directory does not exist: {directory}")
+        from .manifests import enclosing_project
+        if manifest is None and enclosing_project(directory) is not None:
+            raise JobsError("This directory is inside a manifest-enabled project's jobs/ tree; "
+                            "use cmw jobs add --manifest-project")
         if not str(name).strip() or not str(engine).strip():
             raise JobsError("Name and engine are required")
         if on_failure not in {"pause", "continue"}:
@@ -655,6 +665,8 @@ class Store:
                    "cancel_requested": False, "scheduling": scheduling, "sharing_anchor": None}
             if node_submission is not None:
                 job['node_submission'] = node_submission
+            if manifest is not None:
+                job['manifest'] = dict(manifest)
             if molecular_submission is not None:
                 job['molecular_submission'] = molecular_submission
                 from .molecular import launch_blocker
