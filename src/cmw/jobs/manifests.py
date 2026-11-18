@@ -295,26 +295,34 @@ def reserve(store, root, *, request=None):
 
 # Integrity journal -------------------------------------------------------------
 
-def read_journal(root):
-    """Complete, contiguous records; an incomplete or corrupt tail blocks writes."""
+def journal_prefix(root):
+    """The complete, contiguous records and the first damage found after them (or None)."""
     path = root / JOURNAL
     try:
         data = path.read_bytes()
     except FileNotFoundError:
-        return []
+        return [], None
     records = []
     lines = data.split(b'\n')
-    if lines[-1] != b'':
-        raise ManifestError(f'Integrity journal has an incomplete tail after record {len(lines) - 1}; '
-                            'explicit recovery review is required')
     for index, line in enumerate(lines[:-1], 1):
         try:
             record = json.loads(line)
-        except ValueError as exc:
-            raise ManifestError(f'Integrity journal record {index} is not valid JSON') from exc
+        except ValueError:
+            return records, f'Integrity journal record {index} is not valid JSON'
         if not isinstance(record, dict) or record.get('sequence') != index:
-            raise ManifestError(f'Integrity journal sequence is broken at record {index}')
+            return records, f'Integrity journal sequence is broken at record {index}'
         records.append(record)
+    if lines[-1] != b'':
+        return records, (f'Integrity journal has an incomplete tail after record {len(lines) - 1}; '
+                         'explicit recovery review is required')
+    return records, None
+
+
+def read_journal(root):
+    """Complete, contiguous records; an incomplete or corrupt tail blocks writes."""
+    records, damage = journal_prefix(root)
+    if damage is not None:
+        raise ManifestError(damage)
     return records
 
 

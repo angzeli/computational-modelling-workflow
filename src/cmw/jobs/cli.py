@@ -425,8 +425,15 @@ def register(subcommands):
             command.add_argument("--preview", action="store_true", help="node-selected control preview")
             command.add_argument("--request-id", help="durable node control UUID; inspect the original request after a timeout")
         command.set_defaults(handler=handle)
-    check = operations.add_parser("check", help="read-only molecular input, provenance and resource preflight")
-    check.add_argument("--spec", type=Path, required=True)
+    check = operations.add_parser("check", help="read-only molecular input, provenance and resource preflight",
+        description="With --spec: molecular preflight. With --manifest-project: read-only integrity check of native "
+                    "job manifests on the project owner (#41 Phase 3b); exit 0 when verified, 2 with any error.")
+    check.add_argument("--spec", type=Path)
+    check.add_argument("--manifest-project", type=Path, metavar="ROOT",
+                       help="verify native manifests in this owned project instead of a molecular spec")
+    check.add_argument("job_ids", nargs="*", metavar="J<n>", help="manifest only: jobs to check (default: all known)")
+    check.add_argument("--rehash", action="store_true",
+                       help="manifest only: also rehash multi-GiB restart input copies")
     check.add_argument("--json", action="store_true")
     check.set_defaults(handler=handle)
     submit = operations.add_parser("submit", help="reviewed held submission locally or on an explicit node")
@@ -761,6 +768,18 @@ def inspect_progress(store, args):
     return 0
 
 
+def _check_manifests(args):
+    from .manifest_check import check, summary_text
+    try:
+        result = check(Store(args.state), args.manifest_project, args.job_ids, rehash=args.rehash)
+    except (JobsError, OSError) as exc:
+        payload = {"status": "FAILED", "code": "JOBS_ERROR", "reason": str(exc), "exit_code": 2}
+        print(json.dumps(payload, ensure_ascii=True) if args.json else f"cmw jobs: {safe_text(exc)}")
+        return 2
+    print(json.dumps(result, indent=2, ensure_ascii=True) if args.json else safe_text(summary_text(result)))
+    return 0 if result["status"] == "VERIFIED" else 2
+
+
 def handle(args):
     if args.jobs_operation == "retire" and (getattr(args, "node", None) or getattr(args, "queue", None)):
         print("retire is local only; select the existing queue with --state. No endpoint operation is sent.")
@@ -768,6 +787,16 @@ def handle(args):
     if args.jobs_operation in {"request", "fetch"} and not getattr(args, "node", None):
         print("request/fetch require an explicitly enrolled --node; no local fallback")
         return 2
+    if args.jobs_operation == "check":
+        if (args.spec is None) == (args.manifest_project is None):
+            print("check needs exactly one of --spec (molecular preflight) or --manifest-project ROOT")
+            return 2
+        if args.spec is not None and (args.job_ids or args.rehash):
+            print("Job IDs and --rehash require --manifest-project")
+            return 2
+        if args.manifest_project is not None and (getattr(args, "node", None) or getattr(args, "queue", None)):
+            print("Manifest checks run on the project owner itself, without --node/--queue. No endpoint operation is sent.")
+            return 2
     if args.jobs_operation == "annotate":
         manifest_only = [f"--{name.replace('_', '-')}" for name in ("label", "purpose", "system", "outcome", "request_uuid")
                          if getattr(args, name) is not None]
@@ -796,6 +825,8 @@ def handle(args):
             (getattr(args, "preview", False) and args.jobs_operation in {"start", "stop", "pause", "resume", "hold", "release", "move", "cancel"})):
         print("These preview/request options require an explicitly enrolled --node")
         return 2
+    if args.jobs_operation == "check" and args.manifest_project is not None:
+        return _check_manifests(args)
     if args.jobs_operation in {"check", "submit"}:
         from .molecular import handle as handle_molecular
         return handle_molecular(args)
