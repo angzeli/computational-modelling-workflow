@@ -1,7 +1,11 @@
 """Full portal interactions preserve node/attempt identity and deliberate viewports."""
 from tests.ui_readiness import await_laid_out
+from collections import deque
+from contextlib import asynccontextmanager
 from copy import deepcopy
+from functools import wraps
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
@@ -46,6 +50,75 @@ def table_view(app):
             'targets': (table.scroll_target_x, table.scroll_target_y),
             'relative': table.cursor_row - table.scroll_y,
             'screen': (app.screen_stack[0].scroll_x, app.screen_stack[0].scroll_y)}
+
+
+@asynccontextmanager
+async def restore_trace(app):
+    """Record restoration steps against the parent's layout (diagnostic for CI-only failures).
+
+    Observes only; every wrapped call delegates unchanged. The trace is attached
+    to geometry failures so a runner-only ordering can be read from its log.
+    """
+    from textual.screen import Screen
+    trace, started = deque(maxlen=80), time.monotonic()
+
+    def parent():
+        return app.screen_stack[0] if app.screen_stack else None
+
+    def table_state():
+        table = parent().query_one('#table', DataTable)
+        return {'parent_size': tuple(parent().size), 'app_size': tuple(app.size),
+                'table_height': table.scrollable_content_region.height, 'scroll_y': table.scroll_y,
+                'cursor_row': table.cursor_row, 'top_screen': type(app.screen).__name__}
+
+    def record(step, **fields):
+        try:
+            fields = {**table_state(), **fields}
+        except Exception as exc:  # A missing widget mid-teardown is itself evidence.
+            fields['unavailable'] = repr(exc)
+        trace.append({'t': round(time.monotonic() - started, 4), 'step': step, **fields})
+
+    def saved(restore):
+        tables = [item for item in restore.view.tables if item.table.id == 'table']
+        if not tables:
+            return {}
+        item = tables[0]
+        return {'saved_height': item.visible_height, 'saved_cursor_visible': item.cursor_visible,
+                'saved_y': item.scroll.y, 'rows_changed': tuple(app._table_rows(item.table)) and
+                tuple(row[0] for row in app._table_rows(item.table)) != item.rows,
+                'valid': app._restore_valid(restore)}
+
+    def wrap(owner, name, describe=None, after=False):
+        original = getattr(owner, name)
+        @wraps(original)
+        def wrapper(self, *args, **kwargs):
+            extra = describe(self, *args) if describe else {}
+            record(name, **extra)
+            result = original(self, *args, **kwargs)
+            if after:
+                record(name + ':after')
+            return result
+        return patch.object(owner, name, wrapper)
+
+    def screen_event(name):
+        original = getattr(Screen, name)
+        @wraps(original)  # Textual passes an event only to handlers whose signature takes one.
+        def wrapper(self, *args, **kwargs):
+            if self is parent():
+                record(name, args=repr(args)[:60])
+            return original(self, *args, **kwargs)
+        return patch.object(Screen, name, wrapper)
+
+    restore_args = lambda self, restore: saved(restore)
+    with wrap(NodesApp, 'restore_view', lambda self, view: {'view_screen': type(view.screen).__name__}), \
+            wrap(NodesApp, '_restore_cursor', restore_args), wrap(NodesApp, '_cursor_drained', restore_args), \
+            wrap(NodesApp, '_restore_offsets', restore_args, after=True), \
+            wrap(NodesApp, '_discard_restore', restore_args), \
+            wrap(NodesApp, 'render_state', lambda self: {'pending': self.navigation_pending(parent()),
+                                                         'covered': self.navigation_origin_covered(parent()),
+                                                         'card_height': self.card_height}, after=True), \
+            screen_event('_on_screen_resume'), screen_event('_screen_resized'), screen_event('_refresh_layout'):
+        yield trace
 
 
 @unittest.skipIf(NodesApp is None, 'Jobs UI extra unavailable')
@@ -305,7 +378,7 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
                 backend = backends['MINI']
                 backend.snapshot = example()
                 probe = GeometryProbe()
-                async with app.run_test(size=RESIZE_SEQUENCE[0]) as pilot:
+                async with app.run_test(size=RESIZE_SEQUENCE[0]) as pilot, restore_trace(app) as trace:
                     await self.until(pilot, lambda: len(app.rows) == 72 and not app.navigation_pending(),
                                      'initial node layout')
                     target = deepcopy(backend.jobs[24]['target'])
@@ -320,6 +393,7 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     states = []
                     for index, size in enumerate(RESIZE_SEQUENCE):
+                        trace.clear()
                         before = table_view(app)
                         await self.open_details(app, pilot)
                         backend.snapshot = ProgressSnapshot(backend.context, 'height-fixture',
@@ -342,7 +416,11 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
                         await self.until(pilot, lambda: app.selected_snapshot(*app.selected()).adapter == 'test',
                                          'delayed full scientific card')
                         await pilot.press('escape')
-                        state = await probe.settled(app, size, require_visible=where == 'top')
+                        try:
+                            state = await probe.settled(app, size, require_visible=where == 'top')
+                        except AssertionError as exc:
+                            raise AssertionError({'step': index, 'size': size, 'failure': exc.args[0],
+                                                  'restore_trace': list(trace)}) from exc
                         states.append(state)
                         self.assertEqual(state['selected'], row_key(target))
                         if where == 'offscreen' or before['relative'] < len(state['visible']):
