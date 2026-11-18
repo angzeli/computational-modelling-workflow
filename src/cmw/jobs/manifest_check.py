@@ -197,7 +197,7 @@ def _state(job, sidecar, binding, project):
 
 
 def _annotations(job, sidecar, receipts, project):
-    from .manifest_annotations import _load
+    from .manifest_annotations import _load, current
     path = sidecar / 'annotations.json'
     if not os.path.lexists(path) and not receipts:
         return
@@ -209,9 +209,11 @@ def _annotations(job, sidecar, receipts, project):
     published = document['revision']
     if receipts[:published] != document['events']:
         job.error('annotations_changed', 'annotations.json differs from its ledger receipts')
-    elif len(receipts) > published:
-        job.notice('annotations_unpublished', f'{len(receipts) - published} committed annotation(s) await '
-                                              'publication by the next append')
+    else:
+        if len(receipts) > published:
+            job.notice('annotations_unpublished', f'{len(receipts) - published} committed annotation(s) await '
+                                                  'publication by the next append')
+        job.details['annotations'] = current(document['events'])  # Only receipt-matched events are shown.
     job.details['annotation_revision'] = published
 
 
@@ -327,6 +329,7 @@ def check(store, root, job_ids=(), *, rehash=False):
         if anchors and not sidecar_kind and kind is not False:
             job.error('job_json_missing', 'The manifest receipt exists but the job has no sidecar on this owner')
         if document is not None:
+            job.details.update(engine=document.get('engine'), parent=document.get('parent'))
             binding = _registration(job, store, by_event.get(('registration', job_id), []),
                                     job.details['job_sha256'], project)
             if binding is not None and binding[1]:

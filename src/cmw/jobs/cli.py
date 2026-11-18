@@ -436,6 +436,18 @@ def register(subcommands):
                        help="manifest only: also rehash multi-GiB restart input copies")
     check.add_argument("--json", action="store_true")
     check.set_defaults(handler=handle)
+    listing = operations.add_parser("ls", help="list native manifest jobs in numeric ID order; read-only, no cache",
+        description="List the native jobs (J<n>) of a project on its owner (#41 Phase 3c). Each row is one pass of "
+                    "the Phase 3b integrity check and shows only fields from verified sources; filters are exact "
+                    "and combine with AND. Remote jobs' status is unavailable. Use `query` for the queue catalogue.")
+    listing.add_argument("--manifest-project", type=Path, metavar="ROOT", help="the owned native project to list")
+    listing.add_argument("--system", help="exact studied system from manifest annotations")
+    listing.add_argument("--status", choices=("queued", "running", "done", "failed", "cancelled"))
+    listing.add_argument("--scf-result", choices=("converged", "labort", "nelm_reached", "crashed", "unknown"))
+    listing.add_argument("--outcome", choices=("reported", "superseded", "checkpoint-only", "discarded"))
+    listing.add_argument("--parent", metavar="J<n>", help="jobs restarted from this native parent")
+    listing.add_argument("--json", action="store_true")
+    listing.set_defaults(handler=handle)
     submit = operations.add_parser("submit", help="reviewed held submission locally or on an explicit node")
     submit.add_argument("--spec", type=Path, required=True)
     submit.add_argument("--preview", action="store_true", help="prepare a local manifest and inspect destination preflight; no remote mutation")
@@ -780,6 +792,19 @@ def _check_manifests(args):
     return 0 if result["status"] == "VERIFIED" else 2
 
 
+def _list_manifests(args):
+    from .manifest_list import list_jobs, summary_text
+    try:
+        result = list_jobs(Store(args.state), args.manifest_project, system=args.system, status=args.status,
+                           scf_result=args.scf_result, outcome=args.outcome, parent=args.parent)
+    except (JobsError, OSError) as exc:
+        payload = {"status": "FAILED", "code": "JOBS_ERROR", "reason": str(exc), "exit_code": 2}
+        print(json.dumps(payload, ensure_ascii=True) if args.json else f"cmw jobs: {safe_text(exc)}")
+        return 2
+    print(json.dumps(result, indent=2, ensure_ascii=True) if args.json else safe_text(summary_text(result)))
+    return 0
+
+
 def handle(args):
     if args.jobs_operation == "retire" and (getattr(args, "node", None) or getattr(args, "queue", None)):
         print("retire is local only; select the existing queue with --state. No endpoint operation is sent.")
@@ -797,6 +822,15 @@ def handle(args):
         if args.manifest_project is not None and (getattr(args, "node", None) or getattr(args, "queue", None)):
             print("Manifest checks run on the project owner itself, without --node/--queue. No endpoint operation is sent.")
             return 2
+    if args.jobs_operation == "ls":
+        if args.manifest_project is None:
+            print("ls lists native manifest jobs and needs --manifest-project ROOT; "
+                  "use `cmw jobs query` for the queue catalogue")
+            return 2
+        if getattr(args, "node", None) or getattr(args, "queue", None):
+            print("Manifest listings run on the project owner itself, without --node/--queue. No endpoint operation is sent.")
+            return 2
+        return _list_manifests(args)
     if args.jobs_operation == "annotate":
         manifest_only = [f"--{name.replace('_', '-')}" for name in ("label", "purpose", "system", "outcome", "request_uuid")
                          if getattr(args, name) is not None]
