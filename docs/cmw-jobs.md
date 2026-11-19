@@ -701,8 +701,28 @@ cmw jobs check --manifest-project ROOT J28 --rehash --json
   packaged); writer output stays schema-tested in CI. SQLite may leave its transient
   `-wal`/`-shm` files beside the ledger.
 
+**Listing (Phase 3c).** On the project owner, list native jobs in numeric ID order
+(J2 before J10), read-only and without any cache:
+
+```bash
+cmw jobs ls --manifest-project ROOT
+cmw jobs ls --manifest-project ROOT --system Si --outcome reported --json
+cmw jobs ls --manifest-project ROOT --status done --scf-result converged --parent J27
+```
+
+- Each listing is one pass of the Phase 3b check (without `--rehash`), so every row
+  carries its integrity status (`verified`, `failed`, `reserved`, `unverifiable`) and
+  shows fields only from accepted sources: an edited `job.json` or `annotations.json`
+  contributes nothing to its row. Integrity failures stay listed; `check` explains them.
+- Filters are exact and combine with AND: `--system` and `--outcome` (manifest
+  annotations), `--status` and `--scf-result` (`state.json`), `--parent J<n>` (restart
+  parent in `job.json`). Remote jobs show `remote`: their status and SCF result live on
+  the executing node and never match those filters.
+- Exit 0 whenever the project is readable, including with integrity errors. Plain `ls`
+  needs `--manifest-project`; use `query` for the queue catalogue.
+
 Not yet: node-to-node allocation for a frontend that isn't the owner, legacy/cross-project and inferred parents,
-manifest list (3c), and backfill (4).
+and backfill (4).
 
 ## Status, resources and failure policy
 
