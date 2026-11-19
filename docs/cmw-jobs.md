@@ -721,8 +721,44 @@ cmw jobs ls --manifest-project ROOT --status done --scf-result converged --paren
 - Exit 0 whenever the project is readable, including with integrity errors. Plain `ls`
   needs `--manifest-project`; use `query` for the queue catalogue.
 
+**Legacy queue bindings (Phase 4a, [#76](https://github.com/angzeli/computational-modelling-workflow/issues/76)).**
+Separate queue databases reuse the same local integers, so a legacy job is named by
+its origin, `<node>/<queue>:J<n>.<m>` (for example `node-a/research:J27.1`). On the
+project owner, record each of its local legacy queues once:
+
+```bash
+cmw jobs manifest bind-queue --project-root ROOT --node node-a --queue research --state-root PATH
+cmw jobs manifest resolve node-a/research:J27.1 --project-root ROOT --json
+```
+
+- `bind-queue` appends one `queue_binding` receipt to the integrity journal with:
+  - the enrolled queue UUID, or null for an unenrolled queue;
+  - the state root;
+  - the root and database `[device, inode]` pairs;
+  - the containing volume UUID, observed by `manifest_volume.sh` (`diskutil` on
+    macOS, `findmnt` on Linux).
+
+  An unknown volume UUID refuses the binding.
+- Each binding is permanent:
+  - Rebinding a token is refused. So is binding one database under a second token.
+  - All of the owner's queues share one node token.
+  - Retrying with the same `--request-uuid` returns the original receipt.
+- The queue itself is only read, never written.
+- `resolve` returns the one record the reference names. Before and after reading,
+  it checks the volume UUID, the root and database inodes, and the enrolled UUID.
+  Device numbers are diagnostic only.
+- `resolve` refuses:
+  - a moved or replaced queue;
+  - bare `J27.1` and short `node-a:J27.1` forms;
+  - duplicate display IDs;
+  - a renamed display ID (for example `M11.1`), which needs explicit mapping review.
+- Its output leaves out argv and env.
+- `check` validates `queue_binding` receipts and reports a token or database bound twice.
+
 Not yet: node-to-node allocation for a frontend that isn't the owner, legacy/cross-project and inferred parents,
-and backfill (4).
+other nodes' queues, short legacy references and relocation (`queue_locator`), and the backfill report and
+apply steps (4b, 4c). The project file's `legacy_nodes`/`legacy_queues` maps stay empty: bindings live only
+in the journal.
 
 ## Status, resources and failure policy
 
