@@ -157,6 +157,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         self.lookup_busy = set()
         self.card_height = None
         self.viewport = None
+        self.restored_layout = None
         self.init_catalogue()
 
     def compose(self):
@@ -504,9 +505,13 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         with self.navigation_update(), table.prevent(DataTable.RowHighlighted):
             self._render_state()
         after = (self.columns, tuple(self.row_keys), self.card_height, self.viewport)
-        if (before != after and not self.navigation_origin_covered(origin)
-                and not self.navigation_pending(origin)):
-            self.restore_view(view)
+        if not self.navigation_origin_covered(origin) and not self.navigation_pending(origin):
+            # A layout change rendered while covered or restoring may reach the
+            # screen only after the return restore has finished, so compare with
+            # the layout last restored here, not only with this render's start.
+            if before != after or self.restored_layout not in (None, after):
+                self.restore_view(view)
+            self.restored_layout = after
 
     def _render_state(self):
         now = self.clock()
