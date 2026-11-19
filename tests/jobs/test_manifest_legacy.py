@@ -1,6 +1,7 @@
 """Legacy queue bindings and queue-qualified legacy IDs (#41 Phase 4a, #76)."""
 import json
 import os
+from pathlib import Path
 import platform
 import shutil
 import unittest
@@ -88,7 +89,24 @@ class LegacyQueueTests(ManifestCase):
         with self.assertRaisesRegex(ManifestError, 'does not own'):
             manifest_legacy.bind_queue(stranger, self.project, node='node-a', queue='other',
                                        state_root=other.root, volume_uuid_of=volume)
+        # The owner cannot claim a queue enrolled to another node as its own.
+        with self.assertRaisesRegex(ManifestError, 'enrolled to node .* not the project owner'):
+            self.bind(queue='stranger', state_root=stranger.root)
         self.assertEqual(len(manifests.read_journal(self.project)), 1)
+
+    def test_enrolled_queue_resolves_after_a_remount_changes_device_numbers(self):
+        self.store.add(argv=['/bin/true'], cwd=self.base, name='own')
+        self.bind(queue='main', state_root=self.store.root)
+        real, own = Path.lstat, self.store.root
+
+        def remounted(path, *args, **kwargs):  # Same volume UUID and inodes, a new device number.
+            info = real(path, *args, **kwargs)
+            if path == own or own in path.parents:
+                return os.stat_result((info.st_mode, info.st_ino, info.st_dev + 1, *info[3:10]))
+            return info
+        with patch.object(Path, 'lstat', remounted):
+            resolved = self.resolve('node-a/main:J1.1')
+        self.assertEqual(resolved['job']['name'], 'own')
 
     def test_resolution_needs_a_qualified_reference_to_one_unchanged_record(self):
         self.bind()

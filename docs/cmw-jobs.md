@@ -742,11 +742,13 @@ cmw jobs manifest resolve node-a/research:J27.1 --project-root ROOT --json
 - Each binding is permanent:
   - Rebinding a token is refused. So is binding one database under a second token.
   - All of the owner's queues share one node token.
+  - A queue enrolled to another node is refused.
   - Retrying with the same `--request-uuid` returns the original receipt.
 - The queue itself is only read, never written.
 - `resolve` returns the one record the reference names. Before and after reading,
-  it checks the volume UUID, the root and database inodes, and the enrolled UUID.
-  Device numbers are diagnostic only.
+  it checks the volume UUID, the root and database inodes, and the enrolled UUID
+  recorded in the queue. Device numbers are diagnostic only, so a remount that
+  changes them still resolves.
 - `resolve` refuses:
   - a moved or replaced queue;
   - bare `J27.1` and short `node-a:J27.1` forms;

@@ -67,13 +67,25 @@ def _observe(state_root, volume_uuid_of):
                       'database_identity': [database_info.st_dev, database_info.st_ino], 'volume_uuid': volume}
 
 
-def _enrolled_queue_id(resolved):
-    """The enrolled queue UUID, None for an unenrolled queue; a moved or copied enrolled queue refuses."""
+def _enrollment(resolved):
+    """The validated enrollment record, None for an unenrolled queue; a moved or copied enrolled queue refuses."""
     try:
-        identity = Store(resolved).queue_identity()
+        return Store(resolved).queue_identity()
     except JobsError as exc:
         raise ManifestError(f'Queue at {resolved}: {exc}') from exc
-    return identity['queue_id'] if identity else None
+
+
+def _recorded_queue_id(con):
+    """The enrolled queue UUID stored in the queue itself, read without the Store's device-number check.
+
+    Store.queue_identity compares full [device, inode] pairs, which a remount may change;
+    resolution compares volume UUID plus inode instead.
+    """
+    if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() is None:
+        return None
+    row = con.execute("SELECT value FROM meta WHERE key='queue_identity'").fetchone()
+    record = json.loads(row[0]) if row is not None else None
+    return record.get('queue_id') if isinstance(record, dict) else None
 
 
 def _same(binding, observed):
@@ -99,7 +111,11 @@ def bind_queue(store, root, *, node, queue, state_root, request=None, volume_uui
     node, queue = _token(node, 'Node'), _token(queue, 'Queue')
     request = request_uuid(request)
     resolved, observed = _observe(state_root, volume_uuid_of)
-    queue_id = _enrolled_queue_id(resolved)
+    enrollment = _enrollment(resolved)
+    if enrollment is not None and enrollment['node_id'] != project['owner_node_id']:
+        raise ManifestError(f'Queue at {resolved} is enrolled to node {enrollment["node_id"]}, not the project '
+                            "owner; only the owner's local queues can be bound")
+    queue_id = enrollment['queue_id'] if enrollment else None
     try:  # A binding must name a readable Jobs queue, observed without writing.
         with Store(resolved).read_transaction() as con:
             con.execute('SELECT count(*) FROM jobs').fetchone()
@@ -139,25 +155,29 @@ def resolve(root, reference, *, volume_uuid_of=None):
         raise ManifestError(f'Queue {node}/{queue} has no binding in this project (cmw jobs manifest bind-queue)')
     state_root = Path(binding['state_root'])
 
+    def differs(reason):
+        return ManifestError(f'Queue {node}/{queue} at {state_root} no longer matches its binding ({reason}); '
+                             'relocation needs a reviewed queue_locator, which is not available yet')
+
     def verify():  # Before and after the read, so a database swapped in between is refused.
         try:
             resolved, observed = _observe(state_root, volume_uuid_of)
-            if resolved != state_root or not _same(binding, observed):
-                raise ManifestError('volume UUID or inode differs')
-            if binding['queue_id'] is not None and _enrolled_queue_id(state_root) != binding['queue_id']:
-                raise ManifestError('enrolled queue UUID differs')
         except ManifestError as exc:
-            raise ManifestError(f'Queue {node}/{queue} at {state_root} no longer matches its binding ({exc}); '
-                                'relocation needs a reviewed queue_locator, which is not available yet') from exc
+            raise differs(exc) from exc
+        if resolved != state_root or not _same(binding, observed):
+            raise differs('volume UUID or inode differs')
 
     verify()
     try:
         with Store(state_root).read_transaction() as con:
+            queue_id = _recorded_queue_id(con)
             rows = [json.loads(row[0]) for row in con.execute(
                 "SELECT data FROM jobs WHERE id=? OR json_extract(data, '$.display_id')=?", (number, display))]
     except (JobsError, sqlite3.Error, ValueError) as exc:
         raise ManifestError(f'Queue {node}/{queue} is not readable: {exc}') from exc
     verify()
+    if binding['queue_id'] is not None and queue_id != binding['queue_id']:
+        raise differs('enrolled queue UUID differs')
     if not rows:
         raise ManifestError(f'Queue {node}/{queue} has no job {display}')
     if len(rows) > 1:
