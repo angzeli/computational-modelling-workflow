@@ -425,6 +425,14 @@ class BackfillApplyTests(BackfillCase):
             self.apply(inventory, path)
         self.assertEqual(sorted(entry.name for entry in (wrappers[16] / MANIFEST).iterdir()),
                          ['annotations.json', 'job.json', 'state.json'])
+        journal = self.journal()
+        for name in ('job.json', 'state.json'):  # A frozen file made writable is never anchored.
+            frozen = wrappers[16] / MANIFEST / name
+            frozen.chmod(0o644)
+            with self.subTest(name=name), self.assertRaisesRegex(ManifestError, f'{name} is writable'):
+                self.apply(inventory, path)
+            frozen.chmod(0o444)
+        self.assertEqual(self.journal(), journal)
         result = self.apply(inventory, path)
         self.assertEqual(([item['published'] for item in result['applied']], result['skipped']),
                          ([[]], [{'reference': f'{QUEUE}:J{running}.1', 'state': 'deferred'}]))

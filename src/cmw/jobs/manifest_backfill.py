@@ -389,6 +389,20 @@ def _expected(row):
     return {name: canonical(row['documents'][document]) for name, document, _ in SIDECAR}
 
 
+def _existing_issue(path, raw, mode):
+    """Why an existing sidecar file cannot stand for its reviewed publication, or None."""
+    try:
+        info = path.lstat()
+        same = stat.S_ISREG(info.st_mode) and path.read_bytes() == raw
+    except OSError:
+        return f'{path} is unreadable'
+    if not same:
+        return f'{path} differs from the reviewed document'
+    if not mode & 0o222 and info.st_mode & 0o222:  # Frozen files must still be read-only.
+        return f'{path} is writable (mode {stat.S_IMODE(info.st_mode):o}); it is never anchored that way'
+    return None
+
+
 def _published_issue(records, project_key, row):
     """Why an earlier receipt or sidecar file conflicts with publishing this reviewed job, or None."""
     reference, expected = row['reference'], _expected(row)
@@ -400,14 +414,12 @@ def _published_issue(records, project_key, row):
     sidecar = Path(row['fields']['destination']['value'])
     if not os.path.lexists(sidecar):
         return None
+    modes = {name: mode for name, _, mode in SIDECAR}
     for entry in sidecar.iterdir():
         if entry.name in expected:
-            try:
-                same = stat.S_ISREG(entry.lstat().st_mode) and entry.read_bytes() == expected[entry.name]
-            except OSError:
-                same = False
-            if not same:
-                return f'{entry} differs from the reviewed document'
+            issue = _existing_issue(entry, expected[entry.name], modes[entry.name])
+            if issue:
+                return issue
         elif not any(entry.name.startswith(f'.{name}.') for name in expected):  # An interrupted temp file is kept.
             return f'{sidecar} holds {entry.name}, which no apply of this report writes'
     return None
@@ -426,8 +438,9 @@ def _publish(root, project_key, row):
     for name, _, mode in SIDECAR:
         path = sidecar / name
         if os.path.lexists(path):
-            if path.read_bytes() != expected[name]:
-                raise ManifestError(f'{path} changed during apply; it is never replaced')
+            issue = _existing_issue(path, expected[name], mode)
+            if issue:
+                raise ManifestError(f'{issue}; it changed during apply and is never replaced')
             continue
         _publish_new(path, expected[name], mode)
         published.append(name)

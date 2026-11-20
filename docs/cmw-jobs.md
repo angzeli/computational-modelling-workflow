@@ -825,7 +825,8 @@ cmw jobs backfill --manifest-project ROOT --inventory FILE --apply --report repo
   - the inventory differs from the report's;
   - a reviewed ready job is no longer ready, or its documents changed;
   - another receipt already anchors it;
-  - its `.cmw-manifest/` holds any other file, or a different one.
+  - its `.cmw-manifest/` holds any other file, a different one, or a frozen file
+    that has become writable.
 - For each reviewed ready job it publishes `.cmw-manifest/` files that never replace
   an existing file: `job.json` and `state.json` read-only, and `annotations.json`
   with no events. It then appends the job's `manifest` receipt (binding null) and one
