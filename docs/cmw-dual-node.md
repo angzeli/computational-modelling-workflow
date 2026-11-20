@@ -59,12 +59,17 @@ It never reports CMW execution as available on the node.
 The endpoint serves the enrolled kind. A `pbs` endpoint answers only
 `capabilities` and `status`. Every other operation is `UNSUPPORTED_OPERATION`, and
 `mutations_supported` is false. `status` runs `qselect -x -u USER`, then
-`qstat -x -f -F json` for those IDs. Each call has a fixed argv, no inherited
-stdin, a 30 s timeout and bounded output. The reply has no managed jobs;
+`qstat -x -f -F json` for those IDs. Each call goes through the shell helper
+`pbs_client.sh`, which launches only an enrolled `qselect` or `qstat` with no
+inherited stdin, stops it one byte past a 16 MiB stdout bound and cuts stderr at
+4 KiB. Python validates the job IDs between the calls, parses the JSON and stops
+the helper's process group after 30 s. The reply has no managed jobs;
 `state.pbs` lists the endpoint user's current and history-retained PBS jobs
-verbatim: ID, name, `job_state` and substate, queue, requested and used
-resources, exit status, comment and scheduler times. Jobs owned by another user
-are skipped. A job that leaves PBS history between the two calls is counted as
+verbatim, newest first: ID, name, `job_state` and substate, queue, requested and
+used resources, exit status, comment and scheduler times. `offset` and `limit`
+(at most 1000) select a page, and a page is cut short to fit one protocol frame;
+`next_offset` names where the next page starts. Jobs owned by another user are
+skipped. A job that leaves PBS history between the two calls is counted as
 missing, not inferred. Malformed scheduler output fails the call with
 `SCHEDULER_UNAVAILABLE`.
 

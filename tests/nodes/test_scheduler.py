@@ -11,12 +11,15 @@ from pathlib import Path
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
 
 from cmw.nodes.endpoint import default_backend, serve
 from cmw.nodes.identity import check_node, enroll, load_node
-from cmw.nodes.protocol import NodeError, validate_envelope
-from cmw.nodes.scheduler import MAX_JOBS, SchedulerBackend, pbs_status
+from cmw.nodes import scheduler
+from cmw.nodes.protocol import MAX_FRAME, NodeError, encode, validate_envelope
+from cmw.nodes.scheduler import HELPER, MAX_JOBS, MAX_OUTPUT, QUERY_TIMEOUT, SchedulerBackend, pbs_status
 from cmw.nodes.transport_events import compatible_capabilities
 from tests.nodes.test_identity import RUNTIME
 
@@ -55,13 +58,14 @@ class FakePBS:
         self.qselect, self.qstat, self.calls = qselect, qstat, []
         self.qselect_code, self.qstat_code, self.timeout = qselect_code, qstat_code, timeout
 
-    def __call__(self, argv, **options):
-        self.calls.append((list(argv), options))
+    def __call__(self, argv, timeout):
+        # argv is the helper's: /bin/bash HELPER LIMIT CLIENT ARG...
+        self.calls.append((list(argv), timeout))
         if self.timeout:
-            raise subprocess.TimeoutExpired(argv, options['timeout'])
-        if os.path.basename(argv[0]) == 'qselect':
+            raise subprocess.TimeoutExpired(argv, timeout)
+        if os.path.basename(argv[3]) == 'qselect':
             return subprocess.CompletedProcess(argv, self.qselect_code, self.qselect.encode(), b'qselect: refused')
-        output = (json.dumps(document(argv[5:])).encode() if self.qstat is None else self.qstat)
+        output = (json.dumps(document(argv[8:])).encode() if self.qstat is None else self.qstat)
         return subprocess.CompletedProcess(argv, self.qstat_code, output, b'qstat: Unknown Job Id 100.server1')
 
 
@@ -143,14 +147,14 @@ class PBSNodeTests(unittest.TestCase):
     def test_status_lists_own_jobs_verbatim(self):
         fake = FakePBS()
         pbs = pbs_status('/pbs/qselect', '/pbs/qstat', USER, run=fake)
-        self.assertEqual(fake.calls[0][0], ['/pbs/qselect', '-x', '-u', USER])
-        self.assertEqual(fake.calls[1][0], ['/pbs/qstat', '-x', '-f', '-F', 'json',
+        helper = ['/bin/bash', str(HELPER), str(MAX_OUTPUT)]
+        self.assertEqual(fake.calls[0], (helper + ['/pbs/qselect', '-x', '-u', USER], QUERY_TIMEOUT))
+        self.assertEqual(fake.calls[1][0], helper + ['/pbs/qstat', '-x', '-f', '-F', 'json',
                                             '97.server1', '98.server1', '99.server1', '100.server1', '101.server1'])
-        self.assertIs(fake.calls[0][1]['stdin'], subprocess.DEVNULL)
-        self.assertEqual([row['pbs_id'] for row in pbs['jobs']], ['98.server1', '99.server1', '101.server1'])
+        self.assertEqual([row['pbs_id'] for row in pbs['jobs']], ['101.server1', '99.server1', '98.server1'])
         self.assertEqual((pbs['foreign_skipped'], pbs['missing'], pbs['truncated']), (1, 1, False))
         self.assertEqual(pbs['counts'], {'queued': 0, 'running': 1, 'finished': 2, 'other': 0})
-        never, finished, running = pbs['jobs']
+        running, finished, never = pbs['jobs']
         self.assertIsNone(never['exit_status'])
         self.assertEqual((never['substate'], never['phase']), (91, 'finished'))
         self.assertEqual(finished['exit_status'], 0)
@@ -165,6 +169,7 @@ class PBSNodeTests(unittest.TestCase):
                  'qstat not json': FakePBS(qstat=b'Job Id: 98.server1\n'),
                  'qstat refused': FakePBS(qstat=b'', qstat_code=153),
                  'qstat jobs not a mapping': FakePBS(qstat=b'{"Jobs": []}'),
+                 'helper refused': FakePBS(qselect_code=125),
                  'timeout': FakePBS(timeout=True)}
         for name, fake in cases.items():
             with self.subTest(name), self.assertRaises(NodeError) as caught:
@@ -178,8 +183,8 @@ class PBSNodeTests(unittest.TestCase):
         many = FakePBS(qselect=''.join(f'{number}.server1\n' for number in range(1, MAX_JOBS + 6)))
         result = pbs_status('/pbs/qselect', '/pbs/qstat', USER, run=many)
         self.assertTrue(result['truncated'])
-        self.assertEqual(many.calls[1][0][5], '6.server1')
-        self.assertEqual(len(many.calls[1][0]) - 5, MAX_JOBS)
+        self.assertEqual(many.calls[1][0][8], '6.server1')
+        self.assertEqual(len(many.calls[1][0]) - 8, MAX_JOBS)
 
     def backend(self, config, readiness=None, **options):
         readiness = readiness or check_node(config, **self.providers)
@@ -201,7 +206,14 @@ class PBSNodeTests(unittest.TestCase):
         self.assertEqual((status['node_id'], status['queue_id'], status['sequence']),
                          (config['node_id'], config['queues']['main']['queue_id'], 2))
         self.assertEqual(status['result']['state']['jobs'], [])
-        self.assertEqual(len(status['result']['state']['pbs']['jobs']), 3)
+        pbs = status['result']['state']['pbs']
+        self.assertEqual((len(pbs['jobs']), pbs['total'], pbs['next_offset'], pbs['size_limited']), (3, 3, None, False))
+        second = backend.call('status', {'offset': 1, 'limit': 1})['result']['state']['pbs']
+        self.assertEqual(([row['pbs_id'] for row in second['jobs']], second['next_offset']), (['99.server1'], 2))
+        for bad in ({'offset': -1}, {'offset': MAX_JOBS + 1}, {'limit': 0}, {'limit': True}, {'offset': '1'}):
+            with self.subTest(params=bad), self.assertRaises(NodeError) as caught:
+                backend.call('status', bad)
+            self.assertEqual(caught.exception.code, 'INVALID_PARAMS')
         for operation, options, code in (('submit', {}, 'UNSUPPORTED_OPERATION'),
                                          ('lookup', {'params': {'id': 1}}, 'UNSUPPORTED_OPERATION'),
                                          ('control', {}, 'UNSUPPORTED_OPERATION'),
@@ -211,6 +223,26 @@ class PBSNodeTests(unittest.TestCase):
             with self.subTest(operation=operation, options=options), self.assertRaises(NodeError) as caught:
                 backend.call(operation, **options)
             self.assertEqual(caught.exception.code, code)
+
+    def test_full_status_page_fits_one_protocol_frame(self):
+        config = self.enrolled()
+        records = {f'{number}.server1': {'Job_Name': 'n' * 256, 'Job_Owner': 'tester@login1', 'job_state': 'F',
+                                          'comment': 'c' * 512, 'queue': 'q' * 64, 'server': 's' * 64,
+                                          'Resource_List': {key: 'r' * 64 for key in scheduler.REQUESTED},
+                                          'resources_used': {key: 'u' * 64 for key in scheduler.USED},
+                                          'qtime': 't' * 64, 'stime': 't' * 64, 'obittime': 't' * 64}
+                   for number in range(1, MAX_JOBS + 1)}
+        ids = ''.join(f'{job_id}\n' for job_id in records)
+        fake = FakePBS(qselect=ids, qstat=json.dumps({'timestamp': 1, 'Jobs': records}).encode())
+        backend = self.backend(config, run=fake)
+        first = backend.call('status')
+        self.assertLessEqual(len(encode(first)), MAX_FRAME)
+        pbs = first['result']['state']['pbs']
+        self.assertTrue(pbs['size_limited'])
+        self.assertEqual((pbs['total'], pbs['next_offset']), (MAX_JOBS, len(pbs['jobs'])))
+        self.assertEqual(pbs['jobs'][0]['pbs_id'], f'{MAX_JOBS}.server1')
+        rest = backend.call('status', {'offset': pbs['next_offset']})['result']['state']['pbs']
+        self.assertEqual(rest['jobs'][0]['pbs_id'], f'{MAX_JOBS - len(pbs["jobs"])}.server1')
 
     def test_backend_refuses_unready_or_changed_identity(self):
         config = self.enrolled()
@@ -264,7 +296,51 @@ class PBSNodeTests(unittest.TestCase):
         for name in ('qselect', 'qstat'):
             (clients / name).chmod(0o755)
         pbs = pbs_status(str(clients / 'qselect'), str(clients / 'qstat'), USER)
-        self.assertEqual([row['pbs_id'] for row in pbs['jobs']], ['98.server1', '99.server1', '101.server1'])
+        self.assertEqual([row['pbs_id'] for row in pbs['jobs']], ['101.server1', '99.server1', '98.server1'])
+
+    def client(self, name, body):
+        directory = self.root / 'helper-clients'
+        directory.mkdir(exist_ok=True)
+        path = directory / name
+        path.write_text('#!/bin/bash\n' + body + '\n')
+        path.chmod(0o755)
+        return str(path)
+
+    def test_helper_bounds_output_and_stderr_and_refuses_other_clients(self):
+        flood = self.client('qstat', 'exec yes')
+        started = time.monotonic()
+        with patch.object(scheduler, 'MAX_OUTPUT', 4096), self.assertRaises(NodeError) as caught:
+            scheduler._query(flood, ['-x'], scheduler.run_helper)
+        self.assertIn('exceeds its bound', str(caught.exception))
+        self.assertLess(time.monotonic() - started, 10)
+        noisy = self.client('qselect', 'head -c 20000 /dev/zero | tr "\\0" e >&2; exit 3')
+        completed = scheduler._query(noisy, [], scheduler.run_helper)
+        self.assertEqual((completed.returncode, len(completed.stderr)), (3, 4096))
+        with self.assertRaises(NodeError) as caught:
+            own = self.client('qselect', 'exit 3')
+            scheduler.own_job_ids(own, USER)
+        self.assertIn('qselect exited 3', str(caught.exception))
+        for client in (self.client('echo', 'echo 1.server1'), 'qselect', str(self.root / 'helper-clients' / 'absent')):
+            with self.subTest(client=client), self.assertRaises(NodeError) as caught:
+                scheduler._query(client, [], scheduler.run_helper)
+            self.assertIn('refused', str(caught.exception))
+
+    def test_helper_timeout_stops_the_client_process_group(self):
+        marker = self.root / 'client.pid'
+        slow = self.client('qselect', f'echo $$ > {json.dumps(str(marker))}; exec sleep 30')
+        with patch.object(scheduler, 'QUERY_TIMEOUT', 1), self.assertRaises(NodeError) as caught:
+            scheduler.own_job_ids(slow, USER)
+        self.assertIn('timed out', str(caught.exception))
+        pid = int(marker.read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(.05)
+        else:
+            self.fail('PBS client survived the helper timeout')
 
 
 if __name__ == '__main__':

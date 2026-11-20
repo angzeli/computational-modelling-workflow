@@ -11,8 +11,10 @@ from copy import deepcopy
 import hashlib
 import json
 import os
+from pathlib import Path
 import pwd
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -25,6 +27,9 @@ POLL_INTERVAL_SECONDS = 30
 MAX_JOBS = 1000
 MAX_OUTPUT = 16 * 1024 * 1024
 QUERY_TIMEOUT = 30
+# Rows per status page stay well inside protocol.MAX_FRAME (2 MiB) with the envelope.
+MAX_PAGE_BYTES = 1536 * 1024
+HELPER = Path(__file__).with_name('pbs_client.sh')
 JOB_ID = re.compile(r'[0-9]{1,12}(?:\[[0-9]{0,12}\])?\.[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 # PBS Pro job_state letters, grouped for counts. Rows keep the verbatim letter.
 PHASES = {'Q': 'queued', 'H': 'queued', 'W': 'queued', 'T': 'queued', 'M': 'queued',
@@ -56,31 +61,50 @@ def _scalar(value, limit=64):
     return _text(value, limit) if isinstance(value, str) else None
 
 
-def _query(argv, run):
-    """One bounded PBS client call with a fixed argv; stdin is never inherited."""
+def run_helper(argv, timeout):
+    """Start the fixed shell helper in its own session; a timeout stops its whole group."""
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, start_new_session=True, close_fds=True)
     try:
-        completed = run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=QUERY_TIMEOUT, check=False)
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+def _query(client, arguments, run):
+    """One read-only PBS client call through the shell helper; output is bounded there."""
+    name = os.path.basename(client)
+    argv = ['/bin/bash', str(HELPER), str(MAX_OUTPUT), client, *arguments]
+    try:
+        completed = run(argv, QUERY_TIMEOUT)
     except subprocess.TimeoutExpired as exc:
-        raise SchedulerError('SCHEDULER_UNAVAILABLE', f'{os.path.basename(argv[0])} timed out') from exc
+        raise SchedulerError('SCHEDULER_UNAVAILABLE', f'{name} timed out') from exc
     except OSError as exc:
-        raise SchedulerError('SCHEDULER_UNAVAILABLE', f'{os.path.basename(argv[0])} could not run: {exc}') from exc
+        raise SchedulerError('SCHEDULER_UNAVAILABLE', f'{name} could not run: {exc}') from exc
     if len(completed.stdout) > MAX_OUTPUT:
-        raise SchedulerError('SCHEDULER_UNAVAILABLE', 'PBS output exceeds its bound')
+        raise SchedulerError('SCHEDULER_UNAVAILABLE', f'{name} output exceeds its bound')
+    if completed.returncode == 125:
+        raise SchedulerError('SCHEDULER_UNAVAILABLE', f'The PBS client helper refused {name}')
     return completed
 
 
-def _failure(completed, argv):
-    reason = _text(completed.stderr.decode('utf-8', errors='replace').strip(), 512) or 'no diagnostic'
+def _failure(completed, client):
+    reason = _text(completed.stderr[:4096].decode('utf-8', errors='replace').strip(), 512) or 'no diagnostic'
     return SchedulerError('SCHEDULER_UNAVAILABLE',
-                          f'{os.path.basename(argv[0])} exited {completed.returncode}: {reason}')
+                          f'{os.path.basename(client)} exited {completed.returncode}: {reason}')
 
 
-def own_job_ids(qselect, user, *, run=subprocess.run):
+def own_job_ids(qselect, user, *, run=run_helper):
     """Current and history-retained job IDs of one user, oldest first, at most MAX_JOBS."""
-    argv = [qselect, '-x', '-u', user]
-    completed = _query(argv, run)
+    completed = _query(qselect, ['-x', '-u', user], run)
     if completed.returncode != 0:
-        raise _failure(completed, argv)
+        raise _failure(completed, qselect)
     ids = []
     for line in completed.stdout.decode('ascii', errors='replace').splitlines():
         line = line.strip()
@@ -111,27 +135,26 @@ def _row(job_id, record):
             'finished_at': _text(record.get('obittime'), 64), 'run_count': _scalar(record.get('run_count'))}
 
 
-def pbs_status(qselect, qstat, user, *, run=subprocess.run):
-    """The user's PBS jobs as scheduler-reported rows; values are verbatim, never inferred."""
+def pbs_status(qselect, qstat, user, *, run=run_helper):
+    """The user's PBS jobs, newest first, as scheduler-reported rows; values are verbatim."""
     ids, truncated = own_job_ids(qselect, user, run=run)
     document = {}
     if ids:
-        argv = [qstat, '-x', '-f', '-F', 'json', *ids]
-        completed = _query(argv, run)
+        completed = _query(qstat, ['-x', '-f', '-F', 'json', *ids], run)
         try:
             document = json.loads(completed.stdout) if completed.stdout.strip() else {}
         except ValueError:
             document = None
         if not isinstance(document, dict):
-            raise (_failure(completed, argv) if completed.returncode else
+            raise (_failure(completed, qstat) if completed.returncode else
                    SchedulerError('SCHEDULER_UNAVAILABLE', 'qstat JSON is malformed'))
         if not document and completed.returncode:
-            raise _failure(completed, argv)
+            raise _failure(completed, qstat)
     jobs = document.get('Jobs', {})  # PBS omits the mapping when no job matched.
     if not isinstance(jobs, dict):
         raise SchedulerError('SCHEDULER_UNAVAILABLE', 'qstat JSON lacks a job mapping')
     rows, foreign = [], 0
-    for job_id in ids:
+    for job_id in reversed(ids):
         record = jobs.get(job_id)
         if not isinstance(record, dict):
             continue  # Left history between the two calls; nothing is inferred.
@@ -152,11 +175,26 @@ def pbs_status(qselect, qstat, user, *, run=subprocess.run):
             'qualification': 'Scheduler-reported, read-only; not CMW-managed and never adopted'}
 
 
+def page(rows, offset, limit):
+    """One page of rows that fits the frame budget; a short page reports where to resume."""
+    selected = rows[offset:offset + limit]
+    size = 2  # The enclosing JSON array.
+    for index, row in enumerate(selected):
+        size += len(json.dumps(row, ensure_ascii=True, allow_nan=False, separators=(',', ':'))) + 1
+        if size > MAX_PAGE_BYTES:
+            selected = selected[:index]
+            break
+    end = offset + len(selected)
+    return {'jobs': selected, 'total': len(rows), 'offset': offset,
+            'next_offset': end if end < len(rows) else None,
+            'size_limited': len(selected) < len(rows[offset:offset + limit])}
+
+
 class SchedulerBackend:
     """One PBS-backed queue per observer session: identity checks around read-only queries."""
 
     def __init__(self, config_root, queue_alias, *, clock=time.time, identity_loader=None,
-                 identity_checker=None, boot_provider=None, run=subprocess.run, user=None, defer_check=False):
+                 identity_checker=None, boot_provider=None, run=run_helper, user=None, defer_check=False):
         from .identity import load_node, check_node
         if type(queue_alias) is not str or not queue_alias or len(queue_alias) > 128:
             raise SchedulerError('UNKNOWN_QUEUE', 'Select an explicitly enrolled queue alias')
@@ -217,10 +255,16 @@ class SchedulerBackend:
     def _status(self, params):
         if type(params) is not dict or set(params) - {'offset', 'limit'}:
             raise SchedulerError('INVALID_PARAMS', 'Operation parameters differ from the negotiated schema')
+        offset, limit = params.get('offset', 0), params.get('limit', MAX_JOBS)
+        if type(offset) is not int or not 0 <= offset <= MAX_JOBS:
+            raise SchedulerError('INVALID_PARAMS', f'offset must be an integer between 0 and {MAX_JOBS}')
+        if type(limit) is not int or not 1 <= limit <= MAX_JOBS:
+            raise SchedulerError('INVALID_PARAMS', f'limit must be an integer between 1 and {MAX_JOBS}')
         if self.readiness.get('scheduler_ready') is not True:
             raise SchedulerError('NODE_NOT_READY', '; '.join(self.readiness.get('errors') or ['PBS clients are not ready']))
         tools = self.config['scheduler']
         pbs = pbs_status(tools['qselect']['path'], tools['qstat']['path'], self._user, run=self._run)
+        pbs.update(page(pbs.pop('jobs'), offset, limit))
         controller = {'schema': 1, 'kind': 'pbs', 'online': False, 'dispatch': 'scheduler-owned'}
         return {'state': {'jobs': [], 'controller': controller, 'pbs': pbs},
                 'queue_revision': _digest(controller), 'job_count': 0, 'status_counts': {},
