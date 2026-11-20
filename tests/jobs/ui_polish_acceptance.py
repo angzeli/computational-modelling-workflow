@@ -22,6 +22,7 @@ from cmw.jobs.progress import resolve_context
 from cmw.jobs.store import Store
 from cmw.progress.models import SourceDescriptor
 from cmw.progress.service import ObservationService
+from tests.jobs.progress_acceptance import assert_closed_and_drained
 from tests.periodic.vasp.result_fixtures import native_texts, structure_text
 from tests.progress.orca_fixtures import cycle, header
 
@@ -141,17 +142,6 @@ def scenario_projection(state, scenario):
                                   ram_total_bytes=24 * 1024**3, cpu_quality='fresh', memory_quality='fresh',
                                   observed_at=NOW, observed_clock=stamp, age_seconds=0, stale=False, reason='Synthetic telemetry'),
             'job_usage': {job['attempt_id']: deepcopy(usage) for job in state['jobs'] if job['status'] == 'Run'}}
-
-
-async def assert_closed_and_drained(service, timeout=10):
-    """Assert closure now, then allow a busy observation's worker to finish retiring."""
-    # close() deliberately does not wait: a worker still in flight decrements the count
-    # and drops its retired context in its own finally block, shortly after the app exits.
-    assert service._closed
-    deadline = asyncio.get_running_loop().time() + timeout
-    while (service._contexts or service._inflight) and asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(0.05)
-    assert not service._contexts and service._inflight == 0
 
 
 async def settle(app, pilot):
