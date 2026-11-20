@@ -857,9 +857,11 @@ cmw jobs views --manifest-project ROOT
   the reason rather than merged.
 - Views are never read back and never authoritative. Only this command writes
   them; `annotate` doesn't refresh them.
-- A rebuild replaces the whole tree. It refuses a `views/` it didn't generate,
-  checked by its `.cmw-views.json` marker, and one that holds anything besides its
-  own folders, links and marker. Nothing else is deleted.
+- A rebuild replaces the whole tree. The `.cmw-views.json` marker records every
+  link it wrote and the link's target. A rebuild refuses a `views/` without that
+  marker, and one holding any folder, link or file the marker doesn't record,
+  including a recorded link that now points elsewhere. So it never deletes
+  anything a user added.
 - Exit 0 when written or previewed, 2 on an error.
 
 Not yet: node-to-node allocation for a frontend that isn't the owner, legacy/cross-project parents for

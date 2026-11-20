@@ -81,6 +81,25 @@ class ViewTests(ManifestCase):
             self.generate()
         self.assertEqual((stray.read_text(), sorted(self.linked())), ('user notes', ['system/Si/J1']))
         stray.unlink()
+        # A user's own link or folder, or a generated link pointed elsewhere, is never taken for a generated one.
+        additions = [(self.views / 'my-results', lambda path: path.symlink_to(self.project / 'jobs')),
+                     (self.views / 'system' / 'Si' / 'extra', lambda path: path.mkdir()),
+                     (self.views / 'system' / 'GaAs', lambda path: path.mkdir())]
+        for path, add in additions:
+            add(path)
+            with self.subTest(path=path.name), self.assertRaisesRegex(ManifestError, 'move it out'):
+                self.generate()
+            self.assertTrue(os.path.lexists(path))
+            path.unlink() if path.is_symlink() else path.rmdir()
+        link = self.views / 'system' / 'Si' / 'J1'
+        link.unlink()
+        link.symlink_to(self.base)
+        with self.assertRaisesRegex(ManifestError, 'move it out'):
+            self.generate()
+        self.assertEqual(os.readlink(link), str(self.base))
+        link.unlink()
+        self.generate()  # A missing generated link is simply rebuilt.
+        self.assertEqual(sorted(self.linked()), ['system/Si/J1'])
         moved = self.project / 'views-real'
         os.rename(self.views, moved)
         self.views.symlink_to(moved)
