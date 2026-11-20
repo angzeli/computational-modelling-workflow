@@ -1,6 +1,7 @@
 """Dry-run backfill of terminated legacy jobs (#41 Phase 4b, #76); synthetic queues, never a runner or VASP."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import time
@@ -199,8 +200,27 @@ class BackfillDryRunTests(BackfillCase):
             report = self.plan(self.inventory(*entries[1:3], self.entry(first, first_wrapper)))
         field = self.row(report, child)['fields']['job.parent']
         self.assertEqual(field['state'], 'conflict')
-        self.assertIn('could not be compared', field['detail'])
+        self.assertIn('changed while it was hashed', field['detail'])
         self.assertEqual(self.row(report, second)['fields']['state.restart_outputs.WAVECAR']['state'], 'missing')
+
+    def test_a_replaced_donor_wrapper_is_compared_but_never_becomes_a_parent(self):
+        donor, donor_wrapper = self.vasp('converged-at-nelm', checkpoint=b'donor checkpoint')
+        child, child_wrapper = self.vasp('labort-outcar', restart_from=donor_wrapper / 'run' / 'WAVECAR')
+        self.bind()
+        copy = self.base / 'copy'
+        shutil.copytree(donor_wrapper, copy)
+        shutil.rmtree(donor_wrapper)
+        os.rename(copy, donor_wrapper)  # Same path and bytes, a different wrapper directory.
+        report = self.plan(self.inventory(self.entry(donor, donor_wrapper), self.entry(child, child_wrapper)))
+        field = self.row(report, child)['fields']['job.parent']
+        self.assertEqual((self.row(report, child)['state'], field['state']), ('conflict', 'conflict'))
+        self.assertIn('not verified', field['detail'])
+        self.assertIsNone(self.row(report, child)['documents']['job']['parent'])
+        replaced = self.row(report, donor)
+        self.assertIn('output parent identity changed', replaced['fields']['job.inputs.INCAR']['detail'])
+        state = replaced['documents']['state']
+        self.assertEqual((state['scf_result'], state['restart_outputs']), ('unknown', {}))
+        self.assertIn('not attributed', state['evidence'][0]['marker'])
 
     def test_active_unresolved_and_unsafe_jobs_are_deferred_or_in_conflict(self):
         running, running_wrapper = self.vasp('converged-at-nelm', status='Run')

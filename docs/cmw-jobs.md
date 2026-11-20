@@ -785,11 +785,14 @@ cmw jobs backfill --manifest-project ROOT --inventory FILE --json
     from the bound queue record; `created_at` is the queue's enqueue time;
   - input and restart digests from the runner's staging record, only when it
     verifies against the attempt's registration binding;
-  - `scf_result` and final-row metrics from the SCF classifier over the bound
-    output;
+  - `scf_result`, final-row metrics and restart outputs from the run output,
+    only when that staging verifies. A wrapper replaced at the same path does not;
   - a parent only when every staged restart file matches one inventory job's
-    bound output. Only same-size outputs are hashed. Several matches, a partial
-    match or an output that cannot be hashed is a conflict, never a guess.
+    verified output. Only same-size outputs are hashed. These are conflicts,
+    never a guess:
+    - several matches, or a partial match;
+    - an output that cannot be hashed;
+    - a match with an unverified output.
 - Node fields, `binding`, POTCAR identities, executable and preparation record
   stay null.
 - Conflicts:

@@ -21,7 +21,7 @@ import stat
 
 from .manifest_hashing import stable_digest
 from .manifest_legacy import QUALIFIED, resolve
-from .manifest_state import STATUS, TERMINAL, _scf, _utc
+from .manifest_state import RESTART_ROLES, STATUS, TERMINAL, _scf, _utc
 from .manifests import (ENVIRONMENT_PREFIXES, MANIFEST_DIR, SCHEMA_VERSION, VASP_INPUTS, ManifestError,
                         _require_owner, load_project, read_journal)
 
@@ -113,10 +113,9 @@ def _staged(job, engine, route):
         return None, f'runner staging is not verified: {exc}'
 
 
-def _job_fields(project, reference, job, engine, route):
+def _job_fields(project, reference, job, engine, route, staged, issue):
     from cmw.periodic.vasp.result_runner import RESTART_FILES
     fields = {}
-    staged, issue = _staged(job, engine, route)
     fields['job.created_at'] = _field(_utc(job.get('enqueued_at')), 'queue enqueued_at')
     for name in ('authoring_node', 'target_node', 'id_owner_node'):
         fields[f'job.{name}'] = _field(None, None, NODE_MAP_DEFERRED)
@@ -159,10 +158,33 @@ def _job_fields(project, reference, job, engine, route):
     return fields, document, restart
 
 
-def _state_fields(project, reference, job, engine):
+def _unattributed_scf(issue):
+    marker = f"run output is not attributed to this attempt: {issue}"[:512]
+    return {'scf_result': 'unknown', 'last_step': None, 'ionic_step': None, 'energy_ev': None,
+            'delta_energy_ev': None, 'total_magnetisation_mu_b': None, 'restart_outputs': {},
+            'hashes_pending': False, 'evidence': [{'source': 'queue', 'marker': marker, 'line': None}]}
+
+
+def _present(output):
+    """Nonempty regular restart files in a run output whose attempt binding did not verify."""
+    found = {}
+    for role in RESTART_ROLES if output is not None else ():
+        try:
+            info = (output / role).lstat()
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and info.st_size > 0:
+            found[role] = output / role
+    return found
+
+
+def _state_fields(project, reference, job, engine, staged, issue):
     fields = {}
     native = job['status']
-    scf = _scf({**job, 'engine': engine or job.get('engine')})
+    # Output-directory facts belong to this attempt only when its staging verifies, which
+    # also proves the wrapper was not replaced at the same path since registration.
+    scf = (_unattributed_scf(issue) if engine == 'VASP' and staged is None else
+           _scf({**job, 'engine': engine or job.get('engine')}))
     fields['state.writer_node'] = _field(None, None, NODE_MAP_DEFERRED)
     fields['state.status'] = _field(STATUS.get(native), 'queue')
     fields['state.native_status'] = _field(native, 'queue')
@@ -210,8 +232,9 @@ def _candidate(root, project, entry, manifested, volume_uuid_of):
     engine = ENGINES.get(str(job.get('engine')).upper())
     route = _route(job) if engine == 'VASP' else None
     output = route[2] if route else None
-    job_fields, job_document, restart = _job_fields(project, reference, job, engine, route)
-    state_fields, state_document, outputs = _state_fields(project, reference, job, engine)
+    staged, issue = _staged(job, engine, route)
+    job_fields, job_document, restart = _job_fields(project, reference, job, engine, route, staged, issue)
+    state_fields, state_document, outputs = _state_fields(project, reference, job, engine, staged, issue)
     row['fields'] = {'destination': _destination(root, entry['wrapper'], job, output),
                      **job_fields, **state_fields}
     if reference in manifested:
@@ -221,11 +244,16 @@ def _candidate(root, project, entry, manifested, volume_uuid_of):
                         'annotations': {'schema_version': SCHEMA_VERSION, 'id': reference,
                                         'project': project['project_key'], 'provenance': 'backfilled',
                                         'revision': 0, 'events': []}}
-    return row, {'row': row, 'restart': restart, 'outputs': {role: output / role for role in outputs}}
+    return row, {'row': row, 'restart': restart, 'outputs': {role: output / role for role in outputs},
+                 'unverified': _present(output) if staged is None else {}}
 
 
 def _infer_parents(candidates):
-    """Set a parent only where every staged restart digest matches one inventory job's bound output."""
+    """Set a parent only where every staged restart digest matches one inventory job's bound output.
+
+    An output whose attempt binding did not verify is compared too, but never attributed:
+    a match there leaves the parent unresolved.
+    """
     hashed = {}
     for child in candidates:
         if not child['restart']:
@@ -234,7 +262,8 @@ def _infer_parents(candidates):
         for role, identity in child['restart'].items():
             found = set()
             for other in candidates:
-                path = other['outputs'].get(role)
+                verified = role in other['outputs']
+                path = other['outputs'].get(role) or other['unverified'].get(role)
                 if other is child or path is None:
                     continue
                 key = (other['row']['reference'], role)
@@ -248,14 +277,16 @@ def _infer_parents(candidates):
                 digest, problem = hashed[key]
                 if digest is None:
                     unknown.append(f'{key[0]} {role} {problem}')
-                elif digest == identity['sha256']:
+                elif digest == identity['sha256'] and verified:
                     found.add(key[0])
+                elif digest == identity['sha256']:
+                    unknown.append(f'{key[0]} {role} matches, but that run output is not verified as its attempt\'s')
             matches[role] = found
         parents = set().union(*matches.values())
         fields, document = child['row']['fields'], child['row']['documents']['job']
         if unknown:
-            fields['job.parent'] = _field(None, 'restart digests', 'a same-size restart source could not be '
-                                          'compared: ' + '; '.join(unknown), conflict=True)
+            fields['job.parent'] = _field(None, 'restart digests', 'a same-size restart source is unresolved: '
+                                          + '; '.join(unknown), conflict=True)
         elif len(parents) == 1 and all(len(found) == 1 for found in matches.values()):
             parent = parents.pop()
             fields['job.parent'] = _field(parent, 'restart digests', 'every staged restart file matches this '
@@ -270,6 +301,8 @@ def _infer_parents(candidates):
                                           f'({found})', conflict=True)
     for (reference, role), (digest, problem) in hashed.items():
         other = next(item for item in candidates if item['row']['reference'] == reference)
+        if role not in other['outputs']:
+            continue  # Compared only; an unverified output is not attributed to its job.
         name = f'state.restart_outputs.{role}'
         other['row']['fields'][name] = (_field(digest, 'stable SHA-256 of the bound output') if digest else
                                         _field(None, 'stable SHA-256 of the bound output', f'{role} {problem}'))
