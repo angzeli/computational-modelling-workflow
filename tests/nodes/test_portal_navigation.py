@@ -442,6 +442,57 @@ class PortalNavigationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(later['scroll'], states[-1]['scroll'])
                     self.assertFalse(any(call[0].startswith('control.') for call in backend.calls))
 
+    async def test_card_growth_under_a_modal_is_restored_after_the_return(self):
+        """The card can grow under a modal and reach layout only after the return restore."""
+        from tests.progress.test_scientific_card import example
+
+        app, backends = self.app()
+        backend = backends['MINI']
+        small = ProgressSnapshot(backend.context, 'height-fixture', status='UNAVAILABLE',
+                                 phase='No parsed progress', read_health='UNAVAILABLE')
+        backend.snapshot = small
+        async with app.run_test(size=(77, 24)) as pilot:
+            await self.until(pilot, lambda: len(app.rows) == 72 and not app.navigation_pending(),
+                             'initial node layout')
+            target = deepcopy(backend.jobs[24]['target'])
+            app.select(row_key(target))
+            await self.until(pilot, lambda: app.selected_key == row_key(target)
+                             and app.selected_snapshot(*app.selected()) is not None
+                             and app.card_height == 3 and not app.navigation_pending(), 'small scientific card')
+            table = app.query_one('#table', DataTable)
+            table.scroll_to(y=table.cursor_row, animate=False, immediate=True)
+            await pilot.pause()
+            await self.until(pilot, lambda: app.restored_layout is not None and not app.navigation_pending(),
+                             'uncovered layout recorded')
+            await self.open_details(app, pilot)
+            backend.snapshot = example()
+            app.lanes['MINI'].next_progress = 0
+            await self.until(pilot, lambda: app.selected_snapshot(*app.selected()).adapter == 'test'
+                             and app.card_height > 3, 'card grew while covered')
+            rendering, restores = [], []
+            render_state, restore_view = app.render_state, app.restore_view
+
+            def traced_render():
+                rendering.append(True)
+                try:
+                    render_state()
+                finally:
+                    rendering.pop()
+
+            def traced_restore(view):
+                restores.append('render' if rendering else 'return')
+                return restore_view(view)
+            with patch.object(app, 'render_state', traced_render), patch.object(app, 'restore_view', traced_restore):
+                await pilot.press('escape')
+                await self.returned(app, pilot)
+                # The covered growth must be restored by an uncovered render, even if that
+                # render itself changes nothing: the return restore may predate its layout.
+                await self.until(pilot, lambda: 'render' in restores and not app.navigation_pending(),
+                                 'uncovered render restored the covered layout change', lambda: restores)
+            await pilot.pause()
+            self.assertEqual(restores[0], 'return')
+            self.assertIn(row_key(target), table_view(app)['visible'])
+
     async def test_removed_or_replaced_attempt_never_transfers_selection(self):
         for number, replaced in ((15, False), (15, True), (25, False), (25, True)):
             with self.subTest(number=number, replaced=replaced):
