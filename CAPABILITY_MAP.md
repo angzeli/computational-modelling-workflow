@@ -211,7 +211,7 @@ evidence. Preparation never starts the execution branch automatically.
 | Two CIFs into an interface or heterostructure | DEFERRED; model construction, not concatenation. [Handoff](docs/structure/cif-import.md#future-interface-construction-handoff) |
 | Disordered, magnetic, superspace or unsupported special CIF | Not supported; do not resolve the model by choosing occupancies or bypassing the importer |
 | Native VASP launch and general result validation | Not implemented beyond bounded static/fixed-cell evidence. [Scope](docs/periodic/vasp-result-evidence.md#native-dialect-and-modes) |
-| Cluster scheduling, cluster locks, backfill or generic retry ladders | Outside the local contracts. [Jobs limits](docs/cmw-jobs.md). A CX3 PBS Pro node kind is DESIGN ONLY (#81 Phase 0): no code, no CX3 contact. [Design](docs/architecture/scheduler-nodes.md) |
+| Cluster scheduling, cluster locks, backfill or generic retry ladders | Outside the local contracts. [Jobs limits](docs/cmw-jobs.md). A `pbs` node kind for a PBS Pro cluster is being built in phases (#81). [Design and phase status](docs/architecture/scheduler-nodes.md) |
 | Automatic CT-like state choice or general fragment-resolved HEA | DEFERRED. [Analysis boundary](docs/molecular/multiwfn-3.8-excited-state-analysis.md#unsupported-and-deferred-analysis) |
 
 ## Using CMW from another project
