@@ -15,6 +15,7 @@ from cmw.jobs.store import Store
 from cmw.progress.models import SourceDescriptor
 from cmw.progress.service import ObservationService
 from tests.jobs.progress_extension_fixture import ENGINE, TEXT, register
+from tests.jobs.ui_polish_acceptance import assert_closed_and_drained
 from tests.periodic.vasp.result_fixtures import native_texts, structure_text
 
 
@@ -292,7 +293,7 @@ async def console_surface(store, cases, *, renders=None):
             await pilot.press('g')
             await settled(app, pilot)
             await pilot.press('ctrl+c')
-    assert service._closed and not service._contexts and service._inflight == 0
+    await assert_closed_and_drained(service)
     return {'all_four_cards_and_history': 'PASS', 'three_level_drilldown': 'PASS',
             'rapid_selection_note_literal_files_detach': 'PASS', 'resize_card_history_details_identity': 'PASS', 'reader_contexts_after_close': 0,
             'gui_opener': 'stubbed, no Finder check'}

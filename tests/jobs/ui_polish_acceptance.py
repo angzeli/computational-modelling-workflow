@@ -143,6 +143,17 @@ def scenario_projection(state, scenario):
             'job_usage': {job['attempt_id']: deepcopy(usage) for job in state['jobs'] if job['status'] == 'Run'}}
 
 
+async def assert_closed_and_drained(service, timeout=10):
+    """Assert closure now, then allow a busy observation's worker to finish retiring."""
+    # close() deliberately does not wait: a worker still in flight decrements the count
+    # and drops its retired context in its own finally block, shortly after the app exits.
+    assert service._closed
+    deadline = asyncio.get_running_loop().time() + timeout
+    while (service._contexts or service._inflight) and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+    assert not service._contexts and service._inflight == 0
+
+
 async def settle(app, pilot):
     for _ in range(1200):
         view = app.history_view
@@ -305,7 +316,7 @@ async def console_cases(store, cases, *, renders=None, scenarios=SCENARIOS, size
                 await controls(app, pilot, selected, opener, projection)
                 report['controls'].append(scenario)
                 await pilot.press('q')
-        assert service._closed and not service._contexts and service._inflight == 0
+        await assert_closed_and_drained(service)
     return report
 
 

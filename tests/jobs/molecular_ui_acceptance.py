@@ -13,7 +13,7 @@ from cmw.jobs.folder_opener import OpenResult
 from cmw.jobs.molecular import submit
 from cmw.jobs.store import Store
 from cmw.progress.service import ObservationService
-from tests.jobs.ui_polish_acceptance import NOW, SIZES, projection_clock, scenario_projection, screenshot_text, settle
+from tests.jobs.ui_polish_acceptance import NOW, SIZES, assert_closed_and_drained, projection_clock, scenario_projection, screenshot_text, settle
 from tests.molecular.orca.jobs_fixture import make_spec as orca_spec
 from tests.molecular.multiwfn.jobs_fixtures import make_spec as multiwfn_spec
 from tests.progress.orca_fixtures import cycle, header, scf
@@ -109,7 +109,7 @@ async def render_cases(store, cases, renders):
                 opener.assert_called_once()
                 await pilot.press('q')
                 report['controls'].append(profile)
-        assert service._closed and not service._contexts and service._inflight == 0
+        await assert_closed_and_drained(service)
     return report
 
 
