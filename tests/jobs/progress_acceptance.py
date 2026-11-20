@@ -181,6 +181,17 @@ def live_surface(store, cases):
     return report
 
 
+async def assert_closed_and_drained(service, timeout=10):
+    """Assert closure now, then allow a busy observation's worker to finish retiring."""
+    # close() deliberately does not wait: a worker still in flight decrements the count
+    # and drops its retired context in its own finally block, shortly after the app exits.
+    assert service._closed
+    deadline = asyncio.get_running_loop().time() + timeout
+    while (service._contexts or service._inflight) and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+    assert not service._contexts and service._inflight == 0
+
+
 async def settled(app, pilot):
     for _ in range(600):
         view = app.history_view
@@ -292,7 +303,7 @@ async def console_surface(store, cases, *, renders=None):
             await pilot.press('g')
             await settled(app, pilot)
             await pilot.press('ctrl+c')
-    assert service._closed and not service._contexts and service._inflight == 0
+    await assert_closed_and_drained(service)
     return {'all_four_cards_and_history': 'PASS', 'three_level_drilldown': 'PASS',
             'rapid_selection_note_literal_files_detach': 'PASS', 'resize_card_history_details_identity': 'PASS', 'reader_contexts_after_close': 0,
             'gui_opener': 'stubbed, no Finder check'}

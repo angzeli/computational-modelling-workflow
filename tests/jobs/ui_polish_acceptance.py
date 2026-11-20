@@ -22,6 +22,7 @@ from cmw.jobs.progress import resolve_context
 from cmw.jobs.store import Store
 from cmw.progress.models import SourceDescriptor
 from cmw.progress.service import ObservationService
+from tests.jobs.progress_acceptance import assert_closed_and_drained
 from tests.periodic.vasp.result_fixtures import native_texts, structure_text
 from tests.progress.orca_fixtures import cycle, header
 
@@ -305,7 +306,7 @@ async def console_cases(store, cases, *, renders=None, scenarios=SCENARIOS, size
                 await controls(app, pilot, selected, opener, projection)
                 report['controls'].append(scenario)
                 await pilot.press('q')
-        assert service._closed and not service._contexts and service._inflight == 0
+        await assert_closed_and_drained(service)
     return report
 
 
