@@ -638,7 +638,7 @@ switch its profiles, collect live restart hashes, or adopt its worker.
 | 2 ([#65](https://github.com/angzeli/computational-modelling-workflow/issues/65); 2a classifier in `scf_classifier.py`; 2b publisher in `manifest_state.py`; 2c hasher in `manifest_hashing.py`) | Add the executing-node state publisher and bounded classifier, synthetic plus authorized native parser fixtures, stable asynchronous output hashing. Reuse supervisor completion; never make SCF parsing a completion gate or signal policy. Existing workers receive no new writer. |
 | 3 ([#69](https://github.com/angzeli/computational-modelling-workflow/issues/69); 3a annotations in `manifest_annotations.py`; 3b check in `manifest_check.py`, [#71](https://github.com/angzeli/computational-modelling-workflow/issues/71); 3c list in `manifest_list.py`, [#74](https://github.com/angzeli/computational-modelling-workflow/issues/74)) | Add explicit manifest forms to annotate/query/check, enforce owner writes via the allocation channel, project-receipt verification and append-only events. Add the agent rule forbidding direct manifest edits, with schema-test fixtures explicitly distinguished. Existing commands keep their behavior. |
 | 4 ([#76](https://github.com/angzeli/computational-modelling-workflow/issues/76); 4a queue bindings and qualified-ID resolution in `manifest_legacy.py`; 4b dry-run report and 4c reviewed apply in `manifest_backfill.py`) | Implement reviewed dry-run/apply backfill; do not automatically run it on `example-project`. A separate authorized window must establish closure, stable evidence, safe destinations and parent identities. Report unresolved jobs/nulls; leave active runs untouched. |
-| 5 (deferred) | Views are not planned for implementation under the accepted scope; revisit only on a separate explicit request. No view directory or symlink is created by earlier phases. |
+| 5 (by-system views in `manifest_views.py`) | On the owner's explicit request, views are limited to `views/system/<system>/<ID>` symlinks for verified jobs, regenerated only by `cmw jobs views`; disposable, never read back or authoritative. Other groupings are not planned. No earlier phase creates a view. |
 
 For later deployment, first qualify source/synthetic changes in an isolated
 test environment. During a separately authorized maintenance window, establish
@@ -666,7 +666,7 @@ output hashing, nullable unresolved status, one append-only project integrity
 file, uniform sidecars and owner-routed additive annotations are accepted.
 Terminated-only applies to legacy backfill; new jobs create metadata before
 launch and update it atomically during execution, confined to `.cmw-manifest/`.
-Ownership transfer, manual adoption and views are deferred. Restart transport
+Ownership transfer and manual adoption are deferred; views are limited to Phase 5's by-system links. Restart transport
 belongs to a separate multi-host requirement, not an extension of #41.
 
 Later setup still needs the actual enrolled owner/node UUIDs, a complete all-node
