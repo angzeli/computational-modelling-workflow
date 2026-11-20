@@ -7,10 +7,19 @@ from cmw.jobs.store import JobsError
 from .protocol import MAX_FRAME, PROTOCOL, NodeError, decode, encode, validate_request
 
 
+def default_backend(config_root, queue):
+    """The enrolled node kind selects its backend; a PBS node never opens a Store."""
+    from .identity import load_node
+    if load_node(config_root).get('kind') == 'pbs':
+        from .scheduler import SchedulerBackend
+        return SchedulerBackend(config_root, queue, defer_check=True)
+    from .backend import LocalBackend
+    return LocalBackend(config_root, queue, defer_check=True)
+
+
 def serve(config_root, queue, *, input_stream=None, output_stream=None, backend_factory=None):
     if backend_factory is None:
-        from .backend import LocalBackend
-        backend_factory = lambda root, alias: LocalBackend(root, alias, defer_check=True)
+        backend_factory = default_backend
     incoming = sys.stdin.buffer if input_stream is None else input_stream
     outgoing = sys.stdout.buffer if output_stream is None else output_stream
     backend = None

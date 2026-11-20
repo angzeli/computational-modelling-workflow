@@ -39,6 +39,45 @@ cmw jobs --nodes-config FRONTEND_CONFIG --node mini --queue research progress J1
 cmw jobs --nodes-config FRONTEND_CONFIG --node mini --queue research files J1.1 --json
 ```
 
+## Read-only PBS-backed nodes
+
+A cluster login node whose jobs PBS Pro schedules can be enrolled as a read-only
+`pbs` node (issue #81 Phase 1a). On that node,
+`cmw nodes enroll --config NODE_CONFIG --spec PBS_SPEC.json` takes:
+
+```json
+{"kind": "pbs", "queue": "main",
+ "scheduler": {"qselect": "/opt/pbs/bin/qselect", "qstat": "/opt/pbs/bin/qstat"}}
+```
+
+Enrollment records the node, its Linux machine-id, the pinned CMW runtime, one
+queue identity, and each PBS client's path and resolved executable. It creates no
+queue database, storage enrollment or runner profile. Readiness refuses a moved
+host, a changed runtime, or a PBS client that now resolves to another executable.
+It never reports CMW execution as available on the node.
+
+The endpoint serves the enrolled kind. A `pbs` endpoint answers only
+`capabilities` and `status`. Every other operation is `UNSUPPORTED_OPERATION`, and
+`mutations_supported` is false. `status` runs `qselect -x -u USER`, then
+`qstat -x -f -F json` for those IDs. Each call goes through the shell helper
+`pbs_client.sh`, which launches only an enrolled `qselect` or `qstat` with no
+inherited stdin, stops it one byte past a 16 MiB stdout bound and cuts stderr at
+4 KiB. Python validates the job IDs between the calls, parses the JSON and stops
+the helper's process group after 30 s. The reply has no managed jobs;
+`state.pbs` lists the endpoint user's current and history-retained PBS jobs
+verbatim, newest first: ID, name, `job_state` and substate, queue, requested and
+used resources, exit status, comment and scheduler times. `offset` and `limit`
+(at most 1000) select a page, and a page is cut short to fit one protocol frame;
+`next_offset` names where the next page starts. Jobs owned by another user are
+skipped. A job that leaves PBS history between the two calls is counted as
+missing, not inferred. Malformed scheduler output fails the call with
+`SCHEDULER_UNAVAILABLE`.
+
+The frontend session transport and the portal lane for these nodes are Phase 1b
+and are not implemented yet. Nothing here submits, signals or adopts a PBS job.
+The [scheduler-nodes design](architecture/scheduler-nodes.md) records the
+decisions and the probed cluster facts they rest on.
+
 ## Protocol and observation boundaries
 
 OpenSSH uses no PTY, batch authentication, strict host-key checking, no agent
