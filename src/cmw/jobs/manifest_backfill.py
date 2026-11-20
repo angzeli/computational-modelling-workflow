@@ -1,4 +1,4 @@
-"""Dry-run backfill evidence for terminated legacy jobs (#41 Phase 4b, #76).
+"""Backfill of terminated legacy jobs: dry-run evidence and reviewed apply (#41 Phases 4b-4c, #76).
 
 A reviewed inventory names each legacy job by its queue-qualified ID, the
 existing job wrapper that would receive ``.cmw-manifest/`` and the labels it was
@@ -9,25 +9,40 @@ with the documents and ``legacy_alias`` receipts a reviewed ``--apply``
 exit code and launch; the runner's verified staging record for input and
 restart digests; the bounded SCF classifier for ``scf_result``; a parent only
 from a unique restart-digest match against the inventory's own terminated jobs.
-Active or unresolved jobs are deferred. Nothing is written.
+Active or unresolved jobs are deferred. The dry-run writes nothing.
+
+``apply`` takes the reviewed dry-run report, plans again from the same sources and
+refuses everything unless each reviewed ready job is still ready with identical
+documents. It then publishes only new ``.cmw-manifest/`` files (never replacing one),
+anchors each job.json with a ``manifest`` receipt (binding null) and appends one
+``legacy_alias`` receipt per label. Request UUIDs are derived from the project,
+reference and label, so a retry after an interruption resumes and a completed
+apply is a no-op. Existing files, paths, permissions and queue records are not touched.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import stat
+from uuid import UUID, uuid5
 
 from .manifest_hashing import stable_digest
-from .manifest_legacy import QUALIFIED, resolve
+from .manifest_legacy import QUALIFIED, order_key, resolve
 from .manifest_state import RESTART_ROLES, STATUS, TERMINAL, _scf, _utc
 from .manifests import (ENVIRONMENT_PREFIXES, MANIFEST_DIR, SCHEMA_VERSION, VASP_INPUTS, ManifestError,
-                        _require_owner, load_project, read_journal)
+                        _publish_new, _require_owner, append_journal, canonical, load_project, read_journal)
 
 ENGINES = {'VASP': 'VASP', 'ORCA': 'ORCA', 'MULTIWFN': 'Multiwfn', 'COMMAND': 'Command'}
 LABEL = re.compile(r'[^\x00-\x1f\x7f]{1,128}')
 NODE_MAP_DEFERRED = 'the node-token to node-UUID map is deferred (#76); backfilled node fields stay null'
+# Fixed namespace for request UUIDs derived from (project, reference[, label]): retries are idempotent.
+REQUESTS = UUID('6d1f6c2e-3c1b-5f0e-9a52-4b8e7f0c2d19')
+# Published sidecar files and modes. job.json and state.json are frozen evidence;
+# annotations.json is the future append target for human judgement.
+SIDECAR = (('job.json', 'job', 0o444), ('state.json', 'state', 0o444), ('annotations.json', 'annotations', 0o644))
 
 
 def load_inventory(path, project_key):
@@ -70,8 +85,12 @@ def _field(value, source=None, detail=None, *, conflict=False):
     return {'state': state, 'value': None if conflict else value, 'source': source, 'detail': detail}
 
 
-def _destination(root, wrapper, job, output):
-    """The new sidecar path: only the job's working directory or the directory holding its run output."""
+def _destination(root, wrapper, job, output, resume=False):
+    """The new sidecar path: only the job's working directory or the directory holding its run output.
+
+    ``resume`` admits a real sidecar directory an interrupted apply already created; apply then
+    verifies every file in it byte for byte.
+    """
     path = Path(wrapper)
     try:
         info, resolved = path.lstat(), path.resolve(strict=True)
@@ -87,8 +106,10 @@ def _destination(root, wrapper, job, output):
         return _field(None, 'inventory', "wrapper is neither the job's recorded working directory nor the "
                       'directory holding its runner output', conflict=True)
     if os.path.lexists(path / MANIFEST_DIR):
-        return _field(None, 'inventory', f'{path / MANIFEST_DIR} already exists; backfill never overwrites',
-                      conflict=True)
+        sidecar = path / MANIFEST_DIR
+        if resume and stat.S_ISDIR(sidecar.lstat().st_mode) and sidecar.resolve() == sidecar:
+            return _field(str(sidecar), 'inventory', 'created by an earlier apply of this report')
+        return _field(None, 'inventory', f'{sidecar} already exists; backfill never overwrites', conflict=True)
     return _field(str(path / MANIFEST_DIR), 'inventory')
 
 
@@ -215,7 +236,7 @@ def _state_fields(project, reference, job, engine, staged, issue):
     return fields, document, set(scf['restart_outputs'])
 
 
-def _candidate(root, project, entry, manifested, volume_uuid_of):
+def _candidate(root, project, entry, manifested, volume_uuid_of, resume):
     reference = entry['reference']
     row = {'reference': reference, 'state': 'deferred', 'reasons': [], 'wrapper': entry['wrapper'],
            'aliases': [{'label': label, 'target': reference} for label in entry['labels']],
@@ -235,9 +256,9 @@ def _candidate(root, project, entry, manifested, volume_uuid_of):
     staged, issue = _staged(job, engine, route)
     job_fields, job_document, restart = _job_fields(project, reference, job, engine, route, staged, issue)
     state_fields, state_document, outputs = _state_fields(project, reference, job, engine, staged, issue)
-    row['fields'] = {'destination': _destination(root, entry['wrapper'], job, output),
+    row['fields'] = {'destination': _destination(root, entry['wrapper'], job, output, resume),
                      **job_fields, **state_fields}
-    if reference in manifested:
+    if reference in manifested and not resume:  # apply verifies its own receipts instead.
         row['fields']['manifest'] = _field(None, 'integrity journal', 'a manifest receipt already exists for '
                                            f'{reference}', conflict=True)
     row['documents'] = {'job': job_document, 'state': state_document,
@@ -309,20 +330,15 @@ def _infer_parents(candidates):
         other['row']['documents']['state']['restart_outputs'][role] = digest
 
 
-def _order(reference):
-    match = QUALIFIED.fullmatch(reference)
-    return int(match[3]), int(match[4]), match[1], match[2]
-
-
-def plan(store, root, inventory, *, volume_uuid_of=None):
+def plan(store, root, inventory, *, volume_uuid_of=None, resume=False):
     """The dry-run backfill report for a reviewed inventory file; writes nothing."""
     root, project = load_project(root)
     _require_owner(store, project)
     entries = load_inventory(inventory, project['project_key'])
     manifested = {record['payload']['id'] for record in read_journal(root) if record['event'] == 'manifest'}
     rows, candidates = [], []
-    for entry in sorted(entries, key=lambda item: _order(item['reference'])):
-        row, candidate = _candidate(root, project, entry, manifested, volume_uuid_of)
+    for entry in sorted(entries, key=lambda item: order_key(item['reference'])):
+        row, candidate = _candidate(root, project, entry, manifested, volume_uuid_of, resume)
         rows.append(row)
         if candidate is not None:
             candidates.append(candidate)
@@ -338,6 +354,148 @@ def plan(store, root, inventory, *, volume_uuid_of=None):
     totals = {state: sum(row['state'] == state for row in rows) for state in ('ready', 'conflict', 'deferred')}
     return {'project': project['project_key'], 'root': str(root), 'mode': 'dry-run', 'written': False,
             'totals': totals, 'jobs': rows}
+
+
+def request_for(project_key, reference, label=None):
+    """The stable request UUID of a job's manifest receipt, or of one of its alias receipts."""
+    name = f'{project_key}\0{reference}\0' + ('manifest' if label is None else f'alias\0{label}')
+    return uuid5(REQUESTS, name).hex
+
+
+def _reviewed(path, project_key):
+    try:
+        report = json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise ManifestError(f'Reviewed backfill report is unreadable: {exc}') from exc
+    if (not isinstance(report, dict) or report.get('mode') != 'dry-run' or report.get('project') != project_key
+            or not isinstance(report.get('jobs'), list)
+            or not all(isinstance(row, dict) and isinstance(row.get('reference'), str) for row in report['jobs'])):
+        raise ManifestError('The reviewed report must be the --json output of a backfill dry-run of this project')
+    return report
+
+
+def _changed(reviewed, fresh):
+    """Why a reviewed ready job cannot be applied now, or None."""
+    if fresh['state'] != 'ready':
+        return f'it is now {fresh["state"]} ({"; ".join(fresh["reasons"])})'
+    destination = (reviewed.get('fields') or {}).get('destination') or {}
+    if (reviewed.get('documents') != fresh['documents'] or reviewed.get('aliases') != fresh['aliases']
+            or destination.get('value') != fresh['fields']['destination']['value']):
+        return 'its sources or documents changed since the reviewed dry-run'
+    return None
+
+
+def _expected(row):
+    return {name: canonical(row['documents'][document]) for name, document, _ in SIDECAR}
+
+
+def _existing_issue(path, raw, mode):
+    """Why an existing sidecar file cannot stand for its reviewed publication, or None."""
+    try:
+        info = path.lstat()
+        same = stat.S_ISREG(info.st_mode) and path.read_bytes() == raw
+    except OSError:
+        return f'{path} is unreadable'
+    if not same:
+        return f'{path} differs from the reviewed document'
+    if not mode & 0o222 and info.st_mode & 0o222:  # Frozen files must still be read-only.
+        return f'{path} is writable (mode {stat.S_IMODE(info.st_mode):o}); it is never anchored that way'
+    return None
+
+
+def _published_issue(records, project_key, row):
+    """Why an earlier receipt or sidecar file conflicts with publishing this reviewed job, or None."""
+    reference, expected = row['reference'], _expected(row)
+    payload = {'id': reference, 'job_sha256': hashlib.sha256(expected['job.json']).hexdigest(), 'binding': None}
+    for record in records:
+        if record['event'] == 'manifest' and record['payload'].get('id') == reference and (
+                record['request_uuid'] != request_for(project_key, reference) or record['payload'] != payload):
+            return f'journal record {record["sequence"]} already anchors a different job.json'
+    sidecar = Path(row['fields']['destination']['value'])
+    if not os.path.lexists(sidecar):
+        return None
+    modes = {name: mode for name, _, mode in SIDECAR}
+    for entry in sidecar.iterdir():
+        if entry.name in expected:
+            issue = _existing_issue(entry, expected[entry.name], modes[entry.name])
+            if issue:
+                return issue
+        elif not any(entry.name.startswith(f'.{name}.') for name in expected):  # An interrupted temp file is kept.
+            return f'{sidecar} holds {entry.name}, which no apply of this report writes'
+    return None
+
+
+def _publish(root, project_key, row):
+    reference, expected = row['reference'], _expected(row)
+    sidecar = Path(row['fields']['destination']['value'])
+    try:
+        sidecar.mkdir()
+    except FileExistsError:
+        pass
+    if not stat.S_ISDIR(sidecar.lstat().st_mode) or sidecar.resolve(strict=True) != sidecar:
+        raise ManifestError(f'{sidecar} must be a real directory')
+    published = []
+    for name, _, mode in SIDECAR:
+        path = sidecar / name
+        if os.path.lexists(path):
+            issue = _existing_issue(path, expected[name], mode)
+            if issue:
+                raise ManifestError(f'{issue}; it changed during apply and is never replaced')
+            continue
+        _publish_new(path, expected[name], mode)
+        published.append(name)
+
+    def admit(records):
+        if any(record['event'] == 'manifest' and record['payload'].get('id') == reference for record in records):
+            raise ManifestError(f'{reference} is already anchored by another manifest receipt')
+
+    payload = {'id': reference, 'job_sha256': hashlib.sha256(expected['job.json']).hexdigest(), 'binding': None}
+    manifest = append_journal(root, project_key, 'manifest', request_for(project_key, reference), payload, admit)
+    aliases = [append_journal(root, project_key, 'legacy_alias', request_for(project_key, reference, alias['label']),
+                              alias)['sequence'] for alias in row['aliases']]
+    return {'reference': reference, 'destination': str(sidecar), 'published': published,
+            'manifest_sequence': manifest['sequence'], 'alias_sequences': aliases}
+
+
+def apply(store, root, inventory, report, *, volume_uuid_of=None):
+    """Publish the ready jobs of a reviewed dry-run report after planning them again from their sources.
+
+    Every check happens before the first write: a changed source, a different inventory, a
+    foreign receipt or a differing sidecar file refuses the whole apply.
+    """
+    root, project = load_project(root)
+    key = project['project_key']
+    reviewed = _reviewed(report, key)
+    fresh = plan(store, root, inventory, volume_uuid_of=volume_uuid_of, resume=True)
+    if [row['reference'] for row in reviewed['jobs']] != [row['reference'] for row in fresh['jobs']]:
+        raise ManifestError('The reviewed report covers different jobs than this inventory; nothing was written')
+    records = read_journal(root)
+    selected, refusals = [], []
+    for old, new in zip(reviewed['jobs'], fresh['jobs']):
+        if old.get('state') != 'ready':
+            continue
+        reason = _changed(old, new) or _published_issue(records, key, new)
+        if reason:
+            refusals.append(f'{new["reference"]}: {reason}')
+        else:
+            selected.append(new)
+    if refusals:
+        raise ManifestError('Nothing was written; review a new dry-run. ' + ' | '.join(refusals))
+    applied = [_publish(root, key, row) for row in selected]
+    skipped = [{'reference': row['reference'], 'state': row.get('state')} for row in reviewed['jobs']
+               if row.get('state') != 'ready']
+    return {'project': key, 'root': str(root), 'mode': 'apply', 'applied': applied, 'skipped': skipped}
+
+
+def apply_text(result):
+    lines = [f'{result["project"]} backfill apply: {len(result["applied"])} reviewed job(s) published, '
+             f'{len(result["skipped"])} not ready in the reviewed report and skipped']
+    for item in result['applied']:
+        files = ', '.join(item['published']) or 'no new files (already published)'
+        lines.append(f'{item["reference"]}  {item["destination"]}  ({files}; manifest receipt '
+                     f'{item["manifest_sequence"]}, {len(item["alias_sequences"])} alias receipt(s))')
+    lines.extend(f'{item["reference"]}  skipped ({item["state"]})' for item in result['skipped'])
+    return '\n'.join(lines)
 
 
 def summary_text(report):

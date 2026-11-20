@@ -8,16 +8,23 @@ still present. It never writes, locks or repairs project data (SQLite may
 leave its own transient -wal/-shm files beside the read-only ledger). A
 read-only bit is not tamper proof and this detects accidental edits relative
 to trusted owner records, not a malicious actor controlling both.
+
+Backfilled legacy jobs (#76) are found beside their bound queue record (its
+working directory or run-output directory), never by searching. Their job.json
+is anchored like a native one; their frozen state.json has no binding or writer
+and must stay read-only. A queue that cannot be resolved here leaves the job
+unverifiable.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+from pathlib import Path
 import sqlite3
 import stat
 
-from .manifest_legacy import VOLUME_UUID
+from .manifest_legacy import QUALIFIED, VOLUME_UUID, order_key, resolve
 from .manifests import (KEY, LEDGER, MANIFEST_DIR, NATIVE_ID, NODE_UUID, SCHEMA_VERSION, ManifestError,
                         journal_prefix, load_project)
 
@@ -116,13 +123,21 @@ def _malformed_binding(payload):
 def _malformed(record):
     """Why a sequence-valid journal record cannot be indexed as a receipt, or None."""
     payload = record.get('payload')
-    if record.get('event') not in ('manifest', 'registration', 'queue_binding') or not isinstance(payload, dict):
+    if record.get('event') not in ('manifest', 'registration', 'queue_binding', 'legacy_alias') or \
+            not isinstance(payload, dict):
         return 'has an unknown event or a non-object payload'
     if record['event'] == 'queue_binding':
         return _malformed_binding(payload)
-    digest = payload.get('job_sha256')
-    if not isinstance(payload.get('id'), str) or not NATIVE_ID.fullmatch(payload['id']) or \
-            not isinstance(digest, str) or len(digest) != 64:
+    if record['event'] == 'legacy_alias':
+        if (set(payload) != {'label', 'target'} or not isinstance(payload['label'], str) or not payload['label']
+                or not isinstance(payload['target'], str) or not QUALIFIED.fullmatch(payload['target'])):
+            return 'is a malformed legacy_alias receipt'
+        return None
+    digest, job_id = payload.get('job_sha256'), payload.get('id')
+    # Only backfilled legacy jobs carry a queue-qualified ID, and they are never registered.
+    known = isinstance(job_id, str) and (NATIVE_ID.fullmatch(job_id) or record['event'] == 'manifest'
+                                         and QUALIFIED.fullmatch(job_id))
+    if not known or not isinstance(digest, str) or len(digest) != 64:
         return 'has a malformed job ID or job.json digest'
     binding = payload.get('binding')
     if record['event'] == 'manifest' and binding is not None:
@@ -134,8 +149,8 @@ def _malformed(record):
     return None
 
 
-def _identity(job, document, name, project_key):
-    expected = {'schema_version': SCHEMA_VERSION, 'id': job.id, 'project': project_key, 'provenance': 'native'}
+def _identity(job, document, name, project_key, provenance='native'):
+    expected = {'schema_version': SCHEMA_VERSION, 'id': job.id, 'project': project_key, 'provenance': provenance}
     actual = {key: document.get(key) for key in expected} if isinstance(document, dict) else None
     if actual != expected:
         job.error(f'{name}_identity', f'{name} identity {actual} differs from {expected}')
@@ -143,7 +158,7 @@ def _identity(job, document, name, project_key):
     return True
 
 
-def _job_json(job, sidecar, anchors, project):
+def _job_json(job, sidecar, anchors, project, provenance='native'):
     path = sidecar / 'job.json'
     if len(anchors) > 1:
         job.error('duplicate_manifest', f'{len(anchors)} manifest receipts anchor {job.id}')
@@ -170,8 +185,9 @@ def _job_json(job, sidecar, anchors, project):
         return None
     job.details['job_sha256'] = digest
     document = json.loads(raw)
-    if _identity(job, document, 'job.json', project['project_key']) and \
-            document.get('id_owner_node') != project['owner_node_id']:
+    owner = project['owner_node_id'] if provenance == 'native' else None  # Legacy node map deferred (#76).
+    if _identity(job, document, 'job.json', project['project_key'], provenance) and \
+            document.get('id_owner_node') != owner:
         job.error('job_json_owner', 'job.json names a different ID owner node')
     return document
 
@@ -219,13 +235,13 @@ def _state(job, sidecar, binding, project):
     return state
 
 
-def _annotations(job, sidecar, receipts, project):
+def _annotations(job, sidecar, receipts, project, provenance='native'):
     from .manifest_annotations import _load, current
     path = sidecar / 'annotations.json'
     if not os.path.lexists(path) and not receipts:
         return
     try:
-        document = _load(path, project['project_key'], job.id)
+        document = _load(path, project['project_key'], job.id, provenance)
     except ManifestError as exc:
         job.error('annotations_inconsistent', str(exc))
         return
@@ -269,15 +285,19 @@ def _inputs(job, directory, document, rehash):
         job.details['restart_inputs'] = restart
 
 
-def _lineage(job, root, document, project):
+def _lineage(job, root, document, project, locate=None):
     parent = document.get('parent')
     if parent is None:
         return
     lineage = {'parent': parent, 'roles': {}}
     job.details['lineage'] = lineage
-    state = None
+    state, path = None, None
     if isinstance(parent, str) and NATIVE_ID.fullmatch(parent):
         path = root / 'jobs' / parent / MANIFEST_DIR / 'state.json'
+    elif locate is not None and isinstance(parent, str) and QUALIFIED.fullmatch(parent):
+        sidecar = locate(parent)[0]
+        path = sidecar / 'state.json' if sidecar is not None else None
+    if path is not None:
         try:
             state = json.loads(path.read_bytes())
         except (OSError, ValueError):
@@ -292,6 +312,88 @@ def _lineage(job, root, document, project):
         else:
             lineage['roles'][role] = 'differs'
             job.error('parent_output_differs', f'{role} copy digest differs from parent {parent} output digest')
+
+
+def _backfilled_state(job, sidecar, project):
+    path = sidecar / 'state.json'
+    state = _load_json(job, path, 'state_unreadable')
+    if state is None:
+        if not any(item['code'] == 'state_unreadable' for item in job.findings):
+            job.error('state_missing', 'The backfilled state.json is missing')
+        return
+    if _identity(job, state, 'state.json', project['project_key'], 'backfilled'):
+        if state.get('binding') is not None or state.get('writer_node') is not None:
+            job.error('state_binding', 'Backfilled state.json names a binding or writer; legacy node identities '
+                                       'are not mapped')
+        mode = stat.S_IMODE(path.lstat().st_mode)
+        if mode & 0o222:
+            job.error('state_writable', f'Backfilled state.json is writable (mode {mode:o}); it is frozen evidence')
+        job.details.update(state=state.get('status'), scf_result=state.get('scf_result'),
+                           hashes_pending=state.get('hashes_pending'))
+
+
+def _sha256_or_none(path):
+    try:
+        return _sha256(path) if stat.S_ISREG(path.lstat().st_mode) else None
+    except OSError:
+        return None
+
+
+def _named(path):
+    try:
+        document = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        return None
+    return document.get('id') if isinstance(document, dict) else None
+
+
+def _locator(root, by_event, volume_uuid_of):
+    """Find a backfilled job's sidecar beside its bound queue record: (sidecar, code, message)."""
+    from .manifest_backfill import _route
+    cache = {}
+
+    def locate(job_id):
+        if job_id in cache:
+            return cache[job_id]
+        try:
+            record = resolve(root, job_id, volume_uuid_of=volume_uuid_of)['job']
+        except ManifestError as exc:
+            cache[job_id] = (None, 'legacy_unresolved', f'Its legacy queue record cannot be verified here: {exc}')
+            return cache[job_id]
+        route = _route(record) if str(record.get('engine')).upper() == 'VASP' else None
+        wrappers = dict.fromkeys([Path(record['cwd'])] + ([route[2].parent] if route else []))
+        sidecars = [wrapper / MANIFEST_DIR for wrapper in wrappers
+                    if os.path.lexists(wrapper / MANIFEST_DIR / 'job.json')]
+        digests = {anchor['payload']['job_sha256'] for anchor in by_event.get(('manifest', job_id), [])}
+        chosen = ([sidecar for sidecar in sidecars if _sha256_or_none(sidecar / 'job.json') in digests]
+                  or [sidecar for sidecar in sidecars if _named(sidecar / 'job.json') == job_id])
+        if len(chosen) == 1:
+            cache[job_id] = (chosen[0], None, None)
+        elif not chosen:
+            cache[job_id] = (None, 'job_json_missing', 'The manifest receipt exists but no sidecar beside its queue '
+                                                       'record (working or run-output directory) holds this job')
+        else:
+            cache[job_id] = (None, 'sidecar_ambiguous', f'{len(chosen)} sidecars beside its queue record claim it')
+        return cache[job_id]
+    return locate
+
+
+def _backfilled(job, root, project, anchors, receipts, labels, locate):
+    if not anchors:
+        job.error('not_backfilled', 'No manifest receipt anchors this legacy ID in this project')
+        return
+    sidecar, code, message = locate(job.id)
+    if sidecar is None:
+        (job.notice if code == 'legacy_unresolved' else job.error)(code, message)
+        return
+    document = _job_json(job, sidecar, anchors, project, 'backfilled')
+    if document is None:
+        return
+    job.details.update(engine=document.get('engine'), parent=document.get('parent'), labels=labels,
+                       sidecar=str(sidecar))
+    _backfilled_state(job, sidecar, project)
+    _annotations(job, sidecar, receipts, project, 'backfilled')
+    _lineage(job, root, document, project, locate)
 
 
 def _queue_bindings(records):
@@ -312,8 +414,8 @@ def _queue_bindings(records):
     return findings
 
 
-def check(store, root, job_ids=(), *, rehash=False):
-    """Verify each requested native job (all known ones by default) without writing anything."""
+def check(store, root, job_ids=(), *, rehash=False, volume_uuid_of=None):
+    """Verify each requested native or backfilled job (all known ones by default) without writing anything."""
     root, project = load_project(root)
     key = project['project_key']
     meta, reserved, receipts = _ledger_rows(root)
@@ -339,23 +441,36 @@ def check(store, root, job_ids=(), *, rehash=False):
             project_findings.append({'level': 'error', 'code': 'journal_identity',
                                      'message': f'Journal record {record["sequence"]} names another project or schema'})
     project_findings += _queue_bindings(records)
-    by_event = {}
+    by_event, labels = {}, {}
     for record in records:
-        if record['event'] != 'queue_binding':
+        if record['event'] == 'legacy_alias':
+            labels.setdefault(record['payload']['target'], []).append(record['payload']['label'])
+        elif record['event'] != 'queue_binding':
             by_event.setdefault((record['event'], record['payload']['id']), []).append(record)
+    for target in sorted(set(labels) - {job_id for event, job_id in by_event if event == 'manifest'}, key=order_key):
+        project_findings.append({'level': 'notice', 'code': 'alias_unanchored',
+                                 'message': f'Legacy alias receipts name {target}, which no manifest receipt anchors'})
+    locate = _locator(root, by_event, volume_uuid_of)
     jobs = root / 'jobs'
     present = {path.name for path in jobs.iterdir() if NATIVE_ID.fullmatch(path.name)} if jobs.is_dir() else set()
     known = present | {f'J{number}' for number in reserved} | {job_id for _, job_id in by_event if job_id}
     if job_ids:
         selected = list(dict.fromkeys(job_ids))
-        invalid = [job_id for job_id in selected if not NATIVE_ID.fullmatch(str(job_id))]
+        invalid = [job_id for job_id in selected
+                   if not (NATIVE_ID.fullmatch(str(job_id)) or QUALIFIED.fullmatch(str(job_id)))]
         if invalid:
-            raise ManifestError(f'Manifest check takes native project IDs (J<n>): {", ".join(map(str, invalid))}')
+            raise ManifestError('Manifest check takes native project IDs (J<n>) or backfilled queue-qualified '
+                                f'IDs (<node>/<queue>:J<n>.<m>): {", ".join(map(str, invalid))}')
     else:
-        selected = sorted(known, key=lambda job_id: int(job_id[1:]))
+        selected = sorted(known, key=order_key)
     results = []
     for job_id in selected:
         job = _Job(job_id)
+        if QUALIFIED.fullmatch(job_id):
+            _backfilled(job, root, project, by_event.get(('manifest', job_id), []), receipts.get(job_id, []),
+                        sorted(labels.get(job_id, [])), locate)
+            results.append(job.result(False))
+            continue
         number = int(job_id[1:])
         directory = jobs / job_id
         if number not in reserved:

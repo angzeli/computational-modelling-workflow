@@ -1,4 +1,4 @@
-"""Owner-side listing of native manifest jobs (#41 Phase 3c, #74).
+"""Owner-side listing of native and backfilled manifest jobs (#41 Phase 3c, #74; backfilled #76).
 
 Rows come from one read-only pass of the Phase 3b checker, so each row carries
 its integrity status and shows fields only from sources the checker accepted:
@@ -11,6 +11,7 @@ from __future__ import annotations
 from .catalogue_models import text_value
 from .manifest_annotations import OUTCOMES
 from .manifest_check import check
+from .manifest_legacy import QUALIFIED, order_key
 from .manifest_state import STATUS
 from .manifests import NATIVE_ID, ManifestError
 
@@ -30,8 +31,9 @@ def _filters(filters):
     for key, values in allowed.items():
         if key in chosen and chosen[key] not in values:
             raise ManifestError(f'{key} must be one of {", ".join(values)}')
-    if 'parent' in chosen and not (isinstance(chosen['parent'], str) and NATIVE_ID.fullmatch(chosen['parent'])):
-        raise ManifestError('parent must be a native project ID (J<n>)')
+    if 'parent' in chosen and not (isinstance(chosen['parent'], str) and (
+            NATIVE_ID.fullmatch(chosen['parent']) or QUALIFIED.fullmatch(chosen['parent']))):
+        raise ManifestError('parent must be a native project ID (J<n>) or a queue-qualified legacy ID')
     if 'system' in chosen:
         try:
             chosen['system'] = text_value(chosen['system'], 'System', empty=False)
@@ -53,11 +55,11 @@ def _row(job):
             'errors': sum(item['level'] == 'error' for item in job['findings'])}
 
 
-def list_jobs(store, root, **filters):
-    """Known native jobs in numeric ID order, each with its integrity status; exact AND filters."""
+def list_jobs(store, root, *, volume_uuid_of=None, **filters):
+    """Known native and backfilled jobs in numeric ID order, each with its integrity status; exact AND filters."""
     chosen = _filters(filters)
-    result = check(store, root)
-    rows = sorted((_row(job) for job in result['jobs']), key=lambda row: int(row['id'][1:]))
+    result = check(store, root, volume_uuid_of=volume_uuid_of)
+    rows = sorted((_row(job) for job in result['jobs']), key=lambda row: order_key(row['id']))
     records = [row for row in rows if all(row[key] == value for key, value in chosen.items())]
     return {'project': result['project'], 'root': result['root'], 'integrity': result['status'],
             'errors': result['errors'], 'findings': result['findings'], 'filters': chosen,

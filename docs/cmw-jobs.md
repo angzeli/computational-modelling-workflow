@@ -696,13 +696,23 @@ cmw jobs check --manifest-project ROOT J28 --rehash --json
   their state lives on the executing node.
 - `annotations.json` must equal its ledger receipts; committed but unpublished receipts
   are a notice (the next append publishes them).
+- Backfilled legacy jobs (Phase 4c) are checked under their queue-qualified IDs
+  (`check --manifest-project ROOT node-a/project-queue:J27.1`):
+  - The sidecar is found beside the job's bound queue record, in its working
+    directory or the directory holding its run output. There is no search.
+  - `job.json` is anchored like a native one, with `provenance: backfilled` and a null
+    ID owner.
+  - `state.json` must be read-only and have no binding or writer.
+  - Restart lineage is compared with the backfilled parent's restart outputs.
+  - A queue that cannot be resolved here makes the job `unverifiable` with a notice.
+  - Malformed `legacy_alias` receipts count as journal damage.
 - Exit 0 when verified, 2 with any error finding. `check --spec` is unchanged. Full JSON
   Schema validation is not run here (`jsonschema` is a test extra and `schemas/` is not
   packaged); writer output stays schema-tested in CI. SQLite may leave its transient
   `-wal`/`-shm` files beside the ledger.
 
-**Listing (Phase 3c).** On the project owner, list native jobs in numeric ID order
-(J2 before J10), read-only and without any cache:
+**Listing (Phase 3c).** On the project owner, list native and backfilled jobs in numeric ID
+order (J2 before J10; `node-a/project-queue:J27.1` before J28), read-only and without any cache:
 
 ```bash
 cmw jobs ls --manifest-project ROOT
@@ -715,8 +725,8 @@ cmw jobs ls --manifest-project ROOT --status done --scf-result converged --paren
   shows fields only from accepted sources: an edited `job.json` or `annotations.json`
   contributes nothing to its row. Integrity failures stay listed; `check` explains them.
 - Filters are exact and combine with AND: `--system` and `--outcome` (manifest
-  annotations), `--status` and `--scf-result` (`state.json`), `--parent J<n>` (restart
-  parent in `job.json`). Remote jobs show `remote`: their status and SCF result live on
+  annotations), `--status` and `--scf-result` (`state.json`), `--parent J<n>` or a
+  queue-qualified legacy ID (restart parent in `job.json`). Remote jobs show `remote`: their status and SCF result live on
   the executing node and never match those filters.
 - Exit 0 whenever the project is readable, including with integrity errors. Plain `ls`
   needs `--manifest-project`; use `query` for the queue catalogue.
@@ -771,7 +781,7 @@ cmw jobs backfill --manifest-project ROOT --inventory FILE --json
 ```
 
 - It runs on the project owner and is read-only. It writes no sidecar, receipt,
-  queue record or file, and has no `--apply` yet (4c).
+  queue record or file.
 - Each job is `ready`, `conflict` or `deferred`. Exit 0 means every job is ready,
   1 means at least one is not, 2 is an error. A malformed or ambiguous inventory
   is refused whole.
@@ -802,10 +812,35 @@ cmw jobs backfill --manifest-project ROOT --inventory FILE --json
   - an existing `.cmw-manifest/`;
   - a job that already has a manifest receipt.
 
+**Reviewed backfill apply (Phase 4c).** Save the dry-run's `--json` report, review it,
+then apply exactly that report:
+
+```bash
+cmw jobs backfill --manifest-project ROOT --inventory FILE --json > report.json
+cmw jobs backfill --manifest-project ROOT --inventory FILE --apply --report report.json
+```
+
+- Apply plans again from the same sources and checks everything before the first
+  write. Nothing is written when:
+  - the inventory differs from the report's;
+  - a reviewed ready job is no longer ready, or its documents changed;
+  - another receipt already anchors it;
+  - its `.cmw-manifest/` holds any other file, a different one, or a frozen file
+    that has become writable.
+- For each reviewed ready job it publishes `.cmw-manifest/` files that never replace
+  an existing file: `job.json` and `state.json` read-only, and `annotations.json`
+  with no events. It then appends the job's `manifest` receipt (binding null) and one
+  `legacy_alias` receipt per label. Jobs not ready in the report are skipped.
+- Request UUIDs derive from the project, reference and label. A retry after an
+  interruption resumes, and a repeated apply is a no-op. Existing files, paths,
+  permissions and queue records are never changed.
+- Exit 0 when applied, 2 when refused. `check` and `ls` then cover the backfilled jobs.
+  Manifest `annotate` still takes native IDs only.
+
 Not yet: node-to-node allocation for a frontend that isn't the owner, legacy/cross-project parents for
-native jobs, backfill parents outside the inventory, other nodes' queues, short legacy references and relocation (`queue_locator`), and
-the backfill apply step (4c). The project file's `legacy_nodes`/`legacy_queues` maps stay empty: bindings
-live only in the journal.
+native jobs, backfill parents outside the inventory, annotations for backfilled jobs, other nodes' queues,
+short legacy references and relocation (`queue_locator`). The project file's
+`legacy_nodes`/`legacy_queues` maps stay empty: bindings live only in the journal.
 
 ## Status, resources and failure policy
 
