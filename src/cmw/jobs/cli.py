@@ -451,6 +451,16 @@ def register(subcommands):
     listing.add_argument("--parent", metavar="ID", help="jobs restarted from this native or backfilled parent")
     listing.add_argument("--json", action="store_true")
     listing.set_defaults(handler=handle)
+    views = operations.add_parser("views", help="regenerate disposable by-system symlink views of manifest jobs",
+        description="Rebuild <project>/views/system/<system>/<job ID> symlinks to each verified native or backfilled "
+                    "job whose manifest annotations name a system (#41 Phase 5), from one integrity-check pass on "
+                    "the project owner. Views are disposable and never authoritative; a rebuild replaces only a "
+                    "views/ this command generated. Exit 0 when written (or previewed), 2 on an error.")
+    views.add_argument("--manifest-project", type=Path, metavar="ROOT", required=True,
+                       help="the owned project whose views/ is regenerated")
+    views.add_argument("--dry-run", action="store_true", help="report the links without writing views/")
+    views.add_argument("--json", action="store_true")
+    views.set_defaults(handler=handle)
     backfill = operations.add_parser("backfill", help="manifests for terminated legacy jobs: dry-run report, "
                                      "then a reviewed --apply",
         description="Report, for each queue-qualified legacy job in a reviewed inventory (#41 Phase 4b), every "
@@ -845,6 +855,18 @@ def _list_manifests(args):
     return 0
 
 
+def _manifest_views(args):
+    from .manifest_views import generate, summary_text
+    try:
+        result = generate(Store(args.state), args.manifest_project, dry_run=args.dry_run)
+    except (JobsError, OSError) as exc:
+        payload = {"status": "FAILED", "code": "JOBS_ERROR", "reason": str(exc), "exit_code": 2}
+        print(json.dumps(payload, ensure_ascii=True) if args.json else f"cmw jobs: {safe_text(exc)}")
+        return 2
+    print(json.dumps(result, indent=2, ensure_ascii=True) if args.json else safe_text(summary_text(result)))
+    return 0
+
+
 def _backfill_manifests(args):
     from .manifest_backfill import apply, apply_text, plan, summary_text
     try:
@@ -887,6 +909,11 @@ def handle(args):
             print("Manifest listings run on the project owner itself, without --node/--queue. No endpoint operation is sent.")
             return 2
         return _list_manifests(args)
+    if args.jobs_operation == "views":
+        if getattr(args, "node", None) or getattr(args, "queue", None):
+            print("Views are generated on the project owner itself, without --node/--queue. No endpoint operation is sent.")
+            return 2
+        return _manifest_views(args)
     if args.jobs_operation == "backfill":
         if getattr(args, "node", None) or getattr(args, "queue", None):
             print("Backfill reports run on the project owner itself, without --node/--queue. No endpoint operation is sent.")

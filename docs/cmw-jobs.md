@@ -837,6 +837,33 @@ cmw jobs backfill --manifest-project ROOT --inventory FILE --apply --report repo
 - Exit 0 when applied, 2 when refused. `check` and `ls` then cover the backfilled jobs.
   Manifest `annotate` still takes native IDs only.
 
+**By-system views (Phase 5).** On the project owner, regenerate disposable symlinks
+that group verified jobs by their annotated system:
+
+```bash
+cmw jobs views --manifest-project ROOT --dry-run   # report the links, write nothing
+cmw jobs views --manifest-project ROOT
+```
+
+- Each job whose manifest annotations name a system gets
+  `views/system/<system>/<job ID>`, pointing at its job directory. Native jobs get
+  relative links into `jobs/`. Backfilled jobs get absolute links to their wrapper,
+  but they can't be annotated yet, so none appear.
+- Links come from one pass of the integrity check. Failed or unverifiable jobs are
+  skipped with the reason, and jobs without a system are counted.
+- Folder and link names are percent-encoded so they're reversible: `/`, `%` and
+  control characters are encoded, and a leading `.` becomes `%2E`. Systems that
+  differ only by case or Unicode form, or names over 255 bytes, are skipped with
+  the reason rather than merged.
+- Views are never read back and never authoritative. Only this command writes
+  them; `annotate` doesn't refresh them.
+- A rebuild replaces the whole tree. The `.cmw-views.json` marker records every
+  link it wrote and the link's target. A rebuild refuses a `views/` without that
+  marker, and one holding any folder, link or file the marker doesn't record,
+  including a recorded link that now points elsewhere. So it never deletes
+  anything a user added.
+- Exit 0 when written or previewed, 2 on an error.
+
 Not yet: node-to-node allocation for a frontend that isn't the owner, legacy/cross-project parents for
 native jobs, backfill parents outside the inventory, annotations for backfilled jobs, other nodes' queues,
 short legacy references and relocation (`queue_locator`). The project file's
