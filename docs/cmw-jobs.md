@@ -757,10 +757,52 @@ cmw jobs manifest resolve node-a/research:J27.1 --project-root ROOT --json
 - Its output leaves out argv and env.
 - `check` validates `queue_binding` receipts and reports a token or database bound twice.
 
-Not yet: node-to-node allocation for a frontend that isn't the owner, legacy/cross-project and inferred parents,
-other nodes' queues, short legacy references and relocation (`queue_locator`), and the backfill report and
-apply steps (4b, 4c). The project file's `legacy_nodes`/`legacy_queues` maps stay empty: bindings live only
-in the journal.
+**Legacy backfill dry-run (Phase 4b, [#76](https://github.com/angzeli/computational-modelling-workflow/issues/76)).**
+For terminated legacy jobs in bound queues, a reviewed inventory gives each job's
+queue-qualified ID, its existing job wrapper and the labels it was observed under:
+
+```json
+{"schema_version": 1, "project_key": "example-project",
+ "jobs": [{"reference": "node-a/project-queue:J27.1", "wrapper": "/runs/J27", "labels": ["J27.1"]}]}
+```
+
+```bash
+cmw jobs backfill --manifest-project ROOT --inventory FILE --json
+```
+
+- It runs on the project owner and is read-only. It writes no sidecar, receipt,
+  queue record or file, and has no `--apply` yet (4c).
+- Each job is `ready`, `conflict` or `deferred`. Exit 0 means every job is ready,
+  1 means at least one is not, 2 is an error. A malformed or ambiguous inventory
+  is refused whole.
+- Deferred: an unresolved reference, or a queue status that is not Done, Fail or
+  Cancelled.
+- Every manifest field is reported as `evidence`, `missing` or `conflict`, with
+  its source. The report includes the `job.json`, `state.json` and
+  `annotations.json` documents and `legacy_alias` receipts that an apply would
+  publish. Sources:
+  - status, times, exit code, argv, MPI ranks and allowed-prefix environment
+    from the bound queue record; `created_at` is the queue's enqueue time;
+  - input and restart digests from the runner's staging record, only when it
+    verifies against the attempt's registration binding;
+  - `scf_result` and final-row metrics from the SCF classifier over the bound
+    output;
+  - a parent only when every staged restart file matches one inventory job's
+    bound output. Only same-size outputs are hashed. Several matches, a partial
+    match or an output that cannot be hashed is a conflict, never a guess.
+- Node fields, `binding`, POTCAR identities, executable and preparation record
+  stay null.
+- Conflicts:
+  - a wrapper that is not the job's working directory or the directory
+    holding its run output;
+  - a symlinked wrapper, or one inside the native `jobs/` tree;
+  - an existing `.cmw-manifest/`;
+  - a job that already has a manifest receipt.
+
+Not yet: node-to-node allocation for a frontend that isn't the owner, legacy/cross-project parents for
+native jobs, backfill parents outside the inventory, other nodes' queues, short legacy references and relocation (`queue_locator`), and
+the backfill apply step (4c). The project file's `legacy_nodes`/`legacy_queues` maps stay empty: bindings
+live only in the journal.
 
 ## Status, resources and failure policy
 

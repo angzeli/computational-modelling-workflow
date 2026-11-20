@@ -448,6 +448,19 @@ def register(subcommands):
     listing.add_argument("--parent", metavar="J<n>", help="jobs restarted from this native parent")
     listing.add_argument("--json", action="store_true")
     listing.set_defaults(handler=handle)
+    backfill = operations.add_parser("backfill", help="dry-run evidence report for backfilling terminated legacy jobs; "
+                                     "writes nothing",
+        description="Report, for each queue-qualified legacy job in a reviewed inventory (#41 Phase 4b), every "
+                    "manifest field as evidence, missing or conflict, with the documents and legacy_alias receipts "
+                    "a reviewed apply would publish. Owner-side and read-only: active or unresolved jobs are "
+                    "deferred and nothing is written. Exit 0 when every job is ready, 1 when any is in conflict "
+                    "or deferred, 2 on an error.")
+    backfill.add_argument("--manifest-project", type=Path, metavar="ROOT", required=True,
+                          help="the owned project whose bound legacy queues hold the jobs")
+    backfill.add_argument("--inventory", type=Path, metavar="FILE", required=True,
+                          help="reviewed JSON: schema_version, project_key and jobs [{reference, wrapper, labels}]")
+    backfill.add_argument("--json", action="store_true")
+    backfill.set_defaults(handler=handle)
     submit = operations.add_parser("submit", help="reviewed held submission locally or on an explicit node")
     submit.add_argument("--spec", type=Path, required=True)
     submit.add_argument("--preview", action="store_true", help="prepare a local manifest and inspect destination preflight; no remote mutation")
@@ -823,6 +836,18 @@ def _list_manifests(args):
     return 0
 
 
+def _backfill_manifests(args):
+    from .manifest_backfill import plan, summary_text
+    try:
+        result = plan(Store(args.state), args.manifest_project, args.inventory)
+    except (JobsError, OSError) as exc:
+        payload = {"status": "FAILED", "code": "JOBS_ERROR", "reason": str(exc), "exit_code": 2}
+        print(json.dumps(payload, ensure_ascii=True) if args.json else f"cmw jobs: {safe_text(exc)}")
+        return 2
+    print(json.dumps(result, indent=2, ensure_ascii=True) if args.json else safe_text(summary_text(result)))
+    return 0 if result["totals"]["ready"] == len(result["jobs"]) else 1
+
+
 def handle(args):
     if args.jobs_operation == "retire" and (getattr(args, "node", None) or getattr(args, "queue", None)):
         print("retire is local only; select the existing queue with --state. No endpoint operation is sent.")
@@ -849,6 +874,11 @@ def handle(args):
             print("Manifest listings run on the project owner itself, without --node/--queue. No endpoint operation is sent.")
             return 2
         return _list_manifests(args)
+    if args.jobs_operation == "backfill":
+        if getattr(args, "node", None) or getattr(args, "queue", None):
+            print("Backfill reports run on the project owner itself, without --node/--queue. No endpoint operation is sent.")
+            return 2
+        return _backfill_manifests(args)
     if args.jobs_operation == "annotate":
         manifest_only = [f"--{name.replace('_', '-')}" for name in ("label", "purpose", "system", "outcome", "request_uuid")
                          if getattr(args, name) is not None]
