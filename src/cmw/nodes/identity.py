@@ -1,6 +1,7 @@
 """Explicit node enrollment and read-only host/runtime/queue readiness."""
 from __future__ import annotations
 
+from copy import deepcopy
 from importlib import metadata
 from functools import lru_cache
 import hashlib
@@ -25,6 +26,11 @@ from .runner_profiles import (interpreter_observation, pin_interpreter, profile_
 
 MAX_CONFIG_BYTES = 1024 * 1024
 _ALIAS = re.compile(r'[A-Za-z][A-Za-z0-9_-]{0,47}\Z')
+# Scheduler-backed nodes (#81) record only node, host, runtime, one queue
+# identity and the pinned read-only PBS client tools: no Store, storage or
+# runner profile, because PBS, not CMW, executes on them.
+_PBS_CONFIG_FIELDS = {'schema', 'kind', 'node_id', 'host_id', 'host', 'runtime', 'queues', 'scheduler'}
+_PBS_TOOLS = ('qselect', 'qstat')
 _CONFIG_FIELDS = {'schema', 'node_id', 'host_id', 'host', 'runtime', 'queues', 'storages', 'profiles'}
 _PROFILE_FIELDS = {'engine', 'runner', 'max_cpus', 'max_ranks', 'dependencies', 'runtime',
                    'binary_manifests', 'schema', 'runner_interpreter'}
@@ -441,7 +447,51 @@ def _validate_runtime(value):
         raise ValueError('Malformed dependency version evidence')
 
 
+def _validate_tool(value, label):
+    _object(value, {'path', 'resolved_path'}, {'path', 'resolved_path'}, label)
+    path = value['path']
+    if not isinstance(path, str) or not path.startswith('/') or len(path) > 4096 or '\0' in path:
+        raise ValueError(f'{label} must be an absolute path')
+    _absolute(value['resolved_path'], label)
+    return value
+
+
+def _validate_pbs_config(value):
+    _object(value, _PBS_CONFIG_FIELDS | {'runtime_observation'}, _PBS_CONFIG_FIELDS, 'PBS node configuration')
+    if 'runtime_observation' in value:
+        validate_observation(value['runtime_observation'])
+        if value['runtime_observation']['package_sha256'] != value['runtime']['package_sha256']:
+            raise ValueError('Original runtime observation contradicts enrolled digest')
+    if type(value['schema']) is not int or value['schema'] != 3 or value['kind'] != 'pbs':
+        raise ValueError('Unsupported scheduler-backed node kind')
+    _uuid(value['node_id'], 'Node identity')
+    host = _host(value['host'])
+    if host['platform'] != 'linux' or value['host_id'] != host['platform'] + ':' + host['hardware_id']:
+        raise ValueError('PBS node host identity must be Linux machine-id evidence')
+    _validate_runtime(value['runtime'])
+    queues = _aliases(value['queues'], 'Queues')
+    if len(queues) != 1:
+        raise ValueError('A PBS node enrolls exactly one scheduler-backed queue')
+    for alias, queue in queues.items():
+        fields = {'schema', 'kind', 'node_id', 'host_id', 'queue_id'}
+        _object(queue, fields, fields, 'PBS queue enrollment')
+        if type(queue['schema']) is not int or queue['schema'] != 1 or queue['kind'] != 'pbs':
+            raise ValueError('Unsupported PBS queue identity schema')
+        if queue['node_id'] != value['node_id'] or queue['host_id'] != value['host_id']:
+            raise ValueError(f'Queue {alias} belongs to another node or host')
+        _uuid(queue['queue_id'], 'Queue identity')
+    scheduler = value['scheduler']
+    _object(scheduler, {'kind', *_PBS_TOOLS}, {'kind', *_PBS_TOOLS}, 'PBS scheduler tools')
+    if scheduler['kind'] != 'pbs':
+        raise ValueError('Unsupported scheduler kind')
+    for tool in _PBS_TOOLS:
+        _validate_tool(scheduler[tool], f'PBS {tool} tool')
+    return value
+
+
 def _validate_config(value):
+    if isinstance(value, dict) and type(value.get('schema')) is int and value['schema'] == 3:
+        return _validate_pbs_config(value)
     _object(value, _CONFIG_FIELDS | {'runtime_observation'}, _CONFIG_FIELDS, 'node configuration')
     if 'runtime_observation' in value:
         validate_observation(value['runtime_observation'])
@@ -529,6 +579,8 @@ def enroll(config_root, spec, *, host_provider=None, runtime_provider=None,
            storage_provider=None, store_factory=None):
     """Explicitly create private node and queue identities; no execution occurs."""
     from cmw.jobs.store import Store
+    if isinstance(spec, dict) and spec.get('kind') == 'pbs':
+        return _enroll_pbs(config_root, spec, host_provider=host_provider, runtime_provider=runtime_provider)
     _object(spec, {'node_id', 'queues', 'storages', 'profiles'}, {'queues', 'storages', 'profiles'}, 'node enrollment')
     node_id = _uuid(spec.get('node_id', uuid4().hex), 'Node identity')
     host = _host((host_evidence if host_provider is None else host_provider)())
@@ -547,13 +599,7 @@ def enroll(config_root, spec, *, host_provider=None, runtime_provider=None,
         raise ValueError('Each storage alias must name a distinct root')
     profiles = {alias: _profile(profile, runtime)
                 for alias, profile in _aliases(spec['profiles'], 'Profiles').items()}
-    root = _absolute(str(config_root), 'Node configuration root')
-    if root.exists():
-        _private_root(root)
-        if (root / 'node.json').exists():
-            raise ValueError('Node is already enrolled; existing identity is never overwritten')
-    else:
-        _private_root(root, create=True)
+    root = _new_root(config_root)
     store_type = Store if store_factory is None else store_factory
     queue_records = {}
     for (alias, _), state in zip(queues.items(), states):
@@ -563,6 +609,21 @@ def enroll(config_root, spec, *, host_provider=None, runtime_provider=None,
     value = _validate_config({'schema': schema, 'node_id': node_id, 'host_id': host_id, 'host': host,
                               'runtime': runtime, 'queues': queue_records, 'storages': storages,
                               'profiles': profiles, **({'runtime_observation': original} if original is not None else {})})
+    return _write_config(root, value)
+
+
+def _new_root(config_root):
+    root = _absolute(str(config_root), 'Node configuration root')
+    if root.exists():
+        _private_root(root)
+        if (root / 'node.json').exists():
+            raise ValueError('Node is already enrolled; existing identity is never overwritten')
+    else:
+        _private_root(root, create=True)
+    return root
+
+
+def _write_config(root, value):
     content = canonical_json_bytes(value)
     if len(content) > MAX_CONFIG_BYTES:
         raise ValueError('Node configuration exceeds 1 MiB')
@@ -579,34 +640,48 @@ def enroll(config_root, spec, *, host_provider=None, runtime_provider=None,
     return value
 
 
-def check_node(config, *, host_provider=None, runtime_provider=None,
-               storage_provider=None, store_factory=None, operation=None, queue_alias=None,
-               profile_aliases=None, storage_aliases=None, runtime_verifier=None,
-               runtime_request=None, runtime_response=False):
-    """Observe readiness; missing storage does not erase independent queue evidence."""
-    from cmw.jobs.store import Store
-    _validate_config(config)
-    scoped = operation is not None
-    if scoped:
-        from .protocol import OPERATIONS
-        if operation not in OPERATIONS | {'execution'} or queue_alias not in config['queues']:
-            raise ValueError('Scoped readiness requires a supported operation and enrolled queue')
-    elif profile_aliases is not None or storage_aliases is not None:
-        raise ValueError('Dependency scope requires an explicit owning operation')
-    profiles = config['profiles'] if not scoped else {
-        alias: config['profiles'][alias] for alias in (profile_aliases or ())}
-    storages = config['storages'] if not scoped else {
-        alias: config['storages'][alias] for alias in (storage_aliases or ())}
-    result = {'ready': False, 'identity_ready': True, 'runtime_ready': True,
-              'storage_ready': True, 'profiles_ready': True, 'identity_errors': [],
-              'runtime_errors': [], 'errors': [], 'host': None, 'runtime': None,
-              'queues': {}, 'storages': {}, 'profiles': {}}
+def _pbs_tool(path):
+    """Pin an operator-named PBS client by its resolved executable; never search PATH."""
+    if not isinstance(path, str) or not path.startswith('/') or len(path) > 4096 or '\0' in path:
+        raise ValueError('PBS tools must be named by absolute path')
+    resolved = os.path.realpath(path)
+    info = os.stat(resolved)
+    if not stat.S_ISREG(info.st_mode) or not os.access(resolved, os.X_OK):
+        raise ValueError(f'PBS tool is not an executable regular file: {path}')
+    return {'path': path, 'resolved_path': resolved}
+
+
+def _enroll_pbs(config_root, spec, *, host_provider=None, runtime_provider=None):
+    """Enroll a read-only PBS-backed node: identities only, no queue database."""
+    _object(spec, {'kind', 'node_id', 'queue', 'scheduler'}, {'kind', 'queue', 'scheduler'}, 'PBS node enrollment')
+    node_id = _uuid(spec.get('node_id', uuid4().hex), 'Node identity')
+    queue = spec['queue']
+    _aliases({queue: None} if isinstance(queue, str) else None, 'Queues')
+    tools = _object(spec['scheduler'], set(_PBS_TOOLS), set(_PBS_TOOLS), 'PBS scheduler tools')
+    scheduler = {'kind': 'pbs', **{tool: _pbs_tool(tools[tool]) for tool in _PBS_TOOLS}}
+    host = _host((host_evidence if host_provider is None else host_provider)())
+    runtime, original = runtime_observed() if runtime_provider is None else (runtime_provider(), None)
+    _validate_runtime(runtime)
+    host_id = host['platform'] + ':' + host['hardware_id']
+    value = _validate_config({
+        'schema': 3, 'kind': 'pbs', 'node_id': node_id, 'host_id': host_id, 'host': host, 'runtime': runtime,
+        'queues': {queue: {'schema': 1, 'kind': 'pbs', 'node_id': node_id, 'host_id': host_id,
+                           'queue_id': uuid4().hex}},
+        'scheduler': scheduler, **({'runtime_observation': original} if original is not None else {})})
+    return _write_config(_new_root(config_root), value)
+
+
+def _observe_host(result, config, host_provider):
     try:
         result['host'] = _host((host_evidence if host_provider is None else host_provider)())
         if result['host'] != config['host']:
             raise ValueError('Node hardware identity changed or configuration was cloned')
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         result['identity_errors'].append(str(exc))
+
+
+def _observe_runtime(result, config, *, operation, runtime_provider, runtime_verifier,
+                     runtime_request, runtime_response):
     try:
         verifier = runtime_verifier or RuntimeVerifier(config['runtime'], config.get('runtime_observation'))
         if runtime_provider is not None:
@@ -624,6 +699,72 @@ def check_node(config, *, host_provider=None, runtime_provider=None,
         result['runtime_errors'].append(str(exc))
         if isinstance(exc, RuntimeRefusal):
             result['runtime_diagnostic'] = exc.evidence
+
+
+def _check_pbs(config, *, host_provider, runtime_provider, operation, queue_alias,
+               runtime_verifier, runtime_request, runtime_response):
+    """Readiness of a PBS-backed node: identity, runtime and its pinned PBS clients."""
+    if operation is not None:
+        from .protocol import OPERATIONS
+        if operation not in OPERATIONS | {'execution'} or queue_alias not in config['queues']:
+            raise ValueError('Scoped readiness requires a supported operation and enrolled queue')
+    result = {'ready': False, 'identity_ready': True, 'runtime_ready': True, 'scheduler_ready': True,
+              'identity_errors': [], 'runtime_errors': [], 'errors': [], 'host': None, 'runtime': None,
+              'queues': {}, 'scheduler': {}}
+    _observe_host(result, config, host_provider)
+    _observe_runtime(result, config, operation=operation, runtime_provider=runtime_provider,
+                     runtime_verifier=runtime_verifier, runtime_request=runtime_request,
+                     runtime_response=runtime_response)
+    if operation == 'execution':
+        result['identity_errors'].append('PBS nodes do not run CMW executions; PBS owns dispatch')
+    result['queues'] = deepcopy(config['queues'])
+    for tool in _PBS_TOOLS:
+        expected = config['scheduler'][tool]
+        try:
+            if _pbs_tool(expected['path']) != expected:
+                raise ValueError(f'PBS {tool} now resolves to a different executable')
+            result['scheduler'][tool] = {'ready': True, 'error': None}
+        except (OSError, ValueError) as exc:
+            result['scheduler_ready'] = False
+            result['scheduler'][tool] = {'ready': False, 'error': str(exc)}
+            result['errors'].append(f'{tool}: {exc}')
+    result['identity_ready'] = not result['identity_errors']
+    result['runtime_ready'] = not result['runtime_errors']
+    result['errors'] += result['identity_errors'] + result['runtime_errors']
+    result['ready'] = result['identity_ready'] and result['runtime_ready'] and result['scheduler_ready']
+    return result
+
+
+def check_node(config, *, host_provider=None, runtime_provider=None,
+               storage_provider=None, store_factory=None, operation=None, queue_alias=None,
+               profile_aliases=None, storage_aliases=None, runtime_verifier=None,
+               runtime_request=None, runtime_response=False):
+    """Observe readiness; missing storage does not erase independent queue evidence."""
+    from cmw.jobs.store import Store
+    _validate_config(config)
+    if config.get('kind') == 'pbs':
+        return _check_pbs(config, host_provider=host_provider, runtime_provider=runtime_provider,
+                          operation=operation, queue_alias=queue_alias, runtime_verifier=runtime_verifier,
+                          runtime_request=runtime_request, runtime_response=runtime_response)
+    scoped = operation is not None
+    if scoped:
+        from .protocol import OPERATIONS
+        if operation not in OPERATIONS | {'execution'} or queue_alias not in config['queues']:
+            raise ValueError('Scoped readiness requires a supported operation and enrolled queue')
+    elif profile_aliases is not None or storage_aliases is not None:
+        raise ValueError('Dependency scope requires an explicit owning operation')
+    profiles = config['profiles'] if not scoped else {
+        alias: config['profiles'][alias] for alias in (profile_aliases or ())}
+    storages = config['storages'] if not scoped else {
+        alias: config['storages'][alias] for alias in (storage_aliases or ())}
+    result = {'ready': False, 'identity_ready': True, 'runtime_ready': True,
+              'storage_ready': True, 'profiles_ready': True, 'identity_errors': [],
+              'runtime_errors': [], 'errors': [], 'host': None, 'runtime': None,
+              'queues': {}, 'storages': {}, 'profiles': {}}
+    _observe_host(result, config, host_provider)
+    _observe_runtime(result, config, operation=operation, runtime_provider=runtime_provider,
+                     runtime_verifier=runtime_verifier, runtime_request=runtime_request,
+                     runtime_response=runtime_response)
     store_type = Store if store_factory is None else store_factory
     unreadable_queues = 0
     queues = {queue_alias: config['queues'][queue_alias]} if scoped else config['queues']
