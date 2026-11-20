@@ -8,8 +8,8 @@ existing `cmw nodes` baseline, approved decisions and phased changes. Its new
 pure helpers are Phase 0 contracts and are not wired into runtime commands.
 
 The [scheduler-backed nodes design](scheduler-nodes.md) extends it with a
-proposed `pbs` node kind for CX3 (issue #81). It is Phase 0 design only: no
-code, deployment or CX3 contact.
+proposed `pbs` node kind for a PBS Pro cluster (issue #81). It is Phase 0 design
+only: no code or deployment.
 
 The [cutover runbook](../operations/cutover-runbook.md) consolidates deployment
 ordering, qualification, rollback and the MacBook sandbox rehearsal. Production
