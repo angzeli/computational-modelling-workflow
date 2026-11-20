@@ -427,17 +427,20 @@ def register(subcommands):
         command.set_defaults(handler=handle)
     check = operations.add_parser("check", help="read-only molecular input, provenance and resource preflight",
         description="With --spec: molecular preflight. With --manifest-project: read-only integrity check of native "
-                    "job manifests on the project owner (#41 Phase 3b); exit 0 when verified, 2 with any error.")
+                    "and backfilled job manifests on the project owner (#41 Phase 3b, #76); exit 0 when verified, "
+                    "2 with any error.")
     check.add_argument("--spec", type=Path)
     check.add_argument("--manifest-project", type=Path, metavar="ROOT",
                        help="verify native manifests in this owned project instead of a molecular spec")
-    check.add_argument("job_ids", nargs="*", metavar="J<n>", help="manifest only: jobs to check (default: all known)")
+    check.add_argument("job_ids", nargs="*", metavar="ID",
+                       help="manifest only: native J<n> or backfilled NODE/QUEUE:J<n>.<m> jobs (default: all known)")
     check.add_argument("--rehash", action="store_true",
                        help="manifest only: also rehash multi-GiB restart input copies")
     check.add_argument("--json", action="store_true")
     check.set_defaults(handler=handle)
-    listing = operations.add_parser("ls", help="list native manifest jobs in numeric ID order; read-only, no cache",
-        description="List the native jobs (J<n>) of a project on its owner (#41 Phase 3c). Each row is one pass of "
+    listing = operations.add_parser("ls", help="list manifest jobs in numeric ID order; read-only, no cache",
+        description="List the native (J<n>) and backfilled legacy jobs of a project on its owner (#41 Phase 3c, "
+                    "#76). Each row is one pass of "
                     "the Phase 3b integrity check and shows only fields from verified sources; filters are exact "
                     "and combine with AND. Remote jobs' status is unavailable. Use `query` for the queue catalogue.")
     listing.add_argument("--manifest-project", type=Path, metavar="ROOT", help="the owned native project to list")
@@ -445,20 +448,26 @@ def register(subcommands):
     listing.add_argument("--status", choices=("queued", "running", "done", "failed", "cancelled"))
     listing.add_argument("--scf-result", choices=("converged", "labort", "nelm_reached", "crashed", "unknown"))
     listing.add_argument("--outcome", choices=("reported", "superseded", "checkpoint-only", "discarded"))
-    listing.add_argument("--parent", metavar="J<n>", help="jobs restarted from this native parent")
+    listing.add_argument("--parent", metavar="ID", help="jobs restarted from this native or backfilled parent")
     listing.add_argument("--json", action="store_true")
     listing.set_defaults(handler=handle)
-    backfill = operations.add_parser("backfill", help="dry-run evidence report for backfilling terminated legacy jobs; "
-                                     "writes nothing",
+    backfill = operations.add_parser("backfill", help="manifests for terminated legacy jobs: dry-run report, "
+                                     "then a reviewed --apply",
         description="Report, for each queue-qualified legacy job in a reviewed inventory (#41 Phase 4b), every "
                     "manifest field as evidence, missing or conflict, with the documents and legacy_alias receipts "
-                    "a reviewed apply would publish. Owner-side and read-only: active or unresolved jobs are "
-                    "deferred and nothing is written. Exit 0 when every job is ready, 1 when any is in conflict "
-                    "or deferred, 2 on an error.")
+                    "an apply would publish. Owner-side: active or unresolved jobs are deferred and the dry-run "
+                    "writes nothing (exit 0 when every job is ready, 1 when any is not, 2 on an error). With "
+                    "--apply --report (Phase 4c), the saved --json report is replanned from its sources and, only "
+                    "if every reviewed ready job is unchanged, their new .cmw-manifest/ files and journal receipts "
+                    "are published; existing files are never replaced (exit 0 when applied, 2 when refused).")
     backfill.add_argument("--manifest-project", type=Path, metavar="ROOT", required=True,
                           help="the owned project whose bound legacy queues hold the jobs")
     backfill.add_argument("--inventory", type=Path, metavar="FILE", required=True,
                           help="reviewed JSON: schema_version, project_key and jobs [{reference, wrapper, labels}]")
+    backfill.add_argument("--apply", action="store_true",
+                          help="publish the reviewed ready jobs; requires --report")
+    backfill.add_argument("--report", type=Path, metavar="FILE",
+                          help="with --apply: the reviewed --json output of the dry-run for this inventory")
     backfill.add_argument("--json", action="store_true")
     backfill.set_defaults(handler=handle)
     submit = operations.add_parser("submit", help="reviewed held submission locally or on an explicit node")
@@ -837,15 +846,19 @@ def _list_manifests(args):
 
 
 def _backfill_manifests(args):
-    from .manifest_backfill import plan, summary_text
+    from .manifest_backfill import apply, apply_text, plan, summary_text
     try:
-        result = plan(Store(args.state), args.manifest_project, args.inventory)
+        if args.apply:
+            result = apply(Store(args.state), args.manifest_project, args.inventory, args.report)
+        else:
+            result = plan(Store(args.state), args.manifest_project, args.inventory)
     except (JobsError, OSError) as exc:
         payload = {"status": "FAILED", "code": "JOBS_ERROR", "reason": str(exc), "exit_code": 2}
         print(json.dumps(payload, ensure_ascii=True) if args.json else f"cmw jobs: {safe_text(exc)}")
         return 2
-    print(json.dumps(result, indent=2, ensure_ascii=True) if args.json else safe_text(summary_text(result)))
-    return 0 if result["totals"]["ready"] == len(result["jobs"]) else 1
+    text = apply_text(result) if args.apply else summary_text(result)
+    print(json.dumps(result, indent=2, ensure_ascii=True) if args.json else safe_text(text))
+    return 0 if args.apply or result["totals"]["ready"] == len(result["jobs"]) else 1
 
 
 def handle(args):
@@ -877,6 +890,9 @@ def handle(args):
     if args.jobs_operation == "backfill":
         if getattr(args, "node", None) or getattr(args, "queue", None):
             print("Backfill reports run on the project owner itself, without --node/--queue. No endpoint operation is sent.")
+            return 2
+        if args.apply != (args.report is not None):
+            print("--apply and --report go together: apply the reviewed --json report of a dry-run")
             return 2
         return _backfill_manifests(args)
     if args.jobs_operation == "annotate":

@@ -90,10 +90,10 @@ def _sidecar(root, job_id):
     return sidecar
 
 
-def _load(path, project_key, job_id):
+def _load(path, project_key, job_id, provenance='native'):
     if not os.path.lexists(path):
         return {'schema_version': SCHEMA_VERSION, 'id': job_id, 'project': project_key,
-                'provenance': 'native', 'revision': 0, 'events': []}
+                'provenance': provenance, 'revision': 0, 'events': []}
     try:
         if not stat.S_ISREG(path.lstat().st_mode):
             raise ValueError('not a regular file')
@@ -103,7 +103,7 @@ def _load(path, project_key, job_id):
     events = document.get('events') if isinstance(document, dict) else None
     if (not isinstance(document, dict) or set(document) != DOCUMENT_KEYS
             or document['schema_version'] != SCHEMA_VERSION
-            or (document['id'], document['project'], document['provenance']) != (job_id, project_key, 'native')
+            or (document['id'], document['project'], document['provenance']) != (job_id, project_key, provenance)
             or not isinstance(events, list) or document['revision'] != len(events)
             or any(not isinstance(event, dict) or set(event) != EVENT_KEYS or event['sequence'] != index
                    for index, event in enumerate(events, 1))):

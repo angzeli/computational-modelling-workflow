@@ -39,7 +39,7 @@ NODE_UUID = re.compile(r'[0-9a-f]{32}')
 SHA256 = re.compile(r'[0-9a-f]{64}')
 ENVIRONMENT_PREFIXES = ('OMP_', 'OPENBLAS_', 'MKL_', 'VECLIB_', 'GFORTRAN_', 'OMPI_MCA_')
 VASP_INPUTS = ('INCAR', 'POSCAR', 'KPOINTS')
-JOURNAL_EVENTS = {'manifest', 'registration', 'queue_binding'}
+JOURNAL_EVENTS = {'manifest', 'registration', 'queue_binding', 'legacy_alias'}
 LEDGER_TIMEOUT_SECONDS = 5.0
 
 

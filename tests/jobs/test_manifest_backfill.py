@@ -1,4 +1,4 @@
-"""Dry-run backfill of terminated legacy jobs (#41 Phase 4b, #76); synthetic queues, never a runner or VASP."""
+"""Backfill of terminated legacy jobs (#41 Phases 4b-4c, #76); synthetic queues, never a runner or VASP."""
 import hashlib
 import json
 import os
@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from cmw.jobs import manifest_backfill, manifest_legacy, manifests
+from cmw.jobs import manifest_backfill, manifest_check, manifest_legacy, manifest_list, manifests
 from cmw.jobs.manifests import ManifestError
 from cmw.jobs.store import Store
 from tests.jobs.test_catalogue_cli import run_jobs
@@ -20,6 +20,7 @@ CONTRACTS = Path(__file__).resolve().parents[1] / 'fixtures' / 'manifests' / 'pa
 VOLUME = '11111111-2222-3333-4444-555555555555'
 INPUTS = ('INCAR', 'POSCAR', 'KPOINTS', 'POTCAR')
 QUEUE = 'node-a/project-queue'
+MANIFEST = '.cmw-manifest'
 
 
 def volume(path):
@@ -111,6 +112,23 @@ class BackfillCase(ManifestCase):
     def row(report, number):
         return next(row for row in report['jobs'] if row['reference'] == f'{QUEUE}:J{number}.1')
 
+    def j27(self):
+        """Queue jobs J16 (parent), J20 (same-size decoy) and J27 (LABORT restart from J16) with an inventory."""
+        for _ in range(15):
+            self.filler()
+        _, parent = self.vasp('converged-at-nelm', checkpoint=b'parent checkpoint')
+        for _ in range(3):
+            self.filler()
+        _, decoy = self.vasp('converged-at-nelm', checkpoint=b'decoys checkpoint')  # Same size.
+        for _ in range(6):
+            self.filler()
+        number, child = self.vasp('labort-outcar', restart_from=parent / 'run' / 'WAVECAR')
+        self.assertEqual(number, 27)
+        self.bind()
+        wrappers = {16: parent, 20: decoy, 27: child}
+        inventory = self.inventory(self.entry(27, child, 'J27.1'), self.entry(16, parent, 'J10.7'), self.entry(20, decoy))
+        return wrappers, inventory
+
     def tree(self):
         return {str(path): (path.lstat().st_ino, path.lstat().st_size, path.lstat().st_mtime_ns)
                 for path in self.base.rglob('*') if not path.name.startswith('inventory-')}
@@ -118,19 +136,8 @@ class BackfillCase(ManifestCase):
 
 class BackfillDryRunTests(BackfillCase):
     def test_j27_fixture_is_reported_done_labort_with_its_inferred_parent_and_nothing_is_written(self):
-        for _ in range(15):
-            self.filler()
-        parent, parent_wrapper = self.vasp('converged-at-nelm', checkpoint=b'parent checkpoint')
-        for _ in range(3):
-            self.filler()
-        decoy, decoy_wrapper = self.vasp('converged-at-nelm', checkpoint=b'decoys checkpoint')  # Same size.
-        for _ in range(6):
-            self.filler()
-        child, child_wrapper = self.vasp('labort-outcar', restart_from=parent_wrapper / 'run' / 'WAVECAR')
-        self.assertEqual((parent, decoy, child), (16, 20, 27))
-        self.bind()
-        path = self.inventory(self.entry(27, child_wrapper, 'J27.1'), self.entry(16, parent_wrapper, 'J10.7'),
-                              self.entry(20, decoy_wrapper))
+        wrappers, path = self.j27()
+        parent_wrapper, decoy_wrapper, child_wrapper = wrappers[16], wrappers[20], wrappers[27]
         before, journal = self.tree(), (self.project / '.cmw' / 'integrity.jsonl').read_bytes()
         report = self.plan(path)
         self.assertEqual(self.tree(), before)  # Nothing in the project, queue or runs is created or changed.
@@ -311,6 +318,160 @@ class BackfillDryRunTests(BackfillCase):
             self.assertEqual(code, 2, output)
         self.assertFalse((wrapper / '.cmw-manifest').exists())
 
+
+
+class BackfillApplyTests(BackfillCase):
+    def reviewed(self, inventory):
+        report = self.plan(inventory)
+        path = self.base / f'report-{uuid4().hex[:6]}.json'
+        path.write_text(json.dumps(report))
+        return report, path
+
+    def apply(self, inventory, report):
+        return manifest_backfill.apply(self.store, self.project, inventory, report, volume_uuid_of=volume)
+
+    def check(self, *job_ids):
+        return manifest_check.check(self.store, self.project, job_ids, volume_uuid_of=volume)
+
+    def files(self):
+        return {str(path): (path.lstat().st_ino, path.lstat().st_size, path.lstat().st_mtime_ns)
+                for path in self.base.rglob('*') if path.is_file() and '.cmw' not in path.parts
+                and not path.name.startswith(('inventory-', 'report-')) and MANIFEST not in path.parts}
+
+    def journal(self):
+        return (self.project / '.cmw' / 'integrity.jsonl').read_bytes()
+
+    def sidecars(self):
+        return sorted(str(path) for path in self.base.rglob(MANIFEST))
+
+    def test_reviewed_j27_fixture_is_published_once_and_covered_by_check_and_ls(self):
+        wrappers, inventory = self.j27()
+        report, path = self.reviewed(inventory)
+        before = self.files()
+        result = self.apply(inventory, path)
+        self.assertEqual(self.files(), before)  # Every existing file is untouched; only sidecars are new.
+        self.assertEqual([item['reference'] for item in result['applied']], [f'{QUEUE}:J{n}.1' for n in (16, 20, 27)])
+        for item, row in zip(result['applied'], report['jobs']):
+            sidecar = Path(item['destination'])
+            self.assertEqual(sidecar, wrappers[int(item['reference'].split(':J')[1].split('.')[0])] / MANIFEST)
+            self.assertEqual(item['published'], ['job.json', 'state.json', 'annotations.json'])
+            for name, document, mode in manifest_backfill.SIDECAR:
+                self.assertEqual((sidecar / name).read_bytes(), manifests.canonical(row['documents'][document]))
+                self.assertEqual(os.stat(sidecar / name).st_mode & 0o777, mode)
+        records = manifests.read_journal(self.project)
+        self.assertEqual([record['event'] for record in records],
+                         ['queue_binding', 'manifest', 'legacy_alias', 'manifest', 'manifest', 'legacy_alias'])
+        self.assertEqual([record['payload'] for record in records if record['event'] == 'legacy_alias'],
+                         [{'label': 'J10.7', 'target': f'{QUEUE}:J16.1'}, {'label': 'J27.1', 'target': f'{QUEUE}:J27.1'}])
+        child = next(record for record in records if record['payload'].get('id') == f'{QUEUE}:J27.1')
+        self.assertEqual(child['payload'], {'id': f'{QUEUE}:J27.1', 'binding': None, 'job_sha256': hashlib.sha256(
+            (wrappers[27] / MANIFEST / 'job.json').read_bytes()).hexdigest()})
+        if Draft202012Validator is not None:
+            for record in records:
+                self.assertEqual(schema_errors('integrity.v1.json', record), [], record)
+        journal = self.journal()
+        again = self.apply(inventory, path)  # A completed apply is a no-op.
+        self.assertEqual(([item['published'] for item in again['applied']], self.journal()), ([[], [], []], journal))
+        checked = self.check()
+        self.assertEqual((checked['status'], [job['status'] for job in checked['jobs']]),
+                         ('VERIFIED', ['verified'] * 3), checked)
+        j27 = checked['jobs'][2]
+        self.assertEqual((j27['id'], j27['state'], j27['scf_result'], j27['labels']),
+                         (f'{QUEUE}:J27.1', 'done', 'labort', ['J27.1']))
+        self.assertEqual(j27['lineage'], {'parent': f'{QUEUE}:J16.1', 'roles': {'WAVECAR': 'match'}})
+        listing = manifest_list.list_jobs(self.store, self.project, volume_uuid_of=volume)
+        self.assertEqual([row['id'] for row in listing['records']], [f'{QUEUE}:J{n}.1' for n in (16, 20, 27)])
+        children = manifest_list.list_jobs(self.store, self.project, volume_uuid_of=volume, parent=f'{QUEUE}:J16.1')
+        self.assertEqual([(row['id'], row['status'], row['scf_result'], row['integrity']) for row in children['records']],
+                         [(f'{QUEUE}:J27.1', 'done', 'labort', 'verified')])
+        after = self.plan(inventory)  # A new dry-run sees the published jobs, never republishes them.
+        self.assertEqual(after['totals'], {'ready': 0, 'conflict': 3, 'deferred': 0})
+
+    def test_apply_refuses_before_writing_when_anything_differs_from_the_review(self):
+        wrappers, inventory = self.j27()
+        report, path = self.reviewed(inventory)
+        journal = self.journal()
+        wrong = self.base / 'report-wrong.json'
+        wrong.write_text(json.dumps({**report, 'mode': 'apply'}))
+        smaller = self.inventory(self.entry(16, wrappers[16], 'J10.7'), self.entry(27, wrappers[27], 'J27.1'))
+        foreign = wrappers[16] / MANIFEST
+        foreign.mkdir()
+        (foreign / 'notes.txt').write_text('not written by backfill')
+        cases = [(inventory, wrong, '--json output of a backfill dry-run'), (smaller, path, 'different jobs'),
+                 (inventory, path, 'holds notes.txt')]
+        for chosen, reviewed, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ManifestError, message):
+                self.apply(chosen, reviewed)
+        (foreign / 'notes.txt').unlink()
+        foreign.rmdir()
+        (wrappers[20] / 'run' / 'WAVECAR').write_bytes(b'altered checkpoint')  # Same size, different bytes.
+        with self.assertRaisesRegex(ManifestError, f'{QUEUE}:J20.1: its sources or documents changed'):
+            self.apply(inventory, path)
+        self.assertEqual((self.sidecars(), self.journal()), ([], journal))
+
+    def test_an_interrupted_apply_resumes_and_jobs_not_ready_at_review_are_skipped(self):
+        wrappers, _ = self.j27()
+        running, running_wrapper = self.vasp('converged-at-nelm', status='Run')
+        inventory = self.inventory(self.entry(16, wrappers[16], 'J10.7'), self.entry(running, running_wrapper))
+        report, path = self.reviewed(inventory)
+        self.assertEqual(report['totals'], {'ready': 1, 'conflict': 0, 'deferred': 1})
+        real = manifest_backfill.append_journal
+
+        def interrupted(root, key, event, *args, **kwargs):
+            if event == 'manifest':
+                raise OSError('synthetic interruption before the receipt')
+            return real(root, key, event, *args, **kwargs)
+        with patch.object(manifest_backfill, 'append_journal', interrupted), self.assertRaises(OSError):
+            self.apply(inventory, path)
+        self.assertEqual(sorted(entry.name for entry in (wrappers[16] / MANIFEST).iterdir()),
+                         ['annotations.json', 'job.json', 'state.json'])
+        result = self.apply(inventory, path)
+        self.assertEqual(([item['published'] for item in result['applied']], result['skipped']),
+                         ([[]], [{'reference': f'{QUEUE}:J{running}.1', 'state': 'deferred'}]))
+        self.assertFalse((running_wrapper / MANIFEST).exists())
+        self.assertEqual(self.check()['status'], 'VERIFIED')
+
+    def test_check_reports_edited_writable_malformed_and_unresolvable_backfilled_records(self):
+        wrappers, inventory = self.j27()
+        self.apply(inventory, self.reviewed(inventory)[1])
+        job, state = wrappers[27] / MANIFEST / 'job.json', wrappers[16] / MANIFEST / 'state.json'
+        job.chmod(0o644)
+        job.write_bytes(job.read_bytes() + b' ')
+        state.chmod(0o644)
+        result = self.check()
+        codes = {item['id']: {finding['code'] for finding in item['findings']} for item in result['jobs']}
+        self.assertEqual(result['status'], 'FAILED')
+        self.assertLessEqual({'job_json_writable', 'job_json_changed'}, codes[f'{QUEUE}:J27.1'])
+        self.assertIn('state_writable', codes[f'{QUEUE}:J16.1'])
+        listed = manifest_list.list_jobs(self.store, self.project, volume_uuid_of=volume)['records']
+        self.assertIsNone(next(row for row in listed if row['id'] == f'{QUEUE}:J16.1')['status'])
+        moved = manifest_check.check(self.store, self.project, volume_uuid_of=lambda path: VOLUME.replace('1', '9'))
+        self.assertEqual({item['status'] for item in moved['jobs']}, {'unverifiable'})
+        self.assertIn('legacy_unresolved', {finding['code'] for finding in moved['jobs'][0]['findings']})
+        with self.assertRaisesRegex(ManifestError, 'queue-qualified'):
+            self.check('node-a:J27.1')
+        key = manifests.load_project(self.project)[1]['project_key']
+        manifests.append_journal(self.project, key, 'legacy_alias', uuid4().hex, {'label': 'J1', 'target': 'J1.1'})
+        damage = [item['message'] for item in self.check()['findings'] if item['code'] == 'journal_damaged']
+        self.assertIn('malformed legacy_alias receipt', damage[0])
+
+    def test_cli_applies_a_saved_report_and_checks_qualified_ids(self):
+        _, inventory = self.j27()
+        state = str(self.store.root)
+        with patch.object(manifest_legacy, 'observe_volume_uuid', volume):
+            code, output = run_jobs(['backfill', '--manifest-project', str(self.project), '--inventory',
+                                     str(inventory), '--json'], state)
+            report = self.base / 'report-cli.json'
+            report.write_text(output)
+            base = ['backfill', '--manifest-project', str(self.project), '--inventory', str(inventory)]
+            for extra in (['--apply'], ['--report', str(report)]):
+                self.assertEqual(run_jobs([*base, *extra], state)[0], 2)
+            code, output = run_jobs([*base, '--apply', '--report', str(report)], state)
+            self.assertEqual(code, 0, output)
+            self.assertIn('3 reviewed job(s) published', output)
+            code, output = run_jobs(['check', '--manifest-project', str(self.project), f'{QUEUE}:J27.1', '--json'],
+                                    state)
+            self.assertEqual((code, json.loads(output)['jobs'][0]['status']), (0, 'verified'), output)
 
 if __name__ == '__main__':
     unittest.main()

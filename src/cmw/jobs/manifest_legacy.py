@@ -29,6 +29,14 @@ SUMMARY_FIELDS = ('id', 'display_id', 'attempt_id', 'name', 'engine', 'status', 
                   'finished_at', 'exit_code')
 
 
+def order_key(job_id):
+    """Numeric project order: integer component, then legacy suffix, node and queue tokens."""
+    match = QUALIFIED.fullmatch(job_id)
+    if match:
+        return int(match[3]), int(match[4]), match[1], match[2]
+    return int(job_id[1:]), 0, '', ''
+
+
 def observe_volume_uuid(path):
     """The normalized volume UUID holding path, observed by the shell helper; None when unavailable."""
     script = Path(__file__).with_name('manifest_volume.sh')
