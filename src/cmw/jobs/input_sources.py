@@ -124,43 +124,68 @@ def _staging_evidence(content, binding, job, options, now):
         match = next(_STAGED.fullmatch(value) for value in values['staged_file'] if value.startswith(name + ';'))
         _require([int(value) for value in match.groups()[2:6]] == binding.get('restart_sources', {}).get(name),
                  f'Staged {name} source identity differs from the registered restart input')
+    return staged
+
+
+def _verified_staging(job, engine, now):
+    """The registration binding, output directory identity and runner-staged identities of this attempt."""
+    binding = job['progress_sources']['vasp_input']
+    _require(isinstance(binding, dict) and type(binding.get('schema')) is int and binding['schema'] == 1
+             and binding.get('attempt_id') == job['attempt_id']
+             and binding.get('argv') == job['argv']
+             and engine == str(job['engine']).upper() == 'VASP',
+             'POSCAR registration belongs to a different attempt, engine or invocation')
+    _require(not binding.get('issue'), binding.get('issue'))
+    _require(isinstance(binding.get('sha256'), str) and _DIGEST.fullmatch(binding['sha256'])
+             and type(binding.get('bytes')) is int and 0 < binding['bytes'] <= MAX_POSCAR_BYTES,
+             'Registered POSCAR identity is invalid')
+    route = vasp_runner_arguments(job)
+    _require(route is not None, 'Registered staging route is unavailable')
+    options, source, output = route
+    _require(str(source) == binding['input'] and str(output) == binding['output']
+             and source == source.resolve() and output == output.resolve(),
+             'Registered staging paths changed or traverse a symlink')
+    parent = output.parent.stat()
+    _require([parent.st_dev, parent.st_ino] == binding['parent_identity'],
+             'Registered output parent identity changed')
+    directory = output.stat()
+    directory_identity = (directory.st_dev, directory.st_ino)
+    content, _ = _snapshot(output / 'RUN_METADATA.txt', 'runner staging record', 64 * 1024, text=True)
+    staged = _staging_evidence(content, binding, job, options, time.time() if now is None else now)
+    return binding, output, directory_identity, staged
+
+
+def _unchanged(binding, output, directory_identity):
+    after, parent_after = output.stat(), output.parent.stat()
+    _require((after.st_dev, after.st_ino) == directory_identity
+             and [parent_after.st_dev, parent_after.st_ino] == binding['parent_identity']
+             and output == output.resolve(), 'Staging directory identity changed during verification')
+
+
+def staged_identities(job, *, now=None):
+    """The runner-recorded ``{name: {'sha256', 'bytes'}}`` of a VASP attempt's verified staging.
+
+    Accepted only when the staging record matches the registration binding; nothing
+    is hashed or re-read. Raises ValueError otherwise.
+    """
+    try:
+        binding, output, directory_identity, staged = _verified_staging(job, 'VASP', now)
+        _unchanged(binding, output, directory_identity)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, StopIteration, AttributeError) as exc:
+        raise ValueError(str(exc)) from exc
+    return staged
 
 
 def resolve_vasp_input(job, engine, *, now=None):
     """Return a pinned staged source or a qualified absence, never a substitute."""
     try:
-        binding = job['progress_sources']['vasp_input']
-        _require(isinstance(binding, dict) and type(binding.get('schema')) is int and binding['schema'] == 1
-                 and binding.get('attempt_id') == job['attempt_id']
-                 and binding.get('argv') == job['argv']
-                 and engine == str(job['engine']).upper() == 'VASP',
-                 'POSCAR registration belongs to a different attempt, engine or invocation')
-        _require(not binding.get('issue'), binding.get('issue'))
-        _require(isinstance(binding.get('sha256'), str) and _DIGEST.fullmatch(binding['sha256'])
-                 and type(binding.get('bytes')) is int and 0 < binding['bytes'] <= MAX_POSCAR_BYTES,
-                 'Registered POSCAR identity is invalid')
-        route = vasp_runner_arguments(job)
-        _require(route is not None, 'Registered staging route is unavailable')
-        options, source, output = route
-        _require(str(source) == binding['input'] and str(output) == binding['output']
-                 and source == source.resolve() and output == output.resolve(),
-                 'Registered staging paths changed or traverse a symlink')
-        parent = output.parent.stat()
-        _require([parent.st_dev, parent.st_ino] == binding['parent_identity'],
-                 'Registered output parent identity changed')
-        directory = output.stat()
-        directory_identity = (directory.st_dev, directory.st_ino)
-        content, _ = _snapshot(output / 'RUN_METADATA.txt', 'runner staging record', 64 * 1024, text=True)
-        _staging_evidence(content, binding, job, options, time.time() if now is None else now)
+        binding, output, directory_identity, _ = _verified_staging(job, engine, now)
         # Digest verification happens again over the exact bytes consumed by the
         # bounded reader, closing the resolve/read gap without reading outputs.
         _, observed = _snapshot(output / 'POSCAR', 'staged POSCAR', MAX_POSCAR_BYTES)
         _require(observed['sha256'] == binding['sha256'] and observed['bytes_read'] == binding['bytes'],
                  'Runtime POSCAR differs from its immutable staged-input identity')
-        after, parent_after = output.stat(), output.parent.stat()
-        _require((after.st_dev, after.st_ino) == directory_identity
-                 and [parent_after.st_dev, parent_after.st_ino] == binding['parent_identity']
-                 and output == output.resolve(), 'Staging directory identity changed during verification')
+        _unchanged(binding, output, directory_identity)
         return SourceDescriptor('poscar', str(output / 'POSCAR'),
             qualification='attempt-staged-input; local staging byte identity verified; scientific lineage unassessed',
             optional=True, root_path=str(output), root_identity=directory_identity,
