@@ -496,7 +496,7 @@ def register(subcommands):
     add.add_argument("--json", action="store_true")
     add.add_argument("argv", nargs="...")
     add.set_defaults(handler=handle)
-    manifest = operations.add_parser("manifest", help="native job manifests (#41 Phase 1a): project init and ID reservation")
+    manifest = operations.add_parser("manifest", help="native job manifests (#41): project init, ID reservation and legacy queue bindings")
     manifest_operations = manifest.add_subparsers(dest="manifest_operation", required=True)
     init = manifest_operations.add_parser("init", help="create .cmw-project.json and the ID ledger owned by this node")
     init.add_argument("--project-root", type=Path, required=True)
@@ -512,6 +512,24 @@ def register(subcommands):
     reserve.add_argument("--request-uuid", metavar="UUID", help="retry with the same UUID to get the same ID")
     reserve.add_argument("--json", action="store_true")
     reserve.set_defaults(handler=handle)
+    bind = manifest_operations.add_parser("bind-queue",
+        help="record one of this owner's legacy queues once in the project integrity journal (#41 Phase 4a)")
+    bind.add_argument("--project-root", type=Path, required=True)
+    bind.add_argument("--node", required=True, dest="legacy_node", metavar="TOKEN",
+                      help="permanent node reference token used in node/queue:J<n>.<m>")
+    bind.add_argument("--queue", required=True, dest="legacy_queue", metavar="TOKEN",
+                      help="permanent queue reference token")
+    bind.add_argument("--state-root", type=Path, required=True, metavar="PATH",
+                      help="the legacy queue's state directory (holding queue.sqlite3); read, never changed")
+    bind.add_argument("--request-uuid", metavar="UUID", help="retry with the same UUID to get the same receipt")
+    bind.add_argument("--json", action="store_true")
+    bind.set_defaults(handler=handle)
+    resolve = manifest_operations.add_parser("resolve",
+        help="show the queue record a node/queue:J<n>.<m> reference names; read-only")
+    resolve.add_argument("reference", metavar="NODE/QUEUE:J<n>.<m>")
+    resolve.add_argument("--project-root", type=Path, required=True)
+    resolve.add_argument("--json", action="store_true")
+    resolve.set_defaults(handler=handle)
     hashes = manifest_operations.add_parser("hash-outputs",
         help="hash a terminated native job's pending restart outputs now (the automatic hasher's retry)")
     hashes.add_argument("job_id")
@@ -964,6 +982,13 @@ def handle(args):
                         raise JobsError(f"Legacy inventory is not valid JSON: {exc}") from exc
                 result = manifests.init_project(store, args.project_root, args.project_key, inventory=inventory,
                                                 no_legacy=args.no_legacy_ids)
+            elif args.manifest_operation == "bind-queue":
+                from .manifest_legacy import bind_queue
+                result = bind_queue(store, args.project_root, node=args.legacy_node, queue=args.legacy_queue,
+                                    state_root=args.state_root, request=args.request_uuid)
+            elif args.manifest_operation == "resolve":
+                from .manifest_legacy import resolve, summary
+                result = summary(resolve(args.project_root, args.reference))
             elif args.manifest_operation == "hash-outputs":
                 from .manifest_hashing import hash_outputs
                 with store.read_transaction() as con:

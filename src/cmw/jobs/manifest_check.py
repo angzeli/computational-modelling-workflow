@@ -17,8 +17,9 @@ import os
 import sqlite3
 import stat
 
-from .manifests import (LEDGER, MANIFEST_DIR, NATIVE_ID, SCHEMA_VERSION, ManifestError, journal_prefix,
-                        load_project)
+from .manifest_legacy import VOLUME_UUID
+from .manifests import (KEY, LEDGER, MANIFEST_DIR, NATIVE_ID, NODE_UUID, SCHEMA_VERSION, ManifestError,
+                        journal_prefix, load_project)
 
 VASP_INPUTS = ('INCAR', 'POSCAR', 'KPOINTS')
 
@@ -92,11 +93,33 @@ def _load_json(job, path, code):
     return document
 
 
+def _identity_pair(value):
+    return (isinstance(value, list) and len(value) == 2
+            and all(type(item) is int and item >= 0 for item in value))
+
+
+def _malformed_binding(payload):
+    binding = payload.get('binding')
+    if (set(payload) != {'node', 'queue', 'binding'}
+            or not all(isinstance(payload[key], str) and KEY.fullmatch(payload[key]) for key in ('node', 'queue'))
+            or not isinstance(binding, dict)
+            or set(binding) != {'queue_id', 'state_root', 'root_identity', 'database_identity', 'volume_uuid'}
+            or not (binding['queue_id'] is None or isinstance(binding['queue_id'], str)
+                    and NODE_UUID.fullmatch(binding['queue_id']))
+            or not isinstance(binding['state_root'], str) or not binding['state_root'].startswith('/')
+            or not _identity_pair(binding['root_identity']) or not _identity_pair(binding['database_identity'])
+            or not isinstance(binding['volume_uuid'], str) or not VOLUME_UUID.fullmatch(binding['volume_uuid'])):
+        return 'is a malformed queue_binding receipt'
+    return None
+
+
 def _malformed(record):
     """Why a sequence-valid journal record cannot be indexed as a receipt, or None."""
     payload = record.get('payload')
-    if record.get('event') not in ('manifest', 'registration') or not isinstance(payload, dict):
+    if record.get('event') not in ('manifest', 'registration', 'queue_binding') or not isinstance(payload, dict):
         return 'has an unknown event or a non-object payload'
+    if record['event'] == 'queue_binding':
+        return _malformed_binding(payload)
     digest = payload.get('job_sha256')
     if not isinstance(payload.get('id'), str) or not NATIVE_ID.fullmatch(payload['id']) or \
             not isinstance(digest, str) or len(digest) != 64:
@@ -271,6 +294,24 @@ def _lineage(job, root, document, project):
             job.error('parent_output_differs', f'{role} copy digest differs from parent {parent} output digest')
 
 
+def _queue_bindings(records):
+    """Each queue token and each queue database is bound at most once (#76)."""
+    findings, tokens, databases = [], {}, {}
+    for record in records:
+        if record['event'] != 'queue_binding':
+            continue
+        payload, sequence = record['payload'], record['sequence']
+        token = f'{payload["node"]}/{payload["queue"]}'
+        database = (payload['binding']['volume_uuid'], payload['binding']['database_identity'][1])
+        for seen, key, what in ((tokens, token, f'Queue {token}'), (databases, database, 'A queue database')):
+            if key in seen:
+                findings.append({'level': 'error', 'code': 'queue_binding_conflict',
+                                 'message': f'{what} is bound again in journal record {sequence} '
+                                            f'(first in record {seen[key]})'})
+            seen.setdefault(key, sequence)
+    return findings
+
+
 def check(store, root, job_ids=(), *, rehash=False):
     """Verify each requested native job (all known ones by default) without writing anything."""
     root, project = load_project(root)
@@ -297,9 +338,11 @@ def check(store, root, job_ids=(), *, rehash=False):
         if record.get('schema_version') != SCHEMA_VERSION or record.get('project') != key:
             project_findings.append({'level': 'error', 'code': 'journal_identity',
                                      'message': f'Journal record {record["sequence"]} names another project or schema'})
+    project_findings += _queue_bindings(records)
     by_event = {}
     for record in records:
-        by_event.setdefault((record['event'], record['payload']['id']), []).append(record)
+        if record['event'] != 'queue_binding':
+            by_event.setdefault((record['event'], record['payload']['id']), []).append(record)
     jobs = root / 'jobs'
     present = {path.name for path in jobs.iterdir() if NATIVE_ID.fullmatch(path.name)} if jobs.is_dir() else set()
     known = present | {f'J{number}' for number in reserved} | {job_id for _, job_id in by_event if job_id}

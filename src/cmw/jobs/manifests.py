@@ -39,7 +39,7 @@ NODE_UUID = re.compile(r'[0-9a-f]{32}')
 SHA256 = re.compile(r'[0-9a-f]{64}')
 ENVIRONMENT_PREFIXES = ('OMP_', 'OPENBLAS_', 'MKL_', 'VECLIB_', 'GFORTRAN_', 'OMPI_MCA_')
 VASP_INPUTS = ('INCAR', 'POSCAR', 'KPOINTS')
-JOURNAL_EVENTS = {'manifest', 'registration'}
+JOURNAL_EVENTS = {'manifest', 'registration', 'queue_binding'}
 LEDGER_TIMEOUT_SECONDS = 5.0
 
 
@@ -336,8 +336,11 @@ def _journal_lock(root):
         os.close(fd)
 
 
-def append_journal(root, project_key, event, request, payload):
-    """Append one receipt; identical (event, request) retries return the original."""
+def append_journal(root, project_key, event, request, payload, admit=None):
+    """Append one receipt; identical (event, request) retries return the original.
+
+    ``admit(records)`` may refuse a new receipt (by raising) under the same lock.
+    """
     if event not in JOURNAL_EVENTS:
         raise ManifestError(f'Unsupported integrity event: {event}')
     with _journal_lock(root):
@@ -347,6 +350,8 @@ def append_journal(root, project_key, event, request, payload):
                 if record['payload'] != payload or record['project'] != project_key:
                     raise ManifestError(f'Request UUID already anchored a different {event} receipt')
                 return record
+        if admit is not None:
+            admit(records)
         record = {'schema_version': SCHEMA_VERSION, 'sequence': len(records) + 1, 'request_uuid': request,
                   'event': event, 'timestamp': _utc_now(), 'project': project_key, 'payload': payload}
         path = root / JOURNAL
