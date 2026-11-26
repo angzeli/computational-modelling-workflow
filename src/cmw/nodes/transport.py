@@ -5,6 +5,7 @@ import os
 import re
 import selectors
 import shlex
+import stat
 import subprocess
 import threading
 import time
@@ -16,8 +17,14 @@ from .transport_events import TransportFailure
 MAX_STDERR = 64 * 1024
 
 
-def ssh_command(alias, executable, config_root, queue, *, connect_timeout=5):
-    """Quote only fixed enrollment settings at OpenSSH's remote-shell boundary."""
+SSH = '/usr/bin/ssh'
+# OpenSSH expands % tokens and splits option values on whitespace, so the
+# enrolled socket path is limited to characters that need neither.
+_SOCKET = re.compile(r'/[A-Za-z0-9_.@+/-]{1,99}')
+CHECK_TIMEOUT = 5
+
+
+def _bootstrap(alias, executable, config_root, queue, connect_timeout):
     if not isinstance(alias, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', alias):
         raise NodeError('INVALID_CONNECTION', 'Use an explicitly configured SSH alias')
     for value in (executable, config_root):
@@ -27,11 +34,46 @@ def ssh_command(alias, executable, config_root, queue, *, connect_timeout=5):
         raise NodeError('INVALID_CONNECTION', 'Invalid enrolled queue alias')
     if type(connect_timeout) is not int or not 1 <= connect_timeout <= 30:
         raise NodeError('INVALID_CONNECTION', 'Connection timeout must be between 1 and 30 seconds')
-    bootstrap = shlex.join([executable, 'nodes', 'endpoint', '--config', config_root, '--queue', queue])
-    return ['/usr/bin/ssh', '-T', '-v', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+    return shlex.join([executable, 'nodes', 'endpoint', '--config', config_root, '--queue', queue])
+
+
+def ssh_command(alias, executable, config_root, queue, *, connect_timeout=5):
+    """Quote only fixed enrollment settings at OpenSSH's remote-shell boundary."""
+    bootstrap = _bootstrap(alias, executable, config_root, queue, connect_timeout)
+    return [SSH, '-T', '-v', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
             '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes', '-o', 'RequestTTY=no',
             '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ServerAliveInterval=5',
             '-o', 'ServerAliveCountMax=1', '-o', f'ConnectTimeout={connect_timeout}', '--', alias, bootstrap]
+
+
+def control_socket(path):
+    """The enrolled master socket (S02): a fixed absolute path OpenSSH reads literally."""
+    if not isinstance(path, str) or not _SOCKET.fullmatch(path) or '/../' in path + '/' or '//' in path:
+        raise NodeError('INVALID_CONNECTION', 'The control socket must be a plain absolute path of at most 100 '
+                        'characters from letters, digits and _.@+-/')
+    return path
+
+
+def session_command(alias, control_path, executable, config_root, queue, *, ssh=None, connect_timeout=5):
+    """Attach to the user's own OpenSSH master (S02); CMW never opens or authenticates one.
+
+    BatchMode forbids any prompt. ProxyCommand=/usr/bin/false stops OpenSSH's
+    fallback to a direct connection when the master is gone, so no network
+    connection to the node is ever made outside the user's session. The master
+    has already checked the host key, so StrictHostKeyChecking does not apply.
+    """
+    bootstrap = _bootstrap(alias, executable, config_root, queue, connect_timeout)
+    return [ssh or SSH, '-T', '-v', '-o', 'BatchMode=yes', '-o', 'ControlMaster=no',
+            '-o', f'ControlPath={control_socket(control_path)}', '-o', 'ProxyCommand=/usr/bin/false',
+            '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes', '-o', 'RequestTTY=no',
+            '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=1',
+            '-o', f'ConnectTimeout={connect_timeout}', '--', alias, bootstrap]
+
+
+def open_session_command(alias, control_path):
+    """The one command the user runs to open the session CMW attaches to (S03)."""
+    return shlex.join(['ssh', '-M', '-S', control_socket(control_path), '-o', 'ServerAliveInterval=30',
+                       '-o', 'ServerAliveCountMax=3', '-fN', alias])
 
 
 class ProcessTransport:
@@ -169,7 +211,7 @@ class ProcessTransport:
             try:
                 if self.process is not None:
                     failure = self._closed_error(mutation)
-                    if failure.code == 'AUTH_FAILED':
+                    if failure.code in {'AUTH_FAILED', 'AUTH_REQUIRED'}:
                         raise failure from exc
             finally:
                 self.close()
@@ -214,3 +256,65 @@ class SSHTransport(ProcessTransport):
         super().__init__(ssh_command(connection['ssh_alias'], connection['executable'],
                                     connection['config_root'], connection['queue']),
                          timeout=connection.get('timeout', 10), host_key=key)
+
+
+class SessionRequired(TransportFailure):
+    """S03 AUTH_REQUIRED: no live master at the enrolled socket. Carries the one command to run."""
+    def __init__(self, command):
+        super().__init__('AUTH_REQUIRED', 'No open SSH session at the enrolled control socket; open it with: ' + command,
+                         event=NodeEvent.SESSION_REQUIRED)
+        self.command = command
+
+
+class SessionTransport(ProcessTransport):
+    """Connection auth mode `session` (S02/S03): every channel runs through the user's master.
+
+    Before each connection attempt `ssh -O check` asks the master whether it is
+    alive. It talks only to the local socket. If the master is missing,
+    expired or not the user's own, no attempt is made. CMW cannot see the host
+    key through a master (S04); the endpoint's pinned host identity is checked
+    on every reply instead.
+    """
+    def __init__(self, connection, *, ssh=None):
+        if 'ssh_host_key' in connection:
+            raise NodeError('INVALID_CONNECTION', 'A session connection cannot pin a host key it never sees')
+        self.alias, self.control_path = connection.get('ssh_alias'), control_socket(connection.get('control_path'))
+        self.ssh = ssh or SSH
+        super().__init__(session_command(self.alias, self.control_path, connection.get('executable'),
+                                         connection.get('config_root'), connection.get('queue'), ssh=self.ssh),
+                         timeout=connection.get('timeout', 10))
+        self.open_command = open_session_command(self.alias, self.control_path)
+
+    def master_alive(self):
+        """True only if the user's master answers on a private socket; never creates one."""
+        directory = os.path.dirname(self.control_path)
+        try:
+            folder, master = os.lstat(directory), os.lstat(self.control_path)
+        except OSError:
+            return False
+        uid = os.geteuid()
+        if (not stat.S_ISDIR(folder.st_mode) or folder.st_uid != uid or folder.st_mode & 0o077
+                or not stat.S_ISSOCK(master.st_mode) or master.st_uid != uid):
+            return False
+        try:
+            completed = subprocess.run([self.ssh, '-o', 'BatchMode=yes', '-o', f'ControlPath={self.control_path}',
+                                        '-O', 'check', '--', self.alias], stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                       timeout=CHECK_TIMEOUT, close_fds=True)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return completed.returncode == 0
+
+    def _start(self):
+        if self.process is None and not self.master_alive():
+            raise SessionRequired(self.open_command)
+        super()._start()
+
+    def _closed_error(self, mutation):
+        # The master may have gone between the check and the attempt. A read
+        # that then fails is AUTH_REQUIRED only if a repeated check also fails;
+        # a mutation's outcome stays unknown, because its request may have left.
+        failure = super()._closed_error(mutation)
+        if not mutation and failure.code == 'DISCONNECTED' and not self.master_alive():
+            return SessionRequired(self.open_command)
+        return failure

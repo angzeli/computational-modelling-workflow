@@ -137,8 +137,10 @@ def handle(args):
             print(json.dumps(envelope, indent=2, ensure_ascii=True, allow_nan=False))
         elif operation == 'status':
             from cmw.jobs.cli import status_text
+            from .scheduler_report import report_text
+            state = envelope['result']['state']
             print(f"NODE {backend.alias} / {backend.queue} ({backend.node_id})")
-            print(status_text(envelope['result']['state']))
+            print(report_text(state['scheduler_report']) if 'scheduler_report' in state else status_text(state))
         elif operation == 'progress':
             from cmw.progress.formatting import progress_text, history_text
             from .codec import decode_typed
@@ -164,7 +166,8 @@ def handle(args):
                 and code in {'QUEUE_UNAVAILABLE', 'SUCCESSOR_UNVERIFIABLE', 'SUCCESSOR_PENDING_VERIFICATION'}):
             from cmw.jobs.successor_cli import print_retry
             return print_retry('SUCCESSOR_UNVERIFIABLE' if code == 'QUEUE_UNAVAILABLE' else code, str(exc), args)
-        print(json.dumps({'code': getattr(exc, 'code', 'NODE_REFUSED'), 'message': str(exc)}))
+        from .cli import refusal
+        print(json.dumps(refusal(exc)))
         return 2
     finally:
         if backend is not None:

@@ -11,7 +11,19 @@ import math
 from .protocol import NodeError
 
 POLL_INTERVAL_SECONDS = 5.0
-STALE_AFTER_SECONDS = 15.0
+STALE_INTERVALS = 3  # D11: a receipt stays fresh for three poll intervals.
+STALE_AFTER_SECONDS = STALE_INTERVALS * POLL_INTERVAL_SECONDS
+# S05: a scheduler-backed lane polls no faster than every 30 s. Its interval is
+# enrolled on the node and pinned in the frontend connection.
+SCHEDULER_POLL_BOUNDS = (30, 600)
+
+
+def scheduler_poll_interval(value):
+    """An enrolled scheduler poll interval in whole seconds within the S05 bounds."""
+    low, high = SCHEDULER_POLL_BOUNDS
+    if type(value) is not int or not low <= value <= high:
+        raise NodeError('INVALID_PARAMS', f'poll_interval_seconds must be an integer from {low} to {high}')
+    return value
 
 
 def _finite(value, name):
@@ -77,6 +89,9 @@ class NodeState(str, Enum):
     UNREACHABLE = 'UNREACHABLE'
     AUTH_FAILED = 'AUTH_FAILED'
     INCOMPATIBLE = 'INCOMPATIBLE'
+    # S03: no user-opened SSH session to attach to. A frontend state, never a
+    # protocol-1 error code, and never counted toward the D10 failure rule.
+    AUTH_REQUIRED = 'AUTH_REQUIRED'
 
 
 class NodeEvent(str, Enum):
@@ -86,6 +101,7 @@ class NodeEvent(str, Enum):
     TIMEOUT = 'TIMEOUT'
     AUTH_FAILURE = 'AUTH_FAILURE'
     INCOMPATIBLE_HANDSHAKE = 'INCOMPATIBLE_HANDSHAKE'
+    SESSION_REQUIRED = 'SESSION_REQUIRED'
 
 
 @dataclass(frozen=True)
@@ -124,6 +140,8 @@ def transition(current: Reachability, event: NodeEvent | str, *,
         raise NodeError('INVALID_PARAMS', 'Unknown reachability event') from exc
     if event == NodeEvent.AUTH_FAILURE:
         return Reachability(NodeState.AUTH_FAILED, 0, current.received_at)
+    if event == NodeEvent.SESSION_REQUIRED:
+        return Reachability(NodeState.AUTH_REQUIRED, 0, current.received_at)
     if event == NodeEvent.INCOMPATIBLE_HANDSHAKE:
         return Reachability(NodeState.INCOMPATIBLE, 0, current.received_at)
     if event in (NodeEvent.SUCCESS, NodeEvent.HANDSHAKE_SUCCESS):
@@ -145,15 +163,17 @@ class Staleness(str, Enum):
     STALE = 'STALE'
 
 
-def classify_staleness(received_at: float | None, portal_now: float) -> Staleness:
-    """D11 keeps the existing inclusive freshness boundary, extended to 15 s."""
+def classify_staleness(received_at: float | None, portal_now: float, *,
+                       poll_interval: float = POLL_INTERVAL_SECONDS) -> Staleness:
+    """D11 keeps the inclusive freshness boundary: three poll intervals (15 s by default)."""
     _finite(portal_now, 'Portal time')
+    _finite(poll_interval, 'Poll interval')
     if received_at is None:
         return Staleness.UNAVAILABLE
     _finite(received_at, 'Portal receive time')
     if portal_now < received_at:
         raise NodeError('INVALID_PARAMS', 'Portal time precedes its receive time')
-    return Staleness.STALE if portal_now - received_at > STALE_AFTER_SECONDS else Staleness.FRESH
+    return Staleness.STALE if portal_now - received_at > STALE_INTERVALS * poll_interval else Staleness.FRESH
 
 
 class SkewLevel(str, Enum):

@@ -1,8 +1,11 @@
 # Scheduler-backed nodes: PBS Pro design
 
-Status: **Phase 0 design. No code or deployment.** The read-only fact probe
-ran on 2026-11-20 against one login node and is summarized in
-[§6](#6-probe-results); F09, F11 (idle lifetime) and F14 are still open. This document is the Phase 0 deliverable of
+Status: **Phases 0 and 1 implemented; no deployment.** Phase 1a (enrollment and
+the read-only endpoint) and Phase 1b (session transport and the read-only lane,
+[§8](#8-phase-1b-session-transport-and-lane)) are implemented. The read-only fact
+probe ran on 2026-11-20 against one login node and is summarized in
+[§6](#6-probe-results); F09, F11 (idle lifetime) and F14 are still open. This
+document began as the Phase 0 deliverable of
 [issue #81](https://github.com/angzeli/computational-modelling-workflow/issues/81).
 It extends the [multi-host nodes delta specification](multi-host-nodes.md)
 (decisions D01–D34) with decisions S01–S16 for one new node kind, `pbs`. It
@@ -47,11 +50,11 @@ They are reused unchanged.
 | --- | --- |
 | S01 | Add node kind `pbs` to `cmw nodes`. Its queue is backed by PBS, which replaces the CMW controller and dispatcher on that node only. The node is always an explicit target, with no pooled scheduling or automatic node choice across the Macs and the cluster. Existing node kinds and local Jobs behaviour are unchanged. |
 | S02 | Add connection auth mode `session`. The user opens an OpenSSH master themselves and types the password there. CMW attaches with `ControlPath=<enrolled socket>`, `ControlMaster=no` and `BatchMode=yes`. It never creates a master, never prompts, and never reads, stores or forwards a credential. The enrolled socket must be an absolute path in a directory owned by the user with mode 0700. Key-authenticated connections keep their current argv. |
-| S03 | A missing or expired master is a new immediate portal state, `AUTH_REQUIRED`, distinct from `AUTH_FAILED`. Before each connection attempt, the frontend checks the master with `ssh -O check` on the enrolled socket. If the check fails, the frontend makes no connection attempt and shows the one command the user runs. If the master disappears between the check and the attempt, `BatchMode` makes the attempt fail without a prompt. That failure is reported as `AUTH_REQUIRED` when a repeated check also fails, and as `AUTH_FAILED` otherwise. `AUTH_REQUIRED` resets the transport-failure count and never counts toward the D10 three-failure rule. It is a frontend state, not a protocol-1 error code. |
+| S03 | A missing or expired master is a new immediate portal state, `AUTH_REQUIRED`, distinct from `AUTH_FAILED`. Before each connection attempt, the frontend checks the master with `ssh -O check` on the enrolled socket. If the check fails, the frontend makes no connection attempt and shows the one command the user runs. If the master disappears between the check and the attempt, `BatchMode` makes the attempt fail without a prompt. That failure is reported as `AUTH_REQUIRED` when a repeated check also fails, and as an ordinary transport failure otherwise (refined in Phase 1b, §8: through a master CMW never authenticates, so there is no authentication failure to report). `AUTH_REQUIRED` resets the transport-failure count and never counts toward the D10 three-failure rule. It is a frontend state, not a protocol-1 error code. |
 | S04 | A connection pins one login node by its `/etc/machine-id`, checked on every reply as for any Linux node. CMW cannot check the SSH host key itself, because ssh does no key exchange when it attaches to a master (F11). The owner accepted on 2026-11-20 that the host key is verified only by the user's own ssh, against their `known_hosts`, when they open the master. With an explicit control socket the master, not the host name CMW passes, decides which node is reached. An endpoint reached on another login node refuses, because its machine-id differs from the enrolled host; moving to another login node is a reviewed re-enrollment. Machine-id uniqueness across login nodes is still unconfirmed (F06). |
-| S05 | The endpoint stays a foreground process on the SSH stream and exits when the frontend disconnects. Nothing CMW-owned persists on a login node: no daemon, cron job, controller, `nohup` process or pilot job. A `pbs` lane polls no faster than every 30 s. Its staleness threshold is three poll intervals, keeping the D11 ratio. Each status makes two bounded calls: `qselect -x -u` for the user's job IDs, then `qstat -x -f -F json` for those IDs, because `qstat` ignored `-f -F json` when `-u` was given on the probed server (F02). Phase 1 fixes the exact interval after fact F16 has measured what a `qstat` call costs. |
+| S05 | The endpoint stays a foreground process on the SSH stream and exits when the frontend disconnects. Nothing CMW-owned persists on a login node: no daemon, cron job, controller, `nohup` process or pilot job. A `pbs` lane polls no faster than every 30 s. Its staleness threshold is three poll intervals, keeping the D11 ratio. Each status makes two bounded calls: `qselect -x -u` for the user's job IDs, then `qstat -x -f -F json` for those IDs, because `qstat` ignored `-f -F json` when `-u` was given on the probed server (F02). Phase 1 fixes the exact interval after fact F16 has measured what a `qstat` call costs. Phase 1b enrolls it per node, 30 s by default within 30–600 s, and the frontend connection pins the same value (§8). |
 | S06 | The CMW runtime is deployed as an immutable snapshot under the user's home directory, with a source-commit record and a SHA-256 manifest, following the D31 pattern. Its interpreter is pinned (D30) to a module or Miniforge Python of at least 3.11 (fact F10). The registered endpoint executable is an `-I -B` wrapper. Compute nodes run the same snapshot through the shared filesystem. |
-| S07 | A `SchedulerBackend` sits beside [`LocalBackend`](../../src/cmw/nodes/backend.py), with the same `call(operation, params, target)` surface and schema-1 observations. `capabilities` advertises the operations the node cannot perform. Suspend, continue, dispatch, move, sharing and controller start, stop, pause and resume are refused with the existing `UNSUPPORTED_OPERATION` code, and the portal hides those controls for the lane. Python owns state mapping, PBS script values, receipts and reconciliation. A small shell helper owns launching the PBS clients, their descriptors and output bounds (AGENTS §11), from Phase 1: Python passes the enrolled absolute path and fixed arguments, validates job IDs between calls and parses the result. Absolute paths are required because a non-login shell on the probed cluster did not have the PBS clients on its PATH (F02). From Phase 2 the helper also owns module loading and `qsub`/`qdel`, with stable exit codes. |
+| S07 | A `SchedulerBackend` sits beside [`LocalBackend`](../../src/cmw/nodes/backend.py), with the same `call(operation, params, target)` surface and schema-1 observations. Its status carries a scheduler-neutral report that one adapter per scheduler kind fills (§8); transport, lane, portal and the report schema do not depend on the scheduler. `capabilities` advertises the operations the node cannot perform. Suspend, continue, dispatch, move, sharing and controller start, stop, pause and resume are refused with the existing `UNSUPPORTED_OPERATION` code, and the portal hides those controls for the lane. Python owns state mapping, PBS script values, receipts and reconciliation. A small shell helper owns launching the PBS clients, their descriptors and output bounds (AGENTS §11), from Phase 1: Python passes the enrolled absolute path and fixed arguments, validates job IDs between calls and parses the result. Absolute paths are required because a non-login shell on the probed cluster did not have the PBS clients on its PATH (F02). From Phase 2 the helper also owns module loading and `qsub`/`qdel`, with stable exit codes. |
 | S08 | CMW keeps Hold records, request receipts, attempt bindings and PBS job IDs in a private state root under the user's home directory with mode 0700. Only the endpoint on the pinned login node opens it. Compute nodes never open it. The store is the existing SQLite `Store` in rollback-journal mode only if fact F09 shows that POSIX locks, `fsync` and atomic rename behave correctly on that filesystem. Otherwise it is one atomically renamed JSON record per attempt, like the #41 manifest sidecars. Phase 2 records the choice and its evidence. |
 | S09 | Storage for this node kind uses network-filesystem identity: filesystem type, source, mount point, and the stable identifier the filesystem supplies. On the probed cluster `findmnt` reported no UUID for its GPFS filesystem, so that identifier is the `statfs` filesystem ID (F08). The local-disk rule in `storage.platform_volume` is unchanged for existing nodes. Storage on an auto-deleting scratch filesystem is opt-in per enrollment, and its deletion period is shown as a warning wherever that storage is selected. |
 | S10 | Release is submission. `submit` is unchanged: preview, transfer, verify, then register on Hold. A held job consumes nothing on the cluster. `release` keeps its preview and confirmation. It renders a fixed, versioned job-script template from the typed resources as `select=1:ncpus=…:mpiprocs=…:mem=…` and `walltime=…`, names no queue, and calls `qsub`. Walltime is a required typed resource for `pbs` nodes, with no default (as D16 does for cancel mode), and values over the confirmed maximum (fact F05) are refused at preview. CMW always sends `ncpus`, `mem` and `walltime` explicitly, because the server fills missing values with its own defaults (F05). Jobs are submitted not rerunnable (`-r n`), because the server default is rerunnable; a `run_count` above 1 is a contradiction that leaves the attempt `Unknown`. No user-supplied text is interpolated into shell. |
@@ -127,7 +130,7 @@ Each phase is one PR, separately authorized, and updates
 | Phase | Content | Contacts the cluster |
 | --- | --- | --- |
 | 0 | This design and the fact probe checklist. No code. | No. The probe runs in its own authorized window. |
-| 1 | In two PRs. 1a: `pbs` enrollment without storage and the read-only endpoint backend. 1b: S02–S05 session transport and the read-only lane: `cmw nodes connect/check`, `jobs --node ALIAS status`, and the cluster's lane in `watch --all-nodes` listing the user's PBS jobs. Tests use synthetic `ssh` and `qstat` fixtures on both CI platforms. | Only for qualification, in an authorized window. |
+| 1 | In two PRs, both implemented. 1a: `pbs` enrollment without storage and the read-only endpoint backend. 1b: S02–S05 session transport and the read-only lane: `cmw nodes connect/check`, `jobs --node ALIAS status`, and the cluster's lane in `watch --all-nodes` listing the user's PBS jobs (§8). Tests use synthetic `ssh`, `qselect` and `qstat` fixtures on both CI platforms. | Only for qualification, in an authorized window. |
 | 2 | S08/S09 store and storage choice (after F09 and open question 2). S10–S14: held submission and release through `qsub`, the job-side guardian, receipts, lost-reply recovery, `qdel` cancel and walltime classification against a fake PBS. Then one authorized one-core, one-minute probe job in a sandbox namespace, which also confirms fact F14. | One authorized job. |
 | 3 | S16 cluster VASP profile, manifests with `state.json` and `scf_result`, progress, review and fetch. | One authorized small fixture calculation. |
 | 4 | Later: on-cluster successor chains, STOPCAR cancel modes, walltime-aware stop, an ORCA profile, a second scheduler to test the adapter boundary. | — |
@@ -206,3 +209,53 @@ them.
 5. **Frontends (Phase 2).** May only the MacBook submit to the cluster, or the
    Mini as well? This interacts with the #41 rule that the owner frontend
    allocates job IDs from its local ledger.
+
+## 8. Phase 1b: session transport and lane
+
+Phase 1b implements S02–S05 and the frontend side of S07. The supported
+behaviour is described in the [nodes contract](../cmw-dual-node.md#session-connections).
+It contacts no cluster: tests use a fake `ssh`, fake `qselect` and `qstat`
+executables, and a real local control socket.
+
+- **Session transport (S02, S03).** Connection auth mode `session` names an
+  absolute control socket in a 0700 directory owned by the user, and no host key.
+  Each attempt is preceded by `ssh -O check`. Channels run with `BatchMode=yes`,
+  `ControlMaster=no`, the enrolled `ControlPath` and `ProxyCommand=/usr/bin/false`.
+  The last option is a Phase 1b refinement: OpenSSH falls back to a direct
+  connection when it cannot reach the master, and this makes that fallback fail
+  locally, so CMW never connects to a login node outside the user's session. The
+  command CMW shows for `AUTH_REQUIRED` opens the master with
+  `ServerAliveInterval=30` and `ServerAliveCountMax=3`; a mux client has no
+  transport of its own, so only the master's keepalive detects a dead network.
+- **Cadence (S05).** The poll interval is part of the node's enrollment
+  (`scheduler.poll_interval_seconds`, 30 s by default, 30–600 s) and is advertised
+  in the `scheduler` capability. The frontend connection pins the same value, so
+  a lane keeps the bound from its first attempt; a mismatch is
+  `INCOMPATIBLE_CAPABILITIES`. A lane's receipt stays fresh for three intervals,
+  the D11 ratio. Refusals retry after the longer of 30 s and the interval.
+- **Endpoint lifetime (#81 comment of 2026-11-20).** A `pbs` endpoint exits when
+  no complete request arrives for four intervals, one interval past the lane's
+  staleness threshold. It writes nothing and holds no lock, so a reconnect that
+  lands beside a stale endpoint works, and the stale endpoint leaves by itself.
+  Each PBS client call stays bounded by its own 30 s timeout.
+- **Adapter boundary (S07).** `state.scheduler_report` replaces Phase 1a's
+  `state.pbs`: row `id` replaces `pbs_id`, report `version` replaces
+  `pbs_version`, and each row gains `phase` and `elapsed`. The enrolled
+  `scheduler.kind` selects the adapter (`ADAPTERS` in
+  [`scheduler.py`](../../src/cmw/nodes/scheduler.py)); PBS Pro is the only one.
+  Transport, lane, portal and the report validator read only the neutral report.
+- **Site facts.** Host and server names, client paths, the poll interval, the
+  number of servers and the queue layout come from the enrollment or from
+  scheduler output, never from constants. Job IDs are opaque tokens kept in
+  `qselect` order; Phase 1a had parsed a numeric sequence and required a server
+  suffix. Optional fields may be absent, integers printed as strings are read as
+  integers, and text is flattened to one line. Test fixtures cover a one-server
+  site with full records and a two-server site with suffixed IDs that share
+  sequence numbers and sparse records.
+
+PBS specifics that remain in the adapter, outside this phase: the client
+allowlist is the basenames `qselect` and `qstat`; ownership compares the user
+part of `Job_Owner` with the endpoint's Unix user, so a site that maps names
+would hide jobs rather than show another user's; the requested and used resource
+keys are a fixed allowlist of PBS Pro names, so other resources are omitted from
+rows; and host identity needs a distinct `/etc/machine-id` per login node (F06).

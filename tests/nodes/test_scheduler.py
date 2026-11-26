@@ -149,9 +149,10 @@ class PBSNodeTests(unittest.TestCase):
         pbs = pbs_status('/pbs/qselect', '/pbs/qstat', USER, run=fake)
         helper = ['/bin/bash', str(HELPER), str(MAX_OUTPUT)]
         self.assertEqual(fake.calls[0], (helper + ['/pbs/qselect', '-x', '-u', USER], QUERY_TIMEOUT))
+        # IDs stay opaque and in the order qselect listed them; rows are that order reversed.
         self.assertEqual(fake.calls[1][0], helper + ['/pbs/qstat', '-x', '-f', '-F', 'json',
-                                            '97.server1', '98.server1', '99.server1', '100.server1', '101.server1'])
-        self.assertEqual([row['pbs_id'] for row in pbs['jobs']], ['101.server1', '99.server1', '98.server1'])
+                                            '97.server1', '98.server1', '99.server1', '101.server1', '100.server1'])
+        self.assertEqual([row['id'] for row in pbs['jobs']], ['101.server1', '99.server1', '98.server1'])
         self.assertEqual((pbs['foreign_skipped'], pbs['missing'], pbs['truncated']), (1, 1, False))
         self.assertEqual(pbs['counts'], {'queued': 0, 'running': 1, 'finished': 2, 'other': 0})
         running, finished, never = pbs['jobs']
@@ -161,6 +162,8 @@ class PBSNodeTests(unittest.TestCase):
         self.assertEqual(finished['requested']['select'], '2:ncpus=32:mpiprocs=32:mem=64gb')
         self.assertNotIn('vmem', finished['used'])
         self.assertEqual(running['name'], 'relax-c')
+        self.assertEqual((running['elapsed'], never['elapsed']), ('07:02:00', None))
+        self.assertEqual((pbs['kind'], pbs['version'], pbs['schema']), ('pbs', '2026.1.0', 1))
         self.assertEqual((pbs['reported_at'], pbs['servers']), (1795194770, 'server1,server2'))
 
     def test_status_fails_closed_on_scheduler_evidence(self):
@@ -200,16 +203,18 @@ class PBSNodeTests(unittest.TestCase):
         compatible_capabilities(capabilities)
         self.assertEqual(capabilities['result']['operations'], ['capabilities', 'status'])
         self.assertFalse(capabilities['result']['mutations_supported'])
-        self.assertEqual(capabilities['result']['scheduler']['poll_interval_seconds'], 30)
+        self.assertEqual(capabilities['result']['scheduler'], {
+            'schema': 1, 'kind': 'pbs', 'read_only': True, 'poll_interval_seconds': 30, 'idle_exit_seconds': 120})
         status = backend.call('status')
         validate_envelope(status, 'status')
         self.assertEqual((status['node_id'], status['queue_id'], status['sequence']),
                          (config['node_id'], config['queues']['main']['queue_id'], 2))
         self.assertEqual(status['result']['state']['jobs'], [])
-        pbs = status['result']['state']['pbs']
+        self.assertEqual(status['result']['state']['controller']['kind'], 'scheduler')
+        pbs = status['result']['state']['scheduler_report']
         self.assertEqual((len(pbs['jobs']), pbs['total'], pbs['next_offset'], pbs['size_limited']), (3, 3, None, False))
-        second = backend.call('status', {'offset': 1, 'limit': 1})['result']['state']['pbs']
-        self.assertEqual(([row['pbs_id'] for row in second['jobs']], second['next_offset']), (['99.server1'], 2))
+        second = backend.call('status', {'offset': 1, 'limit': 1})['result']['state']['scheduler_report']
+        self.assertEqual(([row['id'] for row in second['jobs']], second['next_offset']), (['99.server1'], 2))
         for bad in ({'offset': -1}, {'offset': MAX_JOBS + 1}, {'limit': 0}, {'limit': True}, {'offset': '1'}):
             with self.subTest(params=bad), self.assertRaises(NodeError) as caught:
                 backend.call('status', bad)
@@ -237,12 +242,13 @@ class PBSNodeTests(unittest.TestCase):
         backend = self.backend(config, run=fake)
         first = backend.call('status')
         self.assertLessEqual(len(encode(first)), MAX_FRAME)
-        pbs = first['result']['state']['pbs']
+        validate_envelope(first, 'status')
+        pbs = first['result']['state']['scheduler_report']
         self.assertTrue(pbs['size_limited'])
         self.assertEqual((pbs['total'], pbs['next_offset']), (MAX_JOBS, len(pbs['jobs'])))
-        self.assertEqual(pbs['jobs'][0]['pbs_id'], f'{MAX_JOBS}.server1')
-        rest = backend.call('status', {'offset': pbs['next_offset']})['result']['state']['pbs']
-        self.assertEqual(rest['jobs'][0]['pbs_id'], f'{MAX_JOBS - len(pbs["jobs"])}.server1')
+        self.assertEqual(pbs['jobs'][0]['id'], f'{MAX_JOBS}.server1')
+        rest = backend.call('status', {'offset': pbs['next_offset']})['result']['state']['scheduler_report']
+        self.assertEqual(rest['jobs'][0]['id'], f'{MAX_JOBS - len(pbs["jobs"])}.server1')
 
     def test_backend_refuses_unready_or_changed_identity(self):
         config = self.enrolled()
@@ -296,7 +302,7 @@ class PBSNodeTests(unittest.TestCase):
         for name in ('qselect', 'qstat'):
             (clients / name).chmod(0o755)
         pbs = pbs_status(str(clients / 'qselect'), str(clients / 'qstat'), USER)
-        self.assertEqual([row['pbs_id'] for row in pbs['jobs']], ['101.server1', '99.server1', '98.server1'])
+        self.assertEqual([row['id'] for row in pbs['jobs']], ['101.server1', '99.server1', '98.server1'])
 
     def client(self, name, body):
         directory = self.root / 'helper-clients'

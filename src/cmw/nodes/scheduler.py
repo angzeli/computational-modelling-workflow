@@ -1,9 +1,12 @@
-"""Read-only PBS Pro observation for scheduler-backed nodes (issue #81 Phase 1).
+"""Read-only scheduler-backed nodes (issue #81 S07): one backend, one adapter per scheduler.
 
-PBS, not CMW, owns admission, placement and dispatch on these nodes. This
-backend answers only ``capabilities`` and ``status``. It lists the endpoint
-user's own PBS jobs as scheduler-reported rows; it never submits, signals or
-adopts a job, and it opens no queue database.
+The scheduler, not CMW, owns admission, placement and dispatch on these nodes.
+`SchedulerBackend` answers only ``capabilities`` and ``status``. Its status
+carries a scheduler-neutral, schema-1 ``scheduler_report`` that the frontend
+lane and portal read without knowing which scheduler produced it. The enrolled
+``scheduler.kind`` selects the adapter that fills the report; PBS Pro is the only
+one. Every site fact comes from the enrollment or from what the scheduler
+reports. Nothing here submits, signals or adopts a job, or opens a queue database.
 """
 from __future__ import annotations
 
@@ -20,24 +23,40 @@ import threading
 import time
 from uuid import uuid4
 
+from .contracts import SCHEDULER_POLL_BOUNDS, scheduler_poll_interval
 from .protocol import NodeError, OPERATIONS as PROTOCOL_OPERATIONS
+from .scheduler_report import PHASES, QUALIFICATION
 
 OPERATIONS = ('capabilities', 'status')
-POLL_INTERVAL_SECONDS = 30
+DEFAULT_POLL_INTERVAL = SCHEDULER_POLL_BOUNDS[0]
+# The endpoint outlives the frontend's three-interval staleness threshold by one
+# interval, then exits: a lane that silent is already shown as stale.
+IDLE_INTERVALS = 4
+DEFAULT_IDLE_EXIT_SECONDS = IDLE_INTERVALS * DEFAULT_POLL_INTERVAL
 MAX_JOBS = 1000
 MAX_OUTPUT = 16 * 1024 * 1024
 QUERY_TIMEOUT = 30
 # Rows per status page stay well inside protocol.MAX_FRAME (2 MiB) with the envelope.
 MAX_PAGE_BYTES = 1536 * 1024
+# A job ID is an opaque token. It is checked only so that it can never be read
+# as an option or carry whitespace or control bytes between the two calls.
+JOB_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.@\[\]+-]{0,254}')
 HELPER = Path(__file__).with_name('pbs_client.sh')
-JOB_ID = re.compile(r'[0-9]{1,12}(?:\[[0-9]{0,12}\])?\.[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 # PBS Pro job_state letters, grouped for counts. Rows keep the verbatim letter.
-PHASES = {'Q': 'queued', 'H': 'queued', 'W': 'queued', 'T': 'queued', 'M': 'queued',
-          'R': 'running', 'E': 'running', 'B': 'running', 'S': 'running', 'U': 'running',
-          'F': 'finished', 'X': 'finished'}
+PBS_PHASES = {'Q': 'queued', 'H': 'queued', 'W': 'queued', 'T': 'queued', 'M': 'queued',
+              'R': 'running', 'E': 'running', 'B': 'running', 'S': 'running', 'U': 'running',
+              'F': 'finished', 'X': 'finished'}
 REQUESTED = ('select', 'ncpus', 'mpiprocs', 'mem', 'walltime', 'nodect', 'place')
 USED = ('walltime', 'cput', 'mem', 'ncpus', 'cpupercent')
-CAPABILITY = {'schema': 1, 'kind': 'pbs', 'read_only': True, 'poll_interval_seconds': POLL_INTERVAL_SECONDS}
+
+
+def poll_interval(scheduler):
+    """The enrolled poll interval of a scheduler configuration (S05 bounds)."""
+    return scheduler_poll_interval(scheduler.get('poll_interval_seconds', DEFAULT_POLL_INTERVAL))
+
+
+def idle_exit_seconds(config):
+    return IDLE_INTERVALS * poll_interval(config['scheduler'])
 
 
 class SchedulerError(NodeError):
@@ -51,14 +70,21 @@ def _digest(value):
 
 
 def _text(value, limit):
-    from cmw.jobs.cli import safe_text
-    return None if value is None else safe_text(value)[:limit]
+    from cmw.jobs.cli import name_text  # One literal line: no control, format or line-break characters.
+    return None if value is None else name_text(value)[:limit]
 
 
 def _scalar(value, limit=64):
     if type(value) is int and abs(value) <= 2**53:
         return value
     return _text(value, limit) if isinstance(value, str) else None
+
+
+def _integer(value):
+    """An integer field some servers print as a decimal string; anything else is absent."""
+    if isinstance(value, str) and re.fullmatch(r'-?[0-9]{1,15}', value.strip()):
+        value = int(value)
+    return value if type(value) is int and abs(value) <= 2**53 else None
 
 
 def run_helper(argv, timeout):
@@ -101,7 +127,11 @@ def _failure(completed, client):
 
 
 def own_job_ids(qselect, user, *, run=run_helper):
-    """Current and history-retained job IDs of one user, oldest first, at most MAX_JOBS."""
+    """One user's current and history-retained job IDs in the order qselect lists them.
+
+    IDs are opaque: neither their sequence part nor a server suffix is parsed.
+    At most the last MAX_JOBS listed are kept.
+    """
     completed = _query(qselect, ['-x', '-u', user], run)
     if completed.returncode != 0:
         raise _failure(completed, qselect)
@@ -114,7 +144,6 @@ def own_job_ids(qselect, user, *, run=run_helper):
             raise SchedulerError('SCHEDULER_UNAVAILABLE', 'qselect returned a malformed job ID')
         if line not in ids:
             ids.append(line)
-    ids.sort(key=lambda value: int(value.split('.', 1)[0].split('[', 1)[0]))
     return ids[-MAX_JOBS:], len(ids) > MAX_JOBS
 
 
@@ -123,20 +152,36 @@ def _row(job_id, record):
     state = state if isinstance(state, str) and len(state) == 1 else None
     requested = record.get('Resource_List') if isinstance(record.get('Resource_List'), dict) else {}
     used = record.get('resources_used') if isinstance(record.get('resources_used'), dict) else {}
-    exit_status = record.get('Exit_status')
-    return {'pbs_id': job_id, 'name': _text(record.get('Job_Name'), 256), 'state': state,
-            'phase': PHASES.get(state, 'other'), 'substate': _scalar(record.get('substate')),
+    return {'id': job_id, 'name': _text(record.get('Job_Name'), 256), 'state': state,
+            'phase': PBS_PHASES.get(state, 'other'), 'substate': _scalar(record.get('substate')),
             'queue': _text(record.get('queue'), 64), 'server': _text(record.get('server'), 64),
             'requested': {key: _scalar(requested[key]) for key in REQUESTED if key in requested},
             'used': {key: _scalar(used[key]) for key in USED if key in used},
-            'exit_status': exit_status if type(exit_status) is int else None,
+            'elapsed': _text(used.get('walltime'), 64) if isinstance(used.get('walltime'), str) else None,
+            'exit_status': _integer(record.get('Exit_status')),
             'comment': _text(record.get('comment'), 512),
             'queued_at': _text(record.get('qtime'), 64), 'started_at': _text(record.get('stime'), 64),
-            'finished_at': _text(record.get('obittime'), 64), 'run_count': _scalar(record.get('run_count'))}
+            'finished_at': _text(record.get('obittime'), 64), 'run_count': _integer(record.get('run_count'))}
+
+
+def report(kind, rows, *, version=None, servers=None, reported_at=None, truncated=False, missing=0,
+           foreign_skipped=0):
+    """The scheduler-neutral schema-1 report a lane reads; rows are newest first."""
+    counts = dict.fromkeys(PHASES, 0)
+    for row in rows:
+        counts[row['phase']] += 1
+    return {'schema': 1, 'kind': kind, 'version': version, 'servers': servers, 'reported_at': reported_at,
+            'jobs': rows, 'counts': counts, 'truncated': truncated, 'missing': missing,
+            'foreign_skipped': foreign_skipped, 'qualification': QUALIFICATION}
 
 
 def pbs_status(qselect, qstat, user, *, run=run_helper):
-    """The user's PBS jobs, newest first, as scheduler-reported rows; values are verbatim."""
+    """The user's PBS jobs as a scheduler report, last listed first; values are verbatim.
+
+    Two bounded calls (S05): `qselect -x -u` for the IDs, then `qstat -x -f -F
+    json` for those IDs. The pair works on every server, including one where a
+    single `qstat -f -F json -u` call would also have answered.
+    """
     ids, truncated = own_job_ids(qselect, user, run=run)
     document = {}
     if ids:
@@ -160,19 +205,20 @@ def pbs_status(qselect, qstat, user, *, run=run_helper):
             continue  # Left history between the two calls; nothing is inferred.
         owner = record.get('Job_Owner')
         if not isinstance(owner, str) or owner.split('@', 1)[0] != user:
-            foreign += 1  # Never show another user's job (#81 S15).
+            foreign += 1  # Never show another user's job, or one whose owner is unreported (#81 S15).
             continue
         rows.append(_row(job_id, record))
-    counts = {'queued': 0, 'running': 0, 'finished': 0, 'other': 0}
-    for row in rows:
-        counts[row['phase']] += 1
-    reported = document.get('timestamp')
-    return {'schema': 1, 'scheduler': 'pbs', 'pbs_version': _text(document.get('pbs_version'), 64),
-            'servers': _text(document.get('pbs_server'), 128),
-            'reported_at': reported if type(reported) is int else None,
-            'jobs': rows, 'counts': counts, 'truncated': truncated, 'missing': len(ids) - len(rows) - foreign,
-            'foreign_skipped': foreign,
-            'qualification': 'Scheduler-reported, read-only; not CMW-managed and never adopted'}
+    return report('pbs', rows, version=_text(document.get('pbs_version'), 64),
+                  servers=_text(document.get('pbs_server'), 128), reported_at=_integer(document.get('timestamp')),
+                  truncated=truncated, missing=len(ids) - len(rows) - foreign, foreign_skipped=foreign)
+
+
+def _pbs(scheduler, user, run):
+    return pbs_status(scheduler['qselect']['path'], scheduler['qstat']['path'], user, run=run)
+
+
+# The S07 adapter boundary: enrolled scheduler kind -> report(scheduler config, user, run).
+ADAPTERS = {'pbs': _pbs}
 
 
 def page(rows, offset, limit):
@@ -191,7 +237,7 @@ def page(rows, offset, limit):
 
 
 class SchedulerBackend:
-    """One PBS-backed queue per observer session: identity checks around read-only queries."""
+    """One scheduler-backed queue per observer session: identity checks around read-only queries."""
 
     def __init__(self, config_root, queue_alias, *, clock=time.time, identity_loader=None,
                  identity_checker=None, boot_provider=None, run=run_helper, user=None, defer_check=False):
@@ -222,8 +268,8 @@ class SchedulerBackend:
 
     def _check(self, operation=None, *, phase='initial'):
         config = self._load_identity(self.config_root)
-        if config.get('kind') != 'pbs':
-            raise SchedulerError('INVALID_QUEUE', 'Node configuration is not a PBS-backed enrollment')
+        if config.get('kind') != 'pbs' or config.get('scheduler', {}).get('kind') not in ADAPTERS:
+            raise SchedulerError('INVALID_QUEUE', 'Node configuration is not a scheduler-backed enrollment')
         if self._custom_identity_checker:
             readiness = self._check_identity(config)
         else:
@@ -261,12 +307,12 @@ class SchedulerBackend:
         if type(limit) is not int or not 1 <= limit <= MAX_JOBS:
             raise SchedulerError('INVALID_PARAMS', f'limit must be an integer between 1 and {MAX_JOBS}')
         if self.readiness.get('scheduler_ready') is not True:
-            raise SchedulerError('NODE_NOT_READY', '; '.join(self.readiness.get('errors') or ['PBS clients are not ready']))
-        tools = self.config['scheduler']
-        pbs = pbs_status(tools['qselect']['path'], tools['qstat']['path'], self._user, run=self._run)
-        pbs.update(page(pbs.pop('jobs'), offset, limit))
-        controller = {'schema': 1, 'kind': 'pbs', 'online': False, 'dispatch': 'scheduler-owned'}
-        return {'state': {'jobs': [], 'controller': controller, 'pbs': pbs},
+            raise SchedulerError('NODE_NOT_READY', '; '.join(self.readiness.get('errors') or ['Scheduler clients are not ready']))
+        scheduler = self.config['scheduler']
+        observed = ADAPTERS[scheduler['kind']](scheduler, self._user, self._run)
+        observed.update(page(observed.pop('jobs'), offset, limit))
+        controller = {'schema': 1, 'kind': 'scheduler', 'online': False, 'dispatch': 'scheduler-owned'}
+        return {'state': {'jobs': [], 'controller': controller, 'scheduler_report': observed},
                 'queue_revision': _digest(controller), 'job_count': 0, 'status_counts': {},
                 'offset': 0, 'has_more': False}
 
@@ -278,7 +324,7 @@ class SchedulerBackend:
             if self._closed:
                 raise SchedulerError('CLOSED', 'Observation session has closed')
             if type(operation) is not str or operation not in PROTOCOL_OPERATIONS or operation not in OPERATIONS:
-                raise SchedulerError('UNSUPPORTED_OPERATION', 'PBS-backed nodes support only read-only capabilities and status')
+                raise SchedulerError('UNSUPPORTED_OPERATION', 'Scheduler-backed nodes support only read-only capabilities and status')
             if target is not None:
                 raise SchedulerError('INVALID_TARGET', 'This operation does not accept an attempt target')
             params = {} if params is None else params
@@ -287,8 +333,12 @@ class SchedulerBackend:
             if operation == 'capabilities':
                 if params:
                     raise SchedulerError('INVALID_PARAMS', 'Operation parameters differ from the negotiated schema')
+                scheduler = self.config['scheduler']
+                capability = {'schema': 1, 'kind': scheduler['kind'], 'read_only': True,
+                              'poll_interval_seconds': poll_interval(scheduler),
+                              'idle_exit_seconds': idle_exit_seconds(self.config)}
                 result = {'queue': deepcopy(self.queue), 'readiness': deepcopy(self.readiness),
-                          'operations': list(OPERATIONS), 'scheduler': deepcopy(CAPABILITY),
+                          'operations': list(OPERATIONS), 'scheduler': capability,
                           'mutations_supported': False, 'observer_session': self.session_id}
             else:
                 result = self._status(params)

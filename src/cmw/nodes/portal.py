@@ -34,7 +34,8 @@ from cmw.progress.models import HistoryPage, ProgressSnapshot
 from .codec import decode_typed, encode_typed
 from .connections import observed_machine_usage, observed_status_usage
 from .contracts import (Reachability, NodeEvent, NodeState, transition, estimate_clock_skew,
-                        POLL_INTERVAL_SECONDS, STALE_AFTER_SECONDS)
+                        POLL_INTERVAL_SECONDS, STALE_INTERVALS)
+from .scheduler_report import counts_text, coverage_text, job_facts, job_resources, job_status
 from .view_freshness import NodeViews, ViewReceipt
 from .protocol import NodeError
 from .transport_events import classify_failure, compatible_capabilities, FailureKind
@@ -47,6 +48,11 @@ def target_key(target):
 
 def row_key(target):
     return '/'.join(map(str, target_key(target)))
+
+
+def scheduler_key(backend, job):
+    """A scheduler-reported row's key; it never collides with a CMW attempt target."""
+    return f"{backend.node_id}/{backend.queue_id}/scheduler/{job['id']}"
 
 
 class NodesTable(NavigationTable):
@@ -93,6 +99,14 @@ class NodeLane:
     session: str | None = None
     clock_id: str | None = None
     cache: dict = field(default_factory=dict)
+    # D11's 5 s, or the scheduler interval pinned in the connection (S05).
+    poll_interval: float = POLL_INTERVAL_SECONDS
+    # S03 AUTH_REQUIRED: the one command that opens the session this lane attaches to.
+    session_command: str | None = None
+
+    @property
+    def stale_after(self):
+        return STALE_INTERVALS * self.poll_interval
 
     def age(self, now):
         return None if self.received is None else now - self.received
@@ -103,7 +117,7 @@ class NodeLane:
         return (receipt is not None and receipt.generation == self.observation_generation
                 and self.error is None and not self.handshake_required and self.status_confirmed and self.refusal is None
                 and self.reachability.state == NodeState.REACHABLE
-                and age is not None and 0 <= age <= STALE_AFTER_SECONDS)
+                and age is not None and 0 <= age <= self.stale_after)
 
 
 class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
@@ -135,7 +149,8 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         identities = [(backend.node_id, backend.queue_id) for backend in backends.values()]
         if len(set(identities)) != len(identities):
             raise ValueError('A node/queue may appear only once in a portal')
-        self.lanes = {label: NodeLane(backend) for label, backend in backends.items()}
+        self.lanes = {label: NodeLane(backend, poll_interval=getattr(backend, 'poll_interval', POLL_INTERVAL_SECONDS))
+                      for label, backend in backends.items()}
         self.backend_factory = backend_factory
         self.request_root = request_root
         self.clock = clock or time.monotonic
@@ -269,7 +284,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
             # after selected reads so both remain serviced by the bounded lane.
             if not lane.busy and now >= lane.next_poll:
                 self.queue(owner, 'capabilities' if lane.handshake_required else 'status', automatic=True)
-                lane.next_poll = now + POLL_INTERVAL_SECONDS
+                lane.next_poll = now + lane.poll_interval
             if lane.pending and not lane.busy:
                 if lane.handshake_required or not lane.status_confirmed:
                     required = 'capabilities' if lane.handshake_required else 'status'
@@ -304,7 +319,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
     def expire_receipts(self, lane, now):
         receipt = lane.receipts.get('status')
         if (receipt is not None and receipt.generation == lane.observation_generation
-                and now - receipt.monotonic > STALE_AFTER_SECONDS):
+                and now - receipt.monotonic > lane.stale_after):
             lane.observation_generation += 1
 
     def invalidate_session(self, owner):
@@ -328,12 +343,15 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         lane.observation_generation += 1
         if failure.event is not None:
             lane.reachability = transition(lane.reachability, failure.event)
-        lane.refusal = failure.kind if failure.kind in {
+        session = failure.kind == FailureKind.SESSION
+        # A missing session supersedes earlier refusal evidence: nothing reached the node.
+        lane.refusal = None if session else failure.kind if failure.kind in {
             FailureKind.SECURITY, FailureKind.READINESS, FailureKind.AUTHENTICATION,
             FailureKind.INCOMPATIBLE} else lane.refusal
+        lane.session_command = getattr(error, 'command', None) if session else None
         lane.handshake_required = lane.reconnect_required = True
         lane.status_confirmed = False
-        lane.next_poll = self.clock() + (30 if lane.refusal is not None else POLL_INTERVAL_SECONDS)
+        lane.next_poll = self.clock() + (max(30, lane.poll_interval) if lane.refusal is not None else lane.poll_interval)
         abandoned = tuple(lane.pending)
         lane.pending.clear()
         self.invalidate_session(owner)
@@ -391,7 +409,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
             lane.session, lane.clock_id = envelope['session_id'], envelope['clock_id']
             if operation == 'capabilities':
                 lane.reachability = transition(lane.reachability, NodeEvent.HANDSHAKE_SUCCESS, received_at=now)
-                lane.error = lane.refusal = None
+                lane.error = lane.refusal = lane.session_command = None
                 lane.handshake_required = False
                 lane.status_confirmed = False
                 lane.next_poll = 0
@@ -444,8 +462,9 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
             self.refresh_catalogue_owner(owner)
 
     def selected(self):
+        # Scheduler-reported rows are never a CMW target: every control and read stays inert.
         selected = self.rows.get(self.selected_key)
-        return selected if selected and not selected[1].get("_catalogue_pending") else None
+        return selected if selected and not selected[1].get("_catalogue_pending") and '_scheduler' not in selected[1] else None
 
     def label(self, owner, job):
         return f"{owner} / {self.lanes[owner].backend.queue} / {job['display_id']}"
@@ -453,7 +472,9 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
     def connection_text(self, owner):
         lane = self.lanes[owner]
         age = lane.age(self.clock())
-        if lane.refusal is not None:
+        if lane.session_command is not None:
+            state = 'session required'
+        elif lane.refusal is not None:
             state = lane.refusal.value + ' refused'
         elif lane.reachability.state == NodeState.UNREACHABLE:
             state = 'node unreachable'
@@ -524,33 +545,49 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
             counts = (lane.status_envelope or {}).get('result',{}).get('status_counts',{})
             count = counts.get('Run',sum(job.get('status') == 'Run' for job in state.get('jobs', ())))
             unknown = counts.get('Unknown',sum(job.get('status') == 'Unknown' for job in state.get('jobs', ())))
-            condition = ('Online' if lane.fresh(now) else lane.refusal.value if lane.refusal is not None
+            condition = ('Online' if lane.fresh(now) else 'Session required' if lane.session_command is not None
+                         else lane.refusal.value if lane.refusal is not None
                          else 'Unreachable' if lane.reachability.state == NodeState.UNREACHABLE
                          else 'Disconnected' if lane.error else 'Connecting' if lane.received is None else 'Stale')
-            control = 'ctrl on' if controller.get('online') else 'ctrl off'
+            control = ('scheduler dispatch' if controller.get('dispatch') == 'scheduler-owned'
+                       else 'ctrl on' if controller.get('online') else 'ctrl off')
+            report = state.get('scheduler_report')
             age = lane.age(now)
             received = '—' if age is None else f'{age:.0f}s'
             identity = table_name(owner, 7 if self.size.width < 100 else 16)
             result = (lane.status_envelope or {}).get('result',{})
             partial_counts = 'status_counts' not in result and result.get('has_more',False)
             count_scope = 'page Run' if partial_counts else 'Run' if lane.fresh(now) else 'last Run'
-            status = f'{identity} {condition} {received} · {count_scope} {count}' + (f' Unknown {unknown}' if unknown else '')
-            if partial_counts:
+            counted = (f'{count_scope} {count}' + (f' Unknown {unknown}' if unknown else '') if report is None
+                       else ('' if lane.fresh(now) else 'last ') + counts_text(report))
+            status = f'{identity} {condition} {received} · {counted}'
+            if partial_counts and report is None:
                 status += ' · other blockers unknown'
-            machine = machine_text(self.machine_usage(owner)).removeprefix('Machine: ')
+            if lane.session_command is not None:
+                label, prefix, machine = '\nRun: ', 'run: ', lane.session_command
+            elif report is not None:
+                label, prefix, machine = '\nScheduler: ', '', coverage_text(report) + ' · read-only'
+            else:
+                label, prefix, machine = '\nMachine: ', '', machine_text(self.machine_usage(owner)).removeprefix('Machine: ')
             if self.size.width >= 100:
                 status += f' · {control}'
             width = max(1, self.size.width - 2)
             if not lane.fresh(now) and lane.state is not None:
                 caption = self.receipt_caption(owner, self.view_receipt(owner, 'status'))
                 retained[owner] = caption
-                status = caption.format(f'{condition} · {count_scope} {count}', width)
-            summary = status + ('\nMachine: ' if len(self.lanes) == 1 else ' · ') + machine
+                status = caption.format(f'{condition} · {counted}', width)
+            if lane.session_command is not None and len(self.lanes) > 1:
+                # The command is what the user needs; it leads the lane's one summary line.
+                status = f'{identity} Session required'
+            summary = status + (label if len(self.lanes) == 1 else ' · ' + prefix) + machine
             summaries.append('\n'.join(fit_text(line, width) for line in summary.splitlines()))
             for job in state.get('jobs', ()):
                 target = job.get('target')
                 if target and (target['node_id'], target['queue_id']) == (lane.backend.node_id, lane.backend.queue_id):
                     rows[row_key(target)] = (owner, job)
+            for job in (report or {}).get('jobs', ()):
+                rows[scheduler_key(lane.backend, job)] = (owner, {
+                    'display_id': job['id'], 'name': job.get('name') or '', 'status': job_status(job), '_scheduler': job})
         rows = self.catalogue_rows(rows)
         self.rows = rows
         summary = self.query_one('#node-summary', Static)
@@ -576,7 +613,9 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
             status = effective_status(job)
             if not lane.fresh(now) or job.get('_catalogue_stale'):
                 status = 'Last ' + status
-            values = (owner, job['display_id'], '[F]', job.get('name', ''), status, elapsed(job.get('elapsed')))
+            scheduled = job.get('_scheduler')
+            values = (owner, job['display_id'], '' if scheduled else '[F]', job.get('name', ''), status,
+                      (scheduled.get('elapsed') or '—') if scheduled else elapsed(job.get('elapsed')))
             for (column, _, width), value in zip(widths, values):
                 table.update_cell(key, column, table_name(value, width))
         if self.selected_key is None and keys and self.catalogue_auto_select:
@@ -596,8 +635,11 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
             caption = retained.get(owner) or next(iter(retained.values()))
             title = caption.format(title, self.size.width - 6)
         frame.border_title = literal(title)
-        table.set_class(selected is None, 'navigation-unavailable')
-        if selected:
+        scheduled = rows.get(self.selected_key, (None, {}))[1].get('_scheduler')
+        table.set_class(selected is None and scheduled is None, 'navigation-unavailable')
+        if scheduled is not None:
+            self.render_scheduled(rows[self.selected_key][0], scheduled, now)
+        elif selected:
             owner, job = selected
             lane = self.lanes[owner]
             status = effective_status(job)
@@ -642,6 +684,25 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
             if selected is None:
                 self.query_one('#selected',Static).update('No current visible attempt selected. Select a catalogue row explicitly.')
             self.message(self.catalogue_summary())
+
+    def render_scheduled(self, owner, job, now):
+        """A scheduler-reported row: read-only facts, no CMW target and no controls (S07, S15)."""
+        lane = self.lanes[owner]
+        identity = f"SELECTED · {owner} / {lane.backend.queue} / {job['id']} · {job_status(job)}"
+        if not lane.fresh(now):
+            identity += ' — ' + self.connection_text(owner).split(' · received')[0]
+        width = max(20, self.size.width - 7)
+        text = '\n'.join(fit_text(line, width) for line in (identity, job_facts(job), job_resources(job)))
+        self.query_one('#selected', Static).update(literal(text))
+        report = (lane.state or {}).get('scheduler_report') or {}
+        qualification = report.get('qualification') or 'Scheduler-reported, read-only'
+        execution = f'Scheduler: reported by {owner} · {qualification}'
+        if not lane.fresh(now):
+            execution = self.receipt_caption(owner, self.view_receipt(owner, 'status')).format(
+                execution, max(1, self.size.width - 5))
+        self.query_one('#execution', Static).update(literal(execution))
+        self.query_one('#progress', Static).display = False
+        self.query_one('#shortcuts', Static).update('Scheduler-reported row · read-only, no CMW controls · Q Detach')
 
     def select(self, key):
         if key == self.selected_key:

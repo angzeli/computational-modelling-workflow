@@ -481,11 +481,14 @@ def _validate_pbs_config(value):
             raise ValueError(f'Queue {alias} belongs to another node or host')
         _uuid(queue['queue_id'], 'Queue identity')
     scheduler = value['scheduler']
-    _object(scheduler, {'kind', *_PBS_TOOLS}, {'kind', *_PBS_TOOLS}, 'PBS scheduler tools')
+    _object(scheduler, {'kind', 'poll_interval_seconds', *_PBS_TOOLS}, {'kind', *_PBS_TOOLS}, 'PBS scheduler tools')
     if scheduler['kind'] != 'pbs':
         raise ValueError('Unsupported scheduler kind')
     for tool in _PBS_TOOLS:
         _validate_tool(scheduler[tool], f'PBS {tool} tool')
+    if 'poll_interval_seconds' in scheduler:
+        from .contracts import scheduler_poll_interval
+        scheduler_poll_interval(scheduler['poll_interval_seconds'])
     return value
 
 
@@ -657,8 +660,10 @@ def _enroll_pbs(config_root, spec, *, host_provider=None, runtime_provider=None)
     node_id = _uuid(spec.get('node_id', uuid4().hex), 'Node identity')
     queue = spec['queue']
     _aliases({queue: None} if isinstance(queue, str) else None, 'Queues')
-    tools = _object(spec['scheduler'], set(_PBS_TOOLS), set(_PBS_TOOLS), 'PBS scheduler tools')
+    tools = _object(spec['scheduler'], {'poll_interval_seconds', *_PBS_TOOLS}, set(_PBS_TOOLS), 'PBS scheduler tools')
     scheduler = {'kind': 'pbs', **{tool: _pbs_tool(tools[tool]) for tool in _PBS_TOOLS}}
+    if 'poll_interval_seconds' in tools:
+        scheduler['poll_interval_seconds'] = tools['poll_interval_seconds']  # Else the S05 floor, 30 s.
     host = _host((host_evidence if host_provider is None else host_provider)())
     runtime, original = runtime_observed() if runtime_provider is None else (runtime_provider(), None)
     _validate_runtime(runtime)
