@@ -24,6 +24,14 @@ def _read_spec(path):
     return value
 
 
+def refusal(exc):
+    """The structured refusal printed on stdout; AUTH_REQUIRED adds the one command to run (S03)."""
+    payload = {'code': getattr(exc, 'code', 'NODE_REFUSED'), 'message': str(exc)}
+    if isinstance(getattr(exc, 'command', None), str):
+        payload['command'] = exc.command
+    return payload
+
+
 def register(subcommands):
     parser = subcommands.add_parser('nodes', help='explicit enrollment and access to independent local execution nodes')
     operations = parser.add_subparsers(dest='nodes_operation', required=True)
@@ -80,5 +88,5 @@ def handle(args):
         print(json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False))
         return 0
     except (NodeError, OSError, ValueError) as exc:
-        print(json.dumps({'code': getattr(exc, 'code', 'NODE_REFUSED'), 'message': str(exc)}))
+        print(json.dumps(refusal(exc)))
         return 2

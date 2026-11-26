@@ -9,6 +9,7 @@ from .protocol import NodeError, is_mutation
 class FailureKind(str, Enum):
     TRANSPORT = 'transport'
     AUTHENTICATION = 'authentication'
+    SESSION = 'session'
     SECURITY = 'security'
     INCOMPATIBLE = 'incompatible'
     READINESS = 'readiness'
@@ -39,6 +40,9 @@ def classify_failure(error, *, operation=None):
         evidence = error.__cause__
     if code in {'AUTH_FAILED', 'SSH_AUTH_FAILED'}:
         return Failure(FailureKind.AUTHENTICATION, NodeEvent.AUTH_FAILURE, True, True)
+    if code == 'AUTH_REQUIRED':
+        # S03: no user-opened session to attach to; never counted toward D10.
+        return Failure(FailureKind.SESSION, NodeEvent.SESSION_REQUIRED, True, True)
     if code in {'SSH_IDENTITY_CHANGED', 'SSH_IDENTITY_UNVERIFIED', 'ENDPOINT_CHANGED',
                 'IDENTITY_CHANGED', 'QUEUE_CHANGED', 'RUNTIME_MISMATCH', 'UNSAFE_CONFIGURATION'}:
         return Failure(FailureKind.SECURITY, None, True, True,

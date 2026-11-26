@@ -212,6 +212,9 @@ def validate_envelope(value, operation=None):
                     any(type(count) is not int or count < 0 for count in counts.values()) or
                     type(result.get('job_count')) is not int or sum(counts.values()) != result['job_count']):
                 raise NodeError('INVALID_RESPONSE', 'Invalid unfiltered operational counts')
+        if 'scheduler_report' in state:
+            from .scheduler_report import validate_report
+            validate_report(state['scheduler_report'])
         for job in state['jobs']:
             if not isinstance(job, dict) or not isinstance(job.get('name'), str) or not isinstance(job.get('status'), str):
                 raise NodeError('INVALID_RESPONSE', 'Invalid managed job row')

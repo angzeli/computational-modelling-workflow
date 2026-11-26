@@ -42,41 +42,118 @@ cmw jobs --nodes-config FRONTEND_CONFIG --node mini --queue research files J1.1 
 ## Read-only PBS-backed nodes
 
 A cluster login node whose jobs PBS Pro schedules can be enrolled as a read-only
-`pbs` node (issue #81 Phase 1a). On that node,
+`pbs` node (issue #81 Phase 1). On that node,
 `cmw nodes enroll --config NODE_CONFIG --spec PBS_SPEC.json` takes:
 
 ```json
 {"kind": "pbs", "queue": "main",
- "scheduler": {"qselect": "/opt/pbs/bin/qselect", "qstat": "/opt/pbs/bin/qstat"}}
+ "scheduler": {"qselect": "/opt/sched/bin/qselect", "qstat": "/opt/sched/bin/qstat",
+               "poll_interval_seconds": 30}}
 ```
 
 Enrollment records the node, its Linux machine-id, the pinned CMW runtime, one
-queue identity, and each PBS client's path and resolved executable. It creates no
+queue identity, each PBS client's path and resolved executable, and the lane's
+poll interval: an integer from 30 to 600 seconds, 30 when omitted. It creates no
 queue database, storage enrollment or runner profile. Readiness refuses a moved
 host, a changed runtime, or a PBS client that now resolves to another executable.
 It never reports CMW execution as available on the node.
 
 The endpoint serves the enrolled kind. A `pbs` endpoint answers only
 `capabilities` and `status`. Every other operation is `UNSUPPORTED_OPERATION`, and
-`mutations_supported` is false. `status` runs `qselect -x -u USER`, then
-`qstat -x -f -F json` for those IDs. Each call goes through the shell helper
+`mutations_supported` is false. Its `scheduler` capability states the kind, the
+enrolled poll interval and the idle exit below. `status` runs `qselect -x -u USER`,
+then `qstat -x -f -F json` for those IDs. Each call goes through the shell helper
 `pbs_client.sh`, which launches only an enrolled `qselect` or `qstat` with no
 inherited stdin, stops it one byte past a 16 MiB stdout bound and cuts stderr at
-4 KiB. Python validates the job IDs between the calls, parses the JSON and stops
-the helper's process group after 30 s. The reply has no managed jobs;
-`state.pbs` lists the endpoint user's current and history-retained PBS jobs
-verbatim, newest first: ID, name, `job_state` and substate, queue, requested and
-used resources, exit status, comment and scheduler times. `offset` and `limit`
-(at most 1000) select a page, and a page is cut short to fit one protocol frame;
-`next_offset` names where the next page starts. Jobs owned by another user are
-skipped. A job that leaves PBS history between the two calls is counted as
-missing, not inferred. Malformed scheduler output fails the call with
-`SCHEDULER_UNAVAILABLE`.
+4 KiB. Python checks that each job ID is a plain token between the calls, parses
+the JSON and stops the helper's process group after 30 s. Job IDs are opaque:
+neither a sequence number nor a server suffix is parsed, so IDs from several
+servers stay distinct, and rows keep the order `qselect` listed them in, latest
+first.
 
-The frontend session transport and the portal lane for these nodes are Phase 1b
-and are not implemented yet. Nothing here submits, signals or adopts a PBS job.
-The [scheduler-nodes design](architecture/scheduler-nodes.md) records the
-decisions and the probed cluster facts they rest on.
+The reply has no managed jobs. `state.scheduler_report` is a scheduler-neutral,
+schema-1 report of the endpoint user's current and history-retained jobs: ID,
+name, the scheduler's state code with its phase (`queued`, `running`, `finished`
+or `other`), substate, queue, server, requested and used resources, elapsed
+walltime, exit status, comment, scheduler times and run count. Values are
+verbatim, flattened to one line; a field the scheduler omits is empty, and an
+integer printed as a string is read as an integer. `counts` covers every listed
+job. `offset` and `limit` (at most 1000) select a page, and a page is cut short to
+fit one protocol frame; `next_offset` names where the next page starts. Jobs owned
+by another user, or with no reported owner, are skipped. A job that leaves the
+scheduler's history between the two calls is counted as missing, not inferred.
+Malformed scheduler output fails the call with `SCHEDULER_UNAVAILABLE`, and the
+frontend refuses a malformed report.
+
+A `pbs` endpoint exits by itself when no complete request arrives for four poll
+intervals (120 s at 30 s), so nothing CMW-owned stays on a login node after its
+client is gone, even when a dropped network leaves the SSH channel open. It holds
+no state: a reconnect starts a new observer session beside any endpoint that has
+not yet exited, and loses nothing. An endpoint whose configuration cannot be read
+is bounded in the same way. Other node kinds keep waiting until the frontend
+closes the stream.
+
+### Session connections
+
+Key authentication is not available on these login nodes, so their frontend
+connection uses auth mode `session`. The user opens an OpenSSH master and types
+the password there; CMW never opens a master, prompts, or reads, stores or
+forwards a credential. The connection specification names the master's socket
+and pins the node's poll interval:
+
+```json
+{"transport": "ssh", "auth": "session", "ssh_alias": "login1.cluster.example",
+ "control_path": "/tmp/cmw-u0001/cluster.sock", "executable": "/scratch/u0001/cmw/bin/cmw-endpoint",
+ "config_root": "/scratch/u0001/cmw/node", "node_id": "…", "host_id": "linux:…",
+ "runtime_id": "…", "queues": {"main": "…"}, "default_queue": "main",
+ "read_only": true, "poll_interval_seconds": 30}
+```
+
+`control_path` is an absolute path of at most 100 characters from letters,
+digits and `_.@+-/`, in a directory owned by the user with mode 0700, such as
+one under the user's own `.ssh` directory. A session
+connection carries no `ssh_host_key`: through a master ssh does no key exchange,
+so the host key is checked only by the user's own ssh when they open the master.
+The endpoint's machine-id is checked on every reply instead. `poll_interval_seconds`
+must equal the endpoint's enrolled interval, so the lane keeps it from its first
+attempt; a different value is `INCOMPATIBLE_CAPABILITIES`.
+
+Before each connection attempt the frontend runs `ssh -O check` on the socket,
+which talks only to the local master. The fixed shell helper `session_check.sh`
+launches it with no terminal and reports only an exit status. If the socket is
+missing, is not the user's own, sits in a shared directory or has no live master,
+nothing is attempted and the result is `AUTH_REQUIRED` with the one command to
+run, for example:
+
+```console
+ssh -M -S /tmp/cmw-u0001/cluster.sock -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -fN login1.cluster.example
+```
+
+The portal prints the command in full on its own lines, broken only between
+arguments with a trailing `\`, so the copied lines still run as one command.
+The keepalive lets the master notice a dead network and exit, which the next
+check then reports. Each channel runs with `BatchMode=yes`, `ControlMaster=no`,
+the enrolled `ControlPath` and `ProxyCommand=/usr/bin/false`, so a master that
+disappears after the check makes the attempt fail locally, without a prompt and
+without a direct connection to the login node. That failure is `AUTH_REQUIRED`
+when a repeated check also fails, and an ordinary transport failure otherwise.
+
+```console
+cmw nodes connect cluster --config FRONTEND_CONFIG --spec CONNECTION.json
+cmw nodes check cluster --config FRONTEND_CONFIG --json
+cmw jobs --nodes-config FRONTEND_CONFIG --node cluster status
+cmw jobs --nodes-config FRONTEND_CONFIG watch --all-nodes
+```
+
+`connect` saves the registration only after a successful handshake through the
+master. `status` prints the scheduler report; `--json` prints the envelope. A
+refusal prints `{"code", "message"}` and, for `AUTH_REQUIRED`, `command`. In
+`watch`, the node is one more lane: its rows are scheduler-reported and
+read-only, with no Files, Progress, Logs or controls, and the lane summary shows
+the queued, running and finished counts instead of machine usage. Nothing here
+submits, signals or adopts a PBS job. The
+[scheduler-nodes design](architecture/scheduler-nodes.md) records the decisions
+and the probed cluster facts they rest on.
 
 ## Protocol and observation boundaries
 
@@ -632,8 +709,10 @@ profile pins alone do not refuse submission or queued attempts.
 
 Status polling is every 5 s. A receipt remains fresh through 15 s inclusive,
 measured only by the portal monotonic clock; older or future receipts cannot
-authorize controls. Stale/disconnected rows are labelled last reported. Unknown
-Jobs states keep their existing display and refusal semantics.
+authorize controls. A scheduler-backed lane polls at its pinned interval, at
+least 30 s, and stays fresh through three intervals. Stale/disconnected rows are
+labelled last reported. Unknown Jobs states keep their existing display and
+refusal semantics.
 
 Lane expiry, polling, handshake and reconnect continue while the portal is
 running, even when a screen or one of its widgets is absent. Each view skips
@@ -645,6 +724,9 @@ controls immediately and qualifies retained rows as last reported. The first two
 transport failures preserve the prior state; the third marks UNREACHABLE.
 Authentication failure and incompatible capabilities are immediate states;
 host-key, runtime, identity or readiness refusal immediately disables controls.
+`AUTH_REQUIRED` (no session to attach to) is immediate too, resets the failure
+count, never counts toward UNREACHABLE and is retried at the lane's interval; the
+lane shows the command that opens the session.
 An unreachable/changed address is a transport failure; a presented key differing
 from the pinned key is a security refusal, never an automatic pin update.
 

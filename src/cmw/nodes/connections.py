@@ -11,7 +11,8 @@ import stat
 
 from cmw.core.provenance import stable_hash
 from .protocol import NodeError, identifier, validate_envelope
-from .transport import SSHTransport, ssh_command
+from .contracts import POLL_INTERVAL_SECONDS, scheduler_poll_interval
+from .transport import SessionTransport, SSHTransport, ssh_command
 from .transport_events import compatible_capabilities
 
 
@@ -103,9 +104,17 @@ def validate_connection(alias, entry):
     required = {'transport', 'config_root', 'node_id', 'host_id', 'runtime_id', 'queues', 'default_queue', 'read_only'}
     if not isinstance(entry, dict) or not required <= set(entry):
         raise NodeError('INVALID_CONNECTION', 'Missing explicit endpoint enrollment fields')
-    allowed = required | {'ssh_alias', 'ssh_host_key', 'executable', 'timeout', 'share_mappings'}
+    allowed = required | {'ssh_alias', 'ssh_host_key', 'executable', 'timeout', 'share_mappings',
+                          'auth', 'control_path', 'poll_interval_seconds'}
     if set(entry) - allowed or entry['transport'] not in {'ssh', 'local'}:
         raise NodeError('INVALID_CONNECTION', 'Unsupported connection fields or transport')
+    if entry.get('auth', 'key') not in {'key', 'session'}:
+        raise NodeError('INVALID_CONNECTION', 'Connection auth must be key or session')
+    if 'poll_interval_seconds' in entry:
+        try:
+            scheduler_poll_interval(entry['poll_interval_seconds'])
+        except NodeError as exc:
+            raise NodeError('INVALID_CONNECTION', str(exc)) from exc
     identifier(entry['node_id'], 'node identity')
     if not isinstance(entry['host_id'], str) or not entry['host_id'] or not isinstance(entry['runtime_id'], str) or not entry['runtime_id']:
         raise NodeError('INVALID_CONNECTION', 'Pinned host and runtime identities are required')
@@ -122,8 +131,13 @@ def validate_connection(alias, entry):
         identifier(identity, 'queue identity')
     if entry['transport'] == 'ssh':
         connection = {**entry, 'queue': entry['default_queue']}
-        SSHTransport(connection)  # Validates without creating a process/connection.
-    elif any(key in entry for key in ('ssh_alias', 'ssh_host_key', 'executable')):
+        if entry.get('auth') == 'session':
+            SessionTransport(connection)  # Validates without checking or attaching to the master.
+        elif 'control_path' in entry:
+            raise NodeError('INVALID_CONNECTION', 'A control socket requires auth session')
+        else:
+            SSHTransport(connection)  # Validates without creating a process/connection.
+    elif any(key in entry for key in ('ssh_alias', 'ssh_host_key', 'executable', 'auth', 'control_path')):
         raise NodeError('INVALID_CONNECTION', 'Local node cannot carry SSH authority')
     if entry.get('share_mappings'):
         raise NodeError('UNSUPPORTED_MAPPING', 'Share mappings require separate endpoint/share identity qualification; use Fetch or Copy Location')
@@ -156,6 +170,20 @@ def save_connection(root, alias, entry):
     return entry
 
 
+def pinned_cadence(entry, envelope):
+    """A scheduler-backed endpoint's enrolled poll interval must equal the connection's pin.
+
+    The frontend learns its cadence before any contact, so the very first
+    attempt already keeps S05's bound; the endpoint's idle exit rests on it.
+    """
+    scheduler = envelope['result'].get('scheduler')
+    advertised = scheduler.get('poll_interval_seconds') if isinstance(scheduler, dict) else None
+    if advertised != entry.get('poll_interval_seconds'):
+        wanted = 'no poll_interval_seconds' if advertised is None else f'poll_interval_seconds {advertised}'
+        raise NodeError('INCOMPATIBLE_CAPABILITIES', f'The endpoint is enrolled with {wanted}; '
+                        'the connection must pin the same value')
+
+
 class ConnectedBackend:
     """Narrow frontend boundary: local services and SSH share structured calls."""
     def __init__(self, alias, entry, queue=None, *, transport=None):
@@ -170,9 +198,16 @@ class ConnectedBackend:
         elif entry['transport'] == 'local':
             from .backend import LocalBackend
             self.backend, self.transport = LocalBackend(entry['config_root'], self.queue, defer_check=True), None
+        elif entry.get('auth') == 'session':
+            self.backend, self.transport = None, SessionTransport({**entry, 'queue': self.queue})
         else:
             self.backend, self.transport = None, SSHTransport({**entry, 'queue': self.queue})
         self.last_envelope = None
+
+    @property
+    def poll_interval(self):
+        """The lane's status cadence: D11's 5 s, or the pinned scheduler interval (S05)."""
+        return self.connection.get('poll_interval_seconds', POLL_INTERVAL_SECONDS)
 
     def call(self, operation, params=None, target=None, *, request_id=None):
         from .protocol import is_mutation
@@ -228,6 +263,7 @@ class ConnectedBackend:
             validate_envelope(value, operation)
             if operation == 'capabilities':
                 compatible_capabilities(value)
+                pinned_cadence(self.connection, value)
             if operation in {'review.preview', 'review.start', 'review.poll', 'review.cancel'} and target is not None:
                 record = value['result']['review']['value']
                 if any(record.get(key) != expected for key, expected in target.items()):
