@@ -119,14 +119,18 @@ must equal the endpoint's enrolled interval, so the lane keeps it from its first
 attempt; a different value is `INCOMPATIBLE_CAPABILITIES`.
 
 Before each connection attempt the frontend runs `ssh -O check` on the socket,
-which talks only to the local master. If the socket is missing, is not the user's
-own, sits in a shared directory or has no live master, nothing is attempted and
-the result is `AUTH_REQUIRED` with the one command to run, for example:
+which talks only to the local master. The fixed shell helper `session_check.sh`
+launches it with no terminal and reports only an exit status. If the socket is
+missing, is not the user's own, sits in a shared directory or has no live master,
+nothing is attempted and the result is `AUTH_REQUIRED` with the one command to
+run, for example:
 
 ```console
 ssh -M -S /tmp/cmw-u0001/cluster.sock -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -fN login1.cluster.example
 ```
 
+The portal prints the command in full on its own lines, broken only between
+arguments with a trailing `\`, so the copied lines still run as one command.
 The keepalive lets the master notice a dead network and exit, which the next
 check then reports. Each channel runs with `BatchMode=yes`, `ControlMaster=no`,
 the enrolled `ControlPath` and `ProxyCommand=/usr/bin/false`, so a master that

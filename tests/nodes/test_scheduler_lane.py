@@ -12,6 +12,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import socket
 import stat
 import subprocess
@@ -33,12 +34,13 @@ from cmw.nodes.identity import check_node, enroll
 from cmw.nodes.protocol import NodeError, validate_envelope
 from cmw.nodes.scheduler import SchedulerBackend, page, pbs_status
 from cmw.nodes.scheduler_report import report_text, validate_report
-from cmw.nodes.transport import SessionRequired, SessionTransport, control_socket, session_command
+from cmw.nodes.transport import (SESSION_CHECK, SessionRequired, SessionTransport, control_socket,
+                                 open_session_command, session_command)
 from cmw.nodes.transport_events import FailureKind, classify_failure
 from tests.nodes.test_identity import RUNTIME
 
 try:
-    from cmw.nodes.portal import NodesApp, scheduler_key
+    from cmw.nodes.portal import NodesApp, command_lines, scheduler_key
     from textual.widgets import Static
     from tests.nodes.test_portal import FakeBackend
 except ImportError:
@@ -414,6 +416,40 @@ exec /bin/bash -c "${{@: -1}}"
                                 transport=SessionTransport({**self.entry, 'queue': 'main'}, ssh=str(self.ssh)))
 
 
+class SessionCheckHelperTests(unittest.TestCase):
+    """The shell helper owns the `ssh -O check` launch; Python only reads its exit status."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.log = self.root / 'argv'
+        self.ssh = self.root / 'ssh'
+        self.ssh.write_text(f'#!/bin/bash\nprintf "%s\\n" "$@" > {json.dumps(str(self.log))}\n'
+                            f'[[ -t 0 ]] && exit 98\nexit "${{CHECK_STATUS:-0}}"\n')
+        self.ssh.chmod(0o755)
+
+    def check(self, *arguments, status=0):
+        return subprocess.run(['/bin/bash', str(SESSION_CHECK), *arguments], stdin=subprocess.DEVNULL,
+                              capture_output=True, env={**os.environ, 'CHECK_STATUS': str(status)},
+                              timeout=10).returncode
+
+    def test_exit_status_contract(self):
+        self.assertEqual(self.check(str(self.ssh), '/tmp/cmw-session/m.sock', 'login1.cluster.example'), 0)
+        self.assertEqual(self.log.read_text().splitlines(),
+                         ['-o', 'BatchMode=yes', '-o', 'ControlPath=/tmp/cmw-session/m.sock', '-O', 'check',
+                          '--', 'login1.cluster.example'])
+        self.assertEqual(self.check(str(self.ssh), '/tmp/cmw-session/m.sock', 'login1.cluster.example',
+                                    status=255), 1)
+        self.log.unlink()
+        for arguments in (('ssh', '/tmp/m.sock', 'cluster'), (str(self.root), '/tmp/m.sock', 'cluster'),
+                          (str(self.ssh), 'm.sock', 'cluster'), (str(self.ssh), '/tmp/m.sock', '-oProxyCommand=x'),
+                          (str(self.ssh), '/tmp/m.sock'), (str(self.ssh), '/tmp/m.sock', 'cluster', 'extra')):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(self.check(*arguments), 125)
+        self.assertFalse(self.log.exists())  # A refused argument never reaches ssh.
+
+
 class SessionTransportTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -675,8 +711,29 @@ class SchedulerPortalRenderTests(unittest.IsolatedAsyncioTestCase):
             app.refuse_lane('cluster', cluster.error, 'status')
             app.render_state()
             summary = str(app.query_one('#node-summary', Static).render())
-            self.assertIn('Session required', summary)
-            self.assertIn('run: ' + OPEN[:20], summary)
+            self.assertIn('cluster Session required · run:\n' + OPEN, summary)
+            # A command wider than the window is wrapped between arguments, never cut short.
+            long = open_session_command('login1.cluster.example', '/tmp/cmw-u0001/' + 'session-' * 9 + 'm.sock')
+            app.refuse_lane('cluster', SessionRequired(long), 'status')
+            app.render_state()
+            await pilot.pause()
+            widget = app.query_one('#node-summary', Static)
+            lines = str(widget.render()).splitlines()
+            heading = lines.index('cluster Session required · run:')
+            command = lines[heading + 1:]
+            self.assertGreater(len(long), 118)
+            self.assertGreater(len(command), 1)
+            self.assertTrue(all(len(line) <= 118 for line in command), command)
+            self.assertEqual(shlex.split('\n'.join(command).replace(' \\\n', ' ')), shlex.split(long))
+            self.assertEqual(widget.size.height, len(lines))  # The summary grows to show every line.
+
+    def test_command_lines_break_only_between_arguments(self):
+        self.assertEqual(command_lines(OPEN, 200), [OPEN])
+        lines = command_lines(OPEN, 30)
+        self.assertEqual(lines, ['ssh -M -S \\', '    /tmp/cmw-session/m.sock \\', '    -fN \\',
+                                 '    login1.cluster.example'])
+        self.assertEqual(shlex.split('\n'.join(lines).replace(' \\\n', ' ')), shlex.split(OPEN))
+        self.assertEqual(command_lines("ssh -S '/tmp/a b' x", 8), ['ssh -S \\', "    '/tmp/a b' \\", '    x'])
 
     async def test_watch_lane_through_the_session_transport(self):
         temporary = tempfile.TemporaryDirectory()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import re
 import selectors
 import shlex
@@ -22,6 +23,7 @@ SSH = '/usr/bin/ssh'
 # enrolled socket path is limited to characters that need neither.
 _SOCKET = re.compile(r'/[A-Za-z0-9_.@+/-]{1,99}')
 CHECK_TIMEOUT = 5
+SESSION_CHECK = Path(__file__).with_name('session_check.sh')
 
 
 def _bootstrap(alias, executable, config_root, queue, connect_timeout):
@@ -296,11 +298,10 @@ class SessionTransport(ProcessTransport):
         if (not stat.S_ISDIR(folder.st_mode) or folder.st_uid != uid or folder.st_mode & 0o077
                 or not stat.S_ISSOCK(master.st_mode) or master.st_uid != uid):
             return False
+        from .scheduler import run_helper  # The shell helper launches the check; Python bounds its lifetime.
         try:
-            completed = subprocess.run([self.ssh, '-o', 'BatchMode=yes', '-o', f'ControlPath={self.control_path}',
-                                        '-O', 'check', '--', self.alias], stdin=subprocess.DEVNULL,
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                       timeout=CHECK_TIMEOUT, close_fds=True)
+            completed = run_helper(['/bin/bash', str(SESSION_CHECK), self.ssh, self.control_path, self.alias],
+                                   CHECK_TIMEOUT)
         except (OSError, subprocess.SubprocessError):
             return False
         return completed.returncode == 0

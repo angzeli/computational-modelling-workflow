@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+import shlex
 import time
 import sys
 from uuid import uuid4
@@ -53,6 +54,22 @@ def row_key(target):
 def scheduler_key(backend, job):
     """A scheduler-reported row's key; it never collides with a CMW attempt target."""
     return f"{backend.node_id}/{backend.queue_id}/scheduler/{job['id']}"
+
+
+def command_lines(command, width):
+    """A shell command broken only between arguments, never cut short (S03).
+
+    Each line but the last ends in ` \\`, so the copied lines still run as one
+    command. An argument longer than the width keeps a whole line of its own.
+    """
+    lines, line = [], ''
+    for word in map(shlex.quote, shlex.split(command)):
+        if line and len(line) + len(word) + 3 > width:
+            lines.append(line + ' \\')
+            line = '    ' + word
+        else:
+            line = f'{line} {word}' if line else word
+    return lines + [line]
 
 
 class NodesTable(NavigationTable):
@@ -563,9 +580,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
             status = f'{identity} {condition} {received} · {counted}'
             if partial_counts and report is None:
                 status += ' · other blockers unknown'
-            if lane.session_command is not None:
-                label, prefix, machine = '\nRun: ', 'run: ', lane.session_command
-            elif report is not None:
+            if report is not None:
                 label, prefix, machine = '\nScheduler: ', '', coverage_text(report) + ' · read-only'
             else:
                 label, prefix, machine = '\nMachine: ', '', machine_text(self.machine_usage(owner)).removeprefix('Machine: ')
@@ -576,11 +591,14 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
                 caption = self.receipt_caption(owner, self.view_receipt(owner, 'status'))
                 retained[owner] = caption
                 status = caption.format(f'{condition} · {counted}', width)
-            if lane.session_command is not None and len(self.lanes) > 1:
-                # The command is what the user needs; it leads the lane's one summary line.
-                status = f'{identity} Session required'
-            summary = status + (label if len(self.lanes) == 1 else ' · ' + prefix) + machine
-            summaries.append('\n'.join(fit_text(line, width) for line in summary.splitlines()))
+            if lane.session_command is not None:
+                # The command is what the user needs, so it is shown whole on its own lines.
+                status = status if len(self.lanes) == 1 else f'{identity} Session required'
+                summaries.append('\n'.join([fit_text(status, max(1, width - 7)) + ' · run:',
+                                            *command_lines(lane.session_command, width)]))
+            else:
+                summary = status + (label if len(self.lanes) == 1 else ' · ' + prefix) + machine
+                summaries.append('\n'.join(fit_text(line, width) for line in summary.splitlines()))
             for job in state.get('jobs', ()):
                 target = job.get('target')
                 if target and (target['node_id'], target['queue_id']) == (lane.backend.node_id, lane.backend.queue_id):
@@ -591,7 +609,7 @@ class NodesApp(NodeViews, NodeCatalogue, NavigationApp):
         rows = self.catalogue_rows(rows)
         self.rows = rows
         summary = self.query_one('#node-summary', Static)
-        summary.styles.max_height = max(2, len(self.lanes))
+        summary.styles.max_height = max(2, sum(text.count('\n') + 1 for text in summaries))
         summary.update(literal('\n'.join(summaries)))
         table = self.query_one('#table', DataTable)
         widths = [('node', 'NODE', 7), ('id', 'JOB ID', 8), ('files', 'FILES', 5),

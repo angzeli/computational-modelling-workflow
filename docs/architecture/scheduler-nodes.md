@@ -219,7 +219,9 @@ executables, and a real local control socket.
 
 - **Session transport (S02, S03).** Connection auth mode `session` names an
   absolute control socket in a 0700 directory owned by the user, and no host key.
-  Each attempt is preceded by `ssh -O check`. Channels run with `BatchMode=yes`,
+  Each attempt is preceded by `ssh -O check`, launched by the shell helper
+  `session_check.sh` (AGENTS §3); Python decides only whether the socket is
+  eligible and what the exit status means. Channels run with `BatchMode=yes`,
   `ControlMaster=no`, the enrolled `ControlPath` and `ProxyCommand=/usr/bin/false`.
   The last option is a Phase 1b refinement: OpenSSH falls back to a direct
   connection when it cannot reach the master, and this makes that fallback fail
