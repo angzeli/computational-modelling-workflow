@@ -6,7 +6,7 @@ Two site shapes show the code is not tied to one cluster: one server with
 fully populated records, and two servers whose suffixed job IDs share sequence
 numbers, with sparse records and integers printed as strings.
 """
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from copy import deepcopy
 import io
 import json
@@ -34,8 +34,8 @@ from cmw.nodes.identity import check_node, enroll
 from cmw.nodes.protocol import NodeError, validate_envelope
 from cmw.nodes.scheduler import SchedulerBackend, page, pbs_status
 from cmw.nodes.scheduler_report import report_text, validate_report
-from cmw.nodes.transport import (SESSION_CHECK, SessionRequired, SessionTransport, control_socket,
-                                 open_session_command, session_command)
+from cmw.nodes.transport import (SESSION_CHECK, ProcessTransport, SessionRequired, SessionTransport,
+                                 control_socket, open_session_command, session_command)
 from cmw.nodes.transport_events import FailureKind, classify_failure
 from tests.nodes.test_identity import RUNTIME
 
@@ -384,10 +384,15 @@ fi
 for option in BatchMode=yes ControlMaster=no ControlPath={self.control_path} ProxyCommand=/usr/bin/false; do
   [[ " $* " == *" -o $option "* ]] || exit 97
 done
+# A non-empty drop/refuse marker makes the failure wait for the request first.
 if [[ -e {json.dumps(str(self.drop))} ]]; then
+  [[ -s {json.dumps(str(self.drop))} ]] && read -r _
   rm -f {json.dumps(str(self.alive))}; echo 'mux_client_request_session: read from master failed' >&2; exit 255
 fi
-[[ -e {json.dumps(str(self.refuse))} ]] && {{ echo 'Session open refused by peer' >&2; exit 255; }}
+if [[ -e {json.dumps(str(self.refuse))} ]]; then
+  [[ -s {json.dumps(str(self.refuse))} ]] && read -r _
+  echo 'Session open refused by peer' >&2; exit 255
+fi
 [[ -e {json.dumps(str(self.alive))} ]] || {{ echo 'Connection closed by UNKNOWN port 65535' >&2; exit 255; }}
 echo 'debug1: mux_client_request_session: master session id: 2' >&2
 exec /bin/bash -c "${{@: -1}}"
@@ -493,16 +498,38 @@ class SessionTransportTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)  # One channel, two requests.
         self.assertIn(f'ControlPath={self.session.control_path}', sessions[0])
 
+    @staticmethod
+    def exit_first():
+        """Hold the first write until the fake ssh has exited, as a fast refusal can."""
+        start = ProcessTransport._start
+
+        def started(transport):
+            fresh = transport.process is None
+            start(transport)
+            if fresh:
+                transport.process.wait(timeout=10)
+        return patch.object(ProcessTransport, '_start', started)
+
     def test_master_lost_between_check_and_attempt(self):
-        self.session.alive.touch()
-        self.session.drop.touch()
-        self.assertEqual(self.refused(self.session.backend()).code, 'AUTH_REQUIRED')
-        self.session.drop.unlink()
-        self.session.alive.touch()
-        self.session.refuse.touch()  # The master still answers; the failure is an ordinary transport one.
-        refusal = self.refused(self.session.backend())
-        self.assertEqual(refusal.code, 'DISCONNECTED')
-        self.assertEqual(classify_failure(refusal).event, NodeEvent.TRANSPORT_FAILURE)
+        # ssh may fail before or after the request is written; both orders are covered.
+        for order, marker in (('after write', 'read first'), ('before write', '')):
+            with self.subTest(order=order):
+                ordering = nullcontext if marker else self.exit_first
+                self.session.alive.touch()
+                self.session.drop.write_text(marker)
+                with ordering():
+                    self.assertEqual(self.refused(self.session.backend()).code, 'AUTH_REQUIRED')
+                self.session.drop.unlink()
+                self.session.alive.touch()
+                self.session.refuse.write_text(marker)  # The master still answers: an ordinary transport failure.
+                with ordering():
+                    refusal = self.refused(self.session.backend())
+                self.session.refuse.unlink()
+                # A broken pipe on the write is UNREACHABLE and an end of output is DISCONNECTED;
+                # once ssh has exited first, the selector may report either one.
+                self.assertIn(refusal.code, {'DISCONNECTED'} if marker else {'DISCONNECTED', 'UNREACHABLE'})
+                failure = classify_failure(refusal)
+                self.assertEqual((failure.kind, failure.event), (FailureKind.TRANSPORT, NodeEvent.TRANSPORT_FAILURE))
 
     def test_cadence_mismatch_is_incompatible(self):
         self.session.alive.touch()
